@@ -16,6 +16,7 @@
 package instructionutil
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/adk/agent"
@@ -38,10 +39,10 @@ import (
 //
 // This method is intended to be used in InstructionProvider based Instruction
 // and GlobalInstruction which are called with ReadonlyContext.
-func InjectSessionState(ctx agent.ReadonlyContext, template string) (string, error) {
-	ictx, ok := ctx.(*icontext.ReadonlyContext)
+func InjectSessionState(ctx context.Context, invCleanCtx agent.ReadonlyContext, template string) (string, error) {
+	ictx, ok := invCleanCtx.(*icontext.ReadonlyContext)
 	if !ok {
-		return "", fmt.Errorf("unexpected context type: %T", ctx)
+		return "", fmt.Errorf("unexpected context type: %T", invCleanCtx)
 	}
-	return llminternal.InjectSessionState(ictx.InvocationContext, template)
+	return llminternal.InjectSessionState(ctx, ictx.InvocationContext, template)
 }

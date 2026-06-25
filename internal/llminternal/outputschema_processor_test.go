@@ -41,7 +41,10 @@ func (m *mockTool) IsLongRunning() bool { return false }
 func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
-func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) { return nil, nil }
+
+func (m *mockTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
+	return nil, nil
+}
 
 type mockLLM struct {
 	model.LLM
@@ -85,7 +88,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		events := outputSchemaRequestProcessor(ctx, req, f)
+		events := outputSchemaRequestProcessor(context.Background(), ctx, req, f)
 		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
@@ -125,7 +128,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		events := outputSchemaRequestProcessor(ctx, req, f)
+		events := outputSchemaRequestProcessor(context.Background(), ctx, req, f)
 		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
@@ -151,7 +154,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		events := outputSchemaRequestProcessor(ctx, req, f)
+		events := outputSchemaRequestProcessor(context.Background(), ctx, req, f)
 		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
@@ -183,7 +186,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		events := outputSchemaRequestProcessor(ctx, req, f)
+		events := outputSchemaRequestProcessor(context.Background(), ctx, req, f)
 		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
@@ -202,7 +205,7 @@ func TestCreateFinalModelResponseEvent(t *testing.T) {
 	})
 
 	jsonResp := `{"answer": "value"}`
-	event := createFinalModelResponseEvent(invCtx, jsonResp)
+	event := createFinalModelResponseEvent(context.Background(), invCtx, jsonResp)
 
 	if event.Author != "TestAgent" {
 		t.Errorf("Author = %q, want TestAgent", event.Author)
@@ -314,10 +317,10 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunSuccess", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(context.Background(), invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
-		got, err := toolInstance.Run(toolCtx, input)
+		got, err := toolInstance.Run(context.Background(), toolCtx, input)
 		if err != nil {
 			t.Fatalf("Run failed: %v", err)
 		}
@@ -328,10 +331,10 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(context.Background(), invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
-		_, err := toolInstance.Run(toolCtx, input)
+		_, err := toolInstance.Run(context.Background(), toolCtx, input)
 		if err == nil {
 			t.Error("Expected validation error for invalid type, got nil")
 		}
@@ -339,10 +342,10 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(context.Background(), invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}
-		_, err := toolInstance.Run(toolCtx, input)
+		_, err := toolInstance.Run(context.Background(), toolCtx, input)
 		if err == nil {
 			t.Error("Expected validation error for missing required field, got nil")
 		}

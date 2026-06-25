@@ -96,7 +96,10 @@ type scheduler struct {
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
 
-	parentCtx agent.Context
+	// parentGoCtx is the go context threaded into per-node
+	// goroutines; per-node timeouts/cancellation derive from it.
+	parentGoCtx context.Context
+	parentCtx   agent.Context
 
 	// maxConcurrency caps len(runsByName); 0 disables the cap.
 	// When at the cap, scheduleResumedNode enqueues into
@@ -250,7 +253,7 @@ func (retryItem) isQueueItem() {}
 // reached, and the consumer drains the queue via
 // tryDispatchPending as in-flight nodes complete. 0 disables the
 // cap (unlimited).
-func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler {
+func newScheduler(ctx context.Context, parent agent.Context, g *graph, maxConcurrency int) *scheduler {
 	return &scheduler{
 		state:          NewRunState(),
 		graph:          g,
@@ -260,6 +263,7 @@ func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler
 		runCancels:     map[string]context.CancelFunc{},
 		retryTimers:    map[string]*time.Timer{},
 		eventQueue:     make(chan queueItem, defaultEventQueueCapacity),
+		parentGoCtx:    ctx,
 		parentCtx:      parent,
 		maxConcurrency: maxConcurrency,
 	}
@@ -372,22 +376,20 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 		cancel  context.CancelFunc
 	)
 	if cfg.Timeout > 0 {
-		nodeCtx, cancel = s.parentCtx.WithAgentTimeout(cfg.Timeout)
+		nodeCtx, cancel = context.WithTimeout(s.parentGoCtx, cfg.Timeout)
 	} else {
-		nodeCtx, cancel = s.parentCtx.WithAgentCancel()
+		nodeCtx, cancel = context.WithCancel(s.parentGoCtx)
 	}
-	// Order matters: WithContext sets up per-node cancellation on
-	// the underlying InvocationContext; withBranch then wraps the
-	// result in branchOverride. Reversing would either lose the
-	// cancellation context or strip the branch override.
+	// Per-node cancellation now rides on the explicit go context
+	// (nodeCtx) threaded into runNode; withBranch then wraps the
+	// adk context in branchOverride.
 
 	if s.parentCtx == nil {
 		panic("nil parent context")
 	}
-	perNodeCtx := s.parentCtx.WithAgentContext(nodeCtx)
-	perNodeCtx = perNodeCtx.WithBranch(branch)
+	perNodeCtx := s.parentCtx.WithBranch(branch)
 
-	perNodeCtx = agent.NewNodeContext(perNodeCtx, resumeInputs)
+	perNodeCtx = agent.NewNodeContext(nodeCtx, perNodeCtx, resumeInputs)
 
 	nodePath := name + "@1"
 	if p := s.parentCtx.Path(); p != "" {
@@ -395,7 +397,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	} else if s.graph.isRootWrapper {
 		nodePath = ""
 	}
-	perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, s.terminalAncestors(name))
+	perNodeCtx = agent.NewDynamicNodeContext(nodeCtx, perNodeCtx, nodePath, "1", nil, s.terminalAncestors(name))
 
 	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
 	// so tools running inside an LlmAgent that is itself running as
@@ -423,7 +425,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
 
-	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, input)
+	go runNode(s.eventQueue, &s.wg, name, n, nodeCtx, perNodeCtx, input)
 }
 
 // scheduleRetry schedules a retry for node n after the given delay.
@@ -434,7 +436,7 @@ func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string,
 		go func() {
 			select {
 			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
-			case <-s.parentCtx.Done():
+			case <-s.parentGoCtx.Done():
 			}
 		}()
 	})
@@ -457,12 +459,13 @@ func runNode(
 	wg *sync.WaitGroup,
 	name string,
 	n Node,
-	ctx agent.Context,
+	ctx context.Context,
+	invCleanCtx agent.Context,
 	input any,
 ) {
 	defer wg.Done()
 
-	span, ctx := startNodeSpan(ctx, n)
+	span, ctx := startNodeSpan(ctx, invCleanCtx, n)
 	defer span.End()
 
 	// completion holds the final completionItem. It is sent in the
@@ -490,7 +493,7 @@ func runNode(
 		return
 	}
 
-	for ev, err := range n.Run(ctx, validated) {
+	for ev, err := range n.Run(ctx, invCleanCtx, validated) {
 		if err != nil {
 			completion.err = err
 			return
@@ -566,7 +569,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	draining := false     // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
 	consumerGone := false // true once the caller broke the range loop; no further yield is allowed
 
-	doneChan := s.parentCtx.Done()
+	doneChan := s.parentGoCtx.Done()
 
 	for len(s.runsByName) > 0 || len(s.retryTimers) > 0 {
 		var item queueItem
@@ -1078,7 +1081,7 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 	return branches
 }
 
-func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
+func startNodeSpan(ctx context.Context, invCleanCtx agent.Context, n Node) (trace.Span, context.Context) {
 	if n == Start {
 		// Don't create span for the Start node.
 		return noop.Span{}, ctx
@@ -1089,6 +1092,6 @@ func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
 		// wrapper around it.
 		return noop.Span{}, ctx
 	}
-	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
-	return span, ctx.WithAgentContext(spanCtx)
+	spanCtx, span := telemetry.StartNodeSpan(ctx, invCleanCtx, telemetry.OperationNode{Node: n})
+	return span, spanCtx
 }

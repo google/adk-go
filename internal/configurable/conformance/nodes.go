@@ -15,6 +15,7 @@
 package conformance
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -23,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/typeutil"
 )
 
-func uppercaseFormatter(ctx agent.Context, input any) (any, error) {
+func uppercaseFormatter(ctx context.Context, invCleanCtx agent.Context, input any) (any, error) {
 	switch v := input.(type) {
 	case string:
 		return strings.ToUpper(v), nil

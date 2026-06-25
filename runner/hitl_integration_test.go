@@ -15,6 +15,7 @@
 package runner_test
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"slices"
@@ -47,7 +48,7 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
 		"handler",
-		func(ctx agent.Context, input string) (string, error) {
+		func(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 			handlerInput.Store(input)
 			return "handled:" + input, nil
 		},
@@ -104,7 +105,7 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
 		"handler",
-		func(ctx agent.Context, input string) (string, error) {
+		func(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 			handlerInput.Store(input)
 			return "handled:" + input, nil
 		},
@@ -198,7 +199,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_Resume(t *testing.T) {
 	var firstChildRuns atomic.Int32
 	firstChild := workflow.NewFunctionNode(
 		"first_child",
-		func(ctx agent.Context, input string) (string, error) {
+		func(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 			firstChildRuns.Add(1)
 			return "X:" + input, nil
 		},
@@ -210,12 +211,12 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_Resume(t *testing.T) {
 	var parentOutput atomic.Value
 	orchestrator := workflow.NewDynamicNode[string, string](
 		"orchestrate",
-		func(nc workflow.NodeContext, input string, _ func(*session.Event) error) (string, error) {
-			x, err := workflow.RunNode[string](nc, firstChild, input, workflow.WithRunID("c1"))
+		func(ctx context.Context, nc workflow.NodeContext, input string, _ func(*session.Event) error) (string, error) {
+			x, err := workflow.RunNode[string](ctx, nc, firstChild, input, workflow.WithRunID("c1"))
 			if err != nil {
 				return "", err
 			}
-			y, err := workflow.RunNode[any](nc, secondChild, nil, workflow.WithRunID("c2"))
+			y, err := workflow.RunNode[any](ctx, nc, secondChild, nil, workflow.WithRunID("c2"))
 			if err != nil {
 				return "", err
 			}
@@ -293,16 +294,16 @@ func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 	}
 }
 
-func (n *hitlAskerNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlAskerNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// On re-entry, hand the response to the successor as output.
-		if response, ok := ctx.ResumedInput(n.interruptID); ok {
-			ev := session.NewEvent(ctx.InvocationID())
+		if response, ok := invCleanCtx.ResumedInput(n.interruptID); ok {
+			ev := session.NewEvent(invCleanCtx.InvocationID())
 			ev.Output = response
 			yield(ev, nil)
 			return
 		}
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		yield(workflow.NewRequestInputEvent(invCleanCtx, session.RequestInput{
 			InterruptID: n.interruptID,
 			Message:     "please decide",
 			Payload:     input,

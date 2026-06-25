@@ -31,9 +31,10 @@ import (
 
 // dynamicSubScheduler runs the children of one dynamic-node activation.
 type dynamicSubScheduler struct {
-	parentPath string
-	parentCtx  NodeContext
-	emitUp     func(*session.Event) error
+	parentPath  string
+	parentGoCtx context.Context
+	parentCtx   NodeContext
+	emitUp      func(*session.Event) error
 
 	// outputForAncestors are the delegating-ancestor paths this
 	// activation's output also counts for, set when this dynamic node is
@@ -131,13 +132,14 @@ func (d *outputDelegation) output() (any, bool) {
 	return d.value, d.hasValue
 }
 
-func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
+func newDynamicSubScheduler(ctx context.Context, parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
 	ancestors := []string{}
 	if parent != nil {
 		ancestors = parent.OutputForAncestors()
 	}
 	s := &dynamicSubScheduler{
 		parentPath:         parentPath,
+		parentGoCtx:        ctx,
 		parentCtx:          parent,
 		emitUp:             emitUp,
 		outputForAncestors: ancestors,
@@ -217,7 +219,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
-	childCtx := agent.NewDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+	childCtx := agent.NewDynamicNodeContext(s.parentGoCtx, s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 	// logContext(childCtx, "childCtx after newDynamicNodeContext", 0)
 
 	// Explicit scope wins over the node-path default; absent both,
@@ -238,9 +240,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// children appear in the trace tree. The span is opened before the
 	// cache lookup so a cached (WithRunID replay) hit is still emitted
 	// as its own span. startNodeSpan returns a context carrying the span.
-	span, spanCtx := startNodeSpan(childCtx, child)
+	span, goCtx := startNodeSpan(s.parentGoCtx, childCtx, child)
 	defer span.End()
-	childCtx = spanCtx
 
 	// Record genuine runtime failures on the span. Pauses (HITL
 	// ErrNodeInterrupted, WaitForOutput ErrNodeWaitingForOutput) and
@@ -295,7 +296,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		// cleanly with no output".
 		pendingLongRunningIDs map[string]struct{}
 	)
-	for ev, evErr := range child.Run(childCtx, input) {
+	for ev, evErr := range child.Run(goCtx, childCtx, input) {
 		if evErr != nil {
 			// Child error wins over any prior interrupt.
 			return nil, &NodeRunError{

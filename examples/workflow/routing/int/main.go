@@ -36,7 +36,7 @@ import (
 
 // rollDie ignores the user message; the random number is what
 // drives the routing.
-func rollDie(_ agent.Context, _ string) (int, error) {
+func rollDie(_ context.Context, _ agent.Context, _ string) (int, error) {
 	return rand.IntN(10) + 1, nil
 }
 
@@ -45,8 +45,8 @@ func rollDie(_ agent.Context, _ string) (int, error) {
 // emitting FunctionNode can do; returning nil suppresses the default
 // terminal event so this single emit carries both the route and the
 // output.
-func routeByValue(ctx agent.Context, value int, emit func(*session.Event) error) (any, error) {
-	ev := session.NewEvent(ctx.InvocationID())
+func routeByValue(ctx context.Context, invCleanCtx agent.Context, value int, emit func(*session.Event) error) (any, error) {
+	ev := session.NewEvent(invCleanCtx.InvocationID())
 	// IntRoute and MultiRoute[int] both compare against the
 	// stringified value, so emit it that way.
 	ev.Routes = []string{fmt.Sprint(value)}
@@ -58,15 +58,15 @@ func routeByValue(ctx agent.Context, value int, emit func(*session.Event) error)
 	return nil, nil
 }
 
-func handleLow(_ agent.Context, value int) (string, error) {
+func handleLow(_ context.Context, _ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling LOW range (1..3)", value), nil
 }
 
-func handleMid(_ agent.Context, value int) (string, error) {
+func handleMid(_ context.Context, _ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling MID range (4..7)", value), nil
 }
 
-func handleHigh(_ agent.Context, value int) (string, error) {
+func handleHigh(_ context.Context, _ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling HIGH range (8..10)", value), nil
 }
 

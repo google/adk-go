@@ -29,11 +29,11 @@ import (
 
 type mockLiveAgent struct {
 	agent.Agent
-	runLiveFn func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	runLiveFn func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
-func (m *mockLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	return m.runLiveFn(ctx)
+func (m *mockLiveAgent) RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return m.runLiveFn(ctx, invCleanCtx)
 }
 
 type dummyLiveSession struct{}
@@ -59,11 +59,11 @@ func TestRunner_RunLive_Callbacks(t *testing.T) {
 
 	p, err := plugin.New(plugin.Config{
 		Name: "test_plugin",
-		BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+		BeforeRunCallback: func(ctx context.Context, invCleanCtx agent.InvocationContext) (*genai.Content, error) {
 			beforeRunCalled = true
 			return nil, nil
 		},
-		AfterRunCallback: func(ctx agent.InvocationContext) {
+		AfterRunCallback: func(ctx context.Context, invCleanCtx agent.InvocationContext) {
 			afterRunCalled = true
 		},
 	})
@@ -74,9 +74,9 @@ func TestRunner_RunLive_Callbacks(t *testing.T) {
 	testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
 	mockLive := &mockLiveAgent{
 		Agent: testAgent,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveFn: func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
-				yield(session.NewEventWithContext(ctx, ctx.InvocationID()), nil)
+				yield(session.NewEventWithContext(ctx, invCleanCtx.InvocationID()), nil)
 			}, nil
 		},
 	}
@@ -138,7 +138,7 @@ func TestRunner_RunLive_EarlyExit(t *testing.T) {
 
 	p, err := plugin.New(plugin.Config{
 		Name: "test_plugin",
-		BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+		BeforeRunCallback: func(ctx context.Context, invCleanCtx agent.InvocationContext) (*genai.Content, error) {
 			return expectedContent, nil
 		},
 	})
@@ -150,7 +150,7 @@ func TestRunner_RunLive_EarlyExit(t *testing.T) {
 	var runLiveCalled bool
 	mockLive := &mockLiveAgent{
 		Agent: testAgent,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveFn: func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			runLiveCalled = true
 			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {}, nil
 		},
@@ -218,10 +218,10 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 	testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
 	mockLive := &mockLiveAgent{
 		Agent: testAgent,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveFn: func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
 				// 1. Partial Transcription
-				ev1 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev1 := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				ev1.LLMResponse.Partial = true
 				ev1.LLMResponse.OutputTranscription = &genai.Transcription{Text: "Hello"}
 				if !yield(ev1, nil) {
@@ -229,7 +229,7 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 				}
 
 				// 2. Function Call (happening during transcription)
-				ev2 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev2 := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				ev2.LLMResponse.Content = &genai.Content{
 					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "test_func"}}},
 				}
@@ -238,7 +238,7 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 				}
 
 				// 3. Final Transcription
-				ev3 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev3 := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				ev3.LLMResponse.OutputTranscription = &genai.Transcription{Text: "Hello there."}
 				if !yield(ev3, nil) {
 					return

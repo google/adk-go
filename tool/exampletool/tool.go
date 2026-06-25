@@ -16,6 +16,7 @@
 package exampletool
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -55,8 +56,8 @@ func (s exampleTool) Description() string {
 }
 
 // ProcessRequest adds the exampleTool examples to the LLM request.
-func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	parts := ctx.UserContent().Parts
+func (s exampleTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
+	parts := invCleanCtx.UserContent().Parts
 	if len(parts) == 0 || parts[0].Text == "" {
 		return nil
 	}

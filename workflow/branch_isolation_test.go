@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -94,7 +95,7 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 	var seenBranches []string
 	peekerNode := NewFunctionNode(
 		childName,
-		func(ctx agent.Context, input string) (string, error) {
+		func(_ context.Context, ctx agent.Context, input string) (string, error) {
 			seenBranches = append(seenBranches, ctx.Branch())
 			return input, nil
 		},
@@ -103,14 +104,14 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 
 	orch := NewDynamicNode[any, []string](
 		"orch",
-		func(ctx NodeContext, _ any, _ func(*session.Event) error) ([]string, error) {
+		func(ctx context.Context, invCleanCtx NodeContext, _ any, _ func(*session.Event) error) ([]string, error) {
 			items := []string{"a", "b", "c"}
 			results := make([]string, len(items))
 			for i, item := range items {
 				opts := append([]RunNodeOption{
 					WithRunID(fmt.Sprintf("custom-%d", i+1)),
 				}, extraOpts...)
-				out, err := RunNode[string](ctx, peekerNode, item, opts...)
+				out, err := RunNode[string](ctx, invCleanCtx, peekerNode, item, opts...)
 				if err != nil {
 					return nil, err
 				}

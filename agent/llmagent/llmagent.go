@@ -15,6 +15,7 @@
 package llmagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -363,19 +364,19 @@ const (
 //
 // If it returns non-nil LLMResponse or error, the actual model call is skipped
 // and the returned response/error is used.
-type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx context.Context, invCleanCtx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+type OnModelErrorCallback func(ctx context.Context, invCleanCtx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
 // BeforeToolCallback is executed before a tool's Run method.
 //
@@ -387,7 +388,7 @@ type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, 
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
-type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx context.Context, invCleanCtx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
 // regardless of whether the tool returned a result or an error.
@@ -396,13 +397,13 @@ type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]
 // If a callback returns a non-nil result or an error:
 //   - execution of remaining callbacks stops
 //   - the returned result and/or error is used as the final tool output
-type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx context.Context, invCleanCtx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // OnToolErrorCallback that is called when receiving an error response from tool execution.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx context.Context, invCleanCtx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string
@@ -435,22 +436,22 @@ type llmAgent struct {
 
 type agentState = agentinternal.State
 
-func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *llmAgent) run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO(kdroste): branch context? SubScheduler?
 
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:      ctx.Artifacts(),
-		Memory:         ctx.Memory(),
-		Session:        ctx.Session(),
-		Branch:         ctx.Branch(),
-		IsolationScope: ctx.IsolationScope(),
+		Artifacts:      invCleanCtx.Artifacts(),
+		Memory:         invCleanCtx.Memory(),
+		Session:        invCleanCtx.Session(),
+		Branch:         invCleanCtx.Branch(),
+		IsolationScope: invCleanCtx.IsolationScope(),
 		Agent:          a,
-		UserContent:    ctx.UserContent(),
-		RunConfig:      ctx.RunConfig(),
-		InvocationID:   ctx.InvocationID(),
+		UserContent:    invCleanCtx.UserContent(),
+		RunConfig:      invCleanCtx.RunConfig(),
+		InvocationID:   invCleanCtx.InvocationID(),
 	})
 
-	ctx = agent.NewContextForAgent(ctx, ic)
+	invCleanCtx = agent.NewContextForAgent(ctx, invCleanCtx, ic)
 
 	f := &llminternal.Flow{
 		Model:                 a.model,
@@ -465,7 +466,7 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 
 	return func(yield func(*session.Event, error) bool) {
-		for ev, err := range f.Run(ctx) {
+		for ev, err := range f.Run(ctx, invCleanCtx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
 				return
@@ -474,17 +475,17 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 }
 
-func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:      ctx.Artifacts(),
-		Memory:         ctx.Memory(),
-		Session:        ctx.Session(),
-		Branch:         ctx.Branch(),
-		IsolationScope: ctx.IsolationScope(),
+func (a *llmAgent) RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	invCleanCtx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:      invCleanCtx.Artifacts(),
+		Memory:         invCleanCtx.Memory(),
+		Session:        invCleanCtx.Session(),
+		Branch:         invCleanCtx.Branch(),
+		IsolationScope: invCleanCtx.IsolationScope(),
 		Agent:          a,
-		UserContent:    ctx.UserContent(),
-		RunConfig:      ctx.RunConfig(),
-		InvocationID:   ctx.InvocationID(),
+		UserContent:    invCleanCtx.UserContent(),
+		RunConfig:      invCleanCtx.RunConfig(),
+		InvocationID:   invCleanCtx.InvocationID(),
 	})
 
 	f := &llminternal.Flow{
@@ -499,7 +500,7 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
 	}
 
-	sess, innerIter, err := f.RunLive(ctx)
+	sess, innerIter, err := f.RunLive(ctx, invCleanCtx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -564,8 +565,8 @@ func (a *llmAgent) FindAgent(name string) agent.Agent {
 	return a.Agent.FindSubAgent(name)
 }
 
-func (a *llmAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
-	return RunLLMAgentAsNode(a, ctx, nodeInput)
+func (a *llmAgent) RunNode(ctx context.Context, invCleanCtx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
+	return RunLLMAgentAsNode(ctx, a, invCleanCtx, nodeInput)
 }
 
 // InstructionProvider allows to create instructions dynamically. It is called
@@ -574,4 +575,4 @@ func (a *llmAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.
 // NOTE: when InstructionProvider is used, ADK will NOT inject session state
 // placeholders into the instruction. You can use
 // util/instructionutil.InjectSessionState() helper if this functionality is needed.
-type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+type InstructionProvider func(ctx context.Context, invCleanCtx agent.ReadonlyContext) (string, error)

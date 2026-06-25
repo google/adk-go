@@ -16,6 +16,7 @@
 package functiontool
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"reflect"
@@ -32,7 +33,7 @@ import (
 )
 
 // StreamingFunc represents a Go function that streams results.
-type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
+type StreamingFunc[TArgs any] func(context.Context, agent.Context, TArgs) iter.Seq2[string, error]
 
 // NewStreaming creates a new streaming tool.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
@@ -100,7 +101,7 @@ func (f *streamingFunctionTool[TArgs]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -127,7 +128,7 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 }
 
 // RunStream executes the tool with the provided context and yields events.
-func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
+func (f *streamingFunctionTool[TArgs]) RunStream(ctx context.Context, invCleanCtx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -146,7 +147,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			return
 		}
 
-		if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if confirmation := invCleanCtx.ToolConfirmation(); confirmation != nil {
 			if !confirmation.Confirmed {
 				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected))
 				return
@@ -159,20 +160,20 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			}
 
 			if requireConfirmation {
-				err := ctx.RequestConfirmation(
+				err := invCleanCtx.RequestConfirmation(
 					fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 						f.Name()), nil)
 				if err != nil {
 					yield("", err)
 					return
 				}
-				ctx.Actions().SkipSummarization = true
+				invCleanCtx.Actions().SkipSummarization = true
 				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired))
 				return
 			}
 		}
 
-		for res, err := range f.handler(ctx, input) {
+		for res, err := range f.handler(ctx, invCleanCtx, input) {
 			if !yield(res, err) {
 				return
 			}

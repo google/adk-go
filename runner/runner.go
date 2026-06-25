@@ -267,8 +267,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-		ctx := agent.NewNodeContext(ic, nil)
-		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		ictx := agent.NewNodeContext(ctx, ic, nil)
+		ictx, _, err = r.appendMessageToSession(ctx, ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -278,11 +278,11 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		if pluginManager != nil {
 			// Defer the after run callbacks to perform global cleanup tasks or finalizing logs and metrics data.
 			// This does NOT emit any event.
-			defer pluginManager.RunAfterRunCallback(ctx)
+			defer pluginManager.RunAfterRunCallback(ctx, ictx)
 
-			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
+			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx, ictx)
 			if earlyExitResult != nil || err != nil {
-				earlyExitEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				earlyExitEvent := session.NewEventWithContext(ctx, ictx.InvocationID())
 				earlyExitEvent.Author = "user"
 				earlyExitEvent.LLMResponse = model.LLMResponse{
 					Content: msg,
@@ -296,7 +296,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range r.rootAgent.Run(ctx) {
+		for event, err := range r.rootAgent.Run(ctx, ictx) {
 			if err != nil {
 				if !yield(event, err) {
 					return
@@ -313,7 +313,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if pluginManager != nil {
-				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
+				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, ictx, event)
 				if err != nil {
 					if !yield(nil, err) {
 						return
@@ -341,13 +341,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 }
 
 type liveAgent interface {
-	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
 // RunLive runs a live session for the agent, supporting bidirectional streaming.
 type runnerLiveSession struct {
 	sess          agent.LiveSession
 	r             *Runner
+	goCtx         context.Context
 	iCtx          agent.InvocationContext
 	storedSession session.Session
 }
@@ -370,12 +371,12 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 		}
 
 		if !isFunctionResponse {
-			event := session.NewEventWithContext(s.iCtx, s.iCtx.InvocationID())
+			event := session.NewEventWithContext(s.goCtx, s.iCtx.InvocationID())
 			event.Author = "user"
 			event.LLMResponse = model.LLMResponse{
 				Content: req.Content,
 			}
-			if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
+			if err := s.r.sessionService.AppendEvent(s.goCtx, s.storedSession, event); err != nil {
 				return fmt.Errorf("failed to add user event to session: %w", err)
 			}
 		}
@@ -456,17 +457,17 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	})
 
 	if r.pluginManager != nil {
-		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
+		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(ctx, iCtx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEventWithContext(iCtx, iCtx.InvocationID())
+			earlyExitEvent := session.NewEventWithContext(ctx, iCtx.InvocationID())
 			earlyExitEvent.Author = agentToRun.Name()
 			earlyExitEvent.LLMResponse = model.LLMResponse{
 				Content: earlyExitResult,
 			}
-			if err := r.sessionService.AppendEvent(iCtx, storedSession, earlyExitEvent); err != nil {
+			if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
 				return nil, nil, fmt.Errorf("failed to add event to session: %w", err)
 			}
 
@@ -477,14 +478,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
-	agentSess, innerIter, err := lAgent.RunLive(iCtx)
+	agentSess, innerIter, err := lAgent.RunLive(ctx, iCtx)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		if r.pluginManager != nil {
-			defer r.pluginManager.RunAfterRunCallback(iCtx)
+			defer r.pluginManager.RunAfterRunCallback(ctx, iCtx)
 		}
 
 		var bufferedEvents []*session.Event
@@ -507,7 +508,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if r.pluginManager != nil {
-				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
+				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(ctx, iCtx, event)
 				if pluginErr != nil {
 					if !yield(nil, pluginErr) {
 						return
@@ -544,7 +545,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				if event.LLMResponse.InputTranscription != nil || event.LLMResponse.OutputTranscription != nil {
 					isTranscribing = false
 
-					if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+					if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 						if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 							return
 						}
@@ -555,7 +556,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 
 					for _, bufferedEvent := range bufferedEvents {
-						if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+						if err := r.sessionService.AppendEvent(ctx, storedSession, bufferedEvent); err != nil {
 							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 								return
 							}
@@ -571,7 +572,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if !event.LLMResponse.Partial && !hasInlineData(event) {
-				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 						return
 					}
@@ -588,45 +589,46 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	return &runnerLiveSession{
 		sess:          agentSess,
 		r:             r,
+		goCtx:         ctx,
 		iCtx:          iCtx,
 		storedSession: storedSession,
 	}, wrappedIter, nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.Context, *session.Event, error) {
+func (r *Runner) appendMessageToSession(ctx context.Context, invCleanCtx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.Context, *session.Event, error) {
 	if msg == nil {
-		return ctx, nil, nil
+		return invCleanCtx, nil, nil
 	}
 	if pluginManager != nil {
-		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
+		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, invCleanCtx, msg)
 		if err != nil {
-			return ctx, nil, fmt.Errorf("error running on run user message callback : %w", err)
+			return invCleanCtx, nil, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
 			msg = modifiedMsg
 			// update ctx user message
 			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Artifacts:    ctx.Artifacts(),
-				Memory:       ctx.Memory(),
-				Session:      ctx.Session(),
-				Agent:        ctx.Agent(),
+				Artifacts:    invCleanCtx.Artifacts(),
+				Memory:       invCleanCtx.Memory(),
+				Session:      invCleanCtx.Session(),
+				Agent:        invCleanCtx.Agent(),
 				UserContent:  msg,
-				RunConfig:    ctx.RunConfig(),
-				InvocationID: ctx.InvocationID(),
+				RunConfig:    invCleanCtx.RunConfig(),
+				InvocationID: invCleanCtx.InvocationID(),
 			})
-			ctx = agent.NewContext(ic)
+			invCleanCtx = agent.NewContext(ctx, ic)
 		}
 	}
 
-	artifactsService := ctx.Artifacts()
+	artifactsService := invCleanCtx.Artifacts()
 	if artifactsService != nil && saveInputBlobsAsArtifacts {
 		for i, part := range msg.Parts {
 			if part.InlineData == nil {
 				continue
 			}
-			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
+			fileName := fmt.Sprintf("artifact_%s_%d", invCleanCtx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return ctx, nil, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return invCleanCtx, nil, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -635,7 +637,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
@@ -651,9 +653,9 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
+		return invCleanCtx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return ctx, event, nil
+	return invCleanCtx, event, nil
 }
 
 // findActiveTaskIsolationScope returns the most recent isolation_scope that has

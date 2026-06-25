@@ -16,6 +16,7 @@ package triggers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -135,11 +136,11 @@ func createMockAgent(t *testing.T, results []error, runCount *int, expectedAttri
 	t.Helper()
 	testAgent, err := agent.New(agent.Config{
 		Name: "test-agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				*runCount++
 
-				userContent := ctx.UserContent()
+				userContent := invCleanCtx.UserContent()
 				if len(expectedAttributes) > 0 {
 					if userContent == nil || len(userContent.Parts) == 0 {
 						t.Errorf("expected user content but got none")

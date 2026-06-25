@@ -15,6 +15,7 @@
 package functionaltest_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -139,7 +140,7 @@ func newWorkflowScenario(t *testing.T, stage errorStage) agent.Agent {
 	// Static node: uppercases the workflow input. Fails when the
 	// scenario targets the static stage.
 	staticNode := workflow.NewFunctionNode("static_node",
-		func(_ agent.Context, in string) (string, error) {
+		func(_ context.Context, _ agent.Context, in string) (string, error) {
 			if stage == errorStaticNode {
 				return "", fmt.Errorf("boom: static node failed")
 			}
@@ -168,28 +169,28 @@ func newWorkflowScenario(t *testing.T, stage errorStage) agent.Agent {
 	// cache hit. It's the regression guard for cached-delegation
 	// observability.
 	echoNode := workflow.NewFunctionNode("echo_node",
-		func(_ agent.Context, in string) (string, error) { return in, nil }, nodeCfg)
+		func(_ context.Context, _ agent.Context, in string) (string, error) { return in, nil }, nodeCfg)
 
 	routerNode := workflow.NewDynamicNode("router_node",
-		func(ctx workflow.NodeContext, in string, _ func(*session.Event) error) (string, error) {
+		func(ctx context.Context, invCleanCtx workflow.NodeContext, in string, _ func(*session.Event) error) (string, error) {
 			if stage == errorDynamicNode {
 				return "", fmt.Errorf("boom: dynamic node failed")
 			}
 			// Collaborative agents: each emits invoke_agent, no
 			// invoke_node wrapper.
-			if _, err := workflow.RunNode[any](ctx, taskNode, in); err != nil {
+			if _, err := workflow.RunNode[any](ctx, invCleanCtx, taskNode, in); err != nil {
 				return "", err
 			}
-			if _, err := workflow.RunNode[any](ctx, singleTurnNode, in); err != nil {
+			if _, err := workflow.RunNode[any](ctx, invCleanCtx, singleTurnNode, in); err != nil {
 				return "", err
 			}
 			// Plain node twice with the SAME run id: the first call
 			// runs it, the second is served from the RunNode result
 			// cache. Both must emit an invoke_node span.
-			if _, err := workflow.RunNode[any](ctx, echoNode, in, workflow.WithRunID("echo")); err != nil {
+			if _, err := workflow.RunNode[any](ctx, invCleanCtx, echoNode, in, workflow.WithRunID("echo")); err != nil {
 				return "", err
 			}
-			if _, err := workflow.RunNode[any](ctx, echoNode, in, workflow.WithRunID("echo")); err != nil {
+			if _, err := workflow.RunNode[any](ctx, invCleanCtx, echoNode, in, workflow.WithRunID("echo")); err != nil {
 				return "", err
 			}
 			return "done", nil

@@ -233,7 +233,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			for ev, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 				if ev != nil {
 					t.Fatal("ContentsRequestProcessor generated an unexpected event")
 				}
@@ -285,7 +285,7 @@ func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *tes
 	})
 
 	req := &model.LLMRequest{}
-	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+	for _, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 		if err != nil {
 			t.Fatalf("contentsRequestProcessor failed: %v", err)
 		}
@@ -331,7 +331,7 @@ func TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope(t *t
 	})
 
 	req := &model.LLMRequest{}
-	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+	for _, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 		if err != nil {
 			t.Fatalf("contentsRequestProcessor failed: %v", err)
 		}
@@ -386,7 +386,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 			Session:        &fakeSession{events: events},
 		})
 		req := &model.LLMRequest{}
-		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		for _, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 			if err != nil {
 				t.Fatalf("contentsRequestProcessor failed: %v", err)
 			}
@@ -413,7 +413,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 			Session:        &fakeSession{events: events},
 		})
 		req := &model.LLMRequest{}
-		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		for _, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 			if err != nil {
 				t.Fatalf("contentsRequestProcessor failed: %v", err)
 			}
@@ -463,7 +463,7 @@ func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T)
 		Session:        &fakeSession{events: events},
 	})
 	req := &model.LLMRequest{}
-	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+	for _, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 		if err != nil {
 			t.Fatalf("contentsRequestProcessor failed: %v", err)
 		}
@@ -763,7 +763,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			for ev, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 				if ev != nil {
 					t.Fatal("ContentsRequestProcessor generated an unexpected event")
 				}
@@ -895,7 +895,7 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 
 	req := &model.LLMRequest{}
 
-	for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+	for ev, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 		if ev != nil {
 			t.Fatal("ContentsRequestProcessor generated an unexpected event")
 		}
@@ -1363,7 +1363,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			for ev, err := range llminternal.ContentsRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 				if ev != nil {
 					t.Fatal("ContentsRequestProcessor generated an unexpected event")
 				}

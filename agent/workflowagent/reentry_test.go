@@ -15,6 +15,7 @@
 package workflowagent
 
 import (
+	"context"
 	"iter"
 	"reflect"
 	"sync"
@@ -137,7 +138,7 @@ func TestWorkflowAgent_ReEntry_DefaultModeIsHandoff(t *testing.T) {
 	sess := newFakeSession()
 
 	runFreshTurn(t, sess, a, "x")
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("decide", "approve"))), nil)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("decide", "approve"))), nil)
 
 	if got := askerActivations.Load(); got != 1 {
 		t.Errorf("asker activations = %d, want 1 (handoff mode must NOT re-activate the asker)", got)
@@ -214,7 +215,7 @@ func newReentryNode(name string, runFn func(agent.Context, any) iter.Seq2[*sessi
 	}
 }
 
-func (n *reentryNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *reentryNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return n.runFn(ctx, input)
 }
 
@@ -311,7 +312,7 @@ func askerForSequence(name string, ids []string, finalOutput any) (*reentryNode,
 // completed without yielding another RequestInput).
 func resumeAndExpect(t *testing.T, sess *fakeSession, a agent.Agent, replyID string, replyValue any, wantNextRequest string) []*session.Event {
 	t.Helper()
-	events := drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(replyID, replyValue))), nil)
+	events := drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage(replyID, replyValue))), nil)
 	if got := findRequest(events); got != wantNextRequest {
 		t.Fatalf("after resume %q=%v: RequestedInput = %q, want %q", replyID, replyValue, got, wantNextRequest)
 	}

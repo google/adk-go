@@ -32,7 +32,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-var upperNode = NewFunctionNode("upper", func(ctx agent.Context, input string) (string, error) {
+var upperNode = NewFunctionNode("upper", func(_ context.Context, _ agent.Context, input string) (string, error) {
 	return strings.ToUpper(input), nil
 }, defaultNodeConfig)
 
@@ -74,7 +74,7 @@ func TestParallelWorker_Run(t *testing.T) {
 			name:           "WorkerError",
 			maxConcurrency: 0,
 			input:          []any{"a", "b", "c"},
-			wrapped: NewFunctionNode("error_node", func(ctx agent.Context, input string) (string, error) {
+			wrapped: NewFunctionNode("error_node", func(_ context.Context, _ agent.Context, input string) (string, error) {
 				if input == "b" {
 					return "", errors.New("failed on b")
 				}
@@ -93,8 +93,8 @@ func TestParallelWorker_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
-			exCtx := agent.NewNodeContext(mockCtx, nil)
-			events := pw.Run(exCtx, tc.input)
+			exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+			events := pw.Run(t.Context(), exCtx, tc.input)
 
 			var gotOutput []any
 			var gotErr error
@@ -133,7 +133,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	blockCh := make(chan struct{})
 
 	startedCh := make(chan struct{}, 4)
-	wrapped := NewFunctionNode("blocking", func(ctx agent.Context, input int) (int, error) {
+	wrapped := NewFunctionNode("blocking", func(_ context.Context, _ agent.Context, input int) (int, error) {
 		atomic.AddInt32(&counter, 1)
 		startedCh <- struct{}{}
 		<-blockCh
@@ -146,12 +146,12 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	input := []any{1, 2, 3, 4}
 
 	done := make(chan struct{})
 	go func() {
-		for range pw.Run(exCtx, input) {
+		for range pw.Run(t.Context(), exCtx, input) {
 		}
 		close(done)
 	}()
@@ -191,7 +191,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 }
 
 func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
-	wrapped := NewFunctionNode("wrapped", func(ctx agent.Context, input any) (any, error) { return input, nil }, defaultNodeConfig)
+	wrapped := NewFunctionNode("wrapped", func(_ context.Context, _ agent.Context, input any) (any, error) { return input, nil }, defaultNodeConfig)
 
 	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
 	if err != nil {
@@ -199,10 +199,10 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	input := []any{1, 2}
 
-	events := pw.Run(exCtx, input)
+	events := pw.Run(t.Context(), exCtx, input)
 
 	nonOutputCount := 0
 	hasAggregatedOutput := false
@@ -231,7 +231,7 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 }
 
 func TestParallelWorker_WorkflowIntegration(t *testing.T) {
-	splitFn := func(ctx agent.Context, input string) ([]any, error) {
+	splitFn := func(_ context.Context, _ agent.Context, input string) ([]any, error) {
 		parts := strings.Split(input, ",")
 		var res []any
 		for _, p := range parts {
@@ -246,7 +246,7 @@ func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	joinFn := func(ctx agent.Context, input []any) (string, error) {
+	joinFn := func(_ context.Context, _ agent.Context, input []any) (string, error) {
 		var strs []string
 		for _, v := range input {
 			strs = append(strs, v.(string))
@@ -268,7 +268,7 @@ func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 		Parts: []*genai.Part{{Text: "a,b,c"}},
 	}
 
-	events := w.Run(mockCtx)
+	events := w.Run(t.Context(), mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -287,7 +287,7 @@ func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 }
 
 func TestNewParallelWorker_ErrorOnWrappedRetryConfig(t *testing.T) {
-	wrapped := NewFunctionNode("wrapped", func(ctx agent.Context, input any) (any, error) { return input, nil }, NodeConfig{RetryConfig: DefaultRetryConfig()})
+	wrapped := NewFunctionNode("wrapped", func(_ context.Context, _ agent.Context, input any) (any, error) { return input, nil }, NodeConfig{RetryConfig: DefaultRetryConfig()})
 
 	_, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
 	if err == nil {
@@ -302,7 +302,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 	var mu sync.Mutex
 	attempts := make(map[string]int)
 
-	wrapped := NewFunctionNode("retry_node", func(ctx agent.Context, input string) (string, error) {
+	wrapped := NewFunctionNode("retry_node", func(_ context.Context, _ agent.Context, input string) (string, error) {
 		mu.Lock()
 		attempts[input]++
 		count := attempts[input]
@@ -327,10 +327,10 @@ func TestParallelWorker_Retry(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	input := []any{"a", "b"}
 
-	events := pw.Run(exCtx, input)
+	events := pw.Run(t.Context(), exCtx, input)
 
 	var gotOutput []any
 	var gotErr error
@@ -371,7 +371,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 	var workerCCancelled int32
 	cancelledCh := make(chan struct{})
 
-	wrapped := NewFunctionNode("fail_fast_node", func(ctx agent.Context, input string) (string, error) {
+	wrapped := NewFunctionNode("fail_fast_node", func(ctx context.Context, _ agent.Context, input string) (string, error) {
 		if input == "b" {
 			return "", errors.New("error b")
 		}
@@ -392,8 +392,8 @@ func TestParallelWorker_FailFast(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	input := []any{"a", "b", "c"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
-	events := pw.Run(exCtx, input)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+	events := pw.Run(t.Context(), exCtx, input)
 
 	var gotErr error
 	for _, err := range events {
@@ -427,7 +427,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	blockCh := make(chan struct{})
 	startedCh := make(chan struct{}, 2)
-	wrapped := NewFunctionNode("blocking", func(ctx agent.Context, input any) (any, error) {
+	wrapped := NewFunctionNode("blocking", func(ctx context.Context, _ agent.Context, input any) (any, error) {
 		startedCh <- struct{}{}
 		select {
 		case <-ctx.Done():
@@ -444,7 +444,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: ctx}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(ctx, mockCtx, nil)
 	input := []any{1, 2}
 
 	done := make(chan struct{})
@@ -452,7 +452,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	var hasFinalResult bool
 
 	go func() {
-		for ev, err := range pw.Run(exCtx, input) {
+		for ev, err := range pw.Run(ctx, exCtx, input) {
 			if err != nil {
 				gotErr = err
 			}
@@ -508,13 +508,13 @@ func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	input := []any{"a", "b", "c"}
 
 	done := make(chan struct{})
 	var gotOutput []any
 	go func() {
-		events := pw.Run(exCtx, input)
+		events := pw.Run(t.Context(), exCtx, input)
 		for ev, err := range events {
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
@@ -556,7 +556,7 @@ type delayedMultiOutputTestNode struct {
 	startedCh    chan struct{}
 }
 
-func (n *delayedMultiOutputTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *delayedMultiOutputTestNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := input.(string)
 
@@ -586,7 +586,7 @@ func (n *delayedMultiOutputTestNode) Config() NodeConfig  { return defaultNodeCo
 func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 	var wrappedAttempts int32
 
-	wrapped := NewFunctionNode("worker", func(ctx agent.Context, input string) (string, error) {
+	wrapped := NewFunctionNode("worker", func(_ context.Context, _ agent.Context, input string) (string, error) {
 		atomic.AddInt32(&wrappedAttempts, 1)
 		return "", errors.New("persistent failure")
 	}, defaultNodeConfig)
@@ -602,7 +602,7 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	splitFn := func(ctx agent.Context, input string) ([]any, error) {
+	splitFn := func(_ context.Context, _ agent.Context, input string) ([]any, error) {
 		return []any{input}, nil
 	}
 	splitNode := NewFunctionNode("split", splitFn, defaultNodeConfig)
@@ -619,7 +619,7 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		Parts: []*genai.Part{{Text: "a"}},
 	}
 
-	events := w.Run(mockCtx)
+	events := w.Run(t.Context(), mockCtx)
 
 	var gotErr error
 	for _, err := range events {

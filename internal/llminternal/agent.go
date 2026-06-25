@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -62,7 +64,7 @@ type State struct {
 	OutputKey string
 }
 
-type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+type InstructionProvider func(ctx context.Context, invCleanCtx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
 

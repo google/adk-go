@@ -16,6 +16,7 @@
 package exitlooptool
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/adk/agent"
@@ -23,9 +24,9 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]string, error) {
-	ctx.Actions().Escalate = true
-	ctx.Actions().SkipSummarization = true
+func exitLoop(ctx context.Context, invCleanCtx agent.Context, myArgs struct{}) (map[string]string, error) {
+	invCleanCtx.Actions().Escalate = true
+	invCleanCtx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
 }
 

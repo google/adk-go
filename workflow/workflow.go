@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -48,7 +49,7 @@ type Node interface {
 	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
 	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
 	ValidateOutput(output any) (any, error)
-	Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
+	Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error]
 }
 
 // StateParamsAware is implemented by nodes that bind their parameters
@@ -134,7 +135,7 @@ func (s *startNode) ValidateOutput(output any) (any, error) {
 	return output, nil
 }
 
-func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (s *startNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
 
@@ -278,33 +279,33 @@ func (w *Workflow) Name() string {
 // effects, yields events to the caller, and schedules successors
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
-func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (w *Workflow) Run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	var c agent.Context
 	if !w.isRootWrapper && w.Name() != "" {
 		wfPath := w.Name() + "@1"
-		if ac, ok := ctx.(agent.Context); ok && ac.Path() != "" {
+		if ac, ok := invCleanCtx.(agent.Context); ok && ac.Path() != "" {
 			wfPath = ac.Path() + "/" + w.Name() + "@1"
 		}
 		var ancestors []string
-		if ac, ok := ctx.(agent.Context); ok {
+		if ac, ok := invCleanCtx.(agent.Context); ok {
 			ancestors = ac.OutputForAncestors()
 		}
-		c = agent.NewDynamicNodeContext(agent.NewNodeContext(ctx, nil), wfPath, "1", nil, ancestors)
+		c = agent.NewDynamicNodeContext(ctx, agent.NewNodeContext(ctx, invCleanCtx, nil), wfPath, "1", nil, ancestors)
 	} else {
-		c = agent.NewNodeContext(ctx, nil)
+		c = agent.NewNodeContext(ctx, invCleanCtx, nil)
 	}
-	return w.RunNode(c, userInput(c))
+	return w.RunNode(ctx, c, userInput(ctx, c))
 }
 
 // RunNode drives the workflow with the given input.
 // This is used by WorkflowNode to run nested workflows.
-func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (w *Workflow) RunNode(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		s := newScheduler(ctx, invCleanCtx, w.graph, w.maxConcurrency)
 		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
-		s.scheduleNode(Start, input, "", ctx.Branch())
+		s.scheduleNode(Start, input, "", invCleanCtx.Branch())
 
 		s.run(yield)
 
@@ -316,8 +317,8 @@ func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Even
 // userInput extracts the workflow's seed input from the
 // InvocationContext's UserContent. Concatenates all text parts;
 // returns nil for an empty UserContent.
-func userInput(ctx agent.Context) any {
-	uc := ctx.UserContent()
+func userInput(ctx context.Context, invCleanCtx agent.Context) any {
+	uc := invCleanCtx.UserContent()
 	if uc == nil {
 		return nil
 	}

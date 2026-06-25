@@ -109,7 +109,7 @@ func newTestCallbackContext(t *testing.T) Context {
 
 	a, err := New(Config{
 		Name: "test-agent",
-		Run: func(InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(func(*session.Event, error) bool) {}
 		},
 	})
@@ -118,7 +118,6 @@ func newTestCallbackContext(t *testing.T) Context {
 	}
 
 	ic := &invocationContext{
-		Context:      t.Context(),
 		agent:        a,
 		artifacts:    fakeArtifacts{},
 		memory:       fakeMemory{},
@@ -127,7 +126,7 @@ func newTestCallbackContext(t *testing.T) Context {
 		branch:       "branch-1",
 		userContent:  genai.NewContentFromText("hi", genai.RoleUser),
 	}
-	return NewCallbackContext(ic, nil)
+	return NewCallbackContext(t.Context(), ic, nil)
 }
 
 // TestCallbackContextWrapper_LogsForToolContextMethods verifies that calling

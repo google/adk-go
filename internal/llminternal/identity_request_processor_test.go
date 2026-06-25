@@ -159,7 +159,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				Agent: tt.agent,
 			})
 
-			iter := identityRequestProcessor(ctx, req, &Flow{})
+			iter := identityRequestProcessor(t.Context(), ctx, req, &Flow{})
 
 			var eventCount int
 			for _, err := range iter {

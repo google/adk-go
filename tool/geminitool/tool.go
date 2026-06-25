@@ -30,6 +30,7 @@
 package geminitool
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/genai"
@@ -56,7 +57,7 @@ type geminiTool struct {
 }
 
 // ProcessRequest adds the Gemini tool to the LLM request.
-func (t *geminiTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *geminiTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return setTool(req, t.value)
 }
 

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"strings"
@@ -45,7 +46,7 @@ func TestJoinNode_E2E_FanInTwoBranches(t *testing.T) {
 		{From: join, To: handler},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	gotMap, ok := seen.(map[string]any)
 	if !ok {
@@ -83,7 +84,7 @@ func TestJoinNode_E2E_FanInThreeBranches(t *testing.T) {
 		{From: join, To: handler},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	m, _ := seen.(map[string]any)
 	var seenKeys []string
@@ -106,7 +107,7 @@ func TestJoinNode_BarrierSkipsUntilAllPredecessorsComplete(t *testing.T) {
 
 	bBlocker := make(chan struct{})
 	branchA := NewFunctionNode("branchA",
-		func(ctx agent.Context, _ any) (string, error) {
+		func(_ context.Context, _ agent.Context, _ any) (string, error) {
 			// Release B once A's function body returns. The
 			// barrier must hold until B also completes, so the
 			// handler runs exactly once with both outputs.
@@ -114,7 +115,7 @@ func TestJoinNode_BarrierSkipsUntilAllPredecessorsComplete(t *testing.T) {
 			return "a", nil
 		}, defaultNodeConfig)
 	branchB := NewFunctionNode("branchB",
-		func(ctx agent.Context, _ any) (string, error) {
+		func(_ context.Context, _ agent.Context, _ any) (string, error) {
 			<-bBlocker
 			return "b", nil
 		}, defaultNodeConfig)
@@ -123,7 +124,7 @@ func TestJoinNode_BarrierSkipsUntilAllPredecessorsComplete(t *testing.T) {
 	handlerCalls := 0
 	var handlerInput any
 	handler := NewFunctionNode("handler",
-		func(ctx agent.Context, input any) (string, error) {
+		func(_ context.Context, _ agent.Context, input any) (string, error) {
 			handlerCalls++
 			handlerInput = input
 			return "ok", nil
@@ -137,7 +138,7 @@ func TestJoinNode_BarrierSkipsUntilAllPredecessorsComplete(t *testing.T) {
 		{From: join, To: handler},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	if handlerCalls != 1 {
 		t.Fatalf("handler ran %d times, want exactly 1", handlerCalls)
@@ -159,8 +160,8 @@ func TestJoinNode_RunIsPassthrough(t *testing.T) {
 	n := NewJoinNode("join")
 
 	input := map[string]any{"a": "x", "b": 42}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
-	events := drain(t, n.Run(exCtx, input))
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+	events := drain(t, n.Run(t.Context(), exCtx, input))
 
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
@@ -181,7 +182,7 @@ func TestJoinNode_PredecessorWithNilOutput(t *testing.T) {
 
 	branchA := constNode("branchA", "A-result")
 	branchNil := NewFunctionNode("branchNil",
-		func(ctx agent.Context, _ any) (any, error) {
+		func(_ context.Context, _ agent.Context, _ any) (any, error) {
 			return nil, nil
 		}, defaultNodeConfig)
 	join := NewJoinNode("join")
@@ -196,7 +197,7 @@ func TestJoinNode_PredecessorWithNilOutput(t *testing.T) {
 		{From: join, To: handler},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	gotMap, ok := seen.(map[string]any)
 	if !ok {
@@ -219,7 +220,7 @@ func TestJoinNode_PredecessorWithNilOutput(t *testing.T) {
 // yields the given string value.
 func constNode(name, value string) *FunctionNode {
 	return NewFunctionNode(name,
-		func(agent.Context, any) (string, error) { return value, nil },
+		func(context.Context, agent.Context, any) (string, error) { return value, nil },
 		defaultNodeConfig)
 }
 
@@ -228,7 +229,7 @@ func constNode(name, value string) *FunctionNode {
 // graph when the assertion only inspects the input it observed.
 func inputRecorder(name string, seen *any) *FunctionNode {
 	return NewFunctionNode(name,
-		func(_ agent.Context, input any) (string, error) {
+		func(_ context.Context, _ agent.Context, input any) (string, error) {
 			*seen = input
 			return "done", nil
 		}, defaultNodeConfig)

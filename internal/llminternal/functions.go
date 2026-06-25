@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -30,7 +32,8 @@ import (
 // not parsing a function_response_event like in the Python example.
 // This function assumes you have a list of confirmations to process.
 func generateRequestConfirmationEvent(
-	invocationContext agent.InvocationContext,
+	ctx context.Context,
+	invCleanCtx agent.InvocationContext,
 	functionCallEvent *session.Event,
 	functionResponseEvent *session.Event,
 ) *session.Event {
@@ -63,7 +66,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			ID:   utils.GenerateFunctionCallID(invocationContext),
+			ID:   utils.GenerateFunctionCallID(ctx),
 			Name: toolconfirmation.FunctionCallName,
 			Args: args,
 		}
@@ -79,9 +82,9 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	ev := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
-	ev.Author = invocationContext.Agent().Name()
-	ev.Branch = invocationContext.Branch()
+	ev := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
+	ev.Author = invCleanCtx.Agent().Name()
+	ev.Branch = invCleanCtx.Branch()
 	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Parts: parts,

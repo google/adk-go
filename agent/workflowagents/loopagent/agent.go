@@ -17,6 +17,7 @@
 package loopagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
@@ -72,14 +73,14 @@ type loopAgent struct {
 	maxIterations uint
 }
 
-func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *loopAgent) Run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {
 		for {
 			shouldExit := false
-			for _, subAgent := range ctx.Agent().SubAgents() {
-				for event, err := range subAgent.Run(ctx) {
+			for _, subAgent := range invCleanCtx.Agent().SubAgents() {
+				for event, err := range subAgent.Run(ctx, invCleanCtx) {
 					// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
 					if !yield(event, err) {
 						return

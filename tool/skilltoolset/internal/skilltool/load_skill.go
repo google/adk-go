@@ -16,6 +16,7 @@
 package skilltool
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/adk/agent"
@@ -52,13 +53,13 @@ func LoadSkill(source skill.Source) (tool.Tool, error) {
 			Name:        "load_skill",
 			Description: "Loads the SKILL.md instructions for a given skill.",
 		},
-		func(ctx agent.Context, args LoadSkillArgs) (*LoadSkillResult, error) {
-			return loadSkill(ctx, args, source)
+		func(ctx context.Context, invCleanCtx agent.Context, args LoadSkillArgs) (*LoadSkillResult, error) {
+			return loadSkill(ctx, invCleanCtx, args, source)
 		},
 	)
 }
 
-func loadSkill(ctx agent.Context, args LoadSkillArgs, source skill.Source) (*LoadSkillResult, error) {
+func loadSkill(ctx context.Context, invCleanCtx agent.Context, args LoadSkillArgs, source skill.Source) (*LoadSkillResult, error) {
 	if args.Name == "" {
 		return nil, fmt.Errorf("skill name is required to load a skill")
 	}

@@ -15,6 +15,7 @@
 package workflowinternal
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -48,7 +49,7 @@ func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *TaskAgentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
+func (t *TaskAgentTool) Run(ctx context.Context, toolCtx agent.Context, args any) (map[string]any, error) {
 	// Framework handles task delegation dispatch directly via the
 	// LlmAgent chat wrapper.
 	return nil, nil
@@ -74,7 +75,7 @@ func (t *TaskAgentTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *TaskAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *TaskAgentTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 

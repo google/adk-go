@@ -40,6 +40,7 @@
 package llmagent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +62,7 @@ import (
 )
 
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
-func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
+func RunLLMAgentAsNode(ctx context.Context, a agent.Agent, invCleanCtx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmA, ok := a.(llminternal.Agent)
 		if !ok || llmA == nil {
@@ -97,31 +98,31 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     else (memory, run config, etc.).
 		switch state.Mode {
 		case llminternal.ModeChat:
-			runChat(a, ctx, yield)
+			runChat(ctx, a, invCleanCtx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
-			userContent := ctx.UserContent()
+			userContent := invCleanCtx.UserContent()
 			if nodeInput != nil {
 				userContent = nodeInputToContent(nodeInput)
 			}
-			sess := ctx.Session()
-			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
+			sess := invCleanCtx.Session()
+			if seed := PrepareLLMAgentInput(ctx, a, invCleanCtx, nodeInput); seed != nil {
 				sess = newWrappedSession(sess, seed)
 			}
 			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Artifacts:      ctx.Artifacts(),
-				Memory:         ctx.Memory(),
+				Artifacts:      invCleanCtx.Artifacts(),
+				Memory:         invCleanCtx.Memory(),
 				Session:        sess,
-				Branch:         ctx.Branch(),
-				IsolationScope: ctx.IsolationScope(),
+				Branch:         invCleanCtx.Branch(),
+				IsolationScope: invCleanCtx.IsolationScope(),
 				Agent:          a,
 				UserContent:    userContent,
-				RunConfig:      ctx.RunConfig(),
-				InvocationID:   ctx.InvocationID(),
+				RunConfig:      invCleanCtx.RunConfig(),
+				InvocationID:   invCleanCtx.InvocationID(),
 			})
 			if state.Mode == llminternal.ModeSingleTurn {
-				runSingleTurn(a, ic, yield)
+				runSingleTurn(ctx, a, ic, yield)
 			} else {
-				runTask(a, ic, yield)
+				runTask(ctx, a, ic, yield)
 			}
 		}
 	}
@@ -129,7 +130,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 
 // PrepareLLMAgentInput returns the seeded user-role event for the
 // single_turn agent's first turn.
-func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
+func PrepareLLMAgentInput(ctx context.Context, a agent.Agent, invCleanCtx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil
 	}
@@ -144,10 +145,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if content == nil {
 		return nil
 	}
-	ev := session.NewEvent(ctx.InvocationID())
+	ev := session.NewEvent(invCleanCtx.InvocationID())
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: content}
-	if iso := ctx.IsolationScope(); iso != "" {
+	if iso := invCleanCtx.IsolationScope(); iso != "" {
 		ev.IsolationScope = iso
 	}
 	return ev
@@ -382,7 +383,7 @@ func safeCanonicalToolsDict(a agent.Agent) map[string]tool.Tool {
 	return out
 }
 
-func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflow.NodeContext) (any, error) {
+func dispatchTaskFC(ctx context.Context, parentAgent agent.Agent, fc *genai.FunctionCall, invCleanCtx workflow.NodeContext) (any, error) {
 	if fc == nil {
 		return nil, fmt.Errorf("dispatchTaskFC: nil function call")
 	}
@@ -394,7 +395,7 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflo
 	if err != nil {
 		return nil, fmt.Errorf("dispatchTaskFC: build node for %q: %w", fc.Name, err)
 	}
-	out, err := workflow.RunNode[any](ctx, node, fc.Args,
+	out, err := workflow.RunNode[any](ctx, invCleanCtx, node, fc.Args,
 		workflow.WithRunID(fc.ID),
 		workflow.WithIsolationScope(fc.ID),
 		workflow.WithRaiseOnWait(),
@@ -454,8 +455,8 @@ func nodeInputToContent(nodeInput any) *genai.Content {
 
 // runSingleTurn drives Agent.Run for a single round and post-processes
 // each event so the terminal Output is set on the model reply.
-func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
-	for ev, err := range a.Run(ic) {
+func runSingleTurn(ctx context.Context, a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
+	for ev, err := range a.Run(ctx, ic) {
 		if err != nil {
 			yield(nil, err)
 			return
@@ -482,11 +483,11 @@ func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*sessio
 //     round.
 //  3. Re-enter Agent.Run after each dispatch round; the loop ends when
 //     the LLM finishes without delegating.
-func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error) bool) {
+func runChat(ctx context.Context, a agent.Agent, invCleanCtx agent.Context, yield func(*session.Event, error) bool) {
 	toolsDict := safeCanonicalToolsDict(a)
 
 	dispatchAndYield := func(fc *genai.FunctionCall) (ok bool) {
-		out, err := dispatchTaskFC(a, fc, ctx)
+		out, err := dispatchTaskFC(ctx, a, fc, invCleanCtx)
 		if err != nil {
 			if errors.Is(err, workflow.ErrNodeInterrupted) {
 				// Task sub-agent paused on a long-running tool
@@ -537,11 +538,11 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// reply in its conversation history.
 			return false
 		}
-		return yield(synthesizeTaskFREvent(ctx.InvocationID(), fc, out), nil)
+		return yield(synthesizeTaskFREvent(invCleanCtx.InvocationID(), fc, out), nil)
 	}
 
 	// Step 1: pre-LLM scan for unresolved task FCs from prior turns.
-	unresolved := findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict)
+	unresolved := findUnresolvedTaskDelegations(invCleanCtx.Session(), a.Name(), toolsDict)
 	for _, fc := range unresolved {
 		if !dispatchAndYield(fc) {
 			return
@@ -552,7 +553,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 	// re-enter Agent.Run with the FR now in session.
 	for {
 		hadTaskFC := false
-		for ev, err := range a.Run(ctx) {
+		for ev, err := range a.Run(ctx, invCleanCtx) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -597,10 +598,10 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 // declaration mirrors the agent's OutputSchema: for wrapped primitives
 // the value lives at the wrapper key; for object schemas it's at the
 // top level of args.
-func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
+func runTask(ctx context.Context, a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
 	finishTool := findFinishTaskTool(a)
 	var pendingFCArgs map[string]any
-	for ev, err := range a.Run(ic) {
+	for ev, err := range a.Run(ctx, ic) {
 		if err != nil {
 			yield(nil, err)
 			return

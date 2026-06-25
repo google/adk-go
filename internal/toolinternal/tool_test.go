@@ -15,6 +15,7 @@
 package toolinternal_test
 
 import (
+	"context"
 	"testing"
 
 	"google.golang.org/genai"
@@ -73,6 +74,6 @@ func (*nonDeferringTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: "non_deferring"}
 }
 
-func (*nonDeferringTool) Run(_ agent.ToolContext, _ any) (map[string]any, error) {
+func (*nonDeferringTool) Run(_ context.Context, _ agent.Context, _ any) (map[string]any, error) {
 	return nil, nil
 }

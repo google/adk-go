@@ -47,14 +47,11 @@ func NewInvocationContext(ctx context.Context, params InvocationContextParams) a
 		params.InvocationID = "e-" + platform.NewUUID(ctx)
 	}
 	return &InvocationContext{
-		Context: ctx,
-		params:  params,
+		params: params,
 	}
 }
 
 type InvocationContext struct {
-	context.Context
-
 	params InvocationContextParams
 }
 
@@ -112,12 +109,6 @@ func (c *InvocationContext) LiveSessionResumptionHandle() string {
 // This allows subsequent reconnection attempts in the live loop to resume the same session state.
 func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
 	c.params.LiveSessionResumptionHandle = handle
-}
-
-func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
 }
 
 // ResumedInput always returns (nil, false) for the base

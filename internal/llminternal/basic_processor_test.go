@@ -88,7 +88,7 @@ func TestBasicRequestProcessor_OutputSchemaPerMode(t *testing.T) {
 				Agent: mock,
 			})
 			req := &model.LLMRequest{}
-			for ev, err := range basicRequestProcessor(ctx, req, &Flow{}) {
+			for ev, err := range basicRequestProcessor(t.Context(), ctx, req, &Flow{}) {
 				if ev != nil {
 					t.Fatalf("basicRequestProcessor unexpectedly yielded an event: %+v", ev)
 				}

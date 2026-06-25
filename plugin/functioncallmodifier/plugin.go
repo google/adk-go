@@ -16,6 +16,7 @@
 package functioncallmodifier
 
 import (
+	"context"
 	"fmt"
 	"maps"
 
@@ -50,8 +51,8 @@ func MustNewPlugin(cfg FunctionCallModifierConfig) *plugin.Plugin {
 	return p
 }
 
-func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
-	return func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+func beforeModelCallback(cfg FunctionCallModifierConfig) func(context.Context, agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+	return func(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 		if req.Config == nil || len(req.Config.Tools) == 0 {
 			return nil, nil
 		}
@@ -88,8 +89,8 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mo
 	}
 }
 
-func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
-	return func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func afterModelCallback(cfg FunctionCallModifierConfig) func(context.Context, agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
+	return func(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 		if llmResponseError != nil {
 			return nil, llmResponseError // Pass through error
 		}
@@ -109,7 +110,7 @@ func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mod
 					}
 					delete(fc.Args, name)
 					stateKey := fmt.Sprintf("%s/%s", fc.ID, name)
-					if err := ctx.State().Set(stateKey, arg); err != nil {
+					if err := invCleanCtx.State().Set(stateKey, arg); err != nil {
 						return nil, fmt.Errorf("failed to set state: %w", err)
 					}
 				}

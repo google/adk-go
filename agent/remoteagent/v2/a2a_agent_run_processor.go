@@ -15,6 +15,7 @@
 package remoteagent
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -59,7 +60,7 @@ func newRunProcessor(config A2AConfig, request *a2a.SendMessageRequest) *a2aAgen
 
 // aggregatePartial stores contents of partial events to emit them with the terminal event.
 // It can modify the original event or return a new event to emit before the provided event.
-func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2aEvent a2a.Event, event *session.Event) []*session.Event {
+func (p *a2aAgentRunProcessor) aggregatePartial(ctx context.Context, invCleanCtx agent.InvocationContext, a2aEvent a2a.Event, event *session.Event) []*session.Event {
 	// ADK partial events should be aggregated by ADK and emitted as a non-partial artifact update.
 	// That's why we skip them regardless of the actual isPartial value.
 	// This is the legacy [adka2a.OutputMode].
@@ -72,7 +73,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 		var events []*session.Event
 		for _, aid := range p.aggregationOrder {
 			if agg, ok := p.aggregations[aid]; ok {
-				events = append(events, p.buildNonPartialAggregation(ctx, agg))
+				events = append(events, p.buildNonPartialAggregation(ctx, invCleanCtx, agg))
 			}
 		}
 		return append(events, event)
@@ -113,7 +114,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 
 	// emit partial last chunk and follow by the non-partial aggregated event
 	p.removeAggregation(update.Artifact.ID)
-	return []*session.Event{event, p.buildNonPartialAggregation(ctx, aggregation)}
+	return []*session.Event{event, p.buildNonPartialAggregation(ctx, invCleanCtx, aggregation)}
 }
 
 func (p *a2aAgentRunProcessor) removeAggregation(aid a2a.ArtifactID) {
@@ -172,9 +173,9 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 	p.aggregationOrder = append(p.aggregationOrder, aid)
 }
 
-func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationContext, agg *artifactAggregation) *session.Event {
+func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx context.Context, invCleanCtx agent.InvocationContext, agg *artifactAggregation) *session.Event {
 	parts := agg.parts
-	result := adka2a.NewRemoteAgentEvent(ctx)
+	result := adka2a.NewRemoteAgentEvent(ctx, invCleanCtx)
 	result.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	result.CustomMetadata = agg.customMeta
 	result.GroundingMetadata = agg.grounding
@@ -184,16 +185,16 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 }
 
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
-func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext, a2aEvent a2a.Event, err error) (*session.Event, error) {
+func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx context.Context, invCleanCtx agent.InvocationContext, a2aEvent a2a.Event, err error) (*session.Event, error) {
 	if err != nil {
-		event := toErrorEvent(ctx, err)
+		event := toErrorEvent(ctx, invCleanCtx, err)
 		p.updateCustomMetadata(event, nil)
 		return event, nil
 	}
 
-	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
+	event, err := adka2a.ToSessionEventWithParts(ctx, invCleanCtx, a2aEvent, p.partConverter)
 	if err != nil {
-		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
+		event := toErrorEvent(ctx, invCleanCtx, fmt.Errorf("failed to convert a2aEvent: %w", err))
 		p.updateCustomMetadata(event, nil)
 		return event, nil
 	}
@@ -205,23 +206,23 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 	return event, nil
 }
 
-func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.InvocationContext) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
+func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx context.Context, invCleanCtx agent.InvocationContext) (*session.Event, error) {
+	cctx := icontext.NewCallbackContext(ctx, invCleanCtx)
 	for _, callback := range p.config.BeforeRequestCallbacks {
-		if cbResp, cbErr := callback(cctx, p.request); cbResp != nil || cbErr != nil {
+		if cbResp, cbErr := callback(ctx, cctx, p.request); cbResp != nil || cbErr != nil {
 			return cbResp, cbErr
 		}
 	}
 	return nil, nil
 }
 
-func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
+func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx context.Context, invCleanCtx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
 	if resp == nil && err == nil {
 		return nil, nil
 	}
-	cctx := icontext.NewCallbackContext(ctx)
+	cctx := icontext.NewCallbackContext(ctx, invCleanCtx)
 	for _, callback := range p.config.AfterRequestCallbacks {
-		if cbEvent, cbErr := callback(cctx, p.request, resp, err); cbEvent != nil || cbErr != nil {
+		if cbEvent, cbErr := callback(ctx, cctx, p.request, resp, err); cbEvent != nil || cbErr != nil {
 			return cbEvent, cbErr
 		}
 	}

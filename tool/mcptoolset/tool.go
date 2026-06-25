@@ -15,6 +15,7 @@
 package mcptoolset
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -83,7 +84,7 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *mcpTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
@@ -91,8 +92,8 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
-	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+func (t *mcpTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
+	if confirmation := invCleanCtx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)
 		}
@@ -106,13 +107,13 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}
 
 		if requireConfirmation {
-			err := ctx.RequestConfirmation(
+			err := invCleanCtx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					t.Name()), nil)
 			if err != nil {
 				return nil, err
 			}
-			ctx.Actions().SkipSummarization = true
+			invCleanCtx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRequired)
 		}
 	}

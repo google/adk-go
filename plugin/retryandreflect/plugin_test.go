@@ -15,6 +15,7 @@
 package retryandreflect
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -99,15 +100,15 @@ func TestRetryAndReflect_SuccessResets(t *testing.T) {
 	err := errors.New("some error")
 
 	// Fail twice
-	_, _ = r.onToolError(ctx, tl, args, err)
-	_, _ = r.onToolError(ctx, tl, args, err)
+	_, _ = r.onToolError(context.Background(), ctx, tl, args, err)
+	_, _ = r.onToolError(context.Background(), ctx, tl, args, err)
 
 	if count := r.scopedFailureCounters["inv1"]["test-tool"]; count != 2 {
 		t.Errorf("expected count 2, got %d", count)
 	}
 
 	// Succeed
-	_, _ = r.afterTool(ctx, tl, args, nil, nil)
+	_, _ = r.afterTool(context.Background(), ctx, tl, args, nil, nil)
 
 	if _, ok := r.scopedFailureCounters["inv1"]["test-tool"]; ok {
 		t.Errorf("expected failure count to be reset")
@@ -127,14 +128,14 @@ func TestRetryAndReflect_AfterToolNoResetOnReflection(t *testing.T) {
 	err := errors.New("some error")
 
 	// Fail once
-	res, _ := r.onToolError(ctx, tl, args, err)
+	res, _ := r.onToolError(context.Background(), ctx, tl, args, err)
 
 	if count := r.scopedFailureCounters["inv1"]["test-tool"]; count != 1 {
 		t.Errorf("expected count 1, got %d", count)
 	}
 
 	// AfterTool is called with the result of onToolError
-	_, _ = r.afterTool(ctx, tl, args, res, nil)
+	_, _ = r.afterTool(context.Background(), ctx, tl, args, res, nil)
 
 	if count := r.scopedFailureCounters["inv1"]["test-tool"]; count != 1 {
 		t.Errorf("expected failure count NOT to be reset, got %d", count)
@@ -154,7 +155,7 @@ func TestRetryAndReflect_MaxRetries(t *testing.T) {
 	err := errors.New("fail")
 
 	// 1st retry
-	res, _ := r.onToolError(ctx, tl, args, err)
+	res, _ := r.onToolError(context.Background(), ctx, tl, args, err)
 	if res["retry_count"] != 1 {
 		t.Errorf("expected retry_count 1, got %v", res["retry_count"])
 	}
@@ -163,13 +164,13 @@ func TestRetryAndReflect_MaxRetries(t *testing.T) {
 	}
 
 	// 2nd retry
-	res, _ = r.onToolError(ctx, tl, args, err)
+	res, _ = r.onToolError(context.Background(), ctx, tl, args, err)
 	if res["retry_count"] != 2 {
 		t.Errorf("expected retry_count 2, got %v", res["retry_count"])
 	}
 
 	// 3rd time - exceed
-	res, _ = r.onToolError(ctx, tl, args, err)
+	res, _ = r.onToolError(context.Background(), ctx, tl, args, err)
 	if res["retry_count"] != 2 { // It returns maxRetries in createToolRetryExceedMsg
 		t.Errorf("expected retry_count 2 (max), got %v", res["retry_count"])
 	}
@@ -191,10 +192,10 @@ func TestRetryAndReflect_ErrorIfRetryExceeded(t *testing.T) {
 	err := errors.New("fail")
 
 	// 1st retry
-	_, _ = r.onToolError(ctx, tl, nil, err)
+	_, _ = r.onToolError(context.Background(), ctx, tl, nil, err)
 
 	// 2nd time - exceed, should return error
-	_, gotErr := r.onToolError(ctx, tl, nil, err)
+	_, gotErr := r.onToolError(context.Background(), ctx, tl, nil, err)
 	if gotErr != err {
 		t.Errorf("expected error %v, got %v", err, gotErr)
 	}
@@ -218,21 +219,21 @@ func TestRetryAndReflect_Scopes(t *testing.T) {
 	err := errors.New("fail")
 
 	// Invocation scope
-	_, _ = rInvocation.onToolError(ctx1, tl, nil, err)
+	_, _ = rInvocation.onToolError(context.Background(), ctx1, tl, nil, err)
 	if rInvocation.scopedFailureCounters["inv1"]["test-tool"] != 1 {
 		t.Errorf("expected 1 failure in inv1")
 	}
-	_, _ = rInvocation.onToolError(ctx2, tl, nil, err)
+	_, _ = rInvocation.onToolError(context.Background(), ctx2, tl, nil, err)
 	if rInvocation.scopedFailureCounters["inv2"]["test-tool"] != 1 {
 		t.Errorf("expected 1 failure in inv2")
 	}
 
 	// Global scope
-	_, _ = rGlobal.onToolError(ctx1, tl, nil, err)
+	_, _ = rGlobal.onToolError(context.Background(), ctx1, tl, nil, err)
 	if rGlobal.scopedFailureCounters[globalScopeKey]["test-tool"] != 1 {
 		t.Errorf("expected 1 failure in global scope")
 	}
-	_, _ = rGlobal.onToolError(ctx2, tl, nil, err)
+	_, _ = rGlobal.onToolError(context.Background(), ctx2, tl, nil, err)
 	if rGlobal.scopedFailureCounters[globalScopeKey]["test-tool"] != 2 {
 		t.Errorf("expected 2 failures in global scope")
 	}

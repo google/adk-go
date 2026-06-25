@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"sync"
@@ -36,7 +37,7 @@ func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 		seenBranches []string
 	)
 	wrapped := NewFunctionNode(wrappedName,
-		func(ctx agent.Context, input string) (string, error) {
+		func(_ context.Context, ctx agent.Context, input string) (string, error) {
 			mu.Lock()
 			seenBranches = append(seenBranches, ctx.Branch())
 			mu.Unlock()
@@ -49,9 +50,9 @@ func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 
-	events := pw.Run(exCtx, []any{"a", "b", "c"})
+	events := pw.Run(t.Context(), exCtx, []any{"a", "b", "c"})
 	for _, err := range events {
 		if err != nil {
 			t.Fatalf("Run error: %v", err)
@@ -90,7 +91,7 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 		seenBranches []string
 	)
 	wrapped := NewFunctionNode(wrappedName,
-		func(ctx agent.Context, input string) (string, error) {
+		func(_ context.Context, ctx agent.Context, input string) (string, error) {
 			mu.Lock()
 			seenBranches = append(seenBranches, ctx.Branch())
 			mu.Unlock()
@@ -105,9 +106,9 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 	// Simulate ParallelWorker running under a parent branch
 	// "outer@1" (e.g. one branch of a static fan-out).
 	parentCtx := withBranch(newMockCtx(t), "outer@1")
-	exCtx := agent.NewNodeContext(parentCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), parentCtx, nil)
 
-	events := pw.Run(exCtx, []any{"x", "y"})
+	events := pw.Run(t.Context(), exCtx, []any{"x", "y"})
 	for _, err := range events {
 		if err != nil {
 			t.Fatalf("Run error: %v", err)
@@ -143,7 +144,7 @@ func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 		attemptsByBranch = map[string]int{}
 	)
 	wrapped := NewFunctionNode(wrappedName,
-		func(ctx agent.Context, input string) (string, error) {
+		func(_ context.Context, ctx agent.Context, input string) (string, error) {
 			mu.Lock()
 			attemptsByBranch[ctx.Branch()]++
 			mu.Unlock()
@@ -157,10 +158,10 @@ func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 
 	var gotErr error
-	for _, runErr := range pw.Run(exCtx, []any{"a"}) {
+	for _, runErr := range pw.Run(t.Context(), exCtx, []any{"a"}) {
 		if runErr != nil {
 			gotErr = runErr
 		}

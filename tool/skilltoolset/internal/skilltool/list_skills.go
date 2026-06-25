@@ -15,6 +15,7 @@
 package skilltool
 
 import (
+	"context"
 	"html"
 	"strings"
 
@@ -39,13 +40,13 @@ func ListSkills(source skill.Source) (tool.Tool, error) {
 			Name:        "list_skills",
 			Description: "Lists all available skills with their names and descriptions.",
 		},
-		func(ctx agent.Context, args ListSkillsArgs) (*ListSkillsResult, error) {
-			return listSkills(ctx, args, source)
+		func(ctx context.Context, invCleanCtx agent.Context, args ListSkillsArgs) (*ListSkillsResult, error) {
+			return listSkills(ctx, invCleanCtx, args, source)
 		},
 	)
 }
 
-func listSkills(ctx agent.Context, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
+func listSkills(ctx context.Context, invCleanCtx agent.Context, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
 	skills, err := source.ListFrontmatters(ctx)
 	if err != nil {
 		return nil, err

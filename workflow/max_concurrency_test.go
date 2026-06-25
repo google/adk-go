@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -81,7 +82,7 @@ func TestMaxConcurrency_Caps(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	}()
 
 	// Wait until cap nodes are admitted, then release them
@@ -118,7 +119,7 @@ func TestMaxConcurrency_PendingDispatchedFIFO(t *testing.T) {
 		i := i
 		nodes[i] = NewFunctionNode(
 			fmt.Sprintf("N%d", i),
-			func(ctx agent.Context, input any) (string, error) {
+			func(_ context.Context, _ agent.Context, input any) (string, error) {
 				starts[i] = order.Add(1)
 				return "ok", nil
 			},
@@ -131,7 +132,7 @@ func TestMaxConcurrency_PendingDispatchedFIFO(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	for i := range fanOut {
 		if want := int32(i + 1); starts[i] != want {
@@ -150,7 +151,7 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 
 	var flakyCalls atomic.Int32
 	flaky := NewFunctionNode("flaky",
-		func(ctx agent.Context, input any) (string, error) {
+		func(_ context.Context, _ agent.Context, input any) (string, error) {
 			defer bumpPeak(&inFlight, &peak)()
 			// Hold long enough that, if the cap were broken, a
 			// sibling could sneak in.
@@ -171,7 +172,7 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 		},
 	)
 	stable := NewFunctionNode("stable",
-		func(ctx agent.Context, input any) (string, error) {
+		func(_ context.Context, _ agent.Context, input any) (string, error) {
 			defer bumpPeak(&inFlight, &peak)()
 			time.Sleep(20 * time.Millisecond)
 			return "ok", nil
@@ -184,7 +185,7 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	if got := peak.Load(); got > 1 {
 		t.Errorf("peak in-flight = %d, want <= 1 (retry bypassed cap)", got)

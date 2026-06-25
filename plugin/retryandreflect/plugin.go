@@ -21,6 +21,7 @@ package retryandreflect
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,7 +126,7 @@ func MustNew(opts ...PluginOption) *plugin.Plugin {
 	return p
 }
 
-func (r *retryAndReflect) afterTool(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) afterTool(ctx context.Context, invCleanCtx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err == nil {
 		isReflectResponse := false
 		if rt, ok := result["response_type"].(string); ok && rt == reflectAndRetryResponseType {
@@ -134,17 +135,17 @@ func (r *retryAndReflect) afterTool(ctx agent.Context, tool tool.Tool, args, res
 		// On success, reset the failure count for this specific tool within its scope.
 		// But do not reset if OnToolErrorCallback just produced a reflection response.
 		if !isReflectResponse {
-			r.resetFailuresForTool(ctx, tool.Name())
+			r.resetFailuresForTool(ctx, invCleanCtx, tool.Name())
 		}
 	}
 	return nil, nil
 }
 
-func (r *retryAndReflect) onToolError(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
-	return r.handleToolError(ctx, tool, args, err)
+func (r *retryAndReflect) onToolError(ctx context.Context, invCleanCtx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+	return r.handleToolError(ctx, invCleanCtx, tool, args, err)
 }
 
-func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) handleToolError(ctx context.Context, invCleanCtx agent.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	// skip if the error is tool.ErrConfirmationRequired.
 	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
 		return nil, nil
@@ -157,7 +158,7 @@ func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Too
 		return r.createToolRetryExceedMsg(failedTool, args, err), nil
 	}
 
-	scopeKey := r.scopeKey(ctx)
+	scopeKey := r.scopeKey(ctx, invCleanCtx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -180,15 +181,15 @@ func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Too
 	return r.createToolRetryExceedMsg(failedTool, args, err), nil
 }
 
-func (r *retryAndReflect) scopeKey(ctx agent.Context) string {
+func (r *retryAndReflect) scopeKey(ctx context.Context, invCleanCtx agent.Context) string {
 	if r.scope == Global {
 		return globalScopeKey
 	}
-	return ctx.InvocationID()
+	return invCleanCtx.InvocationID()
 }
 
-func (r *retryAndReflect) resetFailuresForTool(ctx agent.Context, toolName string) {
-	scopeKey := r.scopeKey(ctx)
+func (r *retryAndReflect) resetFailuresForTool(ctx context.Context, invCleanCtx agent.Context, toolName string) {
+	scopeKey := r.scopeKey(ctx, invCleanCtx)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

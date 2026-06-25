@@ -39,7 +39,7 @@ type SleepResult struct {
 	Success bool `json:"success"`
 }
 
-func sleepFunc(ctx agent.Context, input SleepArgs) (SleepResult, error) {
+func sleepFunc(_ context.Context, _ agent.Context, input SleepArgs) (SleepResult, error) {
 	time.Sleep(time.Duration(input.DurationMS) * time.Millisecond)
 	return SleepResult{Success: true}, nil
 }
@@ -222,12 +222,12 @@ func (t *deferringTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *deferringTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *deferringTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	t.runCount++
 	return t.result, nil
 }
 
-func (t *deferringTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *deferringTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 

@@ -15,6 +15,7 @@
 package remoteagent
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -90,13 +91,13 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 // Parts from all events we processed are returned as a single list.
 // The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
 // any of the previous one. In this case a new contextID will be generated on the remote server.
-func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events, cfg A2AConfig) ([]*a2a.Part, string) {
+func toMissingRemoteSessionParts(ctx context.Context, invCleanCtx agent.InvocationContext, events session.Events, cfg A2AConfig) ([]*a2a.Part, string) {
 	partCount, contextID := 0, ""
 	// only events after this index are not in the remote session
 	lastRemoteResponseIndex := -1
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
-		if event.Author == ctx.Agent().Name() {
+		if event.Author == invCleanCtx.Agent().Name() {
 			lastRemoteResponseIndex = i
 			_, contextID = adka2a.GetA2ATaskInfo(event)
 			break
@@ -112,13 +113,13 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		// Only wrap foreign agent events as user messages when the current agent has an explicit name.
 		// If Agent().Name() is empty (e.g., in anonymous wrappers or conformance harnesses), event.Author != ""
 		// would falsely match and attribute events as foreign turns.
-		if ctx.Agent().Name() != "" && event.Author != "user" && event.Author != ctx.Agent().Name() {
-			event = presentAsUserMessage(ctx, event)
+		if invCleanCtx.Agent().Name() != "" && event.Author != "user" && event.Author != invCleanCtx.Agent().Name() {
+			event = presentAsUserMessage(ctx, invCleanCtx, event)
 		}
 		if event.Content == nil || len(event.Content.Parts) == 0 {
 			continue
 		}
-		parts, err := convertParts(ctx, cfg, event)
+		parts, err := convertParts(ctx, invCleanCtx, cfg, event)
 		if err != nil {
 			log.Warn(ctx, "failed to convert parts for session event", "index", i, "error", err)
 			continue
@@ -128,8 +129,8 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	return result, contextID
 }
 
-func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event) *session.Event {
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+func presentAsUserMessage(ctx context.Context, invCleanCtx agent.InvocationContext, agentEvent *session.Event) *session.Event {
+	event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 	event.Author = "user"
 
 	if agentEvent.Content == nil {
@@ -163,7 +164,7 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 	return event
 }
 
-func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]*a2a.Part, error) {
+func convertParts(ctx context.Context, invCleanCtx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]*a2a.Part, error) {
 	parts := make([]*a2a.Part, 0, len(event.Content.Parts))
 	if cfg.GenAIPartConverter != nil {
 		for _, part := range event.Content.Parts {

@@ -36,7 +36,7 @@ func main() {
 	// Child node: returns a greeting. Equivalent to the Python
 	// @node(name="hello_node") def my_node(node_input): return "Hello World".
 	helloNode := workflow.NewFunctionNode("hello_node",
-		func(_ agent.Context, _ string) (string, error) {
+		func(_ context.Context, _ agent.Context, _ string) (string, error) {
 			return "Hello World", nil
 		},
 		workflow.NodeConfig{},
@@ -45,8 +45,8 @@ func main() {
 	// Parent dynamic node: orchestrates children via RunNode.
 	// RerunOnResume defaults to &true (required for dynamic nodes).
 	myWorkflow := workflow.NewDynamicNode[string, string]("my_workflow",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			return workflow.RunNode[string](ctx, helloNode, "hello")
+		func(ctx context.Context, invCleanCtx workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return workflow.RunNode[string](ctx, invCleanCtx, helloNode, "hello")
 		},
 		workflow.NodeConfig{},
 	)

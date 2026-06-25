@@ -76,10 +76,10 @@ func TestAgentNode_TaskMode_DoesNotPromoteModelText(t *testing.T) {
 		t.Fatalf("NewAgentNode: %v", err)
 	}
 
-	exCtx := newRunnableNodeContext(t, taskAgent)
+	runCtx, exCtx := newRunnableNodeContext(t, taskAgent)
 
 	var lastEv *session.Event
-	for ev, runErr := range node.Run(exCtx, nil) {
+	for ev, runErr := range node.Run(runCtx, exCtx, nil) {
 		if runErr != nil {
 			t.Fatalf("node.Run yielded err: %v", runErr)
 		}
@@ -103,7 +103,7 @@ func TestAgentNode_TaskMode_DoesNotPromoteModelText(t *testing.T) {
 // flow needs: in-memory Session, Agent, and a RunConfig on the
 // embedded context (the flow reads it via runconfig.FromContext and
 // nil-derefs otherwise).
-func newRunnableNodeContext(t *testing.T, a agent.Agent) agent.Context {
+func newRunnableNodeContext(t *testing.T, a agent.Agent) (context.Context, agent.Context) {
 	t.Helper()
 	svc := session.InMemoryService()
 	resp, err := svc.Create(context.Background(), &session.CreateRequest{
@@ -121,7 +121,7 @@ func newRunnableNodeContext(t *testing.T, a agent.Agent) agent.Context {
 		Session:      resp.Session,
 		InvocationID: "inv-test",
 	})
-	return agent.NewNodeContext(ic, nil)
+	return stdCtx, agent.NewNodeContext(stdCtx, ic, nil)
 }
 
 // scriptedLLM yields one LLMResponse per GenerateContent call,

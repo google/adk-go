@@ -15,6 +15,7 @@
 package recordplugin
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -65,12 +66,12 @@ func MustNew(allowedBaseDir string) *plugin.Plugin {
 	return p
 }
 
-func (p *recordPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
-	if ctx.Session() == nil {
+func (p *recordPlugin) beforeRun(ctx context.Context, invCleanCtx agent.InvocationContext) (*genai.Content, error) {
+	if invCleanCtx.Session() == nil {
 		return nil, nil
 	}
 
-	on, err := p.isRecordModeOn(ctx.Session().State())
+	on, err := p.isRecordModeOn(invCleanCtx.Session().State())
 	if err != nil {
 		return nil, err
 	}
@@ -79,17 +80,17 @@ func (p *recordPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 	}
 
 	// Create fresh record state for this invocation
-	_, err = p.createInvocationState(ctx)
+	_, err = p.createInvocationState(ctx, invCleanCtx)
 	return nil, err
 }
 
-func (p *recordPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	on, err := p.isRecordModeOn(ctx.State())
+func (p *recordPlugin) beforeModel(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+	on, err := p.isRecordModeOn(invCleanCtx.State())
 	if err != nil || !on {
 		return nil, nil
 	}
 
-	state, err := p.getInvocationState(ctx.InvocationID())
+	state, err := p.getInvocationState(invCleanCtx.InvocationID())
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +102,8 @@ func (p *recordPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*m
 	return nil, nil
 }
 
-func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
-	on, recordErr := p.isRecordModeOn(ctx.State())
+func (p *recordPlugin) afterModel(ctx context.Context, invCleanCtx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
+	on, recordErr := p.isRecordModeOn(invCleanCtx.State())
 	if recordErr != nil || !on {
 		return nil, nil
 	}
@@ -111,7 +112,7 @@ func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, er
 		return nil, nil
 	}
 
-	state, stateErr := p.getInvocationState(ctx.InvocationID())
+	state, stateErr := p.getInvocationState(invCleanCtx.InvocationID())
 	if stateErr != nil {
 		return nil, stateErr
 	}
@@ -120,72 +121,72 @@ func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, er
 
 	// If it is a final non-partial response, complete the recording
 	if !resp.Partial {
-		state.CompleteLLMRecording(ctx.AgentName())
+		state.CompleteLLMRecording(invCleanCtx.AgentName())
 	}
 
 	return nil, nil
 }
 
-func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	on, err := p.isRecordModeOn(ctx.State())
+func (p *recordPlugin) beforeTool(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	on, err := p.isRecordModeOn(invCleanCtx.State())
 	if err != nil || !on {
 		return nil, nil
 	}
 
-	state, err := p.getInvocationState(ctx.InvocationID())
+	state, err := p.getInvocationState(invCleanCtx.InvocationID())
 	if err != nil {
 		return nil, err
 	}
 
 	fc := &genai.FunctionCall{
-		ID:   ctx.FunctionCallID(),
+		ID:   invCleanCtx.FunctionCallID(),
 		Name: t.Name(),
 		Args: args,
 	}
 
-	state.StartToolRecording(ctx.FunctionCallID(), fc)
+	state.StartToolRecording(invCleanCtx.FunctionCallID(), fc)
 	return nil, nil
 }
 
-func (p *recordPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
-	on, recordErr := p.isRecordModeOn(ctx.State())
+func (p *recordPlugin) afterTool(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+	on, recordErr := p.isRecordModeOn(invCleanCtx.State())
 	if recordErr != nil || !on {
 		return nil, nil
 	}
 
-	state, stateErr := p.getInvocationState(ctx.InvocationID())
+	state, stateErr := p.getInvocationState(invCleanCtx.InvocationID())
 	if stateErr != nil {
 		return nil, stateErr
 	}
 
 	resp := &genai.FunctionResponse{
-		ID:       ctx.FunctionCallID(),
+		ID:       invCleanCtx.FunctionCallID(),
 		Name:     t.Name(),
 		Response: result,
 	}
 
-	state.CompleteToolRecording(ctx.FunctionCallID(), ctx.AgentName(), resp)
+	state.CompleteToolRecording(invCleanCtx.FunctionCallID(), invCleanCtx.AgentName(), resp)
 	return nil, nil
 }
 
-func (p *recordPlugin) afterRun(ctx agent.InvocationContext) {
-	if ctx.Session() == nil {
+func (p *recordPlugin) afterRun(ctx context.Context, invCleanCtx agent.InvocationContext) {
+	if invCleanCtx.Session() == nil {
 		return
 	}
 
-	on, err := p.isRecordModeOn(ctx.Session().State())
+	on, err := p.isRecordModeOn(invCleanCtx.Session().State())
 	if err != nil || !on {
 		return
 	}
 
-	state, err := p.getInvocationState(ctx.InvocationID())
+	state, err := p.getInvocationState(invCleanCtx.InvocationID())
 	if err != nil {
 		return
 	}
 
 	defer func() {
 		p.mu.Lock()
-		delete(p.invocationStates, ctx.InvocationID())
+		delete(p.invocationStates, invCleanCtx.InvocationID())
 		p.mu.Unlock()
 	}()
 
@@ -271,8 +272,8 @@ func (p *recordPlugin) getInvocationState(id string) (*invocationRecordState, er
 	return state, nil
 }
 
-func (p *recordPlugin) createInvocationState(ctx agent.InvocationContext) (*invocationRecordState, error) {
-	caseDir, msgIndex, streamingMode, err := p.parseRecordConfig(ctx.Session().State())
+func (p *recordPlugin) createInvocationState(ctx context.Context, invCleanCtx agent.InvocationContext) (*invocationRecordState, error) {
+	caseDir, msgIndex, streamingMode, err := p.parseRecordConfig(invCleanCtx.Session().State())
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +284,7 @@ func (p *recordPlugin) createInvocationState(ctx agent.InvocationContext) (*invo
 	state := newInvocationRecordState(caseDir, msgIndex, streamingMode)
 
 	p.mu.Lock()
-	p.invocationStates[ctx.InvocationID()] = state
+	p.invocationStates[invCleanCtx.InvocationID()] = state
 	p.mu.Unlock()
 
 	return state, nil

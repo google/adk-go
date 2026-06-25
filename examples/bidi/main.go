@@ -56,7 +56,7 @@ func main() {
 	cameraTool, err := functiontool.New(functiontool.Config{
 		Name:        "camera_toggle",
 		Description: "Turns the camera on or off.",
-	}, func(ctx agent.Context, args EmptyArgs) (MessageResult, error) {
+	}, func(ctx context.Context, invCleanCtx agent.Context, args EmptyArgs) (MessageResult, error) {
 		fmt.Println("Camera tool was called!")
 		return MessageResult{Message: "Camera tool called successfully!"}, nil
 	})

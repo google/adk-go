@@ -556,7 +556,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 			name: "internal error",
 			agentFn: func(t *testing.T) agent.Agent {
 				return utils.Must(agent.New(agent.Config{
-					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					Run: func(ctx context.Context, ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {}
 					},
 				}))
@@ -574,7 +574,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -599,7 +599,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -794,7 +794,7 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
-			func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+			func(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 				if eventCount < 3 {
 					eventCount++
 					return nil, nil
@@ -886,7 +886,7 @@ func newLongRunningTool(t *testing.T) tool.Tool {
 		Name:          approvalToolName,
 		Description:   "Request approval before proceeding.",
 		IsLongRunning: true,
-	}, func(ctx agent.Context, x map[string]any) (approval, error) {
+	}, func(ctx context.Context, invCleanCtx agent.Context, x map[string]any) (approval, error) {
 		return approval{Status: approvalStatusPending, TicketID: a2a.NewContextID()}, nil
 	})
 	if err != nil {
@@ -901,11 +901,11 @@ func newToolConfirmation(t *testing.T) tool.Tool {
 	requestApproval, err := functiontool.New(functiontool.Config{
 		Name:        approvalToolName,
 		Description: "Request approval before proceeding.",
-	}, func(ctx agent.Context, x map[string]any) (approval, error) {
-		confirmation := ctx.ToolConfirmation()
+	}, func(ctx context.Context, invCleanCtx agent.Context, x map[string]any) (approval, error) {
+		confirmation := invCleanCtx.ToolConfirmation()
 		if confirmation == nil {
 			ticketID := a2a.NewContextID()
-			if err := ctx.RequestConfirmation("I need approval", map[string]string{"ticket_id": ticketID}); err != nil {
+			if err := invCleanCtx.RequestConfirmation("I need approval", map[string]string{"ticket_id": ticketID}); err != nil {
 				return approval{}, err
 			}
 			return approval{Status: approvalStatusPending, TicketID: ticketID}, nil
@@ -1233,7 +1233,7 @@ func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
 			AppName: "broken",
 			Agent: utils.Must(agent.New(agent.Config{
 				Name: "broken",
-				Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				Run: func(ctx context.Context, ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						yield(nil, a2a.ErrUnauthorized)
 					}

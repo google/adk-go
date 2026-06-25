@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -26,9 +27,9 @@ import (
 )
 
 // identityRequestProcessor gives the agent identity from the framework.
-func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func identityRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		llmAgent := asLLMAgent(ctx.Agent())
+		llmAgent := asLLMAgent(invCleanCtx.Agent())
 		if llmAgent == nil {
 			return // do nothing.
 		}
@@ -36,8 +37,8 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return
 		}
 
-		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
-		if description := ctx.Agent().Description(); description != "" {
+		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", invCleanCtx.Agent().Name())}
+		if description := invCleanCtx.Agent().Description(); description != "" {
 			parts = append(parts, fmt.Sprintf("The description about you is %q.", description))
 		}
 		si := strings.Join(parts, " ")

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"testing"
@@ -43,7 +44,7 @@ func newLongRunningChild(name, fcName, fcID string, yieldMatchingFR bool) *longR
 	}
 }
 
-func (n *longRunningChild) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+func (n *longRunningChild) Run(context.Context, agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// FC event: ID in LongRunningToolIDs signals "tool pauses".
 		fcEvent := &session.Event{
@@ -79,8 +80,8 @@ func (n *longRunningChild) Run(agent.Context, any) iter.Seq2[*session.Event, err
 func TestRunNode_WithRaiseOnWait_UnresolvedLRT_ReturnsErrNodeInterrupted(t *testing.T) {
 	child := newLongRunningChild("paused_tool_caller", "confirmation", "fc-1", false /* no matching FR */)
 
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
-		return RunNode[string](ctx, child, nil, WithRaiseOnWait())
+	_, err := runInOrchestratorWithErr[string](t, func(ctx context.Context, invCleanCtx NodeContext) (string, error) {
+		return RunNode[string](ctx, invCleanCtx, child, nil, WithRaiseOnWait())
 	})
 	if !errors.Is(err, ErrNodeInterrupted) {
 		t.Errorf("err = %v, want errors.Is(err, ErrNodeInterrupted)", err)
@@ -92,8 +93,8 @@ func TestRunNode_WithRaiseOnWait_UnresolvedLRT_ReturnsErrNodeInterrupted(t *test
 func TestRunNode_WithRaiseOnWait_ResolvedLRT_CompletesNormally(t *testing.T) {
 	child := newLongRunningChild("resolves_in_place", "tool", "fc-1", true /* matching FR yielded */)
 
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
-		return RunNode[string](ctx, child, nil, WithRaiseOnWait())
+	_, err := runInOrchestratorWithErr[string](t, func(ctx context.Context, invCleanCtx NodeContext) (string, error) {
+		return RunNode[string](ctx, invCleanCtx, child, nil, WithRaiseOnWait())
 	})
 	if err != nil {
 		t.Errorf("err = %v, want nil (in-iteration FR clears the pending LRT)", err)
@@ -105,8 +106,8 @@ func TestRunNode_WithRaiseOnWait_ResolvedLRT_CompletesNormally(t *testing.T) {
 func TestRunNode_WithoutRaiseOnWait_UnresolvedLRT_CompletesNormally(t *testing.T) {
 	child := newLongRunningChild("paused_tool_caller", "confirmation", "fc-1", false /* no matching FR */)
 
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
-		return RunNode[string](ctx, child, nil /* no WithRaiseOnWait */)
+	_, err := runInOrchestratorWithErr[string](t, func(ctx context.Context, invCleanCtx NodeContext) (string, error) {
+		return RunNode[string](ctx, invCleanCtx, child, nil /* no WithRaiseOnWait */)
 	})
 	if err != nil {
 		t.Errorf("err = %v, want nil (LRT tracking must be opt-in via WithRaiseOnWait)", err)

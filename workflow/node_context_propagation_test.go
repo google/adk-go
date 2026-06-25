@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"iter"
 	"testing"
 
@@ -35,8 +36,8 @@ func TestNodeContextPropagation_DynamicChildEmbedsItself(t *testing.T) {
 	})
 
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			return RunNode[string](ctx, inner, nil)
+		func(ctx context.Context, invCleanCtx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, invCleanCtx, inner, nil)
 		},
 		NodeConfig{},
 	)
@@ -65,7 +66,7 @@ func newFnNode(name string, fn func(NodeContext) (any, error)) *fnNode {
 	}
 }
 
-func (n *fnNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *fnNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		out, err := n.fn(ctx)
 		if err != nil {

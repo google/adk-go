@@ -647,7 +647,7 @@ func TestToSessionEvent(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
-			got, err := ToSessionEvent(ictx, tc.input)
+			got, err := ToSessionEvent(t.Context(), ictx, tc.input)
 			if err != nil {
 				t.Errorf("ToSessionEvent() error = %v, want nil", err)
 			}
@@ -720,7 +720,7 @@ func TestToSessionEventWithParts_NilResultFiltered(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ToSessionEventWithParts(ictx, tc.input, filterConverter)
+			got, err := ToSessionEventWithParts(t.Context(), ictx, tc.input, filterConverter)
 			if err != nil {
 				t.Fatalf("ToSessionEventWithParts() error = %v", err)
 			}

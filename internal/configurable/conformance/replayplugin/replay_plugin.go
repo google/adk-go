@@ -31,6 +31,7 @@ package replayplugin
 //   - "user_message_index": The index of the user message to replay.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -88,12 +89,12 @@ type replayPlugin struct {
 }
 
 // beforeRun initializes the replay state for the current invocation if replay mode is enabled.
-func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
-	if ctx.Session() == nil {
+func (p *replayPlugin) beforeRun(ctx context.Context, invCleanCtx agent.InvocationContext) (*genai.Content, error) {
+	if invCleanCtx.Session() == nil {
 		return nil, nil
 	}
 
-	on, err := p.isReplayModeOn(ctx.Session().State())
+	on, err := p.isReplayModeOn(invCleanCtx.Session().State())
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +102,7 @@ func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 		return nil, nil
 	}
 
-	_, err = p.loadInvocationState(ctx)
+	_, err = p.loadInvocationState(ctx, invCleanCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +110,8 @@ func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 }
 
 // beforeModel intercepts LLM requests, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	on, err := p.isReplayModeOn(ctx.State())
+func (p *replayPlugin) beforeModel(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+	on, err := p.isReplayModeOn(invCleanCtx.State())
 	if err != nil {
 		return nil, err
 	}
@@ -118,12 +119,12 @@ func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*m
 		return nil, nil
 	}
 
-	invocationState, err := p.getInvocationState(ctx)
+	invocationState, err := p.getInvocationState(ctx, invCleanCtx)
 	if err != nil {
 		return nil, err
 	}
 
-	agentName := ctx.AgentName()
+	agentName := invCleanCtx.AgentName()
 	recording, err := p.verifyAndGetNextLLMRecordingForAgent(invocationState, agentName, req)
 	if err != nil {
 		return nil, err
@@ -137,8 +138,8 @@ func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*m
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	on, err := p.isReplayModeOn(ctx.State())
+func (p *replayPlugin) beforeTool(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	on, err := p.isReplayModeOn(invCleanCtx.State())
 	if err != nil {
 		return nil, err
 	}
@@ -146,12 +147,12 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 		return nil, nil
 	}
 
-	invocationState, err := p.getInvocationState(ctx)
+	invocationState, err := p.getInvocationState(ctx, invCleanCtx)
 	if err != nil {
 		return nil, err
 	}
 
-	agentName := ctx.AgentName()
+	agentName := invCleanCtx.AgentName()
 	recording, err := p.verifyAndGetNextToolRecordingForAgent(invocationState, agentName, t, args)
 	if err != nil {
 		return nil, err
@@ -160,7 +161,7 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 	if !strings.HasSuffix(typeName, "agentTool") {
 		// TODO: support replay requests and responses from AgentTool.
 		if ft, ok := t.(toolinternal.FunctionTool); ok {
-			_, err := ft.Run(ctx, args)
+			_, err := ft.Run(ctx, invCleanCtx, args)
 			if err != nil {
 				fmt.Println("Error calling tool:", err)
 			}
@@ -171,17 +172,17 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 }
 
 // afterRun cleans up the invocation state.
-func (p *replayPlugin) afterRun(ctx agent.InvocationContext) {
-	if ctx.Session() == nil {
+func (p *replayPlugin) afterRun(ctx context.Context, invCleanCtx agent.InvocationContext) {
+	if invCleanCtx.Session() == nil {
 		return
 	}
-	sessionState := ctx.Session().State()
+	sessionState := invCleanCtx.Session().State()
 	on, err := p.isReplayModeOn(sessionState)
 	if err != nil || !on {
 		return
 	}
 	p.mu.Lock()
-	delete(p.invocationStates, ctx.InvocationID())
+	delete(p.invocationStates, invCleanCtx.InvocationID())
 	p.mu.Unlock()
 }
 
@@ -235,8 +236,8 @@ func (p *replayPlugin) isReplayModeOn(sessionState session.State) (bool, error) 
 }
 
 // getInvocationState retrieves the replay state for the current invocation.
-func (p *replayPlugin) getInvocationState(ctx agent.Context) (*invocationReplayState, error) {
-	invocationID := ctx.InvocationID()
+func (p *replayPlugin) getInvocationState(ctx context.Context, invCleanCtx agent.Context) (*invocationReplayState, error) {
+	invocationID := invCleanCtx.InvocationID()
 	state, ok := p.invocationStates[invocationID]
 	if !ok {
 		return nil, fmt.Errorf("replay state not initialized. ensure before_run created it")
@@ -245,12 +246,12 @@ func (p *replayPlugin) getInvocationState(ctx agent.Context) (*invocationReplayS
 }
 
 // loadInvocationState loads the recordings and initializes the replay state for the invocation.
-func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invocationReplayState, error) {
-	invocationID := ctx.InvocationID()
+func (p *replayPlugin) loadInvocationState(ctx context.Context, invCleanCtx agent.InvocationContext) (*invocationReplayState, error) {
+	invocationID := invCleanCtx.InvocationID()
 
 	// 1. Extract Configuration
-	// We assume ctx.State is map[string]any
-	configVal, err := ctx.Session().State().Get("_adk_replay_config")
+	// We assume invCleanCtx.State is map[string]any
+	configVal, err := invCleanCtx.Session().State().Get("_adk_replay_config")
 	if err != nil {
 		return nil, fmt.Errorf("replay config error: %w", err)
 	}

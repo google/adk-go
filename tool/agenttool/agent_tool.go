@@ -18,6 +18,7 @@
 package agenttool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -91,14 +92,14 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result.
-func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
+func (t *agentTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
 	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
+		if actions := invCleanCtx.Actions(); actions != nil {
 			actions.SkipSummarization = true
 		}
 	}
@@ -154,16 +155,16 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	stateMap := make(map[string]any)
 
-	for k, v := range toolCtx.State().All() {
+	for k, v := range invCleanCtx.State().All() {
 		// Filter out adk internal states.
 		if !strings.HasPrefix(k, "_adk") {
 			stateMap[k] = v
 		}
 	}
 
-	subSession, err := sessionService.Create(toolCtx, &session.CreateRequest{
+	subSession, err := sessionService.Create(ctx, &session.CreateRequest{
 		AppName: t.agent.Name(),
-		UserID:  toolCtx.UserID(),
+		UserID:  invCleanCtx.UserID(),
 		State:   stateMap,
 	})
 	if err != nil {
@@ -171,7 +172,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
+	eventCh := r.Run(ctx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 	})
 
@@ -224,6 +225,6 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
-func (t *agentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *agentTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }

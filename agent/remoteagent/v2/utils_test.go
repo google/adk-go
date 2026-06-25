@@ -225,7 +225,7 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := newTestInvocationContext(t, remoteName, tc.events...)
-			gotParts, gotContextID := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+			gotParts, gotContextID := toMissingRemoteSessionParts(t.Context(), ictx, ictx.Session().Events(), A2AConfig{})
 			if tc.wantContextID != gotContextID {
 				t.Errorf("toMissingRemoteSessionParts() contextID = %s, want %s", gotContextID, tc.wantContextID)
 			}
@@ -308,7 +308,7 @@ func TestPresentAsUserMessage(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := newTestInvocationContext(t, "test")
-			got := presentAsUserMessage(ictx, tc.input)
+			got := presentAsUserMessage(t.Context(), ictx, tc.input)
 			if diff := cmp.Diff(tc.want, got, ignoreFields...); diff != "" {
 				t.Errorf("presentAsUserMessage() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %v", got, tc.want, diff)
 			}

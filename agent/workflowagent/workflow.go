@@ -15,6 +15,7 @@
 package workflowagent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -93,23 +94,23 @@ type workflowAgent struct {
 // Workflow.Resume (when the inbound user content carries a
 // FunctionResponse to a previously-emitted RequestInput) and
 // Workflow.Run (every other turn).
-func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *workflowAgent) run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		responses, state, ok, err := a.detectResume(ctx)
+		responses, state, ok, err := a.detectResume(ctx, invCleanCtx)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 		if ok {
-			exCtx := agent.NewNodeContext(ctx, nil)
-			for ev, err := range a.workflow.Resume(exCtx, state, responses) {
+			exCtx := agent.NewNodeContext(ctx, invCleanCtx, nil)
+			for ev, err := range a.workflow.Resume(ctx, exCtx, state, responses) {
 				if !yield(ev, err) {
 					return
 				}
 			}
 			return
 		}
-		for ev, err := range a.workflow.Run(ctx) {
+		for ev, err := range a.workflow.Run(ctx, invCleanCtx) {
 			if !yield(ev, err) {
 				return
 			}
@@ -122,8 +123,8 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 // responses map keyed by InterruptID (suitable for
 // Workflow.Resume), the RunState loaded from session, and true if
 // this turn is a resume; (nil, nil, false) for a fresh turn.
-func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
-	frs := utils.FunctionResponses(ctx.UserContent())
+func (a *workflowAgent) detectResume(ctx context.Context, invCleanCtx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
+	frs := utils.FunctionResponses(invCleanCtx.UserContent())
 	if len(frs) == 0 {
 		return nil, nil, false, nil
 	}
@@ -139,7 +140,7 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, nil
 	}
 
-	state, err := a.workflow.ReconstructRunState(ctx.Session())
+	state, err := a.workflow.ReconstructRunState(invCleanCtx.Session())
 	if err != nil {
 		// A bad resume (e.g. failed schema validation) must fail,
 		// not silently fall through to a fresh Run.

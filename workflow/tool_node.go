@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -36,7 +37,7 @@ type ToolNode struct {
 
 // runnableTool is the internal interface that Node uses to invoke tools.
 type runnableTool interface {
-	Run(ctx agent.Context, args any) (map[string]any, error)
+	Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error)
 }
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
@@ -96,7 +97,7 @@ func NewNamedToolNode(name string, t tool.Tool, cfg NodeConfig) (*ToolNode, erro
 	return newToolNodeWithSchemasTyped[any, any](name, t, nil, nil, cfg)
 }
 
-func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
+func (n *ToolNode) runTool(ctx context.Context, toolCtx agent.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
 	// Upstream nodes (like LLM Agents) frequently produce serialized JSON strings representing
 	// structured tool call arguments. Since ToolNodes expect structured key-value mappings (maps)
@@ -115,7 +116,7 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
 	}
 
-	output, err := runnable.Run(toolCtx, toolInput)
+	output, err := runnable.Run(ctx, toolCtx, toolInput)
 	if err != nil {
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
 	}
@@ -156,18 +157,18 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 }
 
 // Run implements the Node interface and executes the tool.
-func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *ToolNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
+		toolCtx := agent.NewToolContext(ctx, invCleanCtx, uuid.NewString(), eventActions, nil)
 
-		toolOutput, err := n.runTool(toolCtx, input)
+		toolOutput, err := n.runTool(ctx, toolCtx, input)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEvent(invCleanCtx.InvocationID())
 		event.Actions = *eventActions
 		event.Output = toolOutput
 

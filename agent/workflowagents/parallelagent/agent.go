@@ -16,6 +16,7 @@
 package parallelagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
@@ -64,8 +65,8 @@ func New(cfg Config) (agent.Agent, error) {
 	return parallelAgent, nil
 }
 
-func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	curAgent := ctx.Agent()
+func run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	curAgent := invCleanCtx.Agent()
 
 	var (
 		errGroup, errGroupCtx = errgroup.WithContext(ctx)
@@ -73,25 +74,25 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
-	for _, sa := range ctx.Agent().SubAgents() {
+	for _, sa := range invCleanCtx.Agent().SubAgents() {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
-		if ctx.Branch() != "" {
-			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
+		if invCleanCtx.Branch() != "" {
+			branch = fmt.Sprintf("%s.%s", invCleanCtx.Branch(), branch)
 		}
 		subAgent := sa
 		errGroup.Go(func() error {
 			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
-				Artifacts:    ctx.Artifacts(),
-				Memory:       ctx.Memory(),
-				Session:      ctx.Session(),
+				Artifacts:    invCleanCtx.Artifacts(),
+				Memory:       invCleanCtx.Memory(),
+				Session:      invCleanCtx.Session(),
 				Branch:       branch,
 				Agent:        subAgent,
-				UserContent:  ctx.UserContent(),
-				RunConfig:    ctx.RunConfig(),
-				InvocationID: ctx.InvocationID(),
+				UserContent:  invCleanCtx.UserContent(),
+				RunConfig:    invCleanCtx.RunConfig(),
+				InvocationID: invCleanCtx.InvocationID(),
 			})
 
-			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
+			if err := runSubAgent(errGroupCtx, subCtx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
 			}
 
@@ -127,8 +128,8 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}
 }
 
-func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- result, done <-chan bool) error {
-	for event, err := range agent.Run(ctx) {
+func runSubAgent(ctx context.Context, invCleanCtx agent.InvocationContext, agent agent.Agent, results chan<- result, done <-chan bool) error {
+	for event, err := range agent.Run(ctx, invCleanCtx) {
 		if err != nil {
 			return err
 		}

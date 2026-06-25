@@ -15,6 +15,7 @@
 package plugin_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,7 +37,7 @@ import (
 
 type testCase struct {
 	name                            string
-	tool                            func(agent.Context, map[string]any) (map[string]any, error)
+	tool                            func(context.Context, agent.Context, map[string]any) (map[string]any, error)
 	args                            map[string]any
 	beforeToolCallbacks             []llmagent.BeforeToolCallback
 	afterToolCallbacks              []llmagent.AfterToolCallback
@@ -51,7 +52,7 @@ func TestCallTool(t *testing.T) {
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			args:                            map[string]any{"key": "value"},
@@ -60,7 +61,7 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "tool error",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return nil, errors.New("tool error")
 			},
 			args: map[string]any{"key": "value"},
@@ -68,15 +69,15 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback returns result",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "intercepted"}, nil
 				},
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "2nd callback should not be called"}, nil
 				},
 			},
@@ -86,15 +87,15 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback returns error",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("before callback error")
 				},
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("unexpected error")
 				},
 			},
@@ -103,11 +104,11 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback modifies result",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "original"}, nil
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"result": "modified"}, nil
 				},
 			},
@@ -117,17 +118,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback handles error and are run in symmetrical order",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return nil, errors.New("tool error")
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err != nil {
 						return map[string]any{"result": "error handled"}, nil
 					}
 					return nil, nil
 				},
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					t.Errorf("unexpected call to after tool callback")
 					return map[string]any{"result": "unexpected output"}, nil
 				},
@@ -137,14 +138,14 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback returns error and are run in symmetrical order",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, errors.New("after callback error")
 				},
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					t.Errorf("unexpected call to after tool callback")
 					return nil, errors.New("unexpected error")
 				},
@@ -155,16 +156,16 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "no-op callbacks return func results",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
 			},
@@ -173,17 +174,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback result passed to after callback",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "from_before"}, nil
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if val, ok := result["result"]; !ok || val != "from_before" {
 						return nil, errors.New("unexpected result in after callback")
 					}
@@ -197,17 +198,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to after callback",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -220,17 +221,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -243,17 +244,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and after tool called",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -261,7 +262,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err != nil {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -275,17 +276,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and passed to after tool called",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -293,7 +294,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_on_tool_error" {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -307,17 +308,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and passed to after tool called and handled",
-			tool: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+			tool: func(_ context.Context, ctx agent.Context, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -325,7 +326,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_on_tool_error" {
 						return nil, errors.New("unexpected error in after tool callback")
 					}
@@ -386,7 +387,7 @@ func TestCallTool(t *testing.T) {
 			beforeToolCallbacksCalled := false
 			afterToolCallbacksCalled := false
 			onToolErrorCallbacks := []llmagent.OnToolErrorCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					onToolErrorCallbacksCalled = true
 					if tc.dontRunOnErrorCanonicalCallback {
 						t.Error("on tool error should not be called")
@@ -395,7 +396,7 @@ func TestCallTool(t *testing.T) {
 				},
 			}
 			beforeToolCallbacks := []llmagent.BeforeToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					beforeToolCallbacksCalled = true
 					if tc.dontRunBeforeCanonicalCallback {
 						t.Error("before Tool Callback should not be called")
@@ -404,7 +405,7 @@ func TestCallTool(t *testing.T) {
 				},
 			}
 			afterToolCallbacks := []llmagent.AfterToolCallback{
-				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(_ context.Context, ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					afterToolCallbacksCalled = true
 					if tc.dontRunAfterCanonicalCallback {
 						t.Error("after Tool Callback should not be called")
@@ -477,7 +478,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback doesn't modify anything",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -492,10 +493,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns an error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrHijacked)
 				},
 			},
@@ -510,12 +511,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns new LLMResponse",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
@@ -534,7 +535,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns both new LLMResponse and error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
@@ -551,7 +552,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback doesn't modify anything",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -566,12 +567,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns new LLMResponse and are run in symmetrical order",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
@@ -589,10 +590,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns error and are run in symmetrical order",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
@@ -606,7 +607,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns both new LLMResponse and error",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
@@ -622,7 +623,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback is not called",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("on_model_error_callback: %w", http.ErrNoCookie)
@@ -639,7 +640,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback changes message",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, nil
@@ -654,12 +655,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback changes err",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -673,7 +674,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback returns both new LLMResponse and error",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
@@ -687,12 +688,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback does not process before model callback error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
 			},
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -709,14 +710,14 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback does not process before model callback message",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
 			},
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -735,14 +736,14 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after error callback process on model error callback message",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, nil
 				},
 			},
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
@@ -758,12 +759,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after error callback does not process on model error callback error",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
 				},
 			},
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
@@ -808,7 +809,7 @@ func TestModelCallbacks(t *testing.T) {
 			afterModelCallbacksCalled := false
 
 			onModelErrorCallbacks := []llmagent.OnModelErrorCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					onModelErrorCallbacksCalled = true
 					if tc.dontRunOnErrorCanonicalCallback {
 						t.Error("on model error should not be called")
@@ -817,7 +818,7 @@ func TestModelCallbacks(t *testing.T) {
 				},
 			}
 			beforeModelCallbacks := []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					beforeModelCallbacksCalled = true
 					if tc.dontRunBeforeCanonicalCallback {
 						t.Error("before model Callback should not be called")
@@ -826,7 +827,7 @@ func TestModelCallbacks(t *testing.T) {
 				},
 			}
 			afterModelCallbacks := []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(_ context.Context, ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					afterModelCallbacksCalled = true
 					if tc.dontRunAfterCanonicalCallback {
 						t.Error("after model Callback should not be called")

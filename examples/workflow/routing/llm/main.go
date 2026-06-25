@@ -56,14 +56,14 @@ Answer with EXACTLY one word, lowercase, no punctuation: question, exclamation, 
 
 // routeByClassification turns the classifier's one-word output into a
 // routing event; returning nil suppresses the default terminal event.
-func routeByClassification(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
+func routeByClassification(ctx context.Context, invCleanCtx agent.Context, input any, emit func(*session.Event) error) (any, error) {
 	// Normalise defensively in case the LLM ignored the one-word
 	// instruction; off-script replies fall through to "statement".
 	category := strings.TrimRight(strings.ToLower(strings.TrimSpace(fmt.Sprint(input))), ".")
 	if category != "question" && category != "exclamation" && category != "statement" {
 		category = "statement"
 	}
-	ev := session.NewEvent(ctx.InvocationID())
+	ev := session.NewEvent(invCleanCtx.InvocationID())
 	ev.Routes = []string{category}
 	if err := emit(ev); err != nil {
 		return nil, err
@@ -71,23 +71,23 @@ func routeByClassification(ctx agent.Context, input any, emit func(*session.Even
 	return nil, nil
 }
 
-func answerQuestion(ctx agent.Context, _ any) (string, error) {
-	return "answering question: " + userMessage(ctx), nil
+func answerQuestion(ctx context.Context, invCleanCtx agent.Context, _ any) (string, error) {
+	return "answering question: " + userMessage(ctx, invCleanCtx), nil
 }
 
-func commentOnStatement(ctx agent.Context, _ any) (string, error) {
-	return "commenting on statement: " + userMessage(ctx), nil
+func commentOnStatement(ctx context.Context, invCleanCtx agent.Context, _ any) (string, error) {
+	return "commenting on statement: " + userMessage(ctx, invCleanCtx), nil
 }
 
-func reactToExclamation(ctx agent.Context, _ any) (string, error) {
-	return "reacting to exclamation: " + userMessage(ctx), nil
+func reactToExclamation(ctx context.Context, invCleanCtx agent.Context, _ any) (string, error) {
+	return "reacting to exclamation: " + userMessage(ctx, invCleanCtx), nil
 }
 
-// userMessage reads the original user text from ctx.UserContent.
+// userMessage reads the original user text from invCleanCtx.UserContent.
 // Handlers read it here rather than as graph input, since the
 // route node forwards only the one-word classification.
-func userMessage(ctx agent.Context) string {
-	uc := ctx.UserContent()
+func userMessage(ctx context.Context, invCleanCtx agent.Context) string {
+	uc := invCleanCtx.UserContent()
 	if uc == nil {
 		return ""
 	}

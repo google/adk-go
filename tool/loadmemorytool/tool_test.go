@@ -122,7 +122,7 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tc := createToolContext(t, &mockMemory{memories: tt.memories})
 
-			result, err := tool.Run(tc, tt.args)
+			result, err := tool.Run(context.Background(), tc, tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -152,7 +152,7 @@ func TestLoadMemoryTool_ProcessRequest(t *testing.T) {
 		t.Fatal("loadMemoryTool does not implement RequestProcessor")
 	}
 
-	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	err := requestProcessor.ProcessRequest(context.Background(), tc, llmRequest)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -177,5 +177,5 @@ func createToolContext(t *testing.T, mem *mockMemory) agent.Context {
 		Memory: mem,
 	})
 
-	return agent.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(t.Context(), ctx, "", nil, nil)
 }

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -52,7 +53,7 @@ func TestAgentNode_New(t *testing.T) {
 	myAgent, err := agent.New(agent.Config{
 		Name:        "test_agent",
 		Description: "a test agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				event := session.NewEvent(ctx.InvocationID())
 				event.Output = map[string]any{"result": "success"}
@@ -150,7 +151,7 @@ func TestAgentNode_Run(t *testing.T) {
 			agent: func() (agent.Agent, error) {
 				return agent.New(agent.Config{
 					Name: "test_agent",
-					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {
 							uc := ctx.UserContent()
 							val := "Unknown"
@@ -186,7 +187,7 @@ func TestAgentNode_Run(t *testing.T) {
 			agent: func() (agent.Agent, error) {
 				return agent.New(agent.Config{
 					Name: "test_agent",
-					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {
 							uc := ctx.UserContent()
 							val := "Unknown"
@@ -214,7 +215,7 @@ func TestAgentNode_Run(t *testing.T) {
 			agent: func() (agent.Agent, error) {
 				return agent.New(agent.Config{
 					Name: "test_agent",
-					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {
 							yield(nil, errors.New("something went wrong"))
 						}
@@ -243,8 +244,8 @@ func TestAgentNode_Run(t *testing.T) {
 
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test-session-id"} // Fix nil panic
-			runCtx := agent.NewNodeContext(mockCtx, nil)
-			events := node.Run(runCtx, tc.nodeInput)
+			runCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+			events := node.Run(t.Context(), runCtx, tc.nodeInput)
 
 			var got string
 			count := 0
@@ -311,7 +312,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			integrationAgent, err := agent.New(agent.Config{
 				Name: "integration_agent",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						uc := ctx.UserContent()
 						valStr := "0"
@@ -343,7 +344,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 			}
 
 			// Connect to a function node.
-			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.Context, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(_ context.Context, _ agent.Context, in Output) (int, error) {
 				return in.Result + 1, nil
 			}, NodeConfig{})
 
@@ -352,7 +353,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to agentNode
-				seedNode := NewFunctionNode("seed", func(ctx agent.Context, input any) (*Input, error) {
+				seedNode := NewFunctionNode("seed", func(_ context.Context, _ agent.Context, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				}, NodeConfig{})
 
@@ -361,7 +362,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				events := w.Run(mockCtx)
+				events := w.Run(t.Context(), mockCtx)
 
 				var outB any
 				for ev, err := range events {
@@ -384,7 +385,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 	wrapped, err := agent.New(agent.Config{
 		Name: "talky",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// Partial must not be promoted to Output.
 				partial := session.NewEvent(ctx.InvocationID())
@@ -420,12 +421,12 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
-	nc := agent.NewNodeContext(mockCtx, nil)
+	nc := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	var (
 		gotPartial *session.Event
 		gotFinal   *session.Event
 	)
-	for ev, err := range node.Run(nc, "ignored") {
+	for ev, err := range node.Run(t.Context(), nc, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -457,7 +458,7 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	var gotAgentScope string
 	wrapped, err := agent.New(agent.Config{
 		Name: "scoped",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			gotAgentScope = ctx.IsolationScope()
 			return func(yield func(*session.Event, error) bool) {
 				ev := session.NewEvent(ctx.InvocationID())
@@ -481,10 +482,10 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
 	mockCtx.isolationScope = "scope-x"
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 
 	var events []*session.Event
-	for ev, err := range node.Run(exCtx, "ignored") {
+	for ev, err := range node.Run(t.Context(), exCtx, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -548,7 +549,7 @@ func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
 
 			myAgent, err := agent.New(agent.Config{
 				Name: "test_agent",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						agentInvoked = true
 						gotContent = ctx.UserContent()
@@ -573,8 +574,8 @@ func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
 				mockCtx.userContent = tc.parentUserContent
 			}
 
-			exCtx := agent.NewNodeContext(mockCtx, nil)
-			events := node.Run(exCtx, tc.nodeInput)
+			exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+			events := node.Run(t.Context(), exCtx, tc.nodeInput)
 			for _, err := range events {
 				if err != nil {
 					t.Fatalf("run failed: %v", err)
@@ -654,7 +655,7 @@ func TestAgentNode_InputValidation(t *testing.T) {
 
 			myAgent, err := agent.New(agent.Config{
 				Name: "test_agent",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						agentInvoked = true
 						gotContent = ctx.UserContent()
@@ -682,8 +683,8 @@ func TestAgentNode_InputValidation(t *testing.T) {
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test"}
 
-			exCtx := agent.NewNodeContext(mockCtx, nil)
-			events := w.RunNode(exCtx, tc.nodeInput)
+			exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+			events := w.RunNode(t.Context(), exCtx, tc.nodeInput)
 			var workflowErr error
 			for _, err := range events {
 				if err != nil {
@@ -731,7 +732,7 @@ func TestAgentNode_InputValidation(t *testing.T) {
 func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 	wrapped, err := agent.New(agent.Config{
 		Name: "json-talky",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				final := session.NewEvent(ctx.InvocationID())
 				final.LLMResponse.Content = &genai.Content{
@@ -756,9 +757,9 @@ func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 	var gotFinal *session.Event
-	for ev, err := range node.Run(exCtx, "ignored") {
+	for ev, err := range node.Run(t.Context(), exCtx, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -788,7 +789,7 @@ func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 	myAgent, err := agent.New(agent.Config{
 		Name: "text_only_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				event := session.NewEvent(ctx.InvocationID())
 				// Model response with plain text, but no Output set
@@ -814,8 +815,8 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
-	events := node.Run(exCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
+	events := node.Run(t.Context(), exCtx, nil)
 
 	var finalOutput any
 	for ev, err := range events {

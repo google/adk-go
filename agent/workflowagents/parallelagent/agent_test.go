@@ -219,8 +219,8 @@ func must[T agent.Agent](a T, err error) T {
 	return a
 }
 
-func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func customRun(id int, agentErr error) func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
 			time.Sleep((time.Duration(rand.IntN(5) + 1)) * time.Millisecond)
 			if agentErr != nil {
@@ -298,7 +298,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("search_tool_%s", name),
 			Description: "Search for information on the web",
 		},
-		func(ctx agent.Context, args struct{ Query string }) (string, error) {
+		func(_ context.Context, _ agent.Context, args struct{ Query string }) (string, error) {
 			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
 		},
 	)
@@ -311,7 +311,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("analyze_tool_%s", name),
 			Description: "Analyze data and return insights",
 		},
-		func(ctx agent.Context, args struct{ Data string }) (string, error) {
+		func(_ context.Context, _ agent.Context, args struct{ Data string }) (string, error) {
 			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
 		},
 	)
@@ -376,7 +376,7 @@ func TestParallelAgent_PropagatesContextError(t *testing.T) {
 	// We want to trigger runSubAgent returning ctx.Err().
 	subAgent := must(agent.New(agent.Config{
 		Name: "yielder",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, _ agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// Yield one event so we engage runSubAgent logic
 				if !yield(&session.Event{
@@ -447,8 +447,8 @@ type spyAgent struct {
 	yieldedError error
 }
 
-func (s *spyAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	next := s.Agent.Run(ctx)
+func (s *spyAgent) Run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	next := s.Agent.Run(ctx, invCleanCtx)
 	return func(yield func(*session.Event, error) bool) {
 		for event, err := range next {
 			if err != nil {
@@ -469,7 +469,7 @@ func TestParallelAgent_StateSync(t *testing.T) {
 
 	subAgent, err := agent.New(agent.Config{
 		Name: "test_subagent",
-		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				event := &session.Event{
 					LLMResponse: model.LLMResponse{
@@ -483,7 +483,7 @@ func TestParallelAgent_StateSync(t *testing.T) {
 			}
 		},
 		AfterAgentCallbacks: []agent.AfterAgentCallback{
-			func(c agent.Context) (*genai.Content, error) {
+			func(_ context.Context, c agent.Context) (*genai.Content, error) {
 				gotValue, gotErr = c.State().Get("test_key")
 				return nil, nil
 			},

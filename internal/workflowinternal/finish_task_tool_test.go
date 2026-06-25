@@ -15,6 +15,7 @@
 package workflowinternal_test
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -358,7 +359,7 @@ func TestFinishTaskTool_Run(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ft := newFinishTaskTool(t, tc.outputSchema)
-			got, err := ft.Run(nil, tc.args)
+			got, err := ft.Run(context.Background(), nil, tc.args)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("Run() error = nil, want non-nil; result = %v", got)
@@ -395,7 +396,7 @@ func TestFinishTaskTool_ProcessRequest(t *testing.T) {
 	ft := newFinishTaskTool(t, nil)
 	req := &model.LLMRequest{}
 
-	if err := ft.ProcessRequest(nil, req); err != nil {
+	if err := ft.ProcessRequest(context.Background(), nil, req); err != nil {
 		t.Fatalf("ProcessRequest() failed: %v", err)
 	}
 

@@ -66,8 +66,8 @@ func main() {
 	// just calls the greeter once and returns its output. The same shape
 	// scales to multi-step pipelines, branching, loops, etc.
 	myWorkflow := workflow.NewDynamicNode[string, string]("greeter_workflow",
-		func(nc workflow.NodeContext, in string, _ func(*session.Event) error) (string, error) {
-			return workflow.RunNode[string](nc, greeterNode, in)
+		func(ctx context.Context, nc workflow.NodeContext, in string, _ func(*session.Event) error) (string, error) {
+			return workflow.RunNode[string](ctx, nc, greeterNode, in)
 		},
 		workflow.NodeConfig{},
 	)

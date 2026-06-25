@@ -180,7 +180,7 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 
 			pmt := preloadmemorytool.New()
 
-			err := pmt.ProcessRequest(tc, llmRequest)
+			err := pmt.ProcessRequest(context.Background(), tc, llmRequest)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("ProcessRequest expected error, got nil")
@@ -214,5 +214,5 @@ func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content
 		UserContent: userContent,
 	})
 
-	return agent.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(t.Context(), ctx, "", nil, nil)
 }

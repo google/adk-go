@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"iter"
 	"slices"
@@ -66,10 +67,10 @@ import (
 // TODO: implement it in the runners package and update this doc.
 
 // AgentTransferRequestProcessor processes agent transfer requests.
-func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func AgentTransferRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: support agent types other than LLMAgent, that have parent/subagents?
-		agent := ctx.Agent()
+		agent := invCleanCtx.Agent()
 		if !shouldUseAutoFlow(agent) {
 			return
 		}
@@ -159,12 +160,12 @@ func (t *TransferToAgentTool) enums() []string {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
 // Run implements types.Tool.
-func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *TransferToAgentTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}
@@ -176,7 +177,7 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
-	ctx.Actions().TransferToAgent = agent
+	invCleanCtx.Actions().TransferToAgent = agent
 	return map[string]any{}, nil
 }
 

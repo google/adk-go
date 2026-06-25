@@ -296,7 +296,7 @@ End few-shot
 				userContent: tc.userContent,
 			}
 
-			err = et.ProcessRequest(ctx, req)
+			err = et.ProcessRequest(context.Background(), ctx, req)
 			if err != nil {
 				t.Errorf("ProcessRequest() error = %v", err)
 			}

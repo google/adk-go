@@ -340,11 +340,11 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 
 type mockLiveAgent struct {
 	agent.Agent
-	runLiveFn func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	runLiveFn func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
-func (m *mockLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	return m.runLiveFn(ctx)
+func (m *mockLiveAgent) RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return m.runLiveFn(ctx, invCleanCtx)
 }
 
 type dummyLiveSession struct {
@@ -427,13 +427,13 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	}
 
 	liveAgent, ok := sequentialAgent.(interface {
-		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+		RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 	})
 	if !ok {
 		t.Fatalf("sequential agent does not implement RunLive")
 	}
 
-	_, _, _ = liveAgent.RunLive(invCtx)
+	_, _, _ = liveAgent.RunLive(t.Context(), invCtx)
 
 	// After RunLive initiation, the sub-agents MUST have the task_completed tool injected!
 	if llmAgent1, ok := subAgent1.(llminternal.Agent); ok {
@@ -463,9 +463,9 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	agent1 := mustAgent(agent.New(agent.Config{Name: "sub_agent_1"}))
 	liveAgent1 := &mockLiveAgent{
 		Agent: agent1,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveFn: func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				ev.Author = "sub_agent_1"
 				yield(ev, nil)
 			}
@@ -476,9 +476,9 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	agent2 := mustAgent(agent.New(agent.Config{Name: "sub_agent_2"}))
 	liveAgent2 := &mockLiveAgent{
 		Agent: agent2,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveFn: func(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				ev.Author = "sub_agent_2"
 				yield(ev, nil)
 			}
@@ -503,13 +503,13 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	}
 
 	liveAgent, ok := seqAgent.(interface {
-		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+		RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 	})
 	if !ok {
 		t.Fatalf("sequential agent does not implement RunLive")
 	}
 
-	sess, seqIter, err := liveAgent.RunLive(invCtx)
+	sess, seqIter, err := liveAgent.RunLive(ctx, invCtx)
 	if err != nil {
 		t.Fatalf("RunLive failed: %v", err)
 	}

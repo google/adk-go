@@ -15,6 +15,7 @@
 package a2a
 
 import (
+	"context"
 	"iter"
 	"net"
 	"strconv"
@@ -73,9 +74,9 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 	wantMessage := "Hello, world!"
 	agnt, err := agent.New(agent.Config{
 		Name: "HelloWorldAgent",
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEventWithContext(ic, ic.InvocationID())
+				event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				event.Content = genai.NewContentFromText(wantMessage, genai.RoleModel)
 				yield(event, nil)
 			}

@@ -17,7 +17,6 @@ package agent
 import (
 	"context"
 	"log"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -30,18 +29,6 @@ import (
 // related to NodeContext when Context is used as tool context
 type toolContextWrapper struct {
 	context Context
-}
-
-// WithAgentCancel implements [Context].
-func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
-	// this one is needed for tool context.
-	return c.context.WithAgentCancel()
-}
-
-// WithAgentTimeout implements [Context].
-func (c *toolContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for ToolContext")
-	return nil, nil
 }
 
 // InvocationContext implements [Context].
@@ -119,18 +106,6 @@ func (c *toolContextWrapper) WithBranch(branch string) Context {
 	return nil
 }
 
-// WithContext implements [Context].
-func (c *toolContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	log.Print("WithContext() is not supported for ToolContext")
-	return nil
-}
-
-// WithAgentContext implements [Context].
-func (c *toolContextWrapper) WithAgentContext(ctx context.Context) Context {
-	log.Print("WithAgentContext() is not supported for ToolContext")
-	return nil
-}
-
 // ToolContext-related: emit logs and return empty data
 
 // Actions implements [Context].
@@ -184,21 +159,6 @@ func (c *toolContextWrapper) Branch() string {
 	return c.context.Branch()
 }
 
-// Deadline implements [Context].
-func (c *toolContextWrapper) Deadline() (deadline time.Time, ok bool) {
-	return c.context.Deadline()
-}
-
-// Done implements [Context].
-func (c *toolContextWrapper) Done() <-chan struct{} {
-	return c.context.Done()
-}
-
-// Err implements [Context].
-func (c *toolContextWrapper) Err() error {
-	return c.context.Err()
-}
-
 // InvocationID implements [Context].
 func (c *toolContextWrapper) InvocationID() string {
 	return c.context.InvocationID()
@@ -227,11 +187,6 @@ func (c *toolContextWrapper) UserContent() *genai.Content {
 // UserID implements [Context].
 func (c *toolContextWrapper) UserID() string {
 	return c.context.UserID()
-}
-
-// Value implements [Context].
-func (c *toolContextWrapper) Value(key any) any {
-	return c.context.Value(key)
 }
 
 var _ Context = (*toolContextWrapper)(nil)

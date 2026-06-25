@@ -15,6 +15,7 @@
 package llmagent_test
 
 import (
+	"context"
 	"iter"
 	"slices"
 	"testing"
@@ -30,10 +31,10 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 	// Create a custom agent that yields an event and then checks the session events.
 	customAgent, err := agent.New(agent.Config{
 		Name: "test_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// 1. Yield a test event
-				testEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				testEvent := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				testEvent.Content = genai.NewContentFromText("Initial test event", genai.RoleModel)
 				if !yield(testEvent, nil) {
 					return
@@ -41,8 +42,8 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 
 				// 2. Check if the event is in the session
 				var found bool
-				if ctx.Session() != nil {
-					for e := range ctx.Session().Events().All() {
+				if invCleanCtx.Session() != nil {
+					for e := range invCleanCtx.Session().Events().All() {
 						if e.Content != nil && len(e.Content.Parts) > 0 {
 							if e.Content.Parts[0].Text == "Initial test event" {
 								found = true
@@ -53,7 +54,7 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 				}
 
 				// 3. Yield the result of the check
-				resultEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				resultEvent := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 				if found {
 					resultEvent.Content = genai.NewContentFromText("Found initial event in session", genai.RoleModel)
 				} else {

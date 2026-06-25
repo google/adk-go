@@ -15,6 +15,7 @@
 package functiontool_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +51,7 @@ type SumResult struct {
 	Sum int `json:"sum"` // the sum of two integers
 }
 
-func sumFunc(ctx agent.Context, input SumArgs) (SumResult, error) {
+func sumFunc(_ context.Context, _ agent.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 
@@ -67,7 +68,7 @@ func ExampleNew() {
 
 func createToolContext(t *testing.T) agent.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(t.Context(), invCtx, "", &session.EventActions{}, nil)
 }
 
 //go:generate go test -v -httprecord=.*
@@ -101,7 +102,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx agent.Context, input Args) (Result, error) {
+	weatherReport := func(_ context.Context, _ agent.Context, input Args) (Result, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -151,7 +152,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+			if err := requestProcessor.ProcessRequest(context.Background(), nil, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
 			if req.Config == nil || len(req.Config.Tools) != 1 {
@@ -172,7 +173,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			callResult, err := funcTool.Run(createToolContext(t), resp.Args)
+			callResult, err := funcTool.Run(context.Background(), createToolContext(t), resp.Args)
 			if tc.isError {
 				if err == nil {
 					t.Fatalf("weatherReportTool.Run(%v) expected to fail but got success with result %v", resp.Args, callResult)
@@ -202,7 +203,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type IntOutput struct {
 		Result int `json:"result"`
 	}
-	identityFunc := func(ctx agent.Context, input IntInput) (IntOutput, error) {
+	identityFunc := func(_ context.Context, _ agent.Context, input IntInput) (IntOutput, error) {
 		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -220,7 +221,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type StringOutput struct {
 		Result string `json:"result"`
 	}
-	stringIdentityFunc := func(ctx agent.Context, input StringInput) (StringOutput, error) {
+	stringIdentityFunc := func(_ context.Context, _ agent.Context, input StringInput) (StringOutput, error) {
 		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
@@ -238,14 +239,14 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	if !ok {
 		t.Fatal("identityTool does not implement itype.RequestProcessor")
 	}
-	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+	if err := requestProcessor.ProcessRequest(context.Background(), nil, &req); err != nil {
 		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
 	}
 	requestProcessor, ok = stringIdentityTool.(toolinternal.RequestProcessor)
 	if !ok {
 		t.Fatal("stringIdentityTool does not implement itype.RequestProcessor")
 	}
-	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+	if err := requestProcessor.ProcessRequest(context.Background(), nil, &req); err != nil {
 		t.Fatalf("stringIdentityTool.ProcessRequest failed: %v", err)
 	}
 
@@ -266,7 +267,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx agent.Context, input Args) (string, error) {
+	weatherReport := func(_ context.Context, _ agent.Context, input Args) (string, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -316,7 +317,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+			if err := requestProcessor.ProcessRequest(context.Background(), nil, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
 			if req.Config == nil || len(req.Config.Tools) != 1 {
@@ -327,7 +328,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			callResult, err := funcTool.Run(createToolContext(t), tc.args)
+			callResult, err := funcTool.Run(context.Background(), createToolContext(t), tc.args)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
@@ -356,7 +357,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 			Name:        "sum_map",
 			Description: "sums numbers provided in a map input",
 		},
-		func(ctx agent.Context, input map[string]int) (Output, error) {
+		func(_ context.Context, _ agent.Context, input map[string]int) (Output, error) {
 			return Output{Sum: input["a"] + input["b"]}, nil
 		})
 	if err != nil {
@@ -367,7 +368,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 	if !ok {
 		t.Fatal("sumTool does not implement itype.RequestProcessor")
 	}
-	callResult, err := funcTool.Run(createToolContext(t), map[string]any{"a": 2, "b": 3})
+	callResult, err := funcTool.Run(context.Background(), createToolContext(t), map[string]any{"a": 2, "b": 3})
 	if err != nil {
 		t.Fatalf("sumTool.Run failed: %v", err)
 	}
@@ -441,7 +442,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx agent.Context, input Args) (any, error) {
+	}, func(_ context.Context, _ agent.Context, input Args) (any, error) {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)
@@ -458,7 +459,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		if !ok {
 			t.Fatal("inventoryTool does not implement itype.RequestProcessor")
 		}
-		if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		if err := requestProcessor.ProcessRequest(context.Background(), nil, &req); err != nil {
 			t.Fatalf("inventoryTool.ProcessRequest failed: %v", err)
 		}
 		decl := toolDeclaration(req.Config)
@@ -514,7 +515,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 				if !ok {
 					t.Fatal("inventoryTool does not implement itype.RequestProcessor")
 				}
-				ret, err := funcTool.Run(createToolContext(t), tc.in)
+				ret, err := funcTool.Run(context.Background(), createToolContext(t), tc.in)
 				// ret is expected to be nil always.
 				if tc.wantErr && err == nil {
 					t.Errorf("inventoryTool.Run = (%v, %v), want error", ret, err)
@@ -553,7 +554,7 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ agent.Context, _ SimpleArgs) (string, error) {
+func okFunc(_ context.Context, _ agent.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
@@ -927,7 +928,7 @@ type TestResult struct {
 
 func TestNew_RequireConfirmationProvider_Validation(t *testing.T) {
 	// A dummy handler to satisfy the function signature
-	dummyHandler := func(_ agent.Context, _ TestArgs) (TestResult, error) {
+	dummyHandler := func(_ context.Context, _ agent.Context, _ TestArgs) (TestResult, error) {
 		return TestResult{Value: 1}, nil
 	}
 
@@ -1038,7 +1039,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "string_tool",
 					Description: "a tool with string input",
-				}, func(ctx agent.Context, input string) (string, error) {
+				}, func(_ context.Context, _ agent.Context, input string) (string, error) {
 					return input, nil
 				})
 			},
@@ -1050,7 +1051,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "int_tool",
 					Description: "a tool with int input",
-				}, func(ctx agent.Context, input int) (int, error) {
+				}, func(_ context.Context, _ agent.Context, input int) (int, error) {
 					return input, nil
 				})
 			},
@@ -1062,7 +1063,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "bool_tool",
 					Description: "a tool with bool input",
-				}, func(ctx agent.Context, input bool) (bool, error) {
+				}, func(_ context.Context, _ agent.Context, input bool) (bool, error) {
 					return input, nil
 				})
 			},
@@ -1088,7 +1089,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		Value string `json:"value"`
 	}
 
-	panicHandler := func(ctx agent.Context, input Args) (string, error) {
+	panicHandler := func(_ context.Context, _ agent.Context, input Args) (string, error) {
 		panic("intentional panic for testing")
 	}
 
@@ -1105,7 +1106,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		t.Fatal("panicTool does not implement toolinternal.FunctionTool")
 	}
 
-	result, err := funcTool.Run(createToolContext(t), map[string]any{"value": "test"})
+	result, err := funcTool.Run(context.Background(), createToolContext(t), map[string]any{"value": "test"})
 	if err == nil {
 		t.Fatal("expected error from panic recovery, got nil")
 	}

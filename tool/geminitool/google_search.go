@@ -15,6 +15,8 @@
 package geminitool
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -38,7 +40,7 @@ func (s GoogleSearch) Description() string {
 }
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
-func (s GoogleSearch) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (s GoogleSearch) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},
 	})

@@ -16,6 +16,7 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -105,7 +106,7 @@ func (*set) IsLongRunning() bool {
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
-func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+func (s *set) Tools(ctx context.Context, invCleanCtx agent.ReadonlyContext) ([]tool.Tool, error) {
 	mcpTools, err := s.mcpClient.ListTools(ctx)
 	if err != nil {
 		return nil, err
@@ -118,7 +119,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
 
-		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+		if s.toolFilter != nil && !s.toolFilter(ctx, invCleanCtx, t) {
 			continue
 		}
 

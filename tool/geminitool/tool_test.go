@@ -15,6 +15,7 @@
 package geminitool_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -77,7 +78,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 				t.Fatal("geminiTool does not implement RequestProcessor")
 			}
 
-			err := requestProcessor.ProcessRequest(nil, tt.req)
+			err := requestProcessor.ProcessRequest(context.Background(), nil, tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ProcessRequest() error = %v, wantErr %v", err, tt.wantErr)
 			}

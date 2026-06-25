@@ -156,7 +156,7 @@ func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(ctx context.Context, cc agent.CallbackContext) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},
@@ -214,7 +214,7 @@ func TestStreamJSONL_AgentSpaceAcceptsReturnedBackendSessionID(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(ctx context.Context, cc agent.CallbackContext) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},

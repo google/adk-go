@@ -59,7 +59,7 @@ func TestWorkflowAgent_RunThenResume_Handoff(t *testing.T) {
 
 	// Turn 2: resume with a payload; handler should run and
 	// receive the payload as its input.
-	turn2 := drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve_or_reject", "approve"))), nil)
+	turn2 := drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approve_or_reject", "approve"))), nil)
 	if findRequest(turn2) != "" {
 		t.Errorf("turn 2 unexpectedly emitted a RequestedInput")
 	}
@@ -96,7 +96,7 @@ func TestWorkflowAgent_Resume_RestoresStateFromSession(t *testing.T) {
 	// Second agent instance, same session: Resume.
 	asker2, handler2 := makeNodes()
 	a2 := makeAgent(t, workflow.Chain(workflow.Start, asker2, handler2))
-	drainAgent(t, sess, a2.Run(newMockCtx(sess, a2, resumeMessage("human_approval", "yes"))), nil)
+	drainAgent(t, sess, a2.Run(t.Context(), newMockCtx(sess, a2, resumeMessage("human_approval", "yes"))), nil)
 	if !handlerCalled.Load() {
 		t.Error("handler did not run after resume on a fresh agent instance")
 	}
@@ -114,11 +114,11 @@ func TestWorkflowAgent_Resume_Idempotent(t *testing.T) {
 
 	runFreshTurn(t, sess, a, "x")
 	// First resume: matches the waiting node, runs the handler.
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
 	// Second resume with the same payload: PendingRequest was
 	// consumed by the first call, so no waiting node matches and
 	// Resume yields ErrNothingToResume rather than re-running.
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), workflow.ErrNothingToResume)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approve", "yes"))), workflow.ErrNothingToResume)
 
 	if got := handlerRuns.Load(); got != 1 {
 		t.Errorf("handler runs = %d, want 1 (duplicate Resume must not re-run the handler)", got)
@@ -145,7 +145,7 @@ func TestWorkflowAgent_Resume_NoMatchingResponse(t *testing.T) {
 	// but no waiting node will match — Resume yields
 	// ErrNothingToResume so the caller can distinguish the
 	// successful-but-no-effect case from a real resume.
-	turn := drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("unknown_id", "x"))), workflow.ErrNothingToResume)
+	turn := drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("unknown_id", "x"))), workflow.ErrNothingToResume)
 	if findRequest(turn) != "" {
 		t.Errorf("unmatched resume produced a new RequestedInput; got %v", turn)
 	}
@@ -164,7 +164,7 @@ func TestWorkflowAgent_Resume_SchemaValidation_Pass(t *testing.T) {
 	sess := newFakeSession()
 
 	runFreshTurn(t, sess, a, "x")
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval", map[string]any{"approved": true}))), nil)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approval", map[string]any{"approved": true}))), nil)
 
 	got, ok := handlerInput.Load().(map[string]any)
 	if !ok || got["approved"] != true {
@@ -188,13 +188,13 @@ func TestWorkflowAgent_Resume_SchemaValidation_Fail(t *testing.T) {
 	runFreshTurn(t, sess, a, "x")
 
 	// Submit invalid payload (string instead of {approved: bool}).
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval", "not an object"))), workflow.ErrInvalidResumeResponse)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approval", "not an object"))), workflow.ErrInvalidResumeResponse)
 	if handlerRuns.Load() != 0 {
 		t.Fatal("handler ran despite schema validation failure")
 	}
 
 	// Retry with valid payload — should succeed.
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval", map[string]any{"approved": true}))), nil)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("approval", map[string]any{"approved": true}))), nil)
 	if handlerRuns.Load() != 1 {
 		t.Errorf("handler runs after retry = %d, want 1", handlerRuns.Load())
 	}
@@ -219,7 +219,7 @@ func TestWorkflowAgent_Resume_FanOut(t *testing.T) {
 	sess := newFakeSession()
 
 	runFreshTurn(t, sess, a, "x")
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("fan", "go"))), nil)
+	drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage("fan", "go"))), nil)
 
 	if got := hits.Load(); got != 3 {
 		t.Errorf("successor hits = %d, want 3", got)
@@ -289,8 +289,8 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	})
 
 	orchestrator := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			out, err := workflow.RunNode[any](nc, asker, nil)
+		func(ctx context.Context, nc workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			out, err := workflow.RunNode[any](ctx, nc, asker, nil)
 			if err != nil {
 				// Pause: err is ErrNodeInterrupted (swallowed by dynamicNode.Run).
 				// Resume: err is nil and out is the child's response.
@@ -315,7 +315,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	}
 
 	// Turn 2: resume with the reply.
-	turn2 := drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "Wolo"))), nil)
+	turn2 := drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, resumeMessage(interruptID, "Wolo"))), nil)
 	if got := findRequest(turn2); got != "" {
 		t.Errorf("turn 2 unexpectedly emitted a RequestedInput: %q", got)
 	}
@@ -476,7 +476,7 @@ func newHitlNode(name string, run func(ctx agent.Context, input any, yield func(
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}
@@ -591,7 +591,7 @@ func newAskerNode(interruptID, message string, schema *jsonschema.Schema) *hitlN
 // the actual text payload does not matter.
 func runFreshTurn(t *testing.T, sess *fakeSession, a agent.Agent, text string) []*session.Event {
 	t.Helper()
-	return drainAgent(t, sess, a.Run(newMockCtx(sess, a, &genai.Content{
+	return drainAgent(t, sess, a.Run(t.Context(), newMockCtx(sess, a, &genai.Content{
 		Parts: []*genai.Part{{Text: text}},
 	})), nil)
 }
@@ -601,7 +601,7 @@ func runFreshTurn(t *testing.T, sess *fakeSession, a agent.Agent, text string) [
 func newStringHandlerNode(name string, dst *atomic.Value) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.Context, input string) (string, error) {
+		func(_ context.Context, _ agent.Context, input string) (string, error) {
 			dst.Store(input)
 			return "handled:" + input, nil
 		},
@@ -614,7 +614,7 @@ func newStringHandlerNode(name string, dst *atomic.Value) workflow.Node {
 func newMapHandlerNode(name string, dst *atomic.Value) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.Context, input map[string]any) (any, error) {
+		func(_ context.Context, _ agent.Context, input map[string]any) (any, error) {
 			dst.Store(input)
 			return nil, nil
 		},
@@ -628,7 +628,7 @@ func newMapHandlerNode(name string, dst *atomic.Value) workflow.Node {
 func newCountingHandlerNode(name string, counter *atomic.Int32) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.Context, _ any) (any, error) {
+		func(_ context.Context, _ agent.Context, _ any) (any, error) {
 			counter.Add(1)
 			return nil, nil
 		},
@@ -642,7 +642,7 @@ func newCountingHandlerNode(name string, counter *atomic.Int32) workflow.Node {
 func newFlagHandlerNode(name string, flag *atomic.Bool) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.Context, _ any) (any, error) {
+		func(_ context.Context, _ agent.Context, _ any) (any, error) {
 			flag.Store(true)
 			return nil, nil
 		},

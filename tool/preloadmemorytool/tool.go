@@ -22,6 +22,7 @@
 package preloadmemorytool
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -71,15 +72,15 @@ func (t *preloadMemoryTool) IsLongRunning() bool {
 
 // ProcessRequest processes the LLM request by searching memory using the user's
 // current query and injecting relevant past conversations into system instructions.
-func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	userContent := ctx.UserContent()
+func (t *preloadMemoryTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
+	userContent := invCleanCtx.UserContent()
 	if userContent == nil || len(userContent.Parts) == 0 ||
 		userContent.Parts[0] == nil || userContent.Parts[0].Text == "" {
 		return nil
 	}
 	userQuery := userContent.Parts[0].Text
 
-	searchResponse, err := ctx.SearchMemory(ctx, userQuery)
+	searchResponse, err := invCleanCtx.SearchMemory(ctx, userQuery)
 	if err != nil {
 		return fmt.Errorf("preload memory search failed: %v", err)
 	}

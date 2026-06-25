@@ -15,6 +15,7 @@
 package loggingplugin
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -118,36 +119,36 @@ func (p *loggingPlugin) formatArgs(args map[string]any, maxLength int) string {
 	return formatted
 }
 
-func (p *loggingPlugin) onUserMessage(ctx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
+func (p *loggingPlugin) onUserMessage(ctx context.Context, invCleanCtx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
 	p.log("🚀 USER MESSAGE RECEIVED")
-	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
-	p.log(fmt.Sprintf("   Session ID: %s", ctx.Session().ID()))
-	p.log(fmt.Sprintf("   User ID: %s", ctx.Session().UserID()))
-	p.log(fmt.Sprintf("   App Name: %s", ctx.Session().AppName()))
+	p.log(fmt.Sprintf("   Invocation ID: %s", invCleanCtx.InvocationID()))
+	p.log(fmt.Sprintf("   Session ID: %s", invCleanCtx.Session().ID()))
+	p.log(fmt.Sprintf("   User ID: %s", invCleanCtx.Session().UserID()))
+	p.log(fmt.Sprintf("   App Name: %s", invCleanCtx.Session().AppName()))
 	agentName := "Unknown"
-	if ctx.Agent() != nil {
-		agentName = ctx.Agent().Name()
+	if invCleanCtx.Agent() != nil {
+		agentName = invCleanCtx.Agent().Name()
 	}
 	p.log(fmt.Sprintf("   Root Agent: %s", agentName))
 	p.log(fmt.Sprintf("   User Content: %s", p.formatContent(userMessage, 200)))
-	if ctx.Branch() != "" {
-		p.log(fmt.Sprintf("   Branch: %s", ctx.Branch()))
+	if invCleanCtx.Branch() != "" {
+		p.log(fmt.Sprintf("   Branch: %s", invCleanCtx.Branch()))
 	}
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
+func (p *loggingPlugin) beforeRun(ctx context.Context, invCleanCtx agent.InvocationContext) (*genai.Content, error) {
 	p.log("🏃 INVOCATION STARTING")
-	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
+	p.log(fmt.Sprintf("   Invocation ID: %s", invCleanCtx.InvocationID()))
 	agentName := "Unknown"
-	if ctx.Agent() != nil {
-		agentName = ctx.Agent().Name()
+	if invCleanCtx.Agent() != nil {
+		agentName = invCleanCtx.Agent().Name()
 	}
 	p.log(fmt.Sprintf("   Starting Agent: %s", agentName))
 	return nil, nil
 }
 
-func (p *loggingPlugin) onEvent(ctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
+func (p *loggingPlugin) onEvent(ctx context.Context, invCleanCtx agent.InvocationContext, event *session.Event) (*session.Event, error) {
 	p.log("📢 EVENT YIELDED")
 	p.log(fmt.Sprintf("   Event ID: %s", event.ID))
 	p.log(fmt.Sprintf("   Author: %s", event.Author))
@@ -181,41 +182,41 @@ func (p *loggingPlugin) onEvent(ctx agent.InvocationContext, event *session.Even
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterRun(ctx agent.InvocationContext) {
+func (p *loggingPlugin) afterRun(ctx context.Context, invCleanCtx agent.InvocationContext) {
 	p.log("✅ INVOCATION COMPLETED")
-	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
+	p.log(fmt.Sprintf("   Invocation ID: %s", invCleanCtx.InvocationID()))
 	agentName := "Unknown"
-	if ctx.Agent() != nil {
-		agentName = ctx.Agent().Name()
+	if invCleanCtx.Agent() != nil {
+		agentName = invCleanCtx.Agent().Name()
 	}
 	p.log(fmt.Sprintf("   Final Agent: %s", agentName))
 }
 
-func (p *loggingPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
+func (p *loggingPlugin) beforeAgent(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
 	p.log("🤖 AGENT STARTING")
-	p.log(fmt.Sprintf("   Agent Name: %s", ctx.AgentName()))
-	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
-	if ctx.Branch() != "" {
-		p.log(fmt.Sprintf("   Branch: %s", ctx.Branch()))
+	p.log(fmt.Sprintf("   Agent Name: %s", invCleanCtx.AgentName()))
+	p.log(fmt.Sprintf("   Invocation ID: %s", invCleanCtx.InvocationID()))
+	if invCleanCtx.Branch() != "" {
+		p.log(fmt.Sprintf("   Branch: %s", invCleanCtx.Branch()))
 	}
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterAgent(ctx agent.Context) (*genai.Content, error) {
+func (p *loggingPlugin) afterAgent(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
 	p.log("🤖 AGENT COMPLETED")
-	p.log(fmt.Sprintf("   Agent Name: %s", ctx.AgentName()))
-	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
+	p.log(fmt.Sprintf("   Agent Name: %s", invCleanCtx.AgentName()))
+	p.log(fmt.Sprintf("   Invocation ID: %s", invCleanCtx.InvocationID()))
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *loggingPlugin) beforeModel(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	p.log("🧠 LLM REQUEST")
 	modelName := "default"
 	if req.Model != "" {
 		modelName = req.Model
 	}
 	p.log(fmt.Sprintf("   Model: %s", modelName))
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
 
 	if req.Config != nil && req.Config.SystemInstruction != nil && len(req.Config.SystemInstruction.Parts) > 0 {
 		// Assuming SystemInstruction is a Content object with parts
@@ -240,9 +241,9 @@ func (p *loggingPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func (p *loggingPlugin) afterModel(ctx context.Context, invCleanCtx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
 	p.log("🧠 LLM RESPONSE")
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
 
 	// If error passed in, log it
 	if err != nil {
@@ -272,27 +273,27 @@ func (p *loggingPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, e
 	return nil, nil
 }
 
-func (p *loggingPlugin) onModelError(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
+func (p *loggingPlugin) onModelError(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
 	p.log("🧠 LLM ERROR")
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
 	p.log(fmt.Sprintf("   Error: %v", err))
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *loggingPlugin) beforeTool(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	p.log("🔧 TOOL STARTING")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
-	p.log(fmt.Sprintf("   Function Call ID: %s", ctx.FunctionCallID()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
+	p.log(fmt.Sprintf("   Function Call ID: %s", invCleanCtx.FunctionCallID()))
 	p.log(fmt.Sprintf("   Arguments: %s", p.formatArgs(args, 300)))
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) afterTool(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL COMPLETED")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
-	p.log(fmt.Sprintf("   Function Call ID: %s", ctx.FunctionCallID()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
+	p.log(fmt.Sprintf("   Function Call ID: %s", invCleanCtx.FunctionCallID()))
 	if err != nil {
 		p.log(fmt.Sprintf("   Error: %v", err))
 	} else {
@@ -301,11 +302,11 @@ func (p *loggingPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result m
 	return nil, nil
 }
 
-func (p *loggingPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) onToolError(ctx context.Context, invCleanCtx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL ERROR")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
-	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
-	p.log(fmt.Sprintf("   Function Call ID: %s", ctx.FunctionCallID()))
+	p.log(fmt.Sprintf("   Agent: %s", invCleanCtx.AgentName()))
+	p.log(fmt.Sprintf("   Function Call ID: %s", invCleanCtx.FunctionCallID()))
 	p.log(fmt.Sprintf("   Arguments: %s", p.formatArgs(args, 300)))
 	p.log(fmt.Sprintf("   Error: %v", err))
 	return nil, nil

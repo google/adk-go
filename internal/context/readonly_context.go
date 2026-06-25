@@ -23,15 +23,13 @@ import (
 	"google.golang.org/adk/session"
 )
 
-func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
+func NewReadonlyContext(ctx context.Context, invCleanCtx agent.InvocationContext) agent.ReadonlyContext {
 	return &ReadonlyContext{
-		Context:           ctx,
-		InvocationContext: ctx,
+		InvocationContext: invCleanCtx,
 	}
 }
 
 type ReadonlyContext struct {
-	context.Context
 	InvocationContext agent.InvocationContext
 }
 

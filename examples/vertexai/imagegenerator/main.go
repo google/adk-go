@@ -91,7 +91,7 @@ func main() {
 }
 
 // This is a function tool to generate images using Vertex AI's Imagen model.
-func generateImage(ctx agent.Context, input generateImageInput) (generateImageResult, error) {
+func generateImage(ctx context.Context, invCleanCtx agent.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -110,7 +110,7 @@ func generateImage(ctx agent.Context, input generateImageInput) (generateImageRe
 		return generateImageResult{}, err
 	}
 
-	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	_, err = invCleanCtx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
 	if err != nil {
 		return generateImageResult{}, err
 	}
@@ -129,9 +129,9 @@ type generateImageResult struct {
 
 // This is function tool that loads image from the artifacts service and
 // saves is to the local filesystem.
-func saveImage(ctx agent.Context, input saveImageInput) (saveImageResult, error) {
+func saveImage(ctx context.Context, invCleanCtx agent.Context, input saveImageInput) (saveImageResult, error) {
 	filename := input.Filename
-	resp, err := ctx.Artifacts().Load(ctx, filename)
+	resp, err := invCleanCtx.Artifacts().Load(ctx, filename)
 	if err != nil {
 		log.Printf("Failed to load artifact '%s': %v", filename, err)
 		return saveImageResult{}, err

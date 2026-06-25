@@ -56,7 +56,7 @@ func (s *testSessionService) Create(ctx context.Context, req *session.CreateRequ
 func newEventReplayAgent(events []*session.Event, failWith error) (agent.Agent, error) {
 	return agent.New(agent.Config{
 		Name: "test",
-		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				for _, event := range events {
 					if !yield(event, nil) {
@@ -507,7 +507,7 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	agent, err := agent.New(agent.Config{
 		Name: "test",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				defer close(channel)
 				<-ctx.Done()
@@ -580,8 +580,8 @@ func TestExecutor_Converters(t *testing.T) {
 			var receivedText string
 			agent, err := agent.New(agent.Config{
 				Name: "test",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-					if parts := ctx.UserContent().Parts; len(parts) > 0 {
+				Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					if parts := invCleanCtx.UserContent().Parts; len(parts) > 0 {
 						receivedText = parts[0].Text
 					}
 					return func(yield func(*session.Event, error) bool) {}
@@ -618,8 +618,8 @@ func TestExecutor_Converters(t *testing.T) {
 			var receivedParts int
 			agent, err := agent.New(agent.Config{
 				Name: "test",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-					receivedParts = len(ctx.UserContent().Parts)
+				Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					receivedParts = len(invCleanCtx.UserContent().Parts)
 					return func(yield func(*session.Event, error) bool) {}
 				},
 			})

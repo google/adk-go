@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"reflect"
@@ -28,10 +29,10 @@ import (
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func basicRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
 	return func(yield func(*session.Event, error) bool) {
-		llmAgent := asLLMAgent(ctx.Agent())
+		llmAgent := asLLMAgent(invCleanCtx.Agent())
 		if llmAgent == nil {
 			return // do nothing.
 		}

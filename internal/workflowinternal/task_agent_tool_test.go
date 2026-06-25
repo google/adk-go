@@ -69,7 +69,7 @@ func TestTaskAgentTool_Metadata(t *testing.T) {
 	if !tt.DefersResponse() {
 		t.Errorf("DefersResponse() = false, want true")
 	}
-	result, err := tt.Run(nil, nil)
+	result, err := tt.Run(context.Background(), nil, nil)
 	if err != nil {
 		t.Errorf("Run() returned err = %v, want nil", err)
 	}

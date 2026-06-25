@@ -16,6 +16,7 @@
 package functiontool
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -68,8 +69,8 @@ type Config struct {
 }
 
 // Func represents a Go function that can be wrapped in a tool.
-// It takes a agent.Context and a generic argument type, and returns a generic result type.
-type Func[TArgs, TResults any] func(agent.Context, TArgs) (TResults, error)
+// It takes a context.Context, an agent.Context and a generic argument type, and returns a generic result type.
+type Func[TArgs, TResults any] func(context.Context, agent.Context, TArgs) (TResults, error)
 
 // ErrInvalidArgument indicates the input parameter type is invalid.
 var ErrInvalidArgument = errors.New("invalid argument")
@@ -152,7 +153,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -182,7 +183,7 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result map[string]any, err error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx context.Context, invCleanCtx agent.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	defer func() {
 		if r := recover(); r != nil {
@@ -199,7 +200,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 		return nil, err
 	}
 
-	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+	if confirmation := invCleanCtx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
 		}
@@ -213,18 +214,18 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 		}
 
 		if requireConfirmation {
-			err := ctx.RequestConfirmation(
+			err := invCleanCtx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					f.Name()), nil)
 			if err != nil {
 				return nil, err
 			}
-			ctx.Actions().SkipSummarization = true
+			invCleanCtx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 
-	output, err := f.handler(ctx, input)
+	output, err := f.handler(ctx, invCleanCtx, input)
 	if err != nil {
 		return nil, err
 	}

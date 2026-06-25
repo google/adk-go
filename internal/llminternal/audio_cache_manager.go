@@ -81,14 +81,14 @@ func (m *AudioCacheManager) CacheOutput(ctx context.Context, data []byte, mimeTy
 }
 
 // FlushCaches flushes audio caches to artifact services and returns created events.
-func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, flushModel bool) ([]*session.Event, error) {
+func (m *AudioCacheManager) FlushCaches(ctx context.Context, invCleanCtx agent.InvocationContext, flushUser, flushModel bool) ([]*session.Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var events []*session.Event
 
 	if flushUser && len(m.inputCache) > 0 {
-		ev, err := m.flushCache(ctx, m.inputCache, "input_audio", m.inputMimeType, m.inputStartTime)
+		ev, err := m.flushCache(ctx, invCleanCtx, m.inputCache, "input_audio", m.inputMimeType, m.inputStartTime)
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +99,7 @@ func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, 
 	}
 
 	if flushModel && len(m.outputCache) > 0 {
-		ev, err := m.flushCache(ctx, m.outputCache, "output_audio", m.outputMimeType, m.outputStartTime)
+		ev, err := m.flushCache(ctx, invCleanCtx, m.outputCache, "output_audio", m.outputMimeType, m.outputStartTime)
 		if err != nil {
 			return nil, err
 		}
@@ -112,7 +112,7 @@ func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, 
 	return events, nil
 }
 
-func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]byte, cacheType, mimeType string, startTime time.Time) (*session.Event, error) {
+func (m *AudioCacheManager) flushCache(ctx context.Context, invCleanCtx agent.InvocationContext, cache [][]byte, cacheType, mimeType string, startTime time.Time) (*session.Event, error) {
 	if len(cache) == 0 {
 		return nil, nil
 	}
@@ -135,24 +135,24 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 
 	// Save to artifact service
 	part := genai.NewPartFromBytes(combinedData, mimeType)
-	resp, err := ctx.Artifacts().Save(ctx, filename, part)
+	resp, err := invCleanCtx.Artifacts().Save(ctx, filename, part)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save audio artifact: %w", err)
 	}
 
 	// Create artifact reference
-	sess := ctx.Session()
+	sess := invCleanCtx.Session()
 	artifactRef := fmt.Sprintf("artifact://%s/%s/%s/_adk_live/%s#%d", sess.AppName(), sess.UserID(), sess.ID(), filename, resp.Version)
 
 	// Create event with file data reference
-	author := ctx.Agent().Name()
+	author := invCleanCtx.Agent().Name()
 	role := "model"
 	if cacheType == "input_audio" {
 		author = "user"
 		role = "user"
 	}
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 	ev.Author = author
 	ev.Timestamp = startTime
 	ev.Content = &genai.Content{

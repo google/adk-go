@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -115,7 +116,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := toolImpl.Run(tc, tt.args)
+			result, err := toolImpl.Run(context.Background(), tc, tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -152,7 +153,7 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
 	}
 
-	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	err := requestProcessor.ProcessRequest(context.Background(), tc, llmRequest)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
 	}
 
-	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	err := requestProcessor.ProcessRequest(context.Background(), tc, llmRequest)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -265,7 +266,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
 	}
 
-	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	err := requestProcessor.ProcessRequest(context.Background(), tc, llmRequest)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -291,5 +292,5 @@ func createToolContext(t *testing.T) agent.Context {
 		Artifacts: artifacts,
 	})
 
-	return agent.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(t.Context(), ctx, "", nil, nil)
 }
