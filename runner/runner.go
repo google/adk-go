@@ -607,7 +607,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			msg = modifiedMsg
 
 			ctx = ctx.Apply(&agent.CommonContextDelta{
-				InvocationContextDelta: agent.InvocationContextDelta{
+				InvocationContextDelta: &agent.InvocationContextDelta{
 					UserContent: &msg,
 				}})
 		}

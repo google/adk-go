@@ -14,14 +14,20 @@
 
 package agent
 
-import "google.golang.org/genai"
+import (
+	"context"
+
+	"google.golang.org/genai"
+)
 
 type CommonContextDelta struct {
-	InvocationContextDelta
+	InvocationContextDelta *InvocationContextDelta
 }
 
 type InvocationContextDelta struct {
+	Context     *context.Context
 	UserContent **genai.Content
+	Agent       *Agent
 }
 
 func (c *commonContext) Apply(d *CommonContextDelta) Context {
@@ -29,7 +35,14 @@ func (c *commonContext) Apply(d *CommonContextDelta) Context {
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.ApplyICDelta(&d.InvocationContextDelta)
+	res.invocationContext = res.invocationContext.ApplyICDelta(d.InvocationContextDelta)
+
+	if d.InvocationContextDelta != nil {
+		if d.InvocationContextDelta.Context != nil {
+			res.Context = *d.InvocationContextDelta.Context
+		}
+	}
+
 	return &res
 }
 

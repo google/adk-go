@@ -133,5 +133,12 @@ func (c *InvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.
 	if d.UserContent != nil {
 		res.params.UserContent = *d.UserContent
 	}
+	if d.Agent != nil {
+		res.params.Agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+
 	return &res
 }

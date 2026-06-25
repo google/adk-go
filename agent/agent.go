@@ -175,28 +175,45 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		// case 1: ctx is Context
 		// case 2: ctx is InvocationContext and is not Context
 
-		ic := &invocationContext{
-			Context:   ctx.WithContext(spanCtx),
-			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
+		var aa Agent = a
+		var newCtx context.Context = ctx.WithContext(spanCtx)
 
-			invocationID:   ctx.InvocationID(),
-			branch:         ctx.Branch(),
-			isolationScope: ctx.IsolationScope(),
-			userContent:    ctx.UserContent(),
-			runConfig:      ctx.RunConfig(),
-			endInvocation:  ctx.Ended(),
-		}
+		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
 		var nodeCtx Context
 		if parentCC, ok := ctx.(Context); ok {
-			nc := NewNodeContext(ic, nil)
-			nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
+			nodeCtx = parentCC.Apply(
+				&CommonContextDelta{
+					InvocationContextDelta: icDelta,
+				})
+			// nc := NewNodeContext(ic, nil)
+			// nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
 		} else {
+			ic := ctx.ApplyICDelta(icDelta)
 			nodeCtx = NewNodeContext(ic, nil)
 		}
+		// ic := &invocationContext{
+		// 	Context:   ctx.WithContext(spanCtx),
+		// 	agent:     a,
+		// 	artifacts: ctx.Artifacts(),
+		// 	memory:    ctx.Memory(),
+		// 	session:   ctx.Session(),
+
+		// 	invocationID:   ctx.InvocationID(),
+		// 	branch:         ctx.Branch(),
+		// 	isolationScope: ctx.IsolationScope(),
+		// 	userContent:    ctx.UserContent(),
+		// 	runConfig:      ctx.RunConfig(),
+		// 	endInvocation:  ctx.Ended(),
+		// }
+
+		// var nodeCtx Context
+		// if parentCC, ok := ctx.(Context); ok {
+		// 	nc := NewNodeContext(ic, nil)
+		// 	nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
+		// } else {
+		// 	nodeCtx = NewNodeContext(ic, nil)
+		// }
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {

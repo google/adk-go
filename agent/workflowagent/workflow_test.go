@@ -56,7 +56,7 @@ type MockInvocationContext struct {
 
 // ApplyICDelta implements [agent.InvocationContext].
 func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
-	panic("unimplemented")
+	return m
 }
 
 func (m *MockInvocationContext) Session() session.Session {
