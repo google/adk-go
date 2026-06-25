@@ -114,6 +114,8 @@ type InvocationContext interface {
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
+
+	Apply(d *InvocationContextDelta) InvocationContext
 }
 
 // ReadonlyContext provides read-only access to invocation context data.
@@ -237,4 +239,6 @@ type Context interface {
 	// into this activation when it runs as a WithUseAsOutput child;
 	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	OutputForAncestors() []string
+
+	Apply(d *CommonContextDelta) Context
 }

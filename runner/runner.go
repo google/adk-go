@@ -605,17 +605,10 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 		if modifiedMsg != nil {
 			msg = modifiedMsg
-			// update ctx user message
-			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Artifacts:    ctx.Artifacts(),
-				Memory:       ctx.Memory(),
-				Session:      ctx.Session(),
-				Agent:        ctx.Agent(),
-				UserContent:  msg,
-				RunConfig:    ctx.RunConfig(),
-				InvocationID: ctx.InvocationID(),
+
+			ctx = ctx.Apply(&agent.CommonContextDelta{
+				UserContent: &msg,
 			})
-			ctx = agent.NewContext(ic)
 		}
 	}
 
