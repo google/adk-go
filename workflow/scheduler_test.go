@@ -351,7 +351,7 @@ func (n *recordingNode) release() { close(n.released) }
 func (n *recordingNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-n.released
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		out := fmt.Sprintf("%v:%s", input, n.Name())
 		ev.Output = out
 		yield(ev, nil)
@@ -377,7 +377,7 @@ func newBlockingNode(name string, work func()) *blockingNode {
 func (n *blockingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = n.Name()
 		yield(ev, nil)
 	}
@@ -439,7 +439,7 @@ func newMultiOutputNode(name string, outputs []string) *multiOutputNode {
 func (n *multiOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
-			ev := session.NewEvent(ctx.InvocationID())
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			ev.Output = out
 			if !yield(ev, nil) {
 				return
@@ -468,12 +468,12 @@ func newProgressThenOutputNode(name string, progressCount int, finalOutput strin
 func (n *progressThenOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
-			ev := session.NewEvent(ctx.InvocationID())
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			if !yield(ev, nil) {
 				return
 			}
 		}
-		final := session.NewEvent(ctx.InvocationID())
+		final := session.NewEventWithContext(ctx, ctx.InvocationID())
 		final.Output = n.finalOutput
 		yield(final, nil)
 	}
@@ -563,7 +563,7 @@ func (n *retryTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Eve
 			yield(nil, fmt.Errorf("fail attempt %d", calls))
 			return
 		}
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		out := fmt.Sprintf("%v:%s", input, n.Name())
 		ev.Output = out
 		yield(ev, nil)
@@ -749,7 +749,7 @@ func (n *validationTestNode) Run(ctx agent.Context, input any) iter.Seq2[*sessio
 	return func(yield func(*session.Event, error) bool) {
 		n.calls.Add(1)
 		n.runInput = input
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = "ok"
 		yield(ev, nil)
 	}
@@ -763,7 +763,7 @@ type roleTestNode struct {
 
 func (n *roleTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = "hi"
 		// Content with Parts but deliberately no Role.
 		ev.Content = &genai.Content{Parts: []*genai.Part{{Text: "hi"}}}
@@ -860,7 +860,7 @@ func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any
 
 func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = n.output
 		yield(ev, nil)
 	}
@@ -898,7 +898,7 @@ type preRoledNode struct {
 
 func (n *preRoledNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "x"}}}
 		yield(ev, nil)
 	}
@@ -926,7 +926,7 @@ type funcResponseNode struct {
 
 func (n *funcResponseNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Content = &genai.Content{Parts: []*genai.Part{{
 			FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"ok": true}},
 		}}}
@@ -970,11 +970,11 @@ type progressThenSchemaOutputNode struct {
 func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < n.progress; i++ {
-			if !yield(session.NewEvent(ctx.InvocationID()), nil) {
+			if !yield(session.NewEventWithContext(ctx, ctx.InvocationID()), nil) {
 				return
 			}
 		}
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = n.output
 		yield(ev, nil)
 	}
@@ -998,7 +998,7 @@ type noOutputNode struct {
 
 func (n *noOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		yield(session.NewEvent(ctx.InvocationID()), nil)
+		yield(session.NewEventWithContext(ctx, ctx.InvocationID()), nil)
 	}
 }
 

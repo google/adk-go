@@ -686,8 +686,9 @@ func TestPreprocess_Toolset(t *testing.T) {
 
 // fnRespEvent builds a function-response event carrying a single text part,
 // mirroring what the parallel-call producer emits for a normal tool.
-func fnRespEvent(text string) *session.Event {
-	ev := session.NewEvent("inv")
+func fnRespEvent(t *testing.T, text string) *session.Event {
+	t.Helper()
+	ev := session.NewEventWithContext(t.Context(), "inv")
 	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
@@ -702,7 +703,7 @@ func fnRespEvent(text string) *session.Event {
 // merge. Pre-fix, a nil events[0] or an all-nil slice dereferenced nil.
 func TestMergeParallelFunctionResponseEvents_NilEntries(t *testing.T) {
 	t.Run("first entry nil", func(t *testing.T) {
-		got, err := mergeParallelFunctionResponseEvents([]*session.Event{nil, fnRespEvent("b")})
+		got, err := mergeParallelFunctionResponseEvents([]*session.Event{nil, fnRespEvent(t, "b")})
 		if err != nil {
 			t.Fatalf("merge error: %v", err)
 		}
@@ -725,7 +726,7 @@ func TestMergeParallelFunctionResponseEvents_NilEntries(t *testing.T) {
 	})
 
 	t.Run("mixed nil and non-nil", func(t *testing.T) {
-		got, err := mergeParallelFunctionResponseEvents([]*session.Event{fnRespEvent("a"), nil, fnRespEvent("c")})
+		got, err := mergeParallelFunctionResponseEvents([]*session.Event{fnRespEvent(t, "a"), nil, fnRespEvent(t, "c")})
 		if err != nil {
 			t.Fatalf("merge error: %v", err)
 		}

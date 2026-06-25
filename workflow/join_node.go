@@ -59,7 +59,7 @@ func NewJoinNodeWithSchema(name string, schema *jsonschema.Resolved) *JoinNode {
 // aggregation contract.
 func (n *JoinNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.Output = input
 		yield(event, nil)
 	}
