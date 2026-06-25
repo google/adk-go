@@ -115,7 +115,9 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			if lastEvent == nil || lastEvent.IsFinalResponse() {
+			// A thought-only ("thinking") turn reports as final but has no
+			// answer; don't stop on it — call the model again.
+			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
@@ -126,6 +128,26 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 		}
 	}
+}
+
+// isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
+// whose parts are all model "thinking" (Thought) parts — no surfaced answer.
+// Thought signatures ride on substantive parts (text, function calls), which
+// are not Thought, so any such part makes the turn non-thought-only.
+func isThoughtOnlyTurn(ev *session.Event) bool {
+	if ev == nil || ev.LLMResponse.Partial {
+		return false
+	}
+	content := ev.LLMResponse.Content
+	if content == nil || len(content.Parts) == 0 {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p != nil && !p.Thought {
+			return false
+		}
+	}
+	return true
 }
 
 type activeTask struct {

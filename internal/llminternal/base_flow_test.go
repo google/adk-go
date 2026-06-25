@@ -737,3 +737,36 @@ func TestMergeParallelFunctionResponseEvents_NilEntries(t *testing.T) {
 		}
 	})
 }
+
+func TestIsThoughtOnlyTurn(t *testing.T) {
+	event := func(partial bool, parts ...*genai.Part) *session.Event {
+		var content *genai.Content
+		if parts != nil {
+			content = &genai.Content{Role: "model", Parts: parts}
+		}
+		return &session.Event{LLMResponse: model.LLMResponse{Content: content, Partial: partial}}
+	}
+
+	tests := []struct {
+		name string
+		ev   *session.Event
+		want bool
+	}{
+		{"thought_text_only", event(false, &genai.Part{Thought: true, Text: "thinking"}), true},
+		{"thought_plus_answer", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{Text: "answer"}), false},
+		{"answer_only", event(false, &genai.Part{Text: "answer"}), false},
+		{"function_call", event(false, &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}), false},
+		{"thought_then_signed_call", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}, ThoughtSignature: []byte("sig")}), false},
+		{"thought_plus_signature_only_part", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{ThoughtSignature: []byte("sig")}), false},
+		{"partial_thought", event(true, &genai.Part{Thought: true, Text: "t"}), false},
+		{"empty_content", event(false), false},
+		{"nil_event", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isThoughtOnlyTurn(tc.ev); got != tc.want {
+				t.Errorf("isThoughtOnlyTurn = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
