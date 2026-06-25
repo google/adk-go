@@ -707,7 +707,7 @@ func TestFunctionNode_ValidatesInputOnAssertionHitPath(t *testing.T) {
 func runFunctionNodeOnce[OUT any](t *testing.T, fn func(ctx agent.Context, input any) (OUT, error), input any) *session.Event {
 	t.Helper()
 	node := NewFunctionNode[any, OUT]("n", fn, defaultNodeConfig)
-	exCtx := agent.NewNodeContext(&MockInvocationContext{sess: nil}, nil)
+	exCtx := agent.NewNodeContext(&MockInvocationContext{Context: t.Context(), sess: nil}, nil)
 
 	var got *session.Event
 	count := 0
