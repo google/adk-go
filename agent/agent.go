@@ -390,6 +390,18 @@ type invocationContext struct {
 	endInvocation  bool
 }
 
+// Apply implements [InvocationContext].
+func (c *invocationContext) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	if d.UserContent != nil {
+		res.userContent = *d.UserContent
+	}
+	return &res
+}
+
 func (c *invocationContext) Agent() Agent {
 	return c.agent
 }

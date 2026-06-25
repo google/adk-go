@@ -1367,6 +1367,10 @@ func (m *mockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *mockInvocationContext) Ended() bool                     { return false }
 func (m *mockInvocationContext) EndInvocation()                  {}
 
+func (m *mockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 func (m *mockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	cp := *m
 	cp.Context = ctx

@@ -25,7 +25,19 @@ type InvocationContextDelta struct {
 }
 
 func (c *commonContext) Apply(d *CommonContextDelta) Context {
+	if d == nil {
+		return c
+	}
 	res := *c
-	res.invocationContext = res.invocationContext.Apply(&d.InvocationContextDelta)
-	return res
+	res.invocationContext = res.invocationContext.ApplyICDelta(&d.InvocationContextDelta)
+	return &res
+}
+
+func (c *commonContext) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	res.invocationContext = res.invocationContext.ApplyICDelta(d)
+	return &res
 }

@@ -115,7 +115,7 @@ type InvocationContext interface {
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
 
-	Apply(d *InvocationContextDelta) InvocationContext
+	ApplyICDelta(d *InvocationContextDelta) InvocationContext
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

@@ -447,6 +447,10 @@ type MockInvocationContext struct {
 	invocationID string
 }
 
+func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 func (m *MockInvocationContext) Session() session.Session                                { return m.session }
 func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
 func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }

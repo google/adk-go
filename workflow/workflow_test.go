@@ -43,6 +43,11 @@ type MockInvocationContext struct {
 	isolationScope string
 }
 
+// ApplyICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 // newMockCtx returns a fresh MockInvocationContext backed by
 // t.Context(), which is automatically cancelled when the test ends
 // — preventing leaked scheduler goroutines from outliving the test.

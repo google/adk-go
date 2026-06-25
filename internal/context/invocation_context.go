@@ -128,7 +128,7 @@ func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false
 
 var _ agent.InvocationContext = (*InvocationContext)(nil)
 
-func (c *InvocationContext) Apply(d *agent.InvocationContextDelta) agent.InvocationContext {
+func (c *InvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
 	res := *c
 	if d.UserContent != nil {
 		res.params.UserContent = *d.UserContent

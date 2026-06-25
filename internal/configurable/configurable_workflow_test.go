@@ -95,6 +95,11 @@ type MockInvocationContext struct {
 	userContent *genai.Content
 }
 
+// ApplyICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	panic("unimplemented")
+}
+
 func (m *MockInvocationContext) Session() session.Session        { return m.sess }
 func (m *MockInvocationContext) InvocationID() string            { return "test-inv-id" }
 func (m *MockInvocationContext) UserContent() *genai.Content     { return m.userContent }

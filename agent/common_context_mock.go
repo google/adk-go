@@ -214,6 +214,14 @@ func (c *ContextMock) OutputForAncestors() []string {
 	return nil
 }
 
+func (c *ContextMock) Apply(d *CommonContextDelta) Context {
+	return c
+}
+
+func (c *ContextMock) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+	return c
+}
+
 var (
 	_ Context           = (*ContextMock)(nil)
 	_ InvocationContext = (*ContextMock)(nil)
