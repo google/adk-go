@@ -284,5 +284,6 @@ func (pm *PluginManager) Close() error {
 }
 
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
+	// TODO(kdroste): refactor underlying context
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
 }

@@ -611,6 +611,7 @@ func TestScheduler_RetryInChain(t *testing.T) {
 // does not run if the workflow is cancelled.
 func TestScheduler_RetryCancelled(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
+	// TODO(kdroste): refactor underlying context
 	ctx, cancel := context.WithCancel(mockCtx.Context)
 	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
 

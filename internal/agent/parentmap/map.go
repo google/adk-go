@@ -68,6 +68,7 @@ func (m Map) RootAgent(cur agent.Agent) agent.Agent {
 }
 
 func ToContext(ctx context.Context, parents Map) context.Context {
+	// TODO(kdroste): refactor underlying context
 	return context.WithValue(ctx, mapCtxKey, parents)
 }
 

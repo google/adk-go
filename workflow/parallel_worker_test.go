@@ -442,6 +442,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// TODO(kdroste): refactor underlying context
 	ctx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: ctx}
 	exCtx := agent.NewNodeContext(mockCtx, nil)

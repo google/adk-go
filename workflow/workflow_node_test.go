@@ -325,6 +325,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	outerWf := mustNew(t, outerEdges)
 
 	// Act: run the outer workflow with a cancellable context and cancel it.
+	// TODO(kdroste): refactor underlying context
 	baseCtx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: baseCtx}
 

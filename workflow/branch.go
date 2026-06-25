@@ -79,6 +79,7 @@ func (b *branchOverride) Branch() string { return b.branch }
 // preserved through context-cancellation wrapping.
 func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContext {
 	return &branchOverride{
+		// TODO(kdroste): refactor underlying context
 		InvocationContext: b.InvocationContext.WithContext(ctx),
 		branch:            b.branch,
 	}
@@ -171,6 +172,7 @@ func (o *isolationScopeOverride) IsolationScope() string { return o.scope }
 // WithContext preserves the scope override through context-cancellation
 // wrapping.
 func (o *isolationScopeOverride) WithAgentContext(ctx context.Context) agent.Context {
+	// TODO(kdroste): refactor underlying context
 	ic := o.Context.WithContext(ctx)
 	nc := agent.NewNodeContext(ic, nil)
 	return &isolationScopeOverride{

@@ -1346,6 +1346,7 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
 
+			// TODO(kdroste): refactor underlying context
 			ictxCtx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			session := prepareSession(t, ictxCtx, []*session.Event{newUserHello()})

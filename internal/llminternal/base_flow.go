@@ -348,7 +348,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				}
 			}
-
+			// TODO(kdroste): refactor underlying context
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {

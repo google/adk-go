@@ -61,7 +61,7 @@ func TestWithUUIDProviderOverridesNewUUID(t *testing.T) {
 
 func TestWithUUIDProviderDerivedContext(t *testing.T) {
 	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "fixed" })
-
+	// TODO(kdroste): refactor underlying context
 	derived, cancel := context.WithCancel(ctx)
 	defer cancel()
 
