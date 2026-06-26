@@ -367,9 +367,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// so an ambient deadline on the workflow invocation still
 	// applies.
 	cfg := n.Config()
-	var (
-		cancel context.CancelFunc
-	)
+	var cancel context.CancelFunc
 	// Order matters: WithContext sets up per-node cancellation on
 	// the underlying InvocationContext; withBranch then wraps the
 	// result in branchOverride. Reversing would either lose the

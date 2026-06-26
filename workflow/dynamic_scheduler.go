@@ -232,7 +232,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		RunID:                  &runID,
 		SubScheduler:           &ss,
 		OutputForAncestors:     &childAncestors,
-		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope}}
+		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope},
+	}
 
 	childCtx := s.parentCtx.Apply(delta)
 

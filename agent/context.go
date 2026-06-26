@@ -220,7 +220,7 @@ type Context interface {
 	// WithBranch returns a Context whose Branch() returns the
 	// given value; all other fields (path, runID, subScheduler,
 	// resumeInputs, embedded InvocationContext) are preserved.
-	//WithBranch(branch string) Context
+	// WithBranch(branch string) Context
 
 	// SubScheduler is non-nil only when this context belongs to a
 	// dynamic-node activation; RunNode uses it to schedule children.

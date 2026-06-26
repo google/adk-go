@@ -148,35 +148,3 @@ func commonBranchPrefix(branches []string) string {
 	}
 	return strings.Join(splits[0][:commonCount], ".")
 }
-
-// Isolation scope, unlike branch (prefix match, empty is universal), is
-// an exact match — a scoped node sees only events tagged with its own
-// scope.
-
-func withIsolationScope(ctx agent.Context, scope string) agent.Context {
-	if ctx.IsolationScope() == scope {
-		return ctx
-	}
-	return &isolationScopeOverride{Context: ctx, scope: scope}
-}
-
-// isolationScopeOverride wraps an InvocationContext, overriding
-// IsolationScope(). Mirrors branchOverride.
-type isolationScopeOverride struct {
-	agent.Context
-	scope string
-}
-
-func (o *isolationScopeOverride) IsolationScope() string { return o.scope }
-
-// WithContext preserves the scope override through context-cancellation
-// wrapping.
-func (o *isolationScopeOverride) WithAgentContext(ctx context.Context) agent.Context {
-	// TODO(kdroste): refactor underlying context
-	ic := o.Context.WithContext(ctx)
-	nc := agent.NewContext(ic)
-	return &isolationScopeOverride{
-		Context: nc,
-		scope:   o.scope,
-	}
-}

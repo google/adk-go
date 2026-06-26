@@ -325,7 +325,7 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 		return
 	}
 
-	//TODO(kdroste): refactor underlying context
+	// TODO(kdroste): refactor underlying context
 	ctx = context.WithoutCancel(ctx)
 
 	if cfg.RemoteTaskCleanupCallback != nil {
