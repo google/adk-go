@@ -289,7 +289,6 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		if ac, ok := ctx.(agent.Context); ok {
 			ancestors = ac.OutputForAncestors()
 		}
-		c = agent.PromoteContext(ctx)
 		runID := "1"
 		var subScheduler agent.DynamicSubScheduler = nil
 		delta := &agent.CommonContextDelta{
@@ -298,9 +297,9 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			OutputForAncestors: &ancestors,
 			SubScheduler:       &subScheduler,
 		}
-		c = c.WithDelta(delta)
+		c = agent.PromoteWithDelta(ctx, delta)
 	} else {
-		c = agent.PromoteContext(ctx)
+		c = agent.Promote(ctx)
 	}
 	return w.RunNode(c, userInput(c))
 }

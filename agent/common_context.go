@@ -33,7 +33,7 @@ import (
 // It allows to copy&modify context instead of building chains.
 
 // Promotes Context from non-commonContext to commonContext
-func PromoteContext(parent InvocationContext) Context {
+func Promote(parent InvocationContext) Context {
 	if c, ok := parent.(*commonContext); ok {
 		return c
 	}
@@ -44,7 +44,7 @@ func PromoteContext(parent InvocationContext) Context {
 }
 
 func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context {
-	c := PromoteContext(ctx)
+	c := Promote(ctx)
 	return c.WithDelta(delta)
 }
 

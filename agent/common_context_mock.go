@@ -218,7 +218,7 @@ func (c *ContextMock) WithDelta(d *CommonContextDelta) Context {
 	return c
 }
 
-func (c *ContextMock) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+func (c *ContextMock) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	return c
 }
 

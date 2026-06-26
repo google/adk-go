@@ -437,7 +437,7 @@ type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	var ag agent.Agent = a
-	ctx = ctx.ApplyICDelta(&agent.InvocationContextDelta{Agent: &ag})
+	ctx = ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &ag})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,

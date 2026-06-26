@@ -42,7 +42,7 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.ApplyICDelta(d.InvocationContextDelta)
+	res.invocationContext = res.invocationContext.WithICDelta(d.InvocationContextDelta)
 
 	if d.InvocationContextDelta != nil {
 		if d.InvocationContextDelta.Context != nil {
@@ -68,11 +68,11 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	return &res
 }
 
-func (c *commonContext) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.ApplyICDelta(d)
+	res.invocationContext = res.invocationContext.WithICDelta(d)
 	return &res
 }

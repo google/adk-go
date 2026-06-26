@@ -416,6 +416,6 @@ func (c *fakeInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	return &cp
 }
 
-func (c *fakeInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+func (c *fakeInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
 	return c
 }

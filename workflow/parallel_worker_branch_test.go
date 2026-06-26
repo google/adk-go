@@ -104,13 +104,13 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 
 	// Simulate ParallelWorker running under a parent branch
 	// "outer@1" (e.g. one branch of a static fan-out).
-	parentCtx := agent.PromoteContext(newMockCtx(t))
 	branch := "outer@1"
-	exCtx := parentCtx.WithDelta(&agent.CommonContextDelta{
-		InvocationContextDelta: &agent.InvocationContextDelta{
-			Branch: &branch,
-		},
-	})
+	exCtx := agent.PromoteWithDelta(newMockCtx(t),
+		&agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{
+				Branch: &branch,
+			},
+		})
 
 	events := pw.Run(exCtx, []any{"x", "y"})
 	for _, err := range events {

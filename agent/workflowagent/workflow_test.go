@@ -54,8 +54,8 @@ type MockInvocationContext struct {
 	myAgent     agent.Agent
 }
 
-// ApplyICDelta implements [agent.InvocationContext].
-func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+// WithICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
 	return m
 }
 

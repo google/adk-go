@@ -673,7 +673,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			var nextStream iter.Seq2[*session.Event, error]
 			if nr, ok := nextAgent.(nodeRunner); ok {
-				nextStream = nr.RunNode(agent.PromoteContext(ctx), nil)
+				nextStream = nr.RunNode(agent.Promote(ctx), nil)
 			} else {
 				nextStream = nextAgent.Run(ctx)
 			}

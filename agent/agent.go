@@ -190,7 +190,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			// nc := NewNodeContext(ic, nil)
 			// nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
 		} else {
-			ic := ctx.ApplyICDelta(icDelta)
+			ic := ctx.WithICDelta(icDelta)
 			nodeCtx = NewContext(ic)
 		}
 		// ic := &invocationContext{
@@ -409,7 +409,7 @@ type invocationContext struct {
 }
 
 // Apply implements [InvocationContext].
-func (c *invocationContext) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
+func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c
 	}

@@ -44,8 +44,8 @@ type MockInvocationContext struct {
 	branch         string
 }
 
-// ApplyICDelta implements [agent.InvocationContext].
-func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+// WithICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
 	if d == nil {
 		return m
 	}

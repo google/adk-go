@@ -493,7 +493,7 @@ type MockCallbackContext struct {
 	agentName    string
 }
 
-func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
 	return m
 }
 

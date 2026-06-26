@@ -38,9 +38,9 @@ func (c *callbackContextWrapper) WithDelta(d *CommonContextDelta) Context {
 	return c.context.WithDelta(d)
 }
 
-// ApplyICDelta implements [Context].
-func (c *callbackContextWrapper) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
-	return c.context.ApplyICDelta(d)
+// WithICDelta implements [Context].
+func (c *callbackContextWrapper) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	return c.context.WithICDelta(d)
 }
 
 // WithAgentCancel implements [Context].
