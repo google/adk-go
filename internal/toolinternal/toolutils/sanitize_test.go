@@ -15,6 +15,7 @@
 package toolutils
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 
@@ -117,6 +118,72 @@ func TestSanitizeSchemaForVertex(t *testing.T) {
 			t.Errorf("got %+v, want nil", got)
 		}
 	})
+
+	t.Run("leaves_valid_schema_unchanged", func(t *testing.T) {
+		in := &jsonschema.Schema{
+			Type:     "object",
+			Required: []string{"name"},
+			Properties: map[string]*jsonschema.Schema{
+				"name":   {Type: "string", Description: "the name"},
+				"age":    {Type: "integer", Minimum: ptr(0.0)},
+				"factor": {Type: "number", MultipleOf: ptr(2.0)},
+				"tags":   {Type: "array", Items: &jsonschema.Schema{Type: "string"}},
+				"email":  {Type: "string", Format: "email"},
+			},
+			AllOf: []*jsonschema.Schema{{Required: []string{"age"}}},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("schema with no offending composition changed shape:\n got = %+v\nwant = %+v", out, in)
+		}
+	})
+
+	t.Run("preserves_sibling_free_structured_composition", func(t *testing.T) {
+		in := &jsonschema.Schema{
+			AnyOf: []*jsonschema.Schema{
+				{Type: "object", Properties: map[string]*jsonschema.Schema{"a": {Type: "string"}}},
+				{Type: "object", Properties: map[string]*jsonschema.Schema{"b": {Type: "integer"}}},
+			},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("already-valid composition changed:\n got = %+v\nwant = %+v", out, in)
+		}
+	})
+
+	t.Run("collapses_sibling_free_primitive_union", func(t *testing.T) {
+		in := &jsonschema.Schema{AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "null"}}}
+		out := SanitizeSchemaForVertex(in)
+		if len(out.AnyOf) != 0 {
+			t.Errorf("anyOf not collapsed: %+v", out.AnyOf)
+		}
+		if !slices.Equal(out.Types, []string{"string", "null"}) {
+			t.Errorf("types = %v, want [string null]", out.Types)
+		}
+	})
+
+	t.Run("member_with_constraint_is_not_folded", func(t *testing.T) {
+		// A member carrying a validation keyword (format) is not a plain type, so
+		// folding into a type array — which would drop the keyword — must not
+		// happen; the composition is kept and only siblings are stripped.
+		in := &jsonschema.Schema{
+			Description: "optional email",
+			AnyOf: []*jsonschema.Schema{
+				{Type: "string", Format: "email"},
+				{Type: "null"},
+			},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if len(out.Types) != 0 {
+			t.Errorf("constrained union folded into types %v", out.Types)
+		}
+		if len(out.AnyOf) != 2 {
+			t.Errorf("composition members changed: %+v", out.AnyOf)
+		}
+		if hasCompositionWithSiblings(out) {
+			t.Errorf("siblings not stripped: %+v", out)
+		}
+	})
 }
 
 func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
@@ -202,4 +269,53 @@ func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
 			t.Errorf("input map was mutated: %+v", f)
 		}
 	})
+
+	t.Run("leaves_valid_schema_unchanged", func(t *testing.T) {
+		in := map[string]any{
+			"type":     "object",
+			"required": []any{"name"},
+			"properties": map[string]any{
+				"name":  map[string]any{"type": "string", "description": "the name"},
+				"tags":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"email": map[string]any{"type": "string", "format": "email"},
+			},
+		}
+		out := SanitizeJSONSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("schema with no offending composition changed shape:\n got = %#v\nwant = %#v", out, in)
+		}
+	})
+
+	t.Run("does_not_recurse_into_instance_data", func(t *testing.T) {
+		// default holds an instance value, not a subschema; an anyOf inside it
+		// must be left untouched.
+		in := map[string]any{
+			"type": "string",
+			"default": map[string]any{
+				"anyOf": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"type": "null"},
+				},
+			},
+		}
+		out := SanitizeJSONSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("instance data under default was rewritten:\n got = %#v\nwant = %#v", out, in)
+		}
+	})
+
+	t.Run("allOf_passes_through", func(t *testing.T) {
+		in := map[string]any{
+			"allOf": []any{
+				map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}},
+				map[string]any{"required": []any{"a"}},
+			},
+		}
+		out := SanitizeJSONSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("allOf was modified:\n got = %#v\nwant = %#v", out, in)
+		}
+	})
 }
+
+func ptr[T any](v T) *T { return &v }
