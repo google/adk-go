@@ -35,12 +35,12 @@ type callbackContextWrapper struct {
 
 // Apply implements [Context].
 func (c *callbackContextWrapper) Apply(d *CommonContextDelta) Context {
-	return c.Apply(d)
+	return c.context.Apply(d)
 }
 
 // ApplyICDelta implements [Context].
 func (c *callbackContextWrapper) ApplyICDelta(d *InvocationContextDelta) InvocationContext {
-	return c.ApplyICDelta(d)
+	return c.context.ApplyICDelta(d)
 }
 
 // WithAgentCancel implements [Context].
