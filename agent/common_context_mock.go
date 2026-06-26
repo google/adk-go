@@ -214,7 +214,7 @@ func (c *ContextMock) OutputForAncestors() []string {
 	return nil
 }
 
-func (c *ContextMock) Apply(d *CommonContextDelta) Context {
+func (c *ContextMock) WithDelta(d *CommonContextDelta) Context {
 	return c
 }
 

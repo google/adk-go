@@ -298,7 +298,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			OutputForAncestors: &ancestors,
 			SubScheduler:       &subScheduler,
 		}
-		c = c.Apply(delta)
+		c = c.WithDelta(delta)
 	} else {
 		c = agent.PromoteContext(ctx)
 	}

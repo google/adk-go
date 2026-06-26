@@ -114,7 +114,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			SubScheduler:       &sub,
 			OutputForAncestors: &outputForAncestors,
 		}
-		orchestratorCtx := ctx.Apply(delta)
+		orchestratorCtx := ctx.WithDelta(delta)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {

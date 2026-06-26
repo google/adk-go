@@ -48,7 +48,7 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 		SubScheduler:       &subScheduler,
 	}
 
-	dynCtx := baseCtx.Apply(delta)
+	dynCtx := baseCtx.WithDelta(delta)
 
 	tests := []struct {
 		name         string

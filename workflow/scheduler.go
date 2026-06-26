@@ -383,7 +383,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	runID := "1"
 	ofa := s.terminalAncestors(name)
 	var dss agent.DynamicSubScheduler
-	perNodeCtx := s.parentCtx.Apply(&agent.CommonContextDelta{
+	perNodeCtx := s.parentCtx.WithDelta(&agent.CommonContextDelta{
 		ResumeInputs: &resumeInputs,
 		InvocationContextDelta: &agent.InvocationContextDelta{
 			Branch: &branch,

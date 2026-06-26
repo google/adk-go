@@ -206,7 +206,7 @@ func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Conten
 		Path:               &path,
 		OutputForAncestors: &outputForAncestors,
 	}
-	return ctx.Apply(delta)
+	return ctx.WithDelta(delta)
 }
 
 // inputToUserContent converts a node input value into a user Content for

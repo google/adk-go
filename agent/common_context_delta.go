@@ -37,7 +37,7 @@ type InvocationContextDelta struct {
 	IsolationScope *string
 }
 
-func (c *commonContext) Apply(d *CommonContextDelta) Context {
+func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	if d == nil {
 		return c
 	}

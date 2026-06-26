@@ -33,9 +33,9 @@ type callbackContextWrapper struct {
 	context Context
 }
 
-// Apply implements [Context].
-func (c *callbackContextWrapper) Apply(d *CommonContextDelta) Context {
-	return c.context.Apply(d)
+// WithDelta implements [Context].
+func (c *callbackContextWrapper) WithDelta(d *CommonContextDelta) Context {
+	return c.context.WithDelta(d)
 }
 
 // ApplyICDelta implements [Context].

@@ -183,7 +183,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		// TODO(kdroste): consider new Promote func converting InvocationContext to Context
 		var nodeCtx Context
 		if parentCC, ok := ctx.(Context); ok {
-			nodeCtx = parentCC.Apply(
+			nodeCtx = parentCC.WithDelta(
 				&CommonContextDelta{
 					InvocationContextDelta: icDelta,
 				})

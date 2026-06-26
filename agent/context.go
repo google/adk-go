@@ -240,5 +240,6 @@ type Context interface {
 	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	OutputForAncestors() []string
 
-	Apply(d *CommonContextDelta) Context
+	// WithDelta returns a copy of source context with applied delta d
+	WithDelta(d *CommonContextDelta) Context
 }

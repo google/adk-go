@@ -29,6 +29,10 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// In general CommonContext should not be wrapped with contexts not providing agent.Context.
+// It allows to copy&modify context instead of building chains.
+
+// Promotes Context from non-commonContext to commonContext
 func PromoteContext(parent InvocationContext) Context {
 	if c, ok := parent.(*commonContext); ok {
 		return c
@@ -56,7 +60,7 @@ func NewContext(parent InvocationContext) Context {
 func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
 	if c, ok := parent.(Context); ok {
 		// apply delta
-		res := c.Apply(&CommonContextDelta{
+		res := c.WithDelta(&CommonContextDelta{
 			ResumeInputs: &resumeInputs,
 		})
 		return res

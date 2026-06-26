@@ -32,9 +32,9 @@ type toolContextWrapper struct {
 	context Context
 }
 
-// Apply implements [Context].
-func (c *toolContextWrapper) Apply(d *CommonContextDelta) Context {
-	return c.context.Apply(d)
+// WithDelta implements [Context].
+func (c *toolContextWrapper) WithDelta(d *CommonContextDelta) Context {
+	return c.context.WithDelta(d)
 }
 
 // ApplyICDelta implements [Context].
