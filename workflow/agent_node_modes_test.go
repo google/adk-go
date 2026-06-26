@@ -23,6 +23,8 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/internal/agent/runconfig"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
@@ -99,6 +101,50 @@ func TestAgentNode_TaskMode_DoesNotPromoteModelText(t *testing.T) {
 	}
 }
 
+func TestAgentNode_SequentialAgentAsNode_NoMultipleOutputs(t *testing.T) {
+	t.Parallel()
+
+	seqNode, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_node",
+			SubAgents: []agent.Agent{fixedTextAgent(t, "seq_a", "SEQ_A"), fixedTextAgent(t, "seq_b", "SEQ_B")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(seqNode, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	ctx := newRunnableNodeContext(t, seqNode)
+	assertSubAgentOutputsNotSynthesized(t, node, "seq_node", ctx, "seq_a", "seq_b")
+}
+
+func TestAgentNode_ParallelAgentAsNode_NoMultipleOutputs(t *testing.T) {
+	t.Parallel()
+
+	parNode, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "par_node",
+			SubAgents: []agent.Agent{fixedTextAgent(t, "par_a", "PAR_A"), fixedTextAgent(t, "par_b", "PAR_B")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New: %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(parNode, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	ctx := newRunnableNodeContext(t, parNode)
+	assertSubAgentOutputsNotSynthesized(t, node, "par_node", ctx, "par_a", "par_b")
+}
+
 // newRunnableNodeContext builds the minimal NodeContext an LlmAgent
 // flow needs: in-memory Session, Agent, and a RunConfig on the
 // embedded context (the flow reads it via runconfig.FromContext and
@@ -151,3 +197,49 @@ func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ 
 }
 
 var _ model.LLM = (*scriptedLLM)(nil)
+
+func fixedTextAgent(t *testing.T, name, text string) agent.Agent {
+	t.Helper()
+	llm := &scriptedLLM{turns: []*model.LLMResponse{{
+		Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: text}},
+		},
+	}}}
+	a, err := llmagent.New(llmagent.Config{Name: name, Model: llm})
+	if err != nil {
+		t.Fatalf("llmagent.New(%q): %v", name, err)
+	}
+	return a
+}
+
+// assertSubAgentOutputsNotSynthesized fails if a composite's sub-agent events
+// were promoted to node outputs (each would trip the one-output-per-node rule).
+func assertSubAgentOutputsNotSynthesized(t *testing.T, node workflow.Node, nodeName string, ctx agent.Context, wantAuthors ...string) {
+	t.Helper()
+
+	seen := map[string]bool{}
+	for ev, err := range node.Run(ctx, nil) {
+		if err != nil {
+			t.Fatalf("node.Run yielded err: %v", err)
+		}
+		if ev == nil || ev.LLMResponse.Partial {
+			continue
+		}
+		if ev.Author != "" && ev.Author != nodeName {
+			seen[ev.Author] = true
+			if ev.Output != nil {
+				t.Errorf("sub-agent %q event Output = %v, want nil", ev.Author, ev.Output)
+			}
+			if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+				t.Errorf("sub-agent %q event MessageAsOutput = true, want false", ev.Author)
+			}
+		}
+	}
+
+	for _, a := range wantAuthors {
+		if !seen[a] {
+			t.Errorf("missing final event from sub-agent %q", a)
+		}
+	}
+}
