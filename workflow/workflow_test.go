@@ -49,13 +49,14 @@ func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) ag
 	if d == nil {
 		return m
 	}
+	res := *m
 	if d.IsolationScope != nil {
-		m.isolationScope = *d.IsolationScope
+		res.isolationScope = *d.IsolationScope
 	}
 	if d.Branch != nil {
-		m.branch = *d.Branch
+		res.branch = *d.Branch
 	}
-	return m
+	return &res
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
