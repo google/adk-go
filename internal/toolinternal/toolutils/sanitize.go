@@ -27,20 +27,16 @@ var (
 	schemaMapType   = reflect.TypeOf(map[string]*jsonschema.Schema(nil))
 )
 
-// SanitizeSchemaForVertex returns a deep copy of s normalized so that no node
-// carries an `anyOf`/`oneOf` composition alongside sibling keywords. Vertex
-// function-calling rejects such schemas: "schema specified other fields
-// alongside any_of. When using any_of, it must be the only field set." Optional
-// and union-of-primitive schemas emitted by pydantic/MCP servers
-// (`{"description":..., "anyOf":[{"type":"string"},{"type":"null"}]}`) are the
-// common trigger.
+// SanitizeSchemaForVertex returns a deep copy of s with every `anyOf`/`oneOf`
+// composition normalized so it never sits alongside sibling keywords — the
+// shape Vertex function-calling rejects ("schema specified other fields
+// alongside any_of. When using any_of, it must be the only field set."),
+// commonly the optional fields pydantic/MCP servers emit
+// (`{"description":..., "anyOf":[{"type":"string"},{"type":"null"}]}`).
 //
-// A composition whose members are all plain type schemas is collapsed into a
-// JSON-Schema type array, preserving the node's sibling keywords (description,
-// title, ...). A composition with structured members is reduced to the
-// composition keyword alone, satisfying the Vertex constraint. The normalized
-// form is valid JSON Schema for both the Vertex and Gemini API backends, so it
-// is applied unconditionally. Returns nil for a nil input.
+// Primitive unions collapse into a type array (siblings preserved); structured
+// compositions are reduced to the composition keyword alone. The result is
+// valid for both the Vertex and Gemini backends. Returns nil for nil.
 func SanitizeSchemaForVertex(s *jsonschema.Schema) *jsonschema.Schema {
 	if s == nil {
 		return nil
@@ -51,9 +47,8 @@ func SanitizeSchemaForVertex(s *jsonschema.Schema) *jsonschema.Schema {
 }
 
 // SanitizeJSONSchemaForVertex is SanitizeSchemaForVertex for a schema held in an
-// `any`. It covers both forms a tool schema takes: a *jsonschema.Schema, and the
-// map[string]any that MCP tools arrive as on the client side. Other values pass
-// through; the map is deep-copied, not mutated.
+// `any`: a *jsonschema.Schema, or the map[string]any that MCP tools arrive as on
+// the client side. Other values pass through; the map is deep-copied, not mutated.
 func SanitizeJSONSchemaForVertex(v any) any {
 	switch s := v.(type) {
 	case *jsonschema.Schema:
