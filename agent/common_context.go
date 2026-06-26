@@ -138,15 +138,6 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	return wrapper
 }
 
-func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
-	c, ok := ctx.(*commonContext)
-	if !ok {
-		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
-	}
-	res := c.newCleanToolContext(functionCallID, actions, confirmation)
-	return res, nil
-}
-
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	if actions == nil {
 		return &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
@@ -196,46 +187,14 @@ type commonContext struct {
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
 // children, or nil outside a dynamic-node activation. The struct field
 // is the fast path for a freshly built dynamic-node context (and takes
-// precedence); the embedded context value is the fallback that survives
-// context re-wrapping by agents and the LLM flow.
+// precedence);
 func (c *commonContext) SubScheduler() DynamicSubScheduler {
-	if c.subScheduler != nil {
-		return c.subScheduler
-	}
-	if cc, ok := c.Context.(interface{ SubScheduler() DynamicSubScheduler }); ok {
-		return cc.SubScheduler()
-	}
-	return nil
-}
-
-func (c *commonContext) newCleanToolContext(functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
-	ic := &invocationContext{
-		session:      c.Session(),
-		invocationID: c.InvocationID(),
-	}
-	res := &commonContext{
-		invocationContext: ic,
-		actions:           actions,
-		functionCallID:    functionCallID,
-		toolConfirmation:  confirmation,
-		subScheduler:      c.subScheduler,
-	}
-	return res
+	return c.subScheduler
 }
 
 // Path implements [Context].
 func (c *commonContext) Path() string {
-	if c.path != "" {
-		return c.path
-	}
-	// Fallback: when this commonContext wraps another ADK Context (e.g. via NewToolContext
-	// wrapping a branchOverride), c.path is empty. Asserting against interface{ Path() string }
-	// delegates to c.Context. Without this delegation, reading Path() would fail whenever
-	// context is wrapped by adapters like branchOverride.
-	if p, ok := c.Context.(interface{ Path() string }); ok {
-		return p.Path()
-	}
-	return ""
+	return c.path
 }
 
 // RunID implements [Context].
@@ -519,4 +478,26 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 		a.actions.ArtifactDelta[name] = resp.Version
 	}
 	return resp, nil
+}
+
+func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
+	c, ok := ctx.(*commonContext)
+	if !ok {
+		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
+	}
+
+	ic := &invocationContext{
+		session:      c.Session(),
+		invocationID: c.InvocationID(),
+	}
+	res := &commonContext{
+		invocationContext: ic,
+		actions:           actions,
+		functionCallID:    functionCallID,
+		toolConfirmation:  confirmation,
+		subScheduler:      c.subScheduler,
+	}
+
+	// res := c.newCleanToolContext(functionCallID, actions, confirmation)
+	return res, nil
 }

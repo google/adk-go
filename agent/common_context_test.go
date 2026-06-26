@@ -20,14 +20,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-// customContextDecorator is a non-commonContext struct that wraps a Context.
-// When passed to ADK constructors like NewNodeContext or NewContext, the
-// constructor does not short-circuit (since it is not *commonContext) and
-// re-wraps it in a new commonContext envelope.
-type customContextDecorator struct {
-	Context
-}
-
 func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 	t.Parallel()
 
@@ -60,24 +52,12 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 			},
 		},
 		{
-			name: "NewNodeContext wrapping custom decorator (delegates fallback to c.Context)",
-			buildWrapped: func(parent Context) Context {
-				decorator := &customContextDecorator{Context: parent}
-				return NewContext(decorator)
-			},
-		},
-		{
-			name: "NewContext wrapping custom decorator (delegates fallback to c.Context)",
-			buildWrapped: func(parent Context) Context {
-				decorator := &customContextDecorator{Context: parent}
-				return NewContext(decorator)
-			},
-		},
-		{
 			name: "NewToolContext wrapping branchOverride adapter (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
-				branched := &branchOverride{Context: parent, branch: "parallel-branch"}
-				return NewToolContext(branched, "call-id-1", nil, nil)
+				// TODO(kdroste): consult
+				tc := NewToolContext(parent, "call-id-1", nil, nil)
+				branch := "parallel-branch"
+				return tc.WithDelta(&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
 			},
 		},
 	}
