@@ -18,6 +18,7 @@ package console
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -163,6 +165,9 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			}
 			log.Fatal(err)
 		case userInput := <-inputChan:
+			// Drop the line terminator the reader keeps, so the message
+			// matches what the web UI submits (no trailing newline).
+			userInput = strings.TrimRight(userInput, "\r\n")
 
 			var userMsg *genai.Content
 			if len(pendingInterrupts) > 0 {
@@ -198,6 +203,8 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			fmt.Print("\nAgent -> ")
 			prevText := ""
+			printedContent := false
+			var finalOutput any
 			var collectedEvents []*session.Event
 			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
 				StreamingMode: streamingMode,
@@ -207,12 +214,21 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 				} else {
 					collectedEvents = append(collectedEvents, event)
 					if event.LLMResponse.Content == nil {
+						// Function/terminal nodes carry their result in
+						// Event.Output, not model content; keep the latest
+						// so a content-less turn still surfaces a result.
+						if event.Output != nil {
+							finalOutput = event.Output
+						}
 						continue
 					}
 
 					text := ""
 					for _, p := range event.LLMResponse.Content.Parts {
 						text += p.Text
+					}
+					if text != "" {
+						printedContent = true
 					}
 
 					if streamingMode != agent.StreamingModeSSE {
@@ -245,9 +261,27 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 				renderInterruptPrompt(pendingInterrupts[0])
 				continue
 			}
+			// A workflow whose terminal node returns a value rather than
+			// model content streams no text; surface that result so the
+			// turn isn't silent.
+			if !printedContent && finalOutput != nil {
+				fmt.Print(renderOutput(finalOutput))
+			}
 			fmt.Print("\nUser -> ")
 		}
 	}
+}
+
+// renderOutput formats a node's Output value for the console: strings
+// as-is, anything else as compact JSON.
+func renderOutput(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprint(v)
 }
 
 // Parse implements launcher.SubLauncher. After parsing console-specific
