@@ -767,7 +767,8 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		runCfg := ctx.RunConfig()
+		useStream := runCfg != nil && runCfg.StreamingMode == agent.StreamingModeSSE
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
