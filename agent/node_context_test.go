@@ -67,6 +67,24 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	})
 }
 
+func prepareDelta(path, runID string, sub agent.DynamicSubScheduler, outputForAncestors []string) *agent.CommonContextDelta {
+	return &agent.CommonContextDelta{
+		Path:               &path,
+		RunID:              &runID,
+		SubScheduler:       &sub,
+		OutputForAncestors: &outputForAncestors,
+	}
+}
+
+func prepareDelta(path, runID string, sub agent.DynamicSubScheduler, outputForAncestors []string) *agent.CommonContextDelta {
+	return &agent.CommonContextDelta{
+		Path:               &path,
+		RunID:              &runID,
+		SubScheduler:       &sub,
+		OutputForAncestors: &outputForAncestors,
+	}
+}
+
 func TestNodeContext_PathAndRunID(t *testing.T) {
 	t.Run("top-level static returns empty", func(t *testing.T) {
 		c := agent.NewContext(newMockCtx(t))
@@ -80,7 +98,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 	t.Run("child populated from constructor", func(t *testing.T) {
 		parent := agent.NewContext(newMockCtx(t))
-		child := agent.NewDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
+		child := parent.Apply(prepareDelta("wf/fixer@2", "2", nil, nil))
 		if got, want := child.Path(), "wf/fixer@2"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -91,7 +109,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 	t.Run("activation populated with empty runID", func(t *testing.T) {
 		parent := agent.NewContext(newMockCtx(t))
-		act := agent.NewDynamicNodeContext(parent, "city_workflow", "", nil, nil)
+		act := parent.Apply(prepareDelta("city_workflow", "", nil, nil))
 		if got, want := act.Path(), "city_workflow"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -106,7 +124,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	sub := &stubSubScheduler{}
 
 	t.Run("child", func(t *testing.T) {
-		child := NewDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)
+		child := parent.Apply(prepareDelta("wf/asker@1", "1", sub, nil))
 		if v, ok := child.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("child.ResumedInput(%q) = (%v, %v), want (%q, true)", "approval", v, ok, "yes")
 		}
@@ -116,7 +134,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	})
 
 	t.Run("activation", func(t *testing.T) {
-		act := NewDynamicNodeContext(parent, "city_workflow", "", sub, nil)
+		act := parent.Apply(prepareDelta("city_workflow", "", sub, nil))
 		if v, ok := act.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("act.ResumedInput(%q) = (%v, %v), want (%q, true)", "approval", v, ok, "yes")
 		}

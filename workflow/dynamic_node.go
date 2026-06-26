@@ -107,7 +107,14 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 
 		emit := makeEmit(yield, ctx)
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
-		orchestratorCtx := agent.NewDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
+
+		outputForAncestors := sub.OutputForAncestors()
+		delta := &agent.CommonContextDelta{
+			RunID:              new(string),
+			SubScheduler:       &sub,
+			OutputForAncestors: &outputForAncestors,
+		}
+		orchestratorCtx := ctx.Apply(delta)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {

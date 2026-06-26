@@ -67,56 +67,13 @@ func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Conte
 	return c
 }
 
-func NewContextForAgent(ctx, ic InvocationContext) InvocationContext {
-	if ac, ok := ctx.(Context); ok {
-		// copy all, including SubSchedulers etc
-		return &commonContext{
-			Context:            ac,
-			invocationContext:  ic,
-			path:               ac.Path(),
-			runID:              ac.RunID(),
-			subScheduler:       ac.SubScheduler(),
-			outputForAncestors: ac.OutputForAncestors(),
-			actions:            ac.Actions(),
-			artifacts:          ac.Artifacts(),
-			functionCallID:     ac.FunctionCallID(),
-			toolConfirmation:   ac.ToolConfirmation(),
-		}
+func NewContextForAgent(ctx InvocationContext, a Agent) InvocationContext {
+	delta := &InvocationContextDelta{
+		Agent: &a,
 	}
-	return ic
-}
-
-func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
-	// NewDynamicNodeContext wraps parent for either a dynamic-node
-	// activation or one of its children, attaching path, runID, and the
-	// sub-scheduler RunNode reaches from the orchestrator body. Children
-	// pass the sub-scheduler's counter (or WithRunID) value as runID; a
-	// dynamic node's own activation passes runID="" — it is not itself a
-	// sub-scheduler child. Child inherits resumeInputs so HITL responses
-	// reach dynamic children.
-
-	res := parent.Apply(
-		&CommonContextDelta{
-			Path:               &path,
-			RunID:              &runID,
-			SubScheduler:       &sub,
-			OutputForAncestors: &outputForAncestors,
-		})
-	return res
-
-	// var inherited map[string]any
-	// if p, ok := parent.(*commonContext); ok {
-	// 	inherited = p.resumeInputs
-	// }
-	// return &commonContext{
-	// 	Context:            parent,
-	// 	invocationContext:  parent,
-	// 	resumeInputs:       inherited,
-	// 	path:               path,
-	// 	runID:              runID,
-	// 	subScheduler:       sub,
-	// 	outputForAncestors: outputForAncestors,
-	// }
+	ic := ctx.ApplyICDelta(delta)
+	// ic may be a commonContext or simple invocationContext, Promotion handles both cases
+	return PromoteContext(ic)
 }
 
 // NewCallbackContext returns a callback context initialized with provided actions.
