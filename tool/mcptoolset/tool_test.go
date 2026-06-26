@@ -15,6 +15,7 @@
 package mcptoolset
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -60,5 +61,8 @@ func TestConvertTool_SanitizesMapInputSchemaForVertex(t *testing.T) {
 	}
 	if age["description"] != "optional age" {
 		t.Errorf("description dropped: %+v", age)
+	}
+	if gotTypes, _ := age["type"].([]any); !slices.Equal(gotTypes, []any{"integer", "null"}) {
+		t.Errorf("type = %v, want [integer null]", age["type"])
 	}
 }
