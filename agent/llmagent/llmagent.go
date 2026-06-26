@@ -436,7 +436,8 @@ type llmAgent struct {
 type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	ctx = agent.NewContextForAgent(ctx, a)
+	var ag agent.Agent = a
+	ctx = ctx.ApplyICDelta(&agent.InvocationContextDelta{Agent: &ag})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,

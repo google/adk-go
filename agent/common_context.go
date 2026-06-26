@@ -43,6 +43,11 @@ func PromoteContext(parent InvocationContext) Context {
 	}
 }
 
+func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context {
+	c := PromoteContext(ctx)
+	return c.WithDelta(delta)
+}
+
 // NewContext returns a full Context backed by parent, with no callback,
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
@@ -69,15 +74,6 @@ func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Conte
 	c := NewContext(parent).(*commonContext)
 	c.resumeInputs = resumeInputs
 	return c
-}
-
-func NewContextForAgent(ctx InvocationContext, a Agent) InvocationContext {
-	delta := &InvocationContextDelta{
-		Agent: &a,
-	}
-	ic := ctx.ApplyICDelta(delta)
-	// ic may be a commonContext or simple invocationContext, Promotion handles both cases
-	return PromoteContext(ic)
 }
 
 // NewCallbackContext returns a callback context initialized with provided actions.
