@@ -188,6 +188,7 @@ func forEachChildSchema(s *jsonschema.Schema, f func(*jsonschema.Schema)) {
 // jsonSubschemaKeys and jsonSubschemaMapKeys list where subschemas live, so the
 // map-form walk recurses there only — never into instance data (enum, const,
 // default, examples) or a property whose name happens to be a schema keyword.
+// TestSubschemaKeyListsCoverStruct keeps them in sync with jsonschema.Schema.
 var (
 	jsonSubschemaKeys = []string{
 		"items", "additionalItems", "additionalProperties", "propertyNames",
@@ -196,7 +197,8 @@ var (
 		"prefixItems", "allOf", "anyOf", "oneOf",
 	}
 	jsonSubschemaMapKeys = []string{
-		"properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
+		"properties", "patternProperties", "$defs", "definitions",
+		"dependentSchemas", "dependencies",
 	}
 )
 

@@ -17,6 +17,7 @@ package toolutils
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -336,6 +337,53 @@ func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
 			t.Errorf("allOf was modified:\n got = %#v\nwant = %#v", out, in)
 		}
 	})
+}
+
+// TestSubschemaKeyListsCoverStruct keeps jsonSubschemaKeys/jsonSubschemaMapKeys
+// in sync with jsonschema.Schema: it fails if the struct has a subschema-bearing
+// field whose JSON key is in neither list. Such a gap would make the map-form
+// walk skip that location and leave an anyOf/oneOf-plus-siblings shape
+// unsanitized. (The struct-form walk uses forEachChildSchema and needs no list.)
+func TestSubschemaKeyListsCoverStruct(t *testing.T) {
+	covered := map[string]bool{}
+	for _, k := range jsonSubschemaKeys {
+		covered[k] = true
+	}
+	for _, k := range jsonSubschemaMapKeys {
+		covered[k] = true
+	}
+
+	// Wire keys for the subschema fields the library tags json:"-".
+	untagged := map[string]string{
+		"Items":             "items",
+		"ItemsArray":        "items",
+		"DependencySchemas": "dependencies",
+	}
+	subschemaTypes := map[reflect.Type]bool{
+		reflect.TypeOf((*jsonschema.Schema)(nil)):          true,
+		reflect.TypeOf([]*jsonschema.Schema(nil)):          true,
+		reflect.TypeOf(map[string]*jsonschema.Schema(nil)): true,
+	}
+
+	st := reflect.TypeOf(jsonschema.Schema{})
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if !subschemaTypes[f.Type] {
+			continue
+		}
+		wire := strings.Split(f.Tag.Get("json"), ",")[0]
+		if wire == "" || wire == "-" {
+			k, ok := untagged[f.Name]
+			if !ok {
+				t.Errorf("subschema field %s is json:%q with no wire-key override; add it to untagged and to the key lists", f.Name, f.Tag.Get("json"))
+				continue
+			}
+			wire = k
+		}
+		if !covered[wire] {
+			t.Errorf("subschema field %s (JSON key %q) is not covered by jsonSubschemaKeys/jsonSubschemaMapKeys", f.Name, wire)
+		}
+	}
 }
 
 func ptr[T any](v T) *T { return &v }
