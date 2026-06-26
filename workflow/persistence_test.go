@@ -56,7 +56,7 @@ func TestCollectNodeOutputs_MessageAsOutput(t *testing.T) {
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", true)}
 
-	outputs, completed := collectNodeOutputs(events, nodes)
+	outputs, completed := collectNodeOutputs(events, nodes, "")
 
 	if got, want := outputs["talky"], "Hello, world!"; got != want {
 		t.Errorf("outputs[talky] = %#v, want %q", got, want)
@@ -71,7 +71,7 @@ func TestCollectNodeOutputs_MessageNotFlagged(t *testing.T) {
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", false)}
 
-	outputs, _ := collectNodeOutputs(events, nodes)
+	outputs, _ := collectNodeOutputs(events, nodes, "")
 
 	if _, ok := outputs["talky"]; ok {
 		t.Errorf("outputs[talky] = %#v, want absent", outputs["talky"])
@@ -85,7 +85,7 @@ func TestCollectNodeOutputs_ExplicitOutputWins(t *testing.T) {
 	ev.Output = "explicit"
 	events := sliceEvents{ev}
 
-	outputs, _ := collectNodeOutputs(events, nodes)
+	outputs, _ := collectNodeOutputs(events, nodes, "")
 
 	if got, want := outputs["talky"], "explicit"; got != want {
 		t.Errorf("outputs[talky] = %#v, want %q", got, want)
@@ -109,7 +109,7 @@ func TestCollectNodeOutputs_OutputForAttributesAncestors(t *testing.T) {
 		},
 	}
 
-	outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes)
+	outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes, "")
 
 	if got, want := outputs["child"], "delegated"; got != want {
 		t.Errorf("outputs[child] = %#v, want %q", got, want)
@@ -175,5 +175,46 @@ func TestEventNodeName(t *testing.T) {
 				t.Errorf("eventNodeName() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestScanHistory_InvocationScope verifies rehydration is scoped to one
+// logical run: a stable interrupt ID resolved in an earlier invocation
+// must not shadow the same ID freshly raised in the current invocation
+// (the examples/workflow/hitl_simple re-run bug).
+func TestScanHistory_InvocationScope(t *testing.T) {
+	nodes := map[string]Node{"ask": newDummyNode("ask")}
+
+	raise := func(invID string) *session.Event {
+		return &session.Event{
+			Author:             "ask",
+			InvocationID:       invID,
+			LongRunningToolIDs: []string{"iid"},
+		}
+	}
+	resolve := func(invID string) *session.Event {
+		ev := &session.Event{Author: "user", InvocationID: invID}
+		ev.Content = &genai.Content{Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "iid",
+				Response: map[string]any{"payload": "first"},
+			},
+		}}}
+		return ev
+	}
+
+	// Run 1 (inv1) fully resolved; run 2 (inv2) freshly raised, unresolved.
+	events := sliceEvents{raise("inv1"), resolve("inv1"), raise("inv2")}
+
+	// Scoped to the current run: the prior run's resolution is invisible,
+	// so the interrupt is still pending.
+	if s := scanHistory(events, nodes, "inv2")["ask"]; s == nil || len(unresolvedInterrupts(s)) != 1 {
+		t.Fatalf("inv2 scope: want 1 unresolved interrupt, got %+v", s)
+	}
+
+	// Unscoped: the prior run's resolution leaks in and wrongly marks the
+	// interrupt resolved — the leak the invocation scope prevents.
+	if s := scanHistory(events, nodes, "")["ask"]; s == nil || len(unresolvedInterrupts(s)) != 0 {
+		t.Fatalf("no scope: want 0 unresolved (demonstrates the leak), got %+v", s)
 	}
 }

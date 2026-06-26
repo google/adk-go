@@ -256,6 +256,43 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_Resume(t *testing.T) {
 	}
 }
 
+// TestRunner_WorkflowHITL_TwoFullCycles_SameSession guards the re-run
+// case behind the hitl_simple bug: two complete pause/resume cycles in
+// one session must not collide. Each pause gets a fresh auto-generated
+// interrupt ID and rehydration is scoped to the resumed run's
+// invocation (adk-python parity), so the second resume still routes its
+// response to the handler instead of failing with ErrNothingToResume.
+func TestRunner_WorkflowHITL_TwoFullCycles_SameSession(t *testing.T) {
+	ctx := t.Context()
+
+	asker := newHitlAsker("asker", "", false /*rerunOnResume*/)
+	var handlerInput atomic.Value
+	handler := workflow.NewFunctionNode(
+		"handler",
+		func(ctx agent.Context, input string) (string, error) {
+			handlerInput.Store(input)
+			return "handled:" + input, nil
+		},
+		workflow.NodeConfig{},
+	)
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker, handler))
+
+	runCycle := func(answer string) {
+		turn1 := drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, userText("draft"), agent.RunConfig{}))
+		callID, callName := findLongRunningInterrupt(turn1)
+		if callID == "" {
+			t.Fatalf("fresh turn produced no interrupt; events:\n%s", debugEvents(turn1))
+		}
+		drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, resumeContent(callID, callName, answer), agent.RunConfig{}))
+		if got, want := handlerInput.Load(), answer; got != want {
+			t.Fatalf("handler input = %v, want %q", got, want)
+		}
+	}
+
+	runCycle("first")
+	runCycle("second")
+}
+
 // newWorkflowRunner builds a runner driving a workflow agent over the
 // given edges, with its session pre-created.
 func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
