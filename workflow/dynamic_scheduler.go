@@ -217,14 +217,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
-
-	var ss agent.DynamicSubScheduler = s
-	delta := &agent.CommonContextDelta{
-		Path:                   &childPath,
-		RunID:                  &runID,
-		SubScheduler:           &ss,
-		OutputForAncestors:     &childAncestors,
-		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch}}
 	// Explicit scope wins over the node-path default; absent both,
 	// inherit. Matches adk-python _compute_isolation_scope_for_node.
 	childScope := s.parentCtx.IsolationScope()
@@ -233,7 +225,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	} else if opts.scopeFromNodePath {
 		childScope = childPath
 	}
-	delta.InvocationContextDelta.IsolationScope = &childScope
+
+	var ss agent.DynamicSubScheduler = s
+	delta := &agent.CommonContextDelta{
+		Path:                   &childPath,
+		RunID:                  &runID,
+		SubScheduler:           &ss,
+		OutputForAncestors:     &childAncestors,
+		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope}}
 
 	childCtx := s.parentCtx.Apply(delta)
 
