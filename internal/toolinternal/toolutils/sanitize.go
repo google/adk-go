@@ -134,25 +134,29 @@ func memberTypes(m *jsonschema.Schema) []string {
 	return m.Types
 }
 
-// isPlainTypeSchema reports whether m carries only a JSON type and no
-// structural or descriptive keywords, so it can be folded into a type array.
+// isPlainTypeSchema reports whether m carries a JSON type and nothing else, so a
+// composition member can be folded into a parent type array without dropping
+// information. Emptiness is checked structurally — every field other than
+// Type/Types must be zero — so a member carrying any other keyword (format,
+// multipleOf, a nested schema, ...) is left to the structured-composition path
+// instead of being silently flattened.
 func isPlainTypeSchema(m *jsonschema.Schema) bool {
 	if m == nil || (m.Type == "" && len(m.Types) == 0) {
 		return false
 	}
-	return m.Ref == "" &&
-		m.Description == "" && m.Title == "" && m.Format == "" &&
-		len(m.Enum) == 0 && m.Const == nil &&
-		len(m.Properties) == 0 && m.AdditionalProperties == nil &&
-		len(m.PatternProperties) == 0 && m.PropertyNames == nil &&
-		m.Items == nil && len(m.ItemsArray) == 0 && len(m.PrefixItems) == 0 &&
-		m.Contains == nil &&
-		len(m.AllOf) == 0 && len(m.AnyOf) == 0 && len(m.OneOf) == 0 && m.Not == nil &&
-		m.Pattern == "" && m.Minimum == nil && m.Maximum == nil &&
-		m.MinLength == nil && m.MaxLength == nil &&
-		m.MinItems == nil && m.MaxItems == nil &&
-		m.MinProperties == nil && m.MaxProperties == nil &&
-		len(m.Required) == 0
+	v := reflect.ValueOf(m).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		switch t.Field(i).Name {
+		case "Type", "Types":
+			// The type is exactly what we fold; every other field must be empty.
+		default:
+			if !v.Field(i).IsZero() {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // forEachChildSchema applies f to every immediate sub-schema of s.

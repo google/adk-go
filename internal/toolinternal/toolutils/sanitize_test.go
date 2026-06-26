@@ -184,6 +184,26 @@ func TestSanitizeSchemaForVertex(t *testing.T) {
 			t.Errorf("siblings not stripped: %+v", out)
 		}
 	})
+
+	t.Run("member_with_numeric_constraint_is_not_folded", func(t *testing.T) {
+		// multipleOf is a validation keyword like any other; a member carrying it
+		// is not plain, so folding (which would silently drop multipleOf) must
+		// not happen.
+		in := &jsonschema.Schema{
+			Description: "optional even number",
+			AnyOf: []*jsonschema.Schema{
+				{Type: "number", MultipleOf: ptr(2.0)},
+				{Type: "null"},
+			},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if len(out.Types) != 0 {
+			t.Errorf("union with a multipleOf member folded into types %v", out.Types)
+		}
+		if len(out.AnyOf) != 2 {
+			t.Errorf("composition members changed: %+v", out.AnyOf)
+		}
+	})
 }
 
 func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
