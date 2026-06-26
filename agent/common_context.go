@@ -243,51 +243,6 @@ func (c *commonContext) RunID() string {
 	return c.runID
 }
 
-// withBranch returns ctx wrapped with branch as its Branch().
-// Implemented as a small adapter that overrides only Branch() and
-// delegates the rest of the interface to the embedded ctx.
-func withBranch(ctx Context, branch string) Context {
-	if ctx.Branch() == branch {
-		return ctx
-	}
-	return &branchOverride{Context: ctx, branch: branch}
-}
-
-// branchOverride wraps an InvocationContext and overrides Branch().
-// All other interface methods delegate to the embedded value.
-//
-// WithContext is overridden so the branch survives a subsequent
-// context-cancellation wrap. Without this, a caller that does
-// ctx.WithContext(cancelCtx) would get an InvocationContext whose
-// Branch() returns the inner ctx's branch (empty), silently
-// losing the override.
-type branchOverride struct {
-	Context
-	branch string
-}
-
-func (b *branchOverride) Branch() string {
-	return b.branch
-}
-
-// WithBranch implements [Context].
-func (c *commonContext) WithBranch(branch string) Context {
-	ctx := withBranch(c, branch)
-	return &commonContext{
-		Context:            ctx,
-		invocationContext:  ctx,
-		resumeInputs:       c.resumeInputs,
-		path:               c.path,
-		runID:              c.runID,
-		subScheduler:       c.subScheduler,
-		artifacts:          c.artifacts,
-		actions:            c.actions,
-		functionCallID:     c.functionCallID,
-		toolConfirmation:   c.toolConfirmation,
-		outputForAncestors: c.outputForAncestors,
-	}
-}
-
 // Agent implements [InvocationContext].
 func (c *commonContext) Agent() Agent {
 	return c.invocationContext.Agent()

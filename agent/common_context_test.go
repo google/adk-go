@@ -34,7 +34,6 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 	baseIC := &invocationContext{
 		Context: t.Context(),
 	}
-	baseCtx := NewContext(baseIC)
 
 	wantPath := "wf/child@123"
 	wantAncestors := []string{"wf/root", "wf/parent"}
@@ -48,7 +47,7 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 		SubScheduler:       &subScheduler,
 	}
 
-	dynCtx := baseCtx.WithDelta(delta)
+	dynCtx := PromoteWithDelta(baseIC, delta)
 
 	tests := []struct {
 		name         string
