@@ -15,10 +15,7 @@
 package workflow
 
 import (
-	"context"
 	"strings"
-
-	"google.golang.org/adk/agent"
 )
 
 // Branch composition helpers for the static, parallel, and dynamic
@@ -47,42 +44,6 @@ func deriveSubBranch(parent, segment string) string {
 		return segment
 	}
 	return parent + "." + segment
-}
-
-// withBranch returns ctx wrapped with branch as its Branch().
-// Implemented as a small adapter that overrides only Branch() and
-// delegates the rest of the interface to the embedded ctx.
-func withBranch(ctx agent.InvocationContext, branch string) agent.InvocationContext {
-	if ctx.Branch() == branch {
-		return ctx
-	}
-	return &branchOverride{InvocationContext: ctx, branch: branch}
-}
-
-// branchOverride wraps an InvocationContext and overrides Branch().
-// All other interface methods delegate to the embedded value.
-//
-// WithContext is overridden so the branch survives a subsequent
-// context-cancellation wrap. Without this, a caller that does
-// ctx.WithContext(cancelCtx) would get an InvocationContext whose
-// Branch() returns the inner ctx's branch (empty), silently
-// losing the override.
-type branchOverride struct {
-	agent.InvocationContext
-	branch string
-}
-
-func (b *branchOverride) Branch() string { return b.branch }
-
-// WithContext returns a branchOverride wrapping the inner
-// InvocationContext's WithContext result so the branch override is
-// preserved through context-cancellation wrapping.
-func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContext {
-	return &branchOverride{
-		// TODO(kdroste): refactor underlying context
-		InvocationContext: b.InvocationContext.WithContext(ctx),
-		branch:            b.branch,
-	}
 }
 
 // deriveChildBranch composes the branch for a dynamically-scheduled
