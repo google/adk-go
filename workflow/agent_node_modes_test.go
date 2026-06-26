@@ -101,6 +101,50 @@ func TestAgentNode_TaskMode_DoesNotPromoteModelText(t *testing.T) {
 	}
 }
 
+func TestAgentNode_SequentialAgentAsNode_NoMultipleOutputs(t *testing.T) {
+	t.Parallel()
+
+	seqNode, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_node",
+			SubAgents: []agent.Agent{fixedTextAgent(t, "seq_a", "SEQ_A"), fixedTextAgent(t, "seq_b", "SEQ_B")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(seqNode, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	ctx := newRunnableNodeContext(t, seqNode)
+	assertSubAgentOutputsNotSynthesized(t, node, "seq_node", ctx, "seq_a", "seq_b")
+}
+
+func TestAgentNode_ParallelAgentAsNode_NoMultipleOutputs(t *testing.T) {
+	t.Parallel()
+
+	parNode, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "par_node",
+			SubAgents: []agent.Agent{fixedTextAgent(t, "par_a", "PAR_A"), fixedTextAgent(t, "par_b", "PAR_B")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New: %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(parNode, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	ctx := newRunnableNodeContext(t, parNode)
+	assertSubAgentOutputsNotSynthesized(t, node, "par_node", ctx, "par_a", "par_b")
+}
+
 // newRunnableNodeContext builds the minimal NodeContext an LlmAgent
 // flow needs: in-memory Session, Agent, and a RunConfig on the
 // embedded context (the flow reads it via runconfig.FromContext and
@@ -198,48 +242,4 @@ func assertSubAgentOutputsNotSynthesized(t *testing.T, node workflow.Node, nodeN
 			t.Errorf("missing final event from sub-agent %q", a)
 		}
 	}
-}
-
-func TestAgentNode_SequentialAgentAsNode_NoMultipleOutputs(t *testing.T) {
-	t.Parallel()
-
-	seqNode, err := sequentialagent.New(sequentialagent.Config{
-		AgentConfig: agent.Config{
-			Name:      "seq_node",
-			SubAgents: []agent.Agent{fixedTextAgent(t, "seq_a", "SEQ_A"), fixedTextAgent(t, "seq_b", "SEQ_B")},
-		},
-	})
-	if err != nil {
-		t.Fatalf("sequentialagent.New: %v", err)
-	}
-
-	node, err := workflow.NewAgentNode(seqNode, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode: %v", err)
-	}
-
-	ctx := newRunnableNodeContext(t, seqNode)
-	assertSubAgentOutputsNotSynthesized(t, node, "seq_node", ctx, "seq_a", "seq_b")
-}
-
-func TestAgentNode_ParallelAgentAsNode_NoMultipleOutputs(t *testing.T) {
-	t.Parallel()
-
-	parNode, err := parallelagent.New(parallelagent.Config{
-		AgentConfig: agent.Config{
-			Name:      "par_node",
-			SubAgents: []agent.Agent{fixedTextAgent(t, "par_a", "PAR_A"), fixedTextAgent(t, "par_b", "PAR_B")},
-		},
-	})
-	if err != nil {
-		t.Fatalf("parallelagent.New: %v", err)
-	}
-
-	node, err := workflow.NewAgentNode(parNode, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode: %v", err)
-	}
-
-	ctx := newRunnableNodeContext(t, parNode)
-	assertSubAgentOutputsNotSynthesized(t, node, "par_node", ctx, "par_a", "par_b")
 }
