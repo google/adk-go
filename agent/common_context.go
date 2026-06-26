@@ -43,6 +43,7 @@ func Promote(parent InvocationContext) Context {
 	}
 }
 
+// PromoteWithDelta is just a shortcut for Promote with subsequent WithDelta
 func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context {
 	c := Promote(ctx)
 	return c.WithDelta(delta)
@@ -51,6 +52,8 @@ func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context 
 // NewContext returns a full Context backed by parent, with no callback,
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
+// Please mind that if you already have commonContext, you should use WithDelta to
+// create child contextes
 func NewContext(parent InvocationContext) Context {
 	if _, ok := parent.(*commonContext); ok {
 		panic("Should not happen")
@@ -59,21 +62,6 @@ func NewContext(parent InvocationContext) Context {
 		Context:           parent,
 		invocationContext: parent,
 	}
-}
-
-// NewNodeContext returns a Context carrying per-node resume inputs.
-func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
-	if c, ok := parent.(Context); ok {
-		// apply delta
-		res := c.WithDelta(&CommonContextDelta{
-			ResumeInputs: &resumeInputs,
-		})
-		return res
-	}
-
-	c := NewContext(parent).(*commonContext)
-	c.resumeInputs = resumeInputs
-	return c
 }
 
 // NewCallbackContext returns a callback context initialized with provided actions.

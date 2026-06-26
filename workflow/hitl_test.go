@@ -284,7 +284,11 @@ func TestResumeOrRequestInput(t *testing.T) {
 	})
 
 	t.Run("resume returns reply without emitting", func(t *testing.T) {
-		ctx := agent.NewNodeContext(newMockCtx(t), map[string]any{"ask_name": "Alice"})
+		resumeInputs := map[string]any{"ask_name": "Alice"}
+		ctx := agent.PromoteWithDelta(newMockCtx(t),
+			&agent.CommonContextDelta{
+				ResumeInputs: &resumeInputs,
+			})
 
 		emitted := false
 		emit := func(*session.Event) error {

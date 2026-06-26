@@ -50,17 +50,19 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	})
 
 	t.Run("populated resumeInputs returns matched payload", func(t *testing.T) {
-		c := NewNodeContext(parent, map[string]any{
+		resumeInputs := map[string]any{
 			"approval": "yes",
 			"comment":  "looks good",
-		})
+		}
+		c := agent.PromoteWithDelta(parent, &agent.CommonContextDelta{ResumeInputs: &resumeInputs})
 		if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("ResumedInput(%q) = (%v, %v), want (%q, true)", "approval", v, ok, "yes")
 		}
 	})
 
 	t.Run("unmatched InterruptID returns (nil, false)", func(t *testing.T) {
-		c := NewNodeContext(parent, map[string]any{"approval": "yes"})
+		resumeInputs := map[string]any{"approval": "yes"}
+		c := agent.PromoteWithDelta(parent, &agent.CommonContextDelta{ResumeInputs: &resumeInputs})
 		if v, ok := c.ResumedInput("missing"); v != nil || ok {
 			t.Errorf("ResumedInput(%q) = (%v, %v), want (nil, false)", "missing", v, ok)
 		}
@@ -120,8 +122,9 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 }
 
 func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
-	parent := NewNodeContext(newNodeBaseCtx(t), map[string]any{"approval": "yes"})
-	sub := &stubSubScheduler{}
+	parent := agent.PromoteWithDelta(newMockCtx(t),
+		&agent.CommonContextDelta{ResumeInputs: &map[string]any{"approval": "yes"}})
+	sub := newDynamicSubScheduler(parent, "", nil)
 
 	t.Run("child", func(t *testing.T) {
 		child := parent.WithDelta(prepareDelta("wf/asker@1", "1", sub, nil))
