@@ -205,6 +205,51 @@ func TestSanitizeSchemaForVertex(t *testing.T) {
 			t.Errorf("composition members changed: %+v", out.AnyOf)
 		}
 	})
+
+	t.Run("collapses_anyof_of_two_primitives", func(t *testing.T) {
+		// Parity with adk-python test_to_gemini_schema_any_of: a union of plain
+		// types folds into a type array.
+		in := &jsonschema.Schema{AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "integer"}}}
+		out := SanitizeSchemaForVertex(in)
+		if len(out.AnyOf) != 0 {
+			t.Errorf("anyOf not collapsed: %+v", out.AnyOf)
+		}
+		if !slices.Equal(out.Types, []string{"string", "integer"}) {
+			t.Errorf("types = %v, want [string integer]", out.Types)
+		}
+	})
+
+	t.Run("collapses_union_with_type_list_member", func(t *testing.T) {
+		// Parity with adk-python test_sanitize_schema_formats_for_gemini_nullable:
+		// a member may itself carry a type array; its types merge into the fold.
+		in := &jsonschema.Schema{
+			Description: "x",
+			AnyOf: []*jsonschema.Schema{
+				{Type: "string"},
+				{Types: []string{"integer", "null"}},
+			},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if len(out.AnyOf) != 0 {
+			t.Errorf("anyOf not collapsed: %+v", out.AnyOf)
+		}
+		if !slices.Equal(out.Types, []string{"string", "integer", "null"}) {
+			t.Errorf("types = %v, want [string integer null]", out.Types)
+		}
+		if out.Description != "x" {
+			t.Errorf("description dropped: %q", out.Description)
+		}
+	})
+
+	t.Run("dedupes_repeated_types", func(t *testing.T) {
+		in := &jsonschema.Schema{
+			AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "string"}, {Type: "null"}},
+		}
+		out := SanitizeSchemaForVertex(in)
+		if !slices.Equal(out.Types, []string{"string", "null"}) {
+			t.Errorf("types = %v, want [string null]", out.Types)
+		}
+	})
 }
 
 func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
@@ -335,6 +380,70 @@ func TestSanitizeJSONSchemaForVertex_Map(t *testing.T) {
 		out := SanitizeJSONSchemaForVertex(in)
 		if !reflect.DeepEqual(out, in) {
 			t.Errorf("allOf was modified:\n got = %#v\nwant = %#v", out, in)
+		}
+	})
+
+	t.Run("collapses_union_with_type_list_member", func(t *testing.T) {
+		// Parity with adk-python test_sanitize_schema_formats_for_gemini_nullable:
+		// a member carrying a type array is merged into the folded type array.
+		in := map[string]any{
+			"description": "x",
+			"anyOf": []any{
+				map[string]any{"type": "string"},
+				map[string]any{"type": []any{"integer", "null"}},
+			},
+		}
+		out, _ := SanitizeJSONSchemaForVertex(in).(map[string]any)
+		if _, has := out["anyOf"]; has {
+			t.Errorf("anyOf not collapsed: %+v", out)
+		}
+		if gotTypes, _ := out["type"].([]any); !slices.Equal(gotTypes, []any{"string", "integer", "null"}) {
+			t.Errorf("type = %v, want [string integer null]", out["type"])
+		}
+		if out["description"] != "x" {
+			t.Errorf("description dropped: %+v", out)
+		}
+	})
+
+	t.Run("passes_through_boolean_subschema", func(t *testing.T) {
+		// Parity with adk-python boolean-schema tests: MCP servers use `true` for
+		// an unconstrained field; it must pass through without panicking.
+		in := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"model": true,
+				"refId": map[string]any{"type": "string"},
+			},
+		}
+		out := SanitizeJSONSchemaForVertex(in)
+		if !reflect.DeepEqual(out, in) {
+			t.Errorf("boolean subschema not preserved:\n got = %#v\nwant = %#v", out, in)
+		}
+	})
+
+	t.Run("sanitizes_inside_defs", func(t *testing.T) {
+		in := map[string]any{
+			"type": "object",
+			"$defs": map[string]any{
+				"Foo": map[string]any{
+					"description": "d",
+					"anyOf": []any{
+						map[string]any{"type": "string"},
+						map[string]any{"type": "null"},
+					},
+				},
+			},
+		}
+		out, _ := SanitizeJSONSchemaForVertex(in).(map[string]any)
+		foo, _ := out["$defs"].(map[string]any)["Foo"].(map[string]any)
+		if _, has := foo["anyOf"]; has {
+			t.Errorf("anyOf under $defs not collapsed: %+v", foo)
+		}
+		if gotTypes, _ := foo["type"].([]any); !slices.Equal(gotTypes, []any{"string", "null"}) {
+			t.Errorf("type = %v, want [string null]", foo["type"])
+		}
+		if foo["description"] != "d" {
+			t.Errorf("description dropped: %+v", foo)
 		}
 	})
 }
