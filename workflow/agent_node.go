@@ -139,10 +139,9 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 				return
 			}
 
-			// Synthesize output only from the node agent's own reply. A
-			// composite agent streams one final response per sub-agent
-			// (each a distinct author); synthesizing every one would emit
-			// several node outputs and trip the one-output-per-node rule.
+			// A composite agent yields one final response per sub-agent
+			// (each a distinct author); synthesizing all of them would
+			// trip the one-output-per-node rule.
 			if synthesizeMode && isOwnAgentEvent(event, n.agent.Name()) {
 				synthesizeAgentOutput(event)
 			}
@@ -204,9 +203,8 @@ func synthesizeAgentOutput(event *session.Event) {
 }
 
 // isOwnAgentEvent reports whether ev came from the node's own agent.
-// Empty author counts as own (agent.Run stamps the node agent's name on
-// its un-authored events); composite sub-agent events carry the
-// sub-agent's name.
+// Un-authored events count as own (agent.Run stamps the node agent's
+// name); composite sub-agents keep their own author.
 func isOwnAgentEvent(ev *session.Event, nodeAgentName string) bool {
 	if ev == nil {
 		return false
