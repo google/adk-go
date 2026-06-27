@@ -23,19 +23,18 @@ import (
 )
 
 // End-to-end check that a child of a dynamic-node activation can
-// recover its own NodeContext via NodeContextFromGoContext — the
-// path runnable tools rely on to reach the sub-scheduler from
-// tool.Context.
+// recover its own agent.Context — the path runnable tools rely on to
+// reach the sub-scheduler from the context.
 func TestNodeContextPropagation_DynamicChildEmbedsItself(t *testing.T) {
-	var captured NodeContext
+	var captured agent.Context
 
-	inner := newFnNode("inner", func(ctx NodeContext) (any, error) {
+	inner := newFnNode("inner", func(ctx agent.Context) (any, error) {
 		captured = ctx
 		return "ok", nil
 	})
 
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			return RunNode[string](ctx, inner, nil)
 		},
 		NodeConfig{},
@@ -45,20 +44,20 @@ func TestNodeContextPropagation_DynamicChildEmbedsItself(t *testing.T) {
 		t.Fatalf("orchestrator error: %v", err)
 	}
 	if captured == nil {
-		t.Fatal("inner did not recover any NodeContext")
+		t.Fatal("inner did not recover any agent.Context")
 	}
 }
 
 // --- test helpers ---
 
-// fnNode adapts a func(NodeContext) callback into a Node that emits
+// fnNode adapts a func(agent.Context) callback into a Node that emits
 // a single Output event on success.
 type fnNode struct {
 	BaseNode
-	fn func(NodeContext) (any, error)
+	fn func(agent.Context) (any, error)
 }
 
-func newFnNode(name string, fn func(NodeContext) (any, error)) *fnNode {
+func newFnNode(name string, fn func(agent.Context) (any, error)) *fnNode {
 	return &fnNode{
 		BaseNode: NewBaseNode(name, "", NodeConfig{}),
 		fn:       fn,

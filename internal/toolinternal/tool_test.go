@@ -73,6 +73,6 @@ func (*nonDeferringTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: "non_deferring"}
 }
 
-func (*nonDeferringTool) Run(_ agent.ToolContext, _ any) (map[string]any, error) {
+func (*nonDeferringTool) Run(_ agent.Context, _ any) (map[string]any, error) {
 	return nil, nil
 }

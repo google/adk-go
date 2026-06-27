@@ -145,7 +145,7 @@ func TestAgentNode_ParallelAgentAsNode_NoMultipleOutputs(t *testing.T) {
 	assertSubAgentOutputsNotSynthesized(t, node, "par_node", ctx, "par_a", "par_b")
 }
 
-// newRunnableNodeContext builds the minimal NodeContext an LlmAgent
+// newRunnableNodeContext builds the minimal agent.Context an LlmAgent
 // flow needs: in-memory Session, Agent, and a RunConfig on the
 // embedded context (the flow reads it via runconfig.FromContext and
 // nil-derefs otherwise).

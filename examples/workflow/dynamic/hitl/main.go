@@ -17,7 +17,7 @@
 // Demonstrates the re-entry resume pattern: dynamic nodes default to
 // RerunOnResume=&true, so the orchestrator body is re-invoked from the
 // top after the human replies, and the reply is delivered via
-// NodeContext.ResumedInput.
+// agent.Context.ResumedInput.
 //
 //	go run ./examples/workflow/dynamic/hitl/ console
 //
@@ -64,7 +64,7 @@ func main() {
 	)
 
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, emit func(*session.Event) error) (string, error) {
+		func(nc agent.Context, _ string, emit func(*session.Event) error) (string, error) {
 			// Resume re-entry: the reply is in ResumedInput.
 			if reply, ok := nc.ResumedInput("ask_name"); ok {
 				name, _ := reply.(string)

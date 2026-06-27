@@ -114,7 +114,8 @@ func WithRaiseOnWait() RunNodeOption {
 
 // RunNode schedules child as a sub-node of the currently-executing
 // dynamic node and returns its typed output. ctx must be the
-// NodeContext passed into the enclosing dynamic node's body.
+// context passed into the enclosing dynamic node's body (it carries
+// the sub-scheduler used to schedule the child).
 //
 // On failure:
 //   - errors.Is(err, ErrNodeInterrupted): child paused for HITL.

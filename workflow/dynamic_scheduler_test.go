@@ -142,7 +142,7 @@ func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 	if _, err := sub.RunNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
-	// The child must have observed its NodeContext populated with the
+	// The child must have observed its agent.Context populated with the
 	// composite path; verify via the stub's captured context.
 	if got, want := child.lastPath, "wf/processor@order-42"; got != want {
 		t.Errorf("child Path() = %q, want %q", got, want)

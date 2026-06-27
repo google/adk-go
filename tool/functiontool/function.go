@@ -257,7 +257,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 //    function can return an error, that needs to be included in the output
 //    json schema. And for function that never returns an error, I think it
 //    gets less uglier.
-//  * MCP ToolHandler expects mcp.ServerSession. types.ToolContext may be close
+//  * MCP ToolHandler expects mcp.ServerSession. agent.Context may be close
 //    to it, but we don't need to expose this to user function
 //    (similar to ADK Python FunctionTool [2])
 // References

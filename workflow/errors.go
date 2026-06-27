@@ -33,7 +33,8 @@ var (
 	ErrNodeWaitingForOutput = fmt.Errorf("%w: waiting for output", ErrNodeInterrupted)
 
 	// ErrInvalidRunNodeContext is returned by RunNode when ctx is not
-	// the NodeContext of a currently-executing dynamic node.
+	// the context of a currently-executing dynamic node (i.e. it
+	// carries no sub-scheduler).
 	ErrInvalidRunNodeContext = errors.New("workflow: RunNode called outside a dynamic node")
 
 	// ErrInvalidRunID rejects a custom run id that would collide

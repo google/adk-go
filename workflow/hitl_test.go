@@ -331,7 +331,7 @@ func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
 	child := newWaitForOutputNode("waiter")
 	orch := NewDynamicNode[any, any](
 		"orch",
-		func(ctx NodeContext, _ any, _ func(*session.Event) error) (any, error) {
+		func(ctx agent.Context, _ any, _ func(*session.Event) error) (any, error) {
 			return RunNode[any](ctx, child, nil)
 		},
 		NodeConfig{},

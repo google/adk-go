@@ -27,7 +27,7 @@ import (
 )
 
 // toolContextWrapper is used to emit log entries for unexpected calls - those
-// related to NodeContext when Context is used as tool context
+// related to node-context methods when an agent.Context is used as a tool context.
 type toolContextWrapper struct {
 	context Context
 }
@@ -40,13 +40,13 @@ func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 
 // WithAgentTimeout implements [Context].
 func (c *toolContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for ToolContext")
+	log.Print("WithAgentTimeout() is not supported for tool context")
 	return nil, nil
 }
 
 // InvocationContext implements [Context].
 func (c *toolContextWrapper) InvocationContext() InvocationContext {
-	log.Print("InvocationContext() is not supported for ToolContext")
+	log.Print("InvocationContext() is not supported for tool context")
 	return nil
 }
 
@@ -57,30 +57,30 @@ func (c *toolContextWrapper) SubScheduler() DynamicSubScheduler {
 
 // Agent implements [Context].
 func (c *toolContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for ToolContext")
+	log.Print("Agent() is not supported for tool context")
 	return nil
 }
 
 // EndInvocation implements [Context].
 func (c *toolContextWrapper) EndInvocation() {
-	log.Print("EndInvocation() is not supported for ToolContext")
+	log.Print("EndInvocation() is not supported for tool context")
 }
 
 // Ended implements [Context].
 func (c *toolContextWrapper) Ended() bool {
-	log.Print("Ended() is not supported for ToolContext")
+	log.Print("Ended() is not supported for tool context")
 	return false
 }
 
 // IsolationScope implements [Context].
 func (c *toolContextWrapper) IsolationScope() string {
-	log.Print("IsolationScope() is not supported for ToolContext")
+	log.Print("IsolationScope() is not supported for tool context")
 	return ""
 }
 
 // Memory implements [Context].
 func (c *toolContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for ToolContext")
+	log.Print("Memory() is not supported for tool context")
 	return nil
 }
 
@@ -91,47 +91,47 @@ func (c *toolContextWrapper) Path() string {
 
 // ResumedInput implements [Context].
 func (c *toolContextWrapper) ResumedInput(interruptID string) (any, bool) {
-	log.Print("ResumedInput() is not supported for ToolContext")
+	log.Print("ResumedInput() is not supported for tool context")
 	return nil, false
 }
 
 // RunConfig implements [Context].
 func (c *toolContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for ToolContext")
+	log.Print("RunConfig() is not supported for tool context")
 	return nil
 }
 
 // RunID implements [Context].
 func (c *toolContextWrapper) RunID() string {
-	log.Print("RunID() is not supported for ToolContext")
+	log.Print("RunID() is not supported for tool context")
 	return ""
 }
 
 // Session implements [Context].
 func (c *toolContextWrapper) Session() session.Session {
-	log.Print("Session() is not supported for ToolContext")
+	log.Print("Session() is not supported for tool context")
 	return nil
 }
 
 // WithBranch implements [Context].
 func (c *toolContextWrapper) WithBranch(branch string) Context {
-	log.Print("WithBranch() is not supported for ToolContext")
+	log.Print("WithBranch() is not supported for tool context")
 	return nil
 }
 
 // WithContext implements [Context].
 func (c *toolContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	log.Print("WithContext() is not supported for ToolContext")
+	log.Print("WithContext() is not supported for tool context")
 	return nil
 }
 
 // WithAgentContext implements [Context].
 func (c *toolContextWrapper) WithAgentContext(ctx context.Context) Context {
-	log.Print("WithAgentContext() is not supported for ToolContext")
+	log.Print("WithAgentContext() is not supported for tool context")
 	return nil
 }
 
-// ToolContext-related: emit logs and return empty data
+// Tool-context methods: call embedded context.
 
 // Actions implements [Context].
 func (c *toolContextWrapper) Actions() *session.EventActions {
@@ -158,7 +158,7 @@ func (c *toolContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmati
 	return c.context.ToolConfirmation()
 }
 
-// NodeContext
+// Node-context methods: call embedded context.
 
 func (c *toolContextWrapper) OutputForAncestors() []string {
 	return c.context.OutputForAncestors()

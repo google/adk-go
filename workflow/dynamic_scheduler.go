@@ -32,7 +32,7 @@ import (
 // dynamicSubScheduler runs the children of one dynamic-node activation.
 type dynamicSubScheduler struct {
 	parentPath string
-	parentCtx  NodeContext
+	parentCtx  agent.Context
 	emitUp     func(*session.Event) error
 
 	// outputForAncestors are the delegating-ancestor paths this
@@ -263,24 +263,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		s.commitDelegation(childPath, cached)
 		return cached, nil
 	}
-
-	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
-	// subScheduler) in the embedded context.Context so tools running
-	// inside an LlmAgent that is itself running as this dynamic
-	// child can recover the NodeContext via
-	// workflow.NodeContextFromGoContext. See
-	// scheduleResumedNode for the static-node equivalent.
-
-	// ctxWithValue := WithNodeContext(childCtx.InvocationContext(), childCtx)
-	// logContext(ctxWithValue, "iCtx3", 0)
-
-	// log.Printf("iCtx3: %+v branch: n/a", ctxWithValue)
-	// iCtx2 := childCtx.WithContext(ctxWithValue)
-	// logContext(iCtx2, "iCtx2", 0)
-	// log.Printf("iCtx2: %+v branch: %v", iCtx2, iCtx2.Branch())
-	// childCtx.SetInvocationContext(iCtx2)
-	// log.Printf("final childCtx: %+v branch: %v", childCtx, childCtx.Branch())
-	// // childCtx= iCtx3
 
 	var (
 		hasOutput   bool
