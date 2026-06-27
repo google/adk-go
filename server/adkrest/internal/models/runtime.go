@@ -32,6 +32,10 @@ type RunAgentRequest struct {
 	Streaming bool `json:"streaming,omitempty"`
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
+
+	// FunctionCallEventId is sent by the bundled dev-ui when resuming a
+	// long-running function call (e.g. confirmation or OAuth flows).
+	FunctionCallEventId string `json:"functionCallEventId,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
