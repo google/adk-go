@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -243,6 +244,7 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 type trackedArtifacts struct {
 	Artifacts
 	actions *session.EventActions
+	mu      sync.RWMutex
 }
 
 func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
@@ -251,11 +253,22 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 		return resp, err
 	}
 	if a.actions != nil {
+		a.mu.RLock()
+		current, ok := a.actions.ArtifactDelta[name]
+		if ok && current >= resp.Version {
+			a.mu.RUnlock()
+			return resp, nil
+		}
+		a.mu.RUnlock()
+
+		a.mu.Lock()
+		defer a.mu.Unlock()
 		if a.actions.ArtifactDelta == nil {
 			a.actions.ArtifactDelta = make(map[string]int64)
 		}
-		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		a.actions.ArtifactDelta[name] = resp.Version
+		if current, ok := a.actions.ArtifactDelta[name]; !ok || resp.Version > current {
+			a.actions.ArtifactDelta[name] = resp.Version
+		}
 	}
 	return resp, nil
 }
