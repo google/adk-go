@@ -16,7 +16,6 @@
 package console
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -27,6 +26,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/ergochat/readline"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -117,20 +117,26 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 	readErrChan := make(chan error, 1)
 
 	go func() {
-		reader := bufio.NewReader(os.Stdin)
+		rl, err := readline.NewEx(&readline.Config{
+			Prompt: "User -> ",
+		})
+		if err != nil {
+			readErrChan <- err
+			return
+		}
+		defer rl.Close()
+
 		for {
-			userInput, err := reader.ReadString('\n')
+			userInput, err := rl.Readline()
 			if err != nil {
 				readErrChan <- err
 				return
 			}
-			inputChan <- userInput
+			inputChan <- userInput + "\n"
 		}
 	}()
 	// Print an initial newline to work around PTY/exec buffering issues in some environments.
 	fmt.Println()
-
-	fmt.Print("\nUser -> ")
 
 	// Resolve "auto" streaming mode once per session (stdout TTY-ness doesn't change).
 	defaultStreamingMode := l.config.streamingMode
@@ -199,7 +205,6 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 					prevText = ""
 				}
 			}
-			fmt.Print("\nUser -> ")
 		}
 	}
 }
