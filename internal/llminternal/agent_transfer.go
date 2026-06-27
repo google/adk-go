@@ -180,7 +180,10 @@ func (t *TransferToAgentTool) Run(ctx agent.ToolContext, args any) (map[string]a
 	return map[string]any{}, nil
 }
 
-var _ tool.Tool = (*TransferToAgentTool)(nil)
+var (
+	_ toolinternal.FunctionTool     = (*TransferToAgentTool)(nil)
+	_ toolinternal.RequestProcessor = (*TransferToAgentTool)(nil)
+)
 
 func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())

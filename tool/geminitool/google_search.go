@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 )
 
@@ -48,3 +49,5 @@ func (s GoogleSearch) ProcessRequest(ctx agent.ToolContext, req *model.LLMReques
 func (s GoogleSearch) IsLongRunning() bool {
 	return false
 }
+
+var _ toolinternal.RequestProcessor = GoogleSearch{}

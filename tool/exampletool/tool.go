@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 )
@@ -148,3 +149,5 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 	sb.WriteString(examplesEnd)
 	return sb.String()
 }
+
+var _ toolinternal.RequestProcessor = (*exampleTool)(nil)

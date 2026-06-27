@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
@@ -179,3 +180,8 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.ToolContext, args any
 		}
 	}
 }
+
+var (
+	_ toolinternal.StreamingFunctionTool = (*streamingFunctionTool[struct{}])(nil)
+	_ toolinternal.RequestProcessor      = (*streamingFunctionTool[struct{}])(nil)
+)

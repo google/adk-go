@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal/googlellm"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -138,3 +139,5 @@ func (t *setModelResponseTool) Run(ctx agent.ToolContext, args any) (map[string]
 	}
 	return m, nil
 }
+
+var _ toolinternal.FunctionTool = (*setModelResponseTool)(nil)

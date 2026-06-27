@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -115,3 +116,5 @@ func (ts *SkillToolset) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequ
 	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills))
 	return nil
 }
+
+var _ toolinternal.RequestProcessor = (*SkillToolset)(nil)
