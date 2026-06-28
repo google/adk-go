@@ -586,6 +586,55 @@ func TestConvertForeignEvent(t *testing.T) {
 				Branch: "b",
 			},
 		},
+		{
+			name: "ThoughtOnlyEvent",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Text: "internal reasoning", Thought: true},
+							{Text: "more thoughts", Thought: true},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil, // thought-only event produces no useful context
+		},
+		{
+			name: "MixedThoughtAndTextEvent",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Text: "internal reasoning", Thought: true},
+							{Text: "actual response"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: actual response"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
