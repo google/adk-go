@@ -238,15 +238,26 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	defer span.End()
 	childCtx = spanCtx
 
+	// rawErr is the unwrapped child/emit error. The returned err wraps
+	// the cause with "%w: %v", dropping context.Canceled from the chain,
+	// so span status is classified on rawErr rather than err.
+	var rawErr error
+
 	// Record genuine runtime failures on the span. Pauses (HITL
 	// ErrNodeInterrupted, WaitForOutput ErrNodeWaitingForOutput) and
 	// parent cancellation (context.Canceled) are expected control
 	// flow, not span errors — matching the top scheduler's runNode.
 	defer func() {
-		if err != nil &&
-			!errors.Is(err, context.Canceled) &&
-			!errors.Is(err, ErrNodeInterrupted) &&
-			!errors.Is(err, ErrNodeWaitingForOutput) {
+		if err == nil {
+			return
+		}
+		classify := err
+		if rawErr != nil {
+			classify = rawErr
+		}
+		if !errors.Is(classify, context.Canceled) &&
+			!errors.Is(classify, ErrNodeInterrupted) &&
+			!errors.Is(classify, ErrNodeWaitingForOutput) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -276,6 +287,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	for ev, evErr := range child.Run(childCtx, input) {
 		if evErr != nil {
 			// Child error wins over any prior interrupt.
+			rawErr = evErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
 				Cause: fmt.Errorf("%w: %v", ErrNodeFailed, evErr),
@@ -361,10 +373,11 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				ev.NodeInfo.OutputFor = outputFor
 			}
 		}
-		if err := s.emitUp(ev); err != nil {
+		if emitErr := s.emitUp(ev); emitErr != nil {
+			rawErr = emitErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
-				Cause: fmt.Errorf("%w: emitUp: %v", ErrNodeFailed, err),
+				Cause: fmt.Errorf("%w: emitUp: %v", ErrNodeFailed, emitErr),
 			}
 		}
 	}
