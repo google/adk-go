@@ -61,7 +61,7 @@ func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
 
-var _ agent.CallbackContext = (*MockCallbackContext)(nil)
+var _ agent.Context = (*MockCallbackContext)(nil)
 ```
 
 #### Alternative: embed `agent.StrictContextMock`
@@ -78,9 +78,9 @@ the test loudly instead of silently returning a zero value. The standard
 `context.Context` methods (`Deadline`, `Done`, `Err`, `Value`) read from the
 supplied `Ctx` rather than panicking.
 
-Assert against the unified `agent.Context` directly. `CallbackContext` and
-`ToolContext` are only transitional aliases during the migration — don't rely on
-them; migrate straight to `agent.Context`.
+Assert against the unified `agent.Context` directly. The transitional
+`CallbackContext` and `ToolContext` aliases have been removed — migrate any
+remaining references straight to `agent.Context`.
 
 ```go
 // Embed StrictContextMock and override only what the test needs.
