@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// TestFromSessionEvent_EventActions verifies that all EventActions fields —
+// TestFromSessionEvent_EventActions verifies that the mapped EventActions fields —
 // including TransferToAgent, Escalate, and SkipSummarization — are correctly
 // mapped when converting a session.Event to a REST API Event.
 //
@@ -168,7 +168,7 @@ func TestToSessionEvent_EventActions(t *testing.T) {
 }
 
 // TestFromSessionEvent_RoundTrip verifies that a session.Event round-trips
-// through FromSessionEvent → ToSessionEvent without losing any EventActions fields.
+// through FromSessionEvent → ToSessionEvent without losing any mapped EventActions fields.
 func TestFromSessionEvent_RoundTrip(t *testing.T) {
 	original := session.Event{
 		ID:           "evt-1",
