@@ -781,3 +781,54 @@ func (n *waitForOutputWithValueNode) Run(agent.Context, any) iter.Seq2[*session.
 		yield(&session.Event{Output: out}, nil)
 	}
 }
+
+// TestRunNode_DynamicChildRecoversOwnContext is an end-to-end check that a
+// child of a dynamic-node activation can recover its own agent.Context — the
+// path runnable tools rely on to reach the sub-scheduler from the context.
+func TestRunNode_DynamicChildRecoversOwnContext(t *testing.T) {
+	var captured agent.Context
+
+	inner := newFnNode("inner", func(ctx agent.Context) (any, error) {
+		captured = ctx
+		return "ok", nil
+	})
+
+	orchestrator := NewDynamicNode[string, string]("orch",
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, inner, nil)
+		},
+		NodeConfig{},
+	)
+
+	if _, err := drainDynamicWithErr(t, orchestrator, ""); err != nil {
+		t.Fatalf("orchestrator error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("inner did not recover any agent.Context")
+	}
+}
+
+// fnNode adapts a func(agent.Context) callback into a Node that emits
+// a single Output event on success.
+type fnNode struct {
+	BaseNode
+	fn func(agent.Context) (any, error)
+}
+
+func newFnNode(name string, fn func(agent.Context) (any, error)) *fnNode {
+	return &fnNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		fn:       fn,
+	}
+}
+
+func (n *fnNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		out, err := n.fn(ctx)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		yield(&session.Event{Output: out}, nil)
+	}
+}
