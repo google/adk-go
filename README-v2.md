@@ -44,8 +44,7 @@ If you call `NewEvent` from a helper that does not yet receive a context, add a
 callers.
 
 ### Mocks update required for unified contexts 
-PR https://github.com/google/adk-go/pull/945 merges ToolContext and CallbackContext into single Context. 
-ToolContext and CallbackContext became aliases to Context. 
+PR https://github.com/google/adk-go/pull/945 merges ToolContext and CallbackContext into single Context.
 
 This introduces a problem for mock contexts - new functions (ToolContext-related) are missing if the mock was created for the previous version of CallbackContext. 
 Solution:
@@ -78,9 +77,7 @@ the test loudly instead of silently returning a zero value. The standard
 `context.Context` methods (`Deadline`, `Done`, `Err`, `Value`) read from the
 supplied `Ctx` rather than panicking.
 
-Assert against the unified `agent.Context` directly. The transitional
-`CallbackContext` and `ToolContext` aliases have been removed — migrate any
-remaining references straight to `agent.Context`.
+Assert against the unified `agent.Context` directly.
 
 ```go
 // Embed StrictContextMock and override only what the test needs.
