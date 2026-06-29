@@ -42,7 +42,7 @@ type InvocationContextParams struct {
 	OutputForAncestors          []string
 }
 
-// TODO(kdroste): remove this implementation. Add LiveSessionResumptionHandle to the standard InvocationContext
+// TODO(kdroste): merge with agent.InvocationContext implementation in agent package, if possible.
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	if params.InvocationID == "" {
 		params.InvocationID = "e-" + platform.NewUUID(ctx)

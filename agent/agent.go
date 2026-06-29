@@ -169,26 +169,15 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			})
 		})
 		defer endSpan()
-		// TODO: verify&update the setup here. Should we branch etc.
 
 		var aa Agent = a
 		var newCtx context.Context = ctx.WithContext(spanCtx)
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
-		var nodeCtx Context
-		// TODO(kdroste): simplify if possible (PromoteWithDelta?)
-		// ctx can be agent.Context. If so, apply the delta to underlying InvocationContext
-		if parentCC, ok := ctx.(Context); ok {
-			nodeCtx = parentCC.WithDelta(
-				&CommonContextDelta{
-					InvocationContextDelta: icDelta,
-				})
-		} else {
-			// create a new agent.Context based on the original ctx with icDelta
-			ic := ctx.WithICDelta(icDelta)
-			nodeCtx = NewContext(ic)
-		}
+		nodeCtx := PromoteWithDelta(ctx, &CommonContextDelta{
+			InvocationContextDelta: icDelta,
+		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
