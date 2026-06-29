@@ -69,7 +69,7 @@ func main() {
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
 		func(nc agent.Context, _ string, emit func(*session.Event) error) (string, error) {
 			// Resume re-entry: the reply is in ResumedInput.
-      if reply, ok := nc.ResumedInput("ask_name-" + nc.InvocationID()); ok {
+            if reply, ok := nc.ResumedInput("ask_name-" + nc.InvocationID()); ok {
 				name, _ := reply.(string)
 				if name == "" {
 					name = "stranger"
