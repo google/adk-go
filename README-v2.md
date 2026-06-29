@@ -33,11 +33,10 @@ ev := session.NewEvent(ctx, ctx.InvocationID())
 
 Any `context.Context` works as the first argument: the `ctx` of an agent/tool/
 callback (which embed `context.Context`), the incoming RPC/HTTP request context,
-or — in tests — `t.Context()`. Per
-[go/how-to-use-a-context](http://go/how-to-use-a-context), thread the context
-down the call chain rather than creating one with `context.Background()` in the
-middle of it; reserve `context.Background()` for `main`, `init`, and top-level
-test/setup code.
+or — in tests — `t.Context()`. As the [`context`
+package](https://pkg.go.dev/context) advises, thread the context down the call
+chain rather than creating one with `context.Background()` in the middle of it;
+reserve `context.Background()` for `main`, `init`, and top-level test/setup code.
 
 If you call `NewEvent` from a helper that does not yet receive a context, add a
 `ctx context.Context` parameter to that helper and pass it through from its
