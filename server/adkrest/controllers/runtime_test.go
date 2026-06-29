@@ -117,7 +117,7 @@ func testAgent(results []testAgentResult) func(ctx agent.InvocationContext) iter
 }
 
 func makeEvent(id, author, text string) *session.Event {
-	e := session.NewEventWithContext(context.Background(), id)
+	e := session.NewEvent(context.Background(), id)
 	e.Author = author
 	e.LLMResponse.Content = &genai.Content{
 		Parts: []*genai.Part{{Text: text}},

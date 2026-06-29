@@ -28,7 +28,7 @@ import (
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
 func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 	event.Author = ctx.Agent().Name()
 	event.Branch = ctx.Branch()
 	return event

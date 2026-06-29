@@ -252,7 +252,7 @@ func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.E
 		n.onRun()
 	}
 	return func(yield func(*session.Event, error) bool) {
-		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+		ev := session.NewEvent(ctx, ctx.InvocationID())
 		ev.Routes = n.route
 		yield(ev, nil)
 	}
@@ -587,7 +587,7 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 				if ctx.UserContent() != nil && len(ctx.UserContent().Parts) > 0 {
 					receivedInput = ctx.UserContent().Parts[0].Text
 				}
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Output = "ok"
 				yield(ev, nil)
 			}

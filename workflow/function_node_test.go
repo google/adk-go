@@ -233,7 +233,7 @@ func mustSchema[T any](t *testing.T) *jsonschema.Schema {
 
 func TestFunctionNodeDirectEventPropagation(t *testing.T) {
 	fn := func(ctx agent.Context, input string) (*session.Event, error) {
-		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+		ev := session.NewEvent(ctx, ctx.InvocationID())
 		ev.Output = input + " processed"
 		ev.Routes = []string{"CUSTOM_ROUTE"}
 		return ev, nil
@@ -597,7 +597,7 @@ func TestEmittingFunctionNode_EmitProgressBeforeOutput(t *testing.T) {
 
 	var downstreamRan atomic.Bool
 	worker := NewEmittingFunctionNode("worker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (string, error) {
-		progress := session.NewEventWithContext(ctx, ctx.InvocationID())
+		progress := session.NewEvent(ctx, ctx.InvocationID())
 		progress.Content = &genai.Content{Parts: []*genai.Part{{Text: "tick"}}}
 		if err := emit(progress); err != nil {
 			return "", err

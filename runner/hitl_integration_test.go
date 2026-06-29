@@ -297,7 +297,7 @@ func (n *hitlAskerNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Eve
 	return func(yield func(*session.Event, error) bool) {
 		// On re-entry, hand the response to the successor as output.
 		if response, ok := ctx.ResumedInput(n.interruptID); ok {
-			ev := session.NewEvent(ctx.InvocationID())
+			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.Output = response
 			yield(ev, nil)
 			return

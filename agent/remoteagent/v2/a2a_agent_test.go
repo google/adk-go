@@ -206,7 +206,7 @@ func newA2AEventReplay(t *testing.T, events []a2a.Event) a2asrv.AgentExecutor {
 }
 
 func newUserHello() *session.Event {
-	event := session.NewEventWithContext(context.Background(), "invocation")
+	event := session.NewEvent(context.Background(), "invocation")
 	event.Author = "user"
 	event.Content = genai.NewContentFromText("hello", genai.RoleUser)
 	return event

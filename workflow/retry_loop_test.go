@@ -43,7 +43,7 @@ func (n *retryLoopTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session
 			return
 		}
 
-		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+		ev := session.NewEvent(ctx, ctx.InvocationID())
 		// Finish after 2 loop executions.
 		if calls >= 6 {
 			ev.Routes = []string{"finish"}

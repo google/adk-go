@@ -135,7 +135,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 
 		// Yield the terminal output at the end if one was produced.
 		for _, out := range terminalOutputs {
-			event := session.NewEventWithContext(ctx, ctx.InvocationID())
+			event := session.NewEvent(ctx, ctx.InvocationID())
 			event.Output = out
 			if !yield(event, nil) {
 				return

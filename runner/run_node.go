@@ -112,7 +112,7 @@ func (r *Runner) runNode(
 
 		earlyExitResult, err := pluginManager.RunBeforeRunCallback(ictx)
 		if earlyExitResult != nil || err != nil {
-			earlyExitEvent := session.NewEventWithContext(ictx, ictx.InvocationID())
+			earlyExitEvent := session.NewEvent(ictx, ictx.InvocationID())
 			earlyExitEvent.Author = "user"
 			earlyExitEvent.LLMResponse = model.LLMResponse{
 				Content: msg,

@@ -282,7 +282,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
 			if earlyExitResult != nil || err != nil {
-				earlyExitEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				earlyExitEvent := session.NewEvent(ctx, ctx.InvocationID())
 				earlyExitEvent.Author = "user"
 				earlyExitEvent.LLMResponse = model.LLMResponse{
 					Content: msg,
@@ -370,7 +370,7 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 		}
 
 		if !isFunctionResponse {
-			event := session.NewEventWithContext(s.iCtx, s.iCtx.InvocationID())
+			event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
 			event.Author = "user"
 			event.LLMResponse = model.LLMResponse{
 				Content: req.Content,
@@ -461,7 +461,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			return nil, nil, err
 		}
 		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEventWithContext(iCtx, iCtx.InvocationID())
+			earlyExitEvent := session.NewEvent(iCtx, iCtx.InvocationID())
 			earlyExitEvent.Author = agentToRun.Name()
 			earlyExitEvent.LLMResponse = model.LLMResponse{
 				Content: earlyExitResult,
@@ -635,7 +635,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{

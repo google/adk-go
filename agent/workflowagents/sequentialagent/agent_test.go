@@ -465,7 +465,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent1,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_1"
 				yield(ev, nil)
 			}
@@ -478,7 +478,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent2,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_2"
 				yield(ev, nil)
 			}
