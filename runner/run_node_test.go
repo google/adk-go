@@ -445,14 +445,10 @@ func TestRunner_LlmAgent_OutputKeySchema_SingleOutput(t *testing.T) {
 	}
 }
 
-// The tests below port runner-level node behaviors from adk-python's
-// tests/unittests/runners/test_runner_node.py. adk-go has no
-// Runner(node=...) constructor, so a node graph is wrapped in a
-// workflowagent (or an LlmAgent root) and driven through the same node
-// runtime.
-
 // newUpperWorkflowAgent wraps a single function node that upper-cases the
-// user's text.
+// user's text. adk-go has no Runner(node=...) constructor, so node graphs
+// are driven through the node runtime by wrapping them in a workflowagent
+// (the LlmAgent cases use an LlmAgent root directly instead).
 func newUpperWorkflowAgent(t *testing.T, name string) agent.Agent {
 	t.Helper()
 	upper := workflow.NewFunctionNode(name+"_upper", func(_ agent.Context, in string) (string, error) {
