@@ -368,10 +368,6 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// applies.
 	cfg := n.Config()
 	var cancel context.CancelFunc
-	// Order matters: WithContext sets up per-node cancellation on
-	// the underlying InvocationContext; withBranch then wraps the
-	// result in branchOverride. Reversing would either lose the
-	// cancellation context or strip the branch override.
 
 	nodePath := name + "@1"
 	if p := s.parentCtx.Path(); p != "" {
@@ -399,13 +395,6 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	} else {
 		perNodeCtx, cancel = perNodeCtx.WithAgentCancel()
 	}
-
-	// perNodeCtx := s.parentCtx.WithAgentContext(nodeCtx)
-	// perNodeCtx = perNodeCtx.WithBranch(branch)
-
-	// perNodeCtx = agent.NewNodeContext(perNodeCtx, resumeInputs)
-
-	// perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, s.terminalAncestors(name))
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning

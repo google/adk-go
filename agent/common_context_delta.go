@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// CommonContextDelta holds all the changes which should be applied to a new child context based on agent.Context.
 type CommonContextDelta struct {
 	ResumeInputs           *map[string]any
 	InvocationContextDelta *InvocationContextDelta
@@ -29,6 +30,7 @@ type CommonContextDelta struct {
 	OutputForAncestors     *[]string
 }
 
+// InvocationContextDelta holds all the changes which should be applied to a new child context based on agent.InvocationContext
 type InvocationContextDelta struct {
 	Context        *context.Context
 	UserContent    **genai.Content
@@ -37,6 +39,8 @@ type InvocationContextDelta struct {
 	IsolationScope *string
 }
 
+// WithDelta returns a new CommmonContext with all the changes from d applied.
+// If there are no changes, the original context is returned.
 func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	if d == nil {
 		return c
@@ -68,6 +72,7 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	return &res
 }
 
+// WithICDelta returns a new context (copying all the fields from the original one) with changes applied to the underlying InvocationContext
 func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c

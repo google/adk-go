@@ -124,7 +124,6 @@ func TestNewParallelAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// TODO(kdroste): refactor underlying context
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 

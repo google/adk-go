@@ -60,7 +60,6 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
 	t.Cleanup(func() {
-		// TODO(kdroste): refactor underlying context
 		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			t.Errorf("telemetry.Shutdown() failed: %v", err)
 		}
@@ -118,7 +117,6 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Errorf("got log body %q, want %q", gotLog.Body().AsString(), logBody)
 	}
 
-	// TODO(kdroste): refactor underlying context
 	if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 		t.Errorf("telemetry.Shutdown() failed: %v", err)
 	}
@@ -144,7 +142,6 @@ func TestTelemetryCustomProvider(t *testing.T) {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
 	t.Cleanup(func() {
-		// TODO(kdroste): refactor underlying context
 		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			t.Errorf("telemetry.Shutdown() failed: %v", err)
 		}
@@ -193,7 +190,6 @@ func TestTelemetryCustomLoggerProvider(t *testing.T) {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
 	t.Cleanup(func() {
-		// TODO(kdroste): refactor underlying context
 		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			t.Errorf("telemetry.Shutdown() failed: %v", err)
 		}

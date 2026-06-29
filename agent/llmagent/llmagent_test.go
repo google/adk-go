@@ -1244,7 +1244,6 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
 	}
-	// exCtx := agent.PromoteContext(mockCtx)
 
 	events := w.Run(mockCtx)
 	for ev, err := range events {

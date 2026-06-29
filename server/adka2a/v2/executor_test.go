@@ -350,7 +350,6 @@ func TestExecutor_Callbacks(t *testing.T) {
 		{
 			name: "instrument context",
 			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) (context.Context, error) {
-				// TODO(kdroste): refactor underlying context
 				return context.WithValue(ctx, contextKeyType{}, "bar"), nil
 			},
 			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {

@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// ContextMock defines mocking logic (makes creating your own mocks easier if embedded)
 type ContextMock struct{}
 
 // WithAgentCancel implements [Context].

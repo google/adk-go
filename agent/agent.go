@@ -171,50 +171,24 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 
-		// create a node context based on spanCtx and ctx
-		// case 1: ctx is Context
-		// case 2: ctx is InvocationContext and is not Context
-
 		var aa Agent = a
 		var newCtx context.Context = ctx.WithContext(spanCtx)
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
-		// TODO(kdroste): consider new Promote func converting InvocationContext to Context
 		var nodeCtx Context
+		// TODO(kdroste): simplify if possible (PromoteWithDelta?)
+		// ctx can be agent.Context. If so, apply the delta to underlying InvocationContext
 		if parentCC, ok := ctx.(Context); ok {
 			nodeCtx = parentCC.WithDelta(
 				&CommonContextDelta{
 					InvocationContextDelta: icDelta,
 				})
-			// nc := NewNodeContext(ic, nil)
-			// nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
 		} else {
+			// create a new agent.Context based on the original ctx with icDelta
 			ic := ctx.WithICDelta(icDelta)
 			nodeCtx = NewContext(ic)
 		}
-		// ic := &invocationContext{
-		// 	Context:   ctx.WithContext(spanCtx),
-		// 	agent:     a,
-		// 	artifacts: ctx.Artifacts(),
-		// 	memory:    ctx.Memory(),
-		// 	session:   ctx.Session(),
-
-		// 	invocationID:   ctx.InvocationID(),
-		// 	branch:         ctx.Branch(),
-		// 	isolationScope: ctx.IsolationScope(),
-		// 	userContent:    ctx.UserContent(),
-		// 	runConfig:      ctx.RunConfig(),
-		// 	endInvocation:  ctx.Ended(),
-		// }
-
-		// var nodeCtx Context
-		// if parentCC, ok := ctx.(Context); ok {
-		// 	nc := NewNodeContext(ic, nil)
-		// 	nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
-		// } else {
-		// 	nodeCtx = NewNodeContext(ic, nil)
-		// }
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {

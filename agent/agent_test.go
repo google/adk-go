@@ -269,7 +269,6 @@ func TestWithContext(t *testing.T) {
 
 	key := testKey{}
 	val := "val"
-	// TODO(kdroste): refactor underlying context
 	got := inv.WithContext(context.WithValue(baseCtx, key, val))
 
 	if got.Value(key) != val {
