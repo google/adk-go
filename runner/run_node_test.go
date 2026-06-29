@@ -301,7 +301,7 @@ func runStateForAgent(t *testing.T, ctx context.Context, svc session.Service, a 
 	if err != nil {
 		t.Fatalf("workflow.New() error = %v", err)
 	}
-	state, err := wf.ReconstructRunState(got.Session)
+	state, err := wf.ReconstructRunState(got.Session, "")
 	if err != nil {
 		t.Fatalf("ReconstructRunState() error = %v", err)
 	}

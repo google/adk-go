@@ -68,7 +68,16 @@ func (s *nodeScanState) addInterrupt(id string) {
 // response schema. inferNodeState then maps that scan to a NodeState
 // (WAITING / PENDING+ResumedInputs / COMPLETED+Output). Returns
 // (nil, nil) when no node has interrupt history.
-func (w *Workflow) ReconstructRunState(sess session.Session) (*RunState, error) {
+//
+// invocationID scopes the scan to a single logical run: events from
+// other invocations are skipped, so a fresh run started in a session
+// that already holds a completed run does not collide with it (a stable
+// InterruptID reused across runs would otherwise rehydrate against the
+// prior, already-resolved interrupt). The runner reuses the paused
+// run's invocation ID for the resume turn, so the pause and its reply
+// share it. Empty invocationID disables the filter (scan all history).
+// Mirrors adk-python _reconstruct_node_states' invocation_id gate.
+func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string) (*RunState, error) {
 	if sess == nil {
 		return nil, nil
 	}
@@ -77,13 +86,13 @@ func (w *Workflow) ReconstructRunState(sess session.Session) (*RunState, error) 
 
 	// Stage 1: scan history into a per-node view of the pause
 	// (interrupts raised, responses that resolved them, schemas).
-	scans := scanHistory(events, nodesByName)
+	scans := scanHistory(events, nodesByName, invocationID)
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
-	nodeOutputs, completed := collectNodeOutputs(events, nodesByName)
-	workflowInput := firstUserInput(events)
+	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID)
+	workflowInput := firstUserInput(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
 	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput)
@@ -110,8 +119,9 @@ func (w *Workflow) ReconstructRunState(sess session.Session) (*RunState, error) 
 // node, what history says about a paused run: the long-running
 // interrupts it raised, the user responses that resolved them, and
 // each interrupt's declared response schema. Only nodes with
-// interrupt history are returned.
-func scanHistory(events session.Events, nodesByName map[string]Node) map[string]*nodeScanState {
+// interrupt history are returned. invocationID, when non-empty,
+// restricts the scan to that invocation's events.
+func scanHistory(events session.Events, nodesByName map[string]Node, invocationID string) map[string]*nodeScanState {
 	scans := map[string]*nodeScanState{}
 	interruptOwner := map[string]string{} // interrupt ID -> node name
 	scanFor := func(name string) *nodeScanState {
@@ -126,6 +136,9 @@ func scanHistory(events session.Events, nodesByName map[string]Node) map[string]
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 
@@ -182,13 +195,18 @@ func scanHistory(events session.Events, nodesByName map[string]Node) map[string]
 // collectNodeOutputs walks history once and returns each graph node's
 // last cached output plus the set of nodes that emitted any event.
 // The outputs feed predecessor-input reconstruction for re-entry
-// nodes; completed lets Resume skip already-run successors.
-func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (outputs map[string]any, completed map[string]bool) {
+// nodes; completed lets Resume skip already-run successors. When
+// invocationID is non-empty, events from other invocations are skipped
+// so a prior run's completed nodes do not suppress the current run.
+func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invocationID string) (outputs map[string]any, completed map[string]bool) {
 	outputs = map[string]any{}
 	completed = map[string]bool{}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 		name := eventNodeName(ev, nodesByName)
@@ -382,11 +400,16 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workf
 // firstUserInput returns the seed workflow input: the text of the
 // first user event in history (the original prompt), used as the
 // START successor's input on re-entry. Resume turns (user
-// FunctionResponses) are skipped.
-func firstUserInput(events session.Events) any {
+// FunctionResponses) are skipped. When invocationID is non-empty, only
+// that invocation's user events are considered, so the seed is the
+// current run's prompt rather than an earlier run's.
+func firstUserInput(events session.Events, invocationID string) any {
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil || ev.Author != "user" || ev.Content == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 		var text string

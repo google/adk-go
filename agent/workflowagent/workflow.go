@@ -139,7 +139,10 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, nil
 	}
 
-	state, err := a.workflow.ReconstructRunState(ctx.Session())
+	// Scope rehydration to this run's invocation (the runner reuses the
+	// paused run's ID on resume) so a prior completed run in the same
+	// session does not leak in.
+	state, err := a.workflow.ReconstructRunState(ctx.Session(), ctx.InvocationID())
 	if err != nil {
 		// A bad resume (e.g. failed schema validation) must fail,
 		// not silently fall through to a fresh Run.

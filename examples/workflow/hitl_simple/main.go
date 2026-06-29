@@ -37,6 +37,8 @@ import (
 	"log"
 	"os"
 
+	"github.com/google/uuid"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagent"
 	"google.golang.org/adk/cmd/launcher"
@@ -50,8 +52,12 @@ func main() {
 
 	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
 		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			// Unique InterruptID per request: a reused ID would let the
+			// Dev UI treat a later run's prompt as already answered.
+			// Mirrors adk-python (RequestInput.interrupt_id defaults to
+			// a fresh UUID).
 			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-				InterruptID: "ask_name",
+				InterruptID: "ask_name-" + uuid.NewString(),
 				Message:     "What's your name?",
 			})); err != nil {
 				return nil, err
