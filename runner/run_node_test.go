@@ -16,6 +16,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -587,6 +588,16 @@ func TestRunner_Node_YieldUserMessageFalseByDefault(t *testing.T) {
 			t.Errorf("yielded a user message event %v, want none by default", ev)
 		}
 	}
+
+	// The user message is still recorded in history; only the yielding
+	// is gated by WithYieldUserMessage.
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !sessionHasUserText(got.Session, "hi") {
+		t.Errorf("session does not contain the persisted user message %q", "hi")
+	}
 }
 
 // TestRunner_Node_StateDeltaAppliedBeforeNodeRuns checks that a state
@@ -681,8 +692,9 @@ func TestRunner_Node_YieldsUserEventWithStateDelta(t *testing.T) {
 }
 
 // TestRunner_Node_StateDeltaAppliedBeforeLlmAgentRuns checks that an
-// LlmAgent's before-agent callback observes the run's state delta before
-// the model is consulted.
+// LlmAgent's before-agent callback observes the run's state delta. The
+// callback returns content, which short-circuits the agent, so the model
+// is never consulted.
 func TestRunner_Node_StateDeltaAppliedBeforeLlmAgentRuns(t *testing.T) {
 	ctx := t.Context()
 	svc := session.InMemoryService()
@@ -799,8 +811,21 @@ func TestRunner_Node_AllowsMixedFunctionResponseAndText(t *testing.T) {
 		{FunctionResponse: &genai.FunctionResponse{ID: "fc-1", Name: "tool", Response: map[string]any{"v": 1}}},
 	}}
 
-	if gotErr := collectRunError(r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{})); gotErr != nil {
-		t.Fatalf("Run() error = %v, want nil (adk-go allows mixed function-response + text)", gotErr)
+	var sawText bool
+	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil (adk-go allows mixed function-response + text)", err)
+		}
+		if ev != nil && ev.LLMResponse.Content != nil {
+			for _, p := range ev.LLMResponse.Content.Parts {
+				if p.Text == "handled" {
+					sawText = true
+				}
+			}
+		}
+	}
+	if !sawText {
+		t.Error("expected a fresh run to consult the model for a mixed function-response + text message")
 	}
 }
 
@@ -832,22 +857,26 @@ func TestRunner_Node_ToleratesUnmatchedFunctionResponse(t *testing.T) {
 	}
 }
 
-// errNodeBoom is the failure returned by TestRunner_WorkflowNode_ErrorPropagates.
-var errNodeBoom = errNode("node failure")
+// errNodeBoom is the failure the boom node returns in
+// TestRunner_WorkflowNode_ErrorPropagates.
+var errNodeBoom = errors.New("node failure")
 
-type errNode string
-
-func (e errNode) Error() string { return string(e) }
-
-// collectRunError returns the first error a Run iterator yields, or nil.
-func collectRunError(seq iter.Seq2[*session.Event, error]) error {
-	var gotErr error
-	for _, err := range seq {
-		if err != nil && gotErr == nil {
-			gotErr = err
+// sessionHasUserText reports whether session history holds a user event
+// whose content carries the given text.
+func sessionHasUserText(sess session.Session, want string) bool {
+	events := sess.Events()
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || ev.Author != "user" || ev.LLMResponse.Content == nil {
+			continue
+		}
+		for _, p := range ev.LLMResponse.Content.Parts {
+			if p.Text == want {
+				return true
+			}
 		}
 	}
-	return gotErr
+	return false
 }
 
 // sessionHasOutput reports whether any event carries the given output.
