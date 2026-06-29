@@ -260,12 +260,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:   artifacts,
-			Memory:      memoryImpl,
-			Session:     storedSession,
-			Agent:       r.rootAgent,
-			UserContent: msg,
-			RunConfig:   &cfg,
+			Artifacts:    artifacts,
+			Memory:       memoryImpl,
+			Session:      storedSession,
+			Agent:        r.rootAgent,
+			UserContent:  msg,
+			RunConfig:    &cfg,
+			InvocationID: resolveInvocationID(storedSession, msg),
 		})
 		ctx := agent.NewNodeContext(ic, nil)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)

@@ -49,18 +49,21 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 // generic FunctionResponse-by-ID dispatch route the human's reply
 // back to the workflow agent that issued the request.
 //
-// If req.InterruptID is empty, a UUID is generated so the
-// downstream contract (a non-empty correlation key on
-// NodeState.PendingRequest) is always satisfied. Pass an explicit
-// InterruptID when the prompt has a stable, author-defined intent
-// that the UI or a multi-prompt node needs to recognise.
+// Prefer a unique InterruptID per request. If req.InterruptID is
+// empty, a UUID is generated so the downstream contract (a non-empty
+// correlation key on NodeState.PendingRequest) is always satisfied.
+// You may also build a readable-but-unique ID (a stable prefix plus a
+// UUID). Avoid a fixed literal that recurs across separate runs in the
+// same session: clients such as the Dev UI track answered requests by
+// this ID and will not re-prompt for one already resolved earlier in
+// the session (see session.RequestInput.InterruptID).
 //
 // Example:
 //
 //	func (n *MyNode) Run(ctx agent.InvocationContext, in any) iter.Seq2[*session.Event, error] {
 //	    return func(yield func(*session.Event, error) bool) {
 //	        yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-//	            InterruptID: "human_review",
+//	            InterruptID: "human_review-" + uuid.NewString(),
 //	            Message:     "Please review this draft.",
 //	            Payload:     draft,
 //	        }), nil)

@@ -53,8 +53,11 @@ func main() {
 			// ResumeOrRequestInput pauses (asks and returns
 			// ErrNodeInterrupted) on the first pass, and returns the
 			// human's reply once the node is re-run after the answer.
+			// InterruptID embeds the invocation ID: stable across this
+			// run's re-entry so the reply still correlates, yet unique
+			// per run so the Dev UI re-prompts on a later run.
 			reply, err := workflow.ResumeOrRequestInput(nc, emit, session.RequestInput{
-				InterruptID: "ask_name",
+				InterruptID: "ask_name-" + nc.InvocationID(),
 				Message:     "What's your name?",
 			})
 			if err != nil {

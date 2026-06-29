@@ -129,7 +129,7 @@ func (r *Runner) runNode(
 	// Resume (HITL continuation) vs Run (fresh): a resume is a turn whose
 	// function response answers a node waiting on an open interrupt. The
 	// paused state comes from session history, not a persisted blob.
-	state, err := wf.ReconstructRunState(storedSession)
+	state, err := wf.ReconstructRunState(storedSession, ictx.InvocationID())
 	if err != nil {
 		yield(nil, fmt.Errorf("failed to reconstruct workflow run state: %w", err))
 		return
@@ -238,12 +238,13 @@ func (r *Runner) newNodeInvocationContext(
 	}
 
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:   artifacts,
-		Memory:      memoryImpl,
-		Session:     storedSession,
-		Agent:       agentToRun,
-		UserContent: msg,
-		RunConfig:   &cfg,
+		Artifacts:    artifacts,
+		Memory:       memoryImpl,
+		Session:      storedSession,
+		Agent:        agentToRun,
+		UserContent:  msg,
+		RunConfig:    &cfg,
+		InvocationID: resolveInvocationID(storedSession, msg),
 	})
 	resCtx := agent.NewNodeContext(ic, nil)
 	return resCtx
@@ -358,4 +359,47 @@ func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 		}
 	}
 	return ids
+}
+
+// resolveInvocationID reuses the paused run's invocation ID when msg is a
+// HITL resume (carries a function response), so the resume turn and the
+// pause it answers share one ID and rehydration can scope to a single
+// run. Returns "" for a fresh turn or when the answered call is not in
+// history, letting the caller mint a fresh ID. Go analog of adk-python
+// Runner._resolve_invocation_id.
+func resolveInvocationID(sess session.Session, msg *genai.Content) string {
+	if sess == nil || msg == nil {
+		return ""
+	}
+	for _, fr := range utils.FunctionResponses(msg) {
+		if fr == nil || fr.ID == "" {
+			continue
+		}
+		if ev := findEventByFunctionCallID(sess, fr.ID); ev != nil {
+			return ev.InvocationID
+		}
+	}
+	return ""
+}
+
+// findEventByFunctionCallID returns the most recent event whose content
+// carries a FunctionCall with the given id, or nil. Go analog of
+// adk-python functions.find_event_by_function_call_id (reverse scan).
+func findEventByFunctionCallID(sess session.Session, id string) *session.Event {
+	if sess == nil || id == "" {
+		return nil
+	}
+	events := sess.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil {
+			continue
+		}
+		for _, fc := range utils.FunctionCalls(utils.Content(ev)) {
+			if fc != nil && fc.ID == id {
+				return ev
+			}
+		}
+	}
+	return nil
 }
