@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	modelName = "gemini-2.5-flash"
+	modelName = "gemini-flash-latest"
 )
 
 func main() {
