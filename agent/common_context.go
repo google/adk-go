@@ -497,7 +497,5 @@ func NewCleanToolContext(ctx Context, functionCallID string, actions *session.Ev
 		toolConfirmation:  confirmation,
 		subScheduler:      c.subScheduler,
 	}
-
-	// res := c.newCleanToolContext(functionCallID, actions, confirmation)
 	return res, nil
 }
