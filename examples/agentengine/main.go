@@ -82,7 +82,7 @@ func main() {
 	location := os.Getenv("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION")
 	agentEngineID := os.Getenv("GOOGLE_CLOUD_AGENT_ENGINE_ID")
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
 		Backend:  genai.BackendVertexAI,
 		Project:  projectID,
 		Location: location,
