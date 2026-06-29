@@ -32,7 +32,7 @@ type timeProviderKey struct{}
 // instead of the wall clock. A nil provider is ignored by Now, which then
 // falls back to time.Now.
 func WithTimeProvider(ctx context.Context, provider TimeProvider) context.Context {
-	// TODO(kdroste): refactor underlying context
+	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, timeProviderKey{}, provider)
 }
 

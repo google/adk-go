@@ -33,7 +33,7 @@ type uuidProviderKey struct{}
 // provider instead of generating a random UUID. A nil provider is ignored by
 // NewUUID, which then falls back to uuid.NewString.
 func WithUUIDProvider(ctx context.Context, provider UUIDProvider) context.Context {
-	// TODO(kdroste): refactor underlying context
+	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, uuidProviderKey{}, provider)
 }
 

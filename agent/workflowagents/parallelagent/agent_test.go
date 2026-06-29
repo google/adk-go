@@ -405,7 +405,6 @@ func TestParallelAgent_PropagatesContextError(t *testing.T) {
 
 	spy := &spyAgent{Agent: parallelAgent}
 
-	// TODO(kdroste): refactor underlying context
 	ctx, cancel := context.WithCancel(t.Context())
 
 	sessionService := session.InMemoryService()

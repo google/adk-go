@@ -34,7 +34,7 @@ type RunConfig struct {
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {
-	// TODO(kdroste): refactor underlying context
+	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, runConfigCtxKey, cfg)
 }
 
