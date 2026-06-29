@@ -45,7 +45,7 @@ func main() {
 	// Parent dynamic node: orchestrates children via RunNode.
 	// RerunOnResume defaults to &true (required for dynamic nodes).
 	myWorkflow := workflow.NewDynamicNode[string, string]("my_workflow",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			return workflow.RunNode[string](ctx, helloNode, "hello")
 		},
 		workflow.NodeConfig{},

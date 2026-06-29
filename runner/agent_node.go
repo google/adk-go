@@ -36,7 +36,7 @@ var rerunOnResume = true
 
 // newAgentNode wraps any agent.Agent as a dynamic workflow node.
 //
-// Dynamic so the body gets a NodeContext whose sub-scheduler can later
+// Dynamic so the body gets a node context whose sub-scheduler can later
 // delegate transfer_to_agent / request_task; today it forwards events
 // verbatim. HITL rides on LongRunningToolIDs (matching adk-python): the
 // node parks on unresolved IDs and re-runs (RerunOnResume) when the
@@ -65,7 +65,7 @@ func newAgentNode(a agent.Agent) workflow.Node {
 // For any other agent kind, events are forwarded verbatim and HITL rides
 // on LongRunningToolIDs.
 func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
-	return func(ctx workflow.NodeContext, input any, emit func(*session.Event) error) (any, error) {
+	return func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
 		// On resume, input is the ORIGINAL user text; re-feeding it would
 		// loop (model calls the long-running tool again). So pass no
 		// input on resume and let the agent continue from history.
@@ -86,7 +86,7 @@ func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 // ErrNodeInterrupted so the node parks in NodeWaiting.
 func runLlmAgentBody(
 	a agent.Agent,
-	ctx workflow.NodeContext,
+	ctx agent.Context,
 	input any,
 	isResume bool,
 	emit func(*session.Event) error,
@@ -133,7 +133,7 @@ func runLlmAgentBody(
 // events verbatim, park on LongRunningToolIDs, no output.
 func runGenericAgentBody(
 	a agent.Agent,
-	ctx workflow.NodeContext,
+	ctx agent.Context,
 	input any,
 	isResume bool,
 	emit func(*session.Event) error,

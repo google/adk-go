@@ -171,7 +171,7 @@ func newWorkflowScenario(t *testing.T, stage errorStage) agent.Agent {
 		func(_ agent.Context, in string) (string, error) { return in, nil }, nodeCfg)
 
 	routerNode := workflow.NewDynamicNode("router_node",
-		func(ctx workflow.NodeContext, in string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, in string, _ func(*session.Event) error) (string, error) {
 			if stage == errorDynamicNode {
 				return "", fmt.Errorf("boom: dynamic node failed")
 			}

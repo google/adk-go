@@ -36,10 +36,11 @@ func TestRunNode_ErrInvalidRunNodeContext_OnStaticContext(t *testing.T) {
 	}
 }
 
-// TestRunNode_FromBridgedContext_DynamicNodeUnderScheduler checks that
-// a tool inside a dynamic node recovers a RunNode-capable NodeContext
-// from the bridge (NodeContextFromGoContext), not from its argument.
-func TestRunNode_FromBridgedContext_DynamicNodeUnderScheduler(t *testing.T) {
+// TestRunNode_DynamicNodeUnderScheduler checks that a dynamic node run
+// by the main scheduler receives a RunNode-capable agent.Context
+// (carrying the sub-scheduler) so its body can schedule a child via
+// RunNode.
+func TestRunNode_DynamicNodeUnderScheduler(t *testing.T) {
 	child := newStubNode("c", "ok")
 
 	var (
@@ -49,7 +50,7 @@ func TestRunNode_FromBridgedContext_DynamicNodeUnderScheduler(t *testing.T) {
 	// orch is a static graph node that is itself a dynamic node,
 	// mirroring an AgentNode run by the main scheduler.
 	orch := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			gotOut, gotErr = RunNode[string](ctx, child, nil)
 			return gotOut, gotErr
 		},
@@ -67,16 +68,16 @@ func TestRunNode_FromBridgedContext_DynamicNodeUnderScheduler(t *testing.T) {
 	}
 
 	if gotErr != nil {
-		t.Fatalf("RunNode via bridged context err = %v, want nil", gotErr)
+		t.Fatalf("RunNode err = %v, want nil", gotErr)
 	}
 	if gotOut != "ok" {
-		t.Errorf("RunNode via bridged context = %q, want %q", gotOut, "ok")
+		t.Errorf("RunNode output = %q, want %q", gotOut, "ok")
 	}
 }
 
 func TestRunNode_ReturnsTypedOutput(t *testing.T) {
 	child := newStubNode("c", "hello")
-	got := runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	got := runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	if got != "hello" {
@@ -86,7 +87,7 @@ func TestRunNode_ReturnsTypedOutput(t *testing.T) {
 
 func TestRunNode_OutputTypeMismatch(t *testing.T) {
 	child := newStubNode("c", 42) // emits int
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil) // expects string
 	})
 	if err == nil {
@@ -99,7 +100,7 @@ func TestRunNode_OutputTypeMismatch(t *testing.T) {
 
 func TestRunNode_PropagatesErrNodeInterrupted(t *testing.T) {
 	asker := newRequestInputNode("asker", "approve?")
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, asker, nil)
 	})
 	if !errors.Is(err, ErrNodeInterrupted) {
@@ -112,7 +113,7 @@ func TestRunNode_WaitForOutputChildWithNoOutput_ParksParent(t *testing.T) {
 	// park the parent (ErrNodeInterrupted), not falsely complete it with
 	// the zero value. Mirrors adk-python ctx.run_node(raise_on_wait=True).
 	child := newWaitForOutputNode("waiter")
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	if !errors.Is(err, ErrNodeInterrupted) {
@@ -124,7 +125,7 @@ func TestRunNode_WaitForOutputChildWithOutput_Completes(t *testing.T) {
 	// A WaitForOutput child that does produce output completes normally;
 	// the gate must only fire on missing output.
 	child := newWaitForOutputWithValueNode("waiter", "done")
-	got := runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	got := runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	if got != "done" {
@@ -136,7 +137,7 @@ func TestRunNode_NoWaitForOutputChildWithNoOutput_ReturnsZero(t *testing.T) {
 	// Without WaitForOutput, a child that emits no output still completes
 	// and yields the zero value — the gate must not change this default.
 	child := newStubNode("c", nil)
-	got, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	got, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	if err != nil {
@@ -149,7 +150,7 @@ func TestRunNode_NoWaitForOutputChildWithNoOutput_ReturnsZero(t *testing.T) {
 
 func TestRunNode_PropagatesErrNodeFailed(t *testing.T) {
 	failer := newFailingNode("failer", errors.New("boom"))
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, failer, nil)
 	})
 	if !errors.Is(err, ErrNodeFailed) {
@@ -159,7 +160,7 @@ func TestRunNode_PropagatesErrNodeFailed(t *testing.T) {
 
 func TestRunNode_WithRunID_AppearsInChildPath(t *testing.T) {
 	child := newStubNode("processor", "")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil, WithRunID("order-42"))
 	})
 	if got, want := child.lastPath, "orch/processor@order-42"; got != want {
@@ -169,7 +170,7 @@ func TestRunNode_WithRunID_AppearsInChildPath(t *testing.T) {
 
 func TestRunNode_WithRunID_InvalidRejected(t *testing.T) {
 	child := newStubNode("c", "")
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil, WithRunID("123")) // purely numeric
 	})
 	if !errors.Is(err, ErrInvalidRunID) {
@@ -179,7 +180,7 @@ func TestRunNode_WithRunID_InvalidRejected(t *testing.T) {
 
 func TestRunNode_NilChildOutput_ReturnsZero(t *testing.T) {
 	child := newStubNode("c", nil)
-	got := runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	got := runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	if got != "" {
@@ -189,7 +190,7 @@ func TestRunNode_NilChildOutput_ReturnsZero(t *testing.T) {
 
 func TestRunNode_DefaultInheritsParentBranch(t *testing.T) {
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil)
 	})
 	// MockInvocationContext yields Branch() == "", and the
@@ -201,7 +202,7 @@ func TestRunNode_DefaultInheritsParentBranch(t *testing.T) {
 
 func TestRunNode_WithUseSubBranch_AppendsSegment(t *testing.T) {
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil, WithUseSubBranch())
 	})
 	// Parent branch is "" (root); sub-branch is bare "<name>@<runID>".
@@ -213,7 +214,7 @@ func TestRunNode_WithUseSubBranch_AppendsSegment(t *testing.T) {
 
 func TestRunNode_WithUseSubBranch_PlusCustomRunID(t *testing.T) {
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil, WithUseSubBranch(), WithRunID("order-42"))
 	})
 	if got, want := child.lastBranch, "c@order-42"; got != want {
@@ -223,7 +224,7 @@ func TestRunNode_WithUseSubBranch_PlusCustomRunID(t *testing.T) {
 
 func TestRunNode_WithOverrideBranch_ReplacesBase(t *testing.T) {
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil, WithOverrideBranch("custom_branch"))
 	})
 	if got, want := child.lastBranch, "custom_branch"; got != want {
@@ -233,7 +234,7 @@ func TestRunNode_WithOverrideBranch_ReplacesBase(t *testing.T) {
 
 func TestRunNode_WithOverrideBranch_PlusUseSubBranch_AppendsToOverride(t *testing.T) {
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil,
 			WithOverrideBranch("base"),
 			WithUseSubBranch())
@@ -248,7 +249,7 @@ func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
 	// godoc): even combined with WithUseSubBranch the sub-branch
 	// derives off the inherited parent branch.
 	child := newStubNode("c", "x")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		return RunNode[string](ctx, child, nil,
 			WithOverrideBranch(""),
 			WithUseSubBranch())
@@ -262,7 +263,7 @@ func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
 	child := newStubNode("c", "child_value")
 	n := NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
 				return "", err
 			}
@@ -292,14 +293,14 @@ func TestRunNode_WithUseAsOutput_MultiLevelStampsAllAncestors(t *testing.T) {
 	grandchild := newStubNode("gc", "deep_value")
 	child := NewDynamicNode[string, string](
 		"mid",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			return RunNode[string](ctx, grandchild, nil, WithUseAsOutput())
 		},
 		NodeConfig{},
 	)
 	top := NewDynamicNode[string, string](
 		"top",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			return RunNode[string](ctx, child, nil, WithUseAsOutput())
 		},
 		NodeConfig{},
@@ -322,7 +323,7 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputChildBecomesParentOutput(t *test
 	child := newMessageAsOutputNode("c", "child_text")
 	n := NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
 				return "", err
 			}
@@ -345,7 +346,7 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testin
 	child := newMessageAsOutputNode("c", "")
 	n := NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
 				return "", err
 			}
@@ -362,7 +363,7 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testin
 func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
 	c1 := newStubNode("c1", "v1")
 	c2 := newStubNode("c2", "v2")
-	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+	_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
 		if _, err := RunNode[string](ctx, c1, nil, WithUseAsOutput()); err != nil {
 			return "", err
 		}
@@ -377,7 +378,7 @@ func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
 func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	child := newCountingStubNode("c", "the_value")
 	got1, got2 := "", ""
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		var err error
 		got1, err = RunNode[string](ctx, child, nil, WithRunID("stable-id"))
 		if err != nil {
@@ -398,7 +399,7 @@ func TestRunNode_WithRunID_AndUseAsOutput_IdempotentReplay(t *testing.T) {
 	child := newCountingStubNode("c", "delegated_value")
 	n := NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil,
 				WithRunID("stable-id"), WithUseAsOutput()); err != nil {
 				return "", err
@@ -429,7 +430,7 @@ func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
 	c1 := newStubNode("c", "first")
 	// re-use the same node twice to exercise the per-name counter.
 	var got []string
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		if _, err := RunNode[string](ctx, c1, nil, WithUseSubBranch()); err != nil {
 			return "", err
 		}
@@ -458,7 +459,7 @@ func TestRunNode_IsolationScopeFromNodePath(t *testing.T) {
 	child := newStubNode("c", "v")
 	events := drainDynamic(t, NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
 				return "", err
 			}
@@ -479,7 +480,7 @@ func TestRunNode_IsolationScope_Explicit(t *testing.T) {
 	child := newStubNode("c", "v")
 	events := drainDynamic(t, NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			if _, err := RunNode[string](ctx, child, nil, WithIsolationScope("fc-123")); err != nil {
 				return "", err
 			}
@@ -498,7 +499,7 @@ func TestRunNode_IsolationScope_Explicit(t *testing.T) {
 
 func TestRunNode_ExplicitScopeTakesPrecedenceOverNodePath(t *testing.T) {
 	child := newStubNode("c", "v")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		_, err := RunNode[string](ctx, child, nil,
 			WithIsolationScope("fc-123"), WithIsolationScopeFromNodePath())
 		return "", err
@@ -512,7 +513,7 @@ func TestRunNode_NoIsolationScope_InheritsParent(t *testing.T) {
 	// Without a scope option the child inherits the parent's scope,
 	// which is empty for an unscoped orchestrator.
 	child := newStubNode("c", "v")
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		_, err := RunNode[string](ctx, child, nil)
 		return "", err
 	})
@@ -526,7 +527,7 @@ func TestRunNode_IsolationScope_DistinctPerNodePath(t *testing.T) {
 	// distinct scopes, the uniqueness guarantee from b/514866119.
 	child := newStubNode("c", "v")
 	var scopes []string
-	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+	runInOrchestrator[string](t, func(ctx agent.Context) (string, error) {
 		if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
 			return "", err
 		}
@@ -557,8 +558,8 @@ func isolationScopeAtPath(events []*session.Event, nodePath string) string {
 }
 
 // runInOrchestrator drives orchestratorFn inside a dynamic node so that
-// the RunNode calls inside have a valid NodeContext + sub-scheduler.
-func runInOrchestrator[OUT any](t *testing.T, orchestratorFn func(NodeContext) (OUT, error)) OUT {
+// the RunNode calls inside have a valid agent.Context + sub-scheduler.
+func runInOrchestrator[OUT any](t *testing.T, orchestratorFn func(agent.Context) (OUT, error)) OUT {
 	t.Helper()
 	got, err := runInOrchestratorWithErr[OUT](t, orchestratorFn)
 	if err != nil {
@@ -567,7 +568,7 @@ func runInOrchestrator[OUT any](t *testing.T, orchestratorFn func(NodeContext) (
 	return got
 }
 
-func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeContext) (OUT, error)) (OUT, error) {
+func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(agent.Context) (OUT, error)) (OUT, error) {
 	t.Helper()
 	var (
 		got    OUT
@@ -575,7 +576,7 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 	)
 	n := NewDynamicNode[string, OUT](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (OUT, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (OUT, error) {
 			got, gotErr = orchestratorFn(ctx)
 			if gotErr != nil {
 				return got, gotErr
@@ -688,7 +689,7 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 
 	orch := NewDynamicNode[string, string](
 		"orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			start := make(chan struct{})
 			var wg sync.WaitGroup
 			wg.Add(n)
@@ -777,6 +778,57 @@ func newWaitForOutputWithValueNode(name string, out any) *waitForOutputWithValue
 func (n *waitForOutputWithValueNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{Output: out}, nil)
+	}
+}
+
+// TestRunNode_DynamicChildRecoversOwnContext is an end-to-end check that a
+// child of a dynamic-node activation can recover its own agent.Context — the
+// path runnable tools rely on to reach the sub-scheduler from the context.
+func TestRunNode_DynamicChildRecoversOwnContext(t *testing.T) {
+	var captured agent.Context
+
+	inner := newFnNode("inner", func(ctx agent.Context) (any, error) {
+		captured = ctx
+		return "ok", nil
+	})
+
+	orchestrator := NewDynamicNode[string, string]("orch",
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, inner, nil)
+		},
+		NodeConfig{},
+	)
+
+	if _, err := drainDynamicWithErr(t, orchestrator, ""); err != nil {
+		t.Fatalf("orchestrator error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("inner did not recover any agent.Context")
+	}
+}
+
+// fnNode adapts a func(agent.Context) callback into a Node that emits
+// a single Output event on success.
+type fnNode struct {
+	BaseNode
+	fn func(agent.Context) (any, error)
+}
+
+func newFnNode(name string, fn func(agent.Context) (any, error)) *fnNode {
+	return &fnNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		fn:       fn,
+	}
+}
+
+func (n *fnNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		out, err := n.fn(ctx)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
 		yield(&session.Event{Output: out}, nil)
 	}
 }

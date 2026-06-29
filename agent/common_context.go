@@ -89,7 +89,7 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 	}
 }
 
-// NewCallbackContext returns CallbackContext initialized with provided actions.
+// NewCallbackContext returns a callback context initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
@@ -99,14 +99,14 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Con
 		actions:           actions,
 		artifacts:         ic.Artifacts(),
 	}
-	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
+	// wrap the commonContext in order to log information about someone using tool-context methods on a callback context
 	wrapper := &callbackContextWrapper{
 		context: cc,
 	}
 	return wrapper
 }
 
-// NewCallbackContextWithArtifactTracking returns CallbackContext initialized with provided actions.
+// NewCallbackContextWithArtifactTracking returns a callback context initialized with provided actions.
 // the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
@@ -118,21 +118,21 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 		actions:           actions,
 		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
 	}
-	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
+	// wrap the commonContext in order to log information about someone using tool-context methods on a callback context
 	wrapper := &callbackContextWrapper{
 		context: cc,
 	}
 	return wrapper
 }
 
-// NewToolContext constructs a ToolContext for a tool execution.
+// NewToolContext constructs a tool context for a tool execution.
 //
 // If functionCallID is empty a new UUID is generated. If actions is nil a
 // fresh session.EventActions with empty StateDelta and ArtifactDelta is
-// allocated; missing sub-maps are populated. The returned ToolContext is
-// backed by the same *callbackContext implementation used for CallbackContext,
+// allocated; missing sub-maps are populated. The returned context is
+// backed by the same *commonContext implementation used for a callback context,
 // so all callback-context semantics (state delta tracking, artifact delta
-// tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
+// tracking, etc.) apply, plus the tool-specific extensions.
 func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	var res commonContext
 	ctx, ok := ic.(*commonContext)
@@ -198,7 +198,7 @@ type commonContext struct {
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
 
-	// Fields below are used by NodeContext
+	// Fields below are used by node contexts.
 	// resumeInputs are keyed by InterruptID. Nil on fresh activations
 	// and on handoff resume.
 	resumeInputs map[string]any
@@ -458,9 +458,9 @@ var (
 	_ ReadonlyContext   = (*commonContext)(nil)
 )
 
-// --- ToolContext extensions ----------------------------------------------
+// --- Tool-context extensions ----------------------------------------------
 //
-// The methods below are always present on *callbackContext but only
+// The methods below are always present on *commonContext but only
 // meaningful when the context was constructed via NewToolContext (i.e.
 // when functionCallID is set).
 

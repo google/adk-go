@@ -133,18 +133,6 @@ type ReadonlyContext interface {
 	Branch() string
 }
 
-// CallbackContext is passed to user callbacks during agent execution.
-//
-// Deprecated: use [Context] directly. This alias exists only to ease the
-// migration to the unified context and will be removed in a future release.
-type CallbackContext = Context
-
-// ToolContext is the context passed to a tool when it is called.
-//
-// Deprecated: use [Context] directly. This alias exists only to ease the
-// migration to the unified context and will be removed in a future release.
-type ToolContext = Context
-
 // Context is the unified context passed to user callbacks during agent
 // execution and to tools when they are called. It provides access to the
 // originating function call, mutable event actions, long-term memory search,
@@ -157,7 +145,7 @@ type Context interface {
 	Artifacts() Artifacts
 	State() session.State
 
-	// ToolContext section
+	// Tool context section
 
 	// FunctionCallID returns the unique identifier of the function call
 	// that triggered this tool execution.
@@ -211,7 +199,7 @@ type Context interface {
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
 
-	// NodeContext section
+	// Workflow node section
 
 	// ResumedInput returns the response payload for a re-entry resume
 	// activation keyed by InterruptID, or (nil, false) otherwise.
@@ -227,7 +215,7 @@ type Context interface {
 	// dynamic children.
 	RunID() string
 
-	// WithBranch returns a NodeContext whose Branch() returns the
+	// WithBranch returns a Context whose Branch() returns the
 	// given value; all other fields (path, runID, subScheduler,
 	// resumeInputs, embedded InvocationContext) are preserved.
 	WithBranch(branch string) Context

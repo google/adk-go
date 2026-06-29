@@ -289,7 +289,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	})
 
 	orchestrator := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(nc agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			out, err := workflow.RunNode[any](nc, asker, nil)
 			if err != nil {
 				// Pause: err is ErrNodeInterrupted (swallowed by dynamicNode.Run).

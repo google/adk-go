@@ -41,7 +41,7 @@ func TestCallbackContext(t *testing.T) {
 	callback := NewCallbackContext(inv)
 
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
+		t.Errorf("callback context (%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
 }
 

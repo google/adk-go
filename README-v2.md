@@ -33,19 +33,17 @@ ev := session.NewEvent(ctx, ctx.InvocationID())
 
 Any `context.Context` works as the first argument: the `ctx` of an agent/tool/
 callback (which embed `context.Context`), the incoming RPC/HTTP request context,
-or — in tests — `t.Context()`. Per
-[go/how-to-use-a-context](http://go/how-to-use-a-context), thread the context
-down the call chain rather than creating one with `context.Background()` in the
-middle of it; reserve `context.Background()` for `main`, `init`, and top-level
-test/setup code.
+or — in tests — `t.Context()`. As the [`context`
+package](https://pkg.go.dev/context) advises, thread the context down the call
+chain rather than creating one with `context.Background()` in the middle of it;
+reserve `context.Background()` for `main`, `init`, and top-level test/setup code.
 
 If you call `NewEvent` from a helper that does not yet receive a context, add a
 `ctx context.Context` parameter to that helper and pass it through from its
 callers.
 
 ### Mocks update required for unified contexts 
-PR https://github.com/google/adk-go/pull/945 merges ToolContext and CallbackContext into single Context. 
-ToolContext and CallbackContext became aliases to Context. 
+PR https://github.com/google/adk-go/pull/945 merges ToolContext and CallbackContext into single Context.
 
 This introduces a problem for mock contexts - new functions (ToolContext-related) are missing if the mock was created for the previous version of CallbackContext. 
 Solution:
@@ -61,7 +59,7 @@ func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
 
-var _ agent.CallbackContext = (*MockCallbackContext)(nil)
+var _ agent.Context = (*MockCallbackContext)(nil)
 ```
 
 #### Alternative: embed `agent.StrictContextMock`
@@ -78,9 +76,7 @@ the test loudly instead of silently returning a zero value. The standard
 `context.Context` methods (`Deadline`, `Done`, `Err`, `Value`) read from the
 supplied `Ctx` rather than panicking.
 
-Assert against the unified `agent.Context` directly. `CallbackContext` and
-`ToolContext` are only transitional aliases during the migration — don't rely on
-them; migrate straight to `agent.Context`.
+Assert against the unified `agent.Context` directly.
 
 ```go
 // Embed StrictContextMock and override only what the test needs.
