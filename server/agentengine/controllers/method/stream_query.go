@@ -113,8 +113,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			continue
 		}
 
-		chunk := *event
-		err = helper.EmitJSON(rw, chunk)
+		err = helper.EmitJSON(rw, *event)
 		if err != nil {
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
 			log.Print(e.Error())

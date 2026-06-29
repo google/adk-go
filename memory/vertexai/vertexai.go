@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package vertexai provides support for using MemoryBank provided by VertexAI
+// Package vertexai provides support for using MemoryBank provided by VertexAI
 package vertexai
 
 import (
