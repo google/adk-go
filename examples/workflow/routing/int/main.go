@@ -46,7 +46,7 @@ func rollDie(_ agent.Context, _ string) (int, error) {
 // terminal event so this single emit carries both the route and the
 // output.
 func routeByValue(ctx agent.Context, value int, emit func(*session.Event) error) (any, error) {
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	// IntRoute and MultiRoute[int] both compare against the
 	// stringified value, so emit it that way.
 	ev.Routes = []string{fmt.Sprint(value)}

@@ -71,7 +71,7 @@ func NewRequestInputEvent(ctx agent.InvocationContext, req session.RequestInput)
 		req.InterruptID = uuid.NewString()
 	}
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.RequestedInput = &req
 
 	// Synthesise the FunctionCall part so generic

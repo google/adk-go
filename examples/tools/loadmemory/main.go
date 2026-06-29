@@ -170,7 +170,7 @@ func createPreviousSessionWithHistory(
 	}
 
 	for _, e := range events {
-		event := session.NewEventWithContext(ctx, "previous-session")
+		event := session.NewEvent(ctx, "previous-session")
 		event.Author = e.author
 		event.LLMResponse = model.LLMResponse{
 			Content: genai.NewContentFromText(e.content, genai.Role(e.author)),
