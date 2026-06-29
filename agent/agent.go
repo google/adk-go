@@ -171,7 +171,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 
-		// create NodeContext based on spanCtx and ctx
+		// create a node context based on spanCtx and ctx
 		// case 1: ctx is Context
 		// case 2: ctx is InvocationContext and is not Context
 

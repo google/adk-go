@@ -32,7 +32,7 @@ import (
 // dynamicSubScheduler runs the children of one dynamic-node activation.
 type dynamicSubScheduler struct {
 	parentPath string
-	parentCtx  NodeContext
+	parentCtx  agent.Context
 	emitUp     func(*session.Event) error
 
 	// outputForAncestors are the delegating-ancestor paths this

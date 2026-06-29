@@ -28,155 +28,155 @@ import (
 )
 
 // callbackContextWrapper is used to emit log entries for unexpected calls - those
-// related to ToolContext when Context is used as callback context
+// related to tool-context methods when an agent.Context is used as a callback context.
 type callbackContextWrapper struct {
 	context Context
 }
 
 // WithAgentCancel implements [Context].
 func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
-	log.Print("WithAgentCancel() is not supported for CallbackContext")
+	log.Print("WithAgentCancel() is not supported for callback context")
 	return nil, nil
 }
 
 // WithAgentTimeout implements [Context].
 func (c *callbackContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for CallbackContext")
+	log.Print("WithAgentTimeout() is not supported for callback context")
 	return nil, nil
 }
 
 // InvocationContext implements [Context].
 func (c *callbackContextWrapper) InvocationContext() InvocationContext {
-	log.Print("InvocationContext() is not supported for CallbackContext")
+	log.Print("InvocationContext() is not supported for callback context")
 	return nil
 }
 
 // SubScheduler implements [Context].
 func (c *callbackContextWrapper) SubScheduler() DynamicSubScheduler {
-	log.Print("SubScheduler() is not supported for CallbackContext")
+	log.Print("SubScheduler() is not supported for callback context")
 	return nil
 }
 
 // Agent implements [Context].
 func (c *callbackContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for CallbackContext")
+	log.Print("Agent() is not supported for callback context")
 	return nil
 }
 
 // EndInvocation implements [Context].
 func (c *callbackContextWrapper) EndInvocation() {
-	log.Print("EndInvocation() is not supported for CallbackContext")
+	log.Print("EndInvocation() is not supported for callback context")
 }
 
 // Ended implements [Context].
 func (c *callbackContextWrapper) Ended() bool {
-	log.Print("Ended() is not supported for CallbackContext")
+	log.Print("Ended() is not supported for callback context")
 	return false
 }
 
 // IsolationScope implements [Context].
 func (c *callbackContextWrapper) IsolationScope() string {
-	log.Print("IsolationScope() is not supported for CallbackContext")
+	log.Print("IsolationScope() is not supported for callback context")
 	return ""
 }
 
 // Memory implements [Context].
 func (c *callbackContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for CallbackContext")
+	log.Print("Memory() is not supported for callback context")
 	return nil
 }
 
 // Path implements [Context].
 func (c *callbackContextWrapper) Path() string {
-	log.Print("Path() is not supported for CallbackContext")
+	log.Print("Path() is not supported for callback context")
 	return ""
 }
 
 // ResumedInput implements [Context].
 func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
-	log.Print("ResumedInput() is not supported for CallbackContext")
+	log.Print("ResumedInput() is not supported for callback context")
 	return nil, false
 }
 
 // RunConfig implements [Context].
 func (c *callbackContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for CallbackContext")
+	log.Print("RunConfig() is not supported for callback context")
 	return nil
 }
 
 // RunID implements [Context].
 func (c *callbackContextWrapper) RunID() string {
-	log.Print("RunID() is not supported for CallbackContext")
+	log.Print("RunID() is not supported for callback context")
 	return ""
 }
 
 // Session implements [Context].
 func (c *callbackContextWrapper) Session() session.Session {
-	log.Print("Session() is not supported for CallbackContext")
+	log.Print("Session() is not supported for callback context")
 	return nil
 }
 
 // WithBranch implements [Context].
 func (c *callbackContextWrapper) WithBranch(branch string) Context {
-	log.Print("WithBranch() is not supported for CallbackContext")
+	log.Print("WithBranch() is not supported for callback context")
 	return nil
 }
 
 // WithContext implements [Context].
 func (c *callbackContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	log.Print("WithContext() is not supported for CallbackContext")
+	log.Print("WithContext() is not supported for callback context")
 	return nil
 }
 
 // WithAgentContext implements [Context].
 func (c *callbackContextWrapper) WithAgentContext(ctx context.Context) Context {
-	log.Print("WithAgentContext() is not supported for CallbackContext")
+	log.Print("WithAgentContext() is not supported for callback context")
 	return nil
 }
 
-// ToolContext-related: emit logs and return empty data
+// Tool-context methods: emit logs and return empty data
 
 // Actions implements [Context].
 func (c *callbackContextWrapper) Actions() *session.EventActions {
-	// return nil, Actions() do not make any sense for CallbackContext
-	log.Print("Actions() is not supported for CallbackContext")
+	// return nil, Actions() do not make any sense for a callback context
+	log.Print("Actions() is not supported for callback context")
 	return nil
 }
 
 // FunctionCallID implements [Context].
 func (c *callbackContextWrapper) FunctionCallID() string {
-	// return "", FunctionCallID() do not make any sense for CallbackContext
-	log.Print("FunctionCallID() is not supported for CallbackContext")
+	// return "", FunctionCallID() do not make any sense for a callback context
+	log.Print("FunctionCallID() is not supported for callback context")
 	return ""
 }
 
 // RequestConfirmation implements [Context].
 func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) error {
-	//  RequestConfirmation() does not make any sense for CallbackContext
-	log.Print("RequestConfirmation() is not supported for CallbackContext")
+	//  RequestConfirmation() does not make any sense for a callback context
+	log.Print("RequestConfirmation() is not supported for callback context")
 	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
 }
 
 // SearchMemory implements [Context].
 func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	//  SearchMemory() does not make any sense for CallbackContext
-	log.Print("SearchMemory() is not supported for CallbackContext")
+	//  SearchMemory() does not make any sense for a callback context
+	log.Print("SearchMemory() is not supported for callback context")
 	return nil, fmt.Errorf("SearchMemory() is not supported for callback context")
 }
 
 // ToolConfirmation implements [Context].
 func (c *callbackContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmation {
-	// ToolConfirmation() does not make any sense for CallbackContext
-	log.Print("ToolConfirmation() is not supported for CallbackContext")
+	// ToolConfirmation() does not make any sense for a callback context
+	log.Print("ToolConfirmation() is not supported for callback context")
 	return nil
 }
 
 func (c *callbackContextWrapper) OutputForAncestors() []string {
-	log.Print("OutputForAncestors() is not supported for CallbackContext")
+	log.Print("OutputForAncestors() is not supported for callback context")
 	return nil
 }
 
-// non ToolContext-related - call embedded context.
+// Non-tool-context methods - call embedded context.
 
 // AgentName implements [Context].
 func (c *callbackContextWrapper) AgentName() string {

@@ -31,7 +31,7 @@ import (
 // DynamicFn is the orchestrator body of a dynamic node. emit publishes
 // mid-body events (state updates, HITL requests, progress); the return
 // value becomes the node's terminal Event.Output.
-type DynamicFn[IN, OUT any] = func(ctx NodeContext, in IN, emit func(*session.Event) error) (OUT, error)
+type DynamicFn[IN, OUT any] = func(ctx agent.Context, in IN, emit func(*session.Event) error) (OUT, error)
 
 type dynamicNode[IN, OUT any] struct {
 	BaseNode
@@ -171,7 +171,7 @@ func (n *dynamicNode[IN, OUT]) coerceInput(input any) (IN, error) {
 // context with the full child path ("<parent>/<name>@<runID>"), so that
 // path is used as-is. A top-level activation has no parent path and
 // gets the bare Name().
-func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
+func (n *dynamicNode[IN, OUT]) composePath(parent agent.Context) string {
 	if p := parent.Path(); p != "" {
 		return p
 	}
@@ -190,7 +190,7 @@ func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 // children (see WithUseSubBranch) that all emit through this one
 // callback, and calling the same yield from multiple goroutines panics
 // the iterator and races the parent runNode's completion accumulator.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext) func(*session.Event) error {
+func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) func(*session.Event) error {
 	var mu sync.Mutex
 	return func(ev *session.Event) error {
 		mu.Lock()

@@ -383,7 +383,7 @@ func safeCanonicalToolsDict(a agent.Agent) map[string]tool.Tool {
 	return out
 }
 
-func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflow.NodeContext) (any, error) {
+func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.Context) (any, error) {
 	if fc == nil {
 		return nil, fmt.Errorf("dispatchTaskFC: nil function call")
 	}

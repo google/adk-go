@@ -101,7 +101,7 @@ func (fakeMemory) SearchMemory(context.Context, string) (*memory.SearchResponse,
 	return &memory.SearchResponse{}, nil
 }
 
-// newTestCallbackContext builds a CallbackContext (a *callbackContextWrapper)
+// newTestCallbackContext builds a callback context (a *callbackContextWrapper)
 // backed by a fully-populated invocationContext so that the supported methods
 // have meaningful values to delegate to.
 func newTestCallbackContext(t *testing.T) Context {
@@ -131,7 +131,7 @@ func newTestCallbackContext(t *testing.T) Context {
 }
 
 // TestCallbackContextWrapper_LogsForToolContextMethods verifies that calling
-// ToolContext-only methods on a CallbackContext (obtained via
+// tool-context-only methods on a callback context (obtained via
 // NewCallbackContext, which wraps the underlying commonContext in a
 // callbackContextWrapper) emits a log entry indicating the method is not
 // supported, and returns the documented "no-op" value.
@@ -204,7 +204,7 @@ func TestCallbackContextWrapper_LogsForToolContextMethods(t *testing.T) {
 }
 
 // TestCallbackContextWrapper_NoLogForSupportedMethods verifies that methods
-// which are valid on a CallbackContext (i.e. the ones the wrapper simply
+// which are valid on a callback context (i.e. the ones the wrapper simply
 // delegates to the underlying context) do not emit any log entry and return
 // the values produced by the underlying invocation context.
 func TestCallbackContextWrapper_NoLogForSupportedMethods(t *testing.T) {

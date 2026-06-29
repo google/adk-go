@@ -210,7 +210,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_Resume(t *testing.T) {
 	var parentOutput atomic.Value
 	orchestrator := workflow.NewDynamicNode[string, string](
 		"orchestrate",
-		func(nc workflow.NodeContext, input string, _ func(*session.Event) error) (string, error) {
+		func(nc agent.Context, input string, _ func(*session.Event) error) (string, error) {
 			x, err := workflow.RunNode[string](nc, firstChild, input, workflow.WithRunID("c1"))
 			if err != nil {
 				return "", err

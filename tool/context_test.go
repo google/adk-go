@@ -27,7 +27,7 @@ func TestNewToolContext_Interfaces(t *testing.T) {
 	toolCtx := agent.NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
+		t.Errorf("tool context (%+T) is unexpectedly not a ReadonlyContext", toolCtx)
 	}
 }
 

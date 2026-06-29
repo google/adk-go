@@ -225,7 +225,7 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 		gotErr    error
 	)
 	orchestrator := workflow.NewDynamicNode("orchestrator",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (any, error) {
 			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
@@ -292,7 +292,7 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	// Body mirrors runner.runAgentNodeBody: re-wrap ctx, then re-stash
 	// the sub-scheduler in the value chain before building the tool context.
 	orchestrator := workflow.NewDynamicNode("orchestrator",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (any, error) {
 			toolCtx, err := agent.NewCleanToolContext(ctx, "fc-id", &session.EventActions{}, nil)
 			if err != nil {
 				return nil, fmt.Errorf("cannot agent.NewCleanToolContext: %w", err)
