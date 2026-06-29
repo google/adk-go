@@ -235,7 +235,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope},
 	}
 
-	childCtx := s.parentCtx.Apply(delta)
+	childCtx := s.parentCtx.WithDelta(delta)
 
 	// Emit an "invoke_node <name>" span nested under the dynamic
 	// node's span (carried in s.parentCtx), so RunNode-driven

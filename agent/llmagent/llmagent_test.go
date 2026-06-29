@@ -1313,10 +1313,10 @@ func TestLLMAgent_WorkflowIntegration_OutputKeyDoesNotDuplicateOutput(t *testing
 	}
 
 	runCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
-	exCtx := agent.NewNodeContext(&mockInvocationContext{
+	exCtx := agent.NewContext(&mockInvocationContext{
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
-	}, nil)
+	})
 
 	for _, err := range w.Run(exCtx) {
 		if err != nil {
