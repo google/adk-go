@@ -152,7 +152,7 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 		role = "user"
 	}
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = author
 	ev.Timestamp = startTime
 	ev.Content = &genai.Content{

@@ -52,8 +52,11 @@ func main() {
 
 	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
 		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			// InterruptID embeds the invocation ID: stable within a run
+			// (the greeter resolves by the same key) yet unique per run
+			// for the Dev UI.
 			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-				InterruptID: "ask_name",
+				InterruptID: "ask_name-" + ctx.InvocationID(),
 				Message:     "What's your name?",
 			})); err != nil {
 				return nil, err
@@ -66,7 +69,7 @@ func main() {
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
 		func(nc agent.Context, _ string, emit func(*session.Event) error) (string, error) {
 			// Resume re-entry: the reply is in ResumedInput.
-			if reply, ok := nc.ResumedInput("ask_name"); ok {
+      if reply, ok := nc.ResumedInput("ask_name-" + nc.InvocationID()); ok {
 				name, _ := reply.(string)
 				if name == "" {
 					name = "stranger"
@@ -74,7 +77,7 @@ func main() {
 				greeting := fmt.Sprintf("Hello, %s!", name)
 				// Emit Content so the console renders the greeting; the
 				// terminal Output below is for downstream nodes / state.
-				ev := session.NewEventWithContext(nc, nc.InvocationID())
+				ev := session.NewEvent(nc, nc.InvocationID())
 				ev.Content = &genai.Content{Parts: []*genai.Part{{Text: greeting}}}
 				if err := emit(ev); err != nil {
 					return "", err

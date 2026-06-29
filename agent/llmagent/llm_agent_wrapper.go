@@ -145,7 +145,7 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if content == nil {
 		return nil
 	}
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: content}
 	if iso := ctx.IsolationScope(); iso != "" {
@@ -415,7 +415,7 @@ func synthesizeTaskFREvent(ctx context.Context, invocationID string, fc *genai.F
 	} else {
 		response = map[string]any{"output": output}
 	}
-	ev := session.NewEventWithContext(ctx, invocationID)
+	ev := session.NewEvent(ctx, invocationID)
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{

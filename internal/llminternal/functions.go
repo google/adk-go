@@ -79,7 +79,7 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	ev := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
+	ev := session.NewEvent(invocationContext, invocationContext.InvocationID())
 	ev.Author = invocationContext.Agent().Name()
 	ev.Branch = invocationContext.Branch()
 	ev.LLMResponse = model.LLMResponse{

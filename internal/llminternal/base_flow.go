@@ -403,7 +403,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								}
 							}
 						}
-						ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
 						select {
@@ -961,7 +961,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
 	utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.ID = resp.eventID // TODO change NewEvent to accept event id
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
@@ -1171,7 +1171,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",

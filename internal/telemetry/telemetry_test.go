@@ -167,7 +167,7 @@ func TestInvokeAgent(t *testing.T) {
 		{
 			name: "Success",
 			resultParams: TraceAgentResultParams{
-				ResponseEvent: session.NewEventWithContext(context.Background(), "test-invocation-id"),
+				ResponseEvent: session.NewEvent(t.Context(), "test-invocation-id"),
 			},
 			wantName:   "invoke_agent test-agent",
 			wantStatus: codes.Unset,

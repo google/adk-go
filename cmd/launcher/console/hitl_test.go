@@ -21,9 +21,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/adk/workflow"
@@ -458,4 +462,97 @@ func TestRenderOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConsoleHITL_TwoFullCycles_SameSession drives the console's real
+// HITL handling (collectPendingInterrupts + buildInterruptResponse)
+// against a live runner for two pause/resume cycles in one session, as
+// the REPL loop does. The cases above cover the helpers in isolation;
+// this guards that a fresh run reusing a completed session still resumes.
+func TestConsoleHITL_TwoFullCycles_SameSession(t *testing.T) {
+	ctx := t.Context()
+	const app, user, sid = "hitl_simple", "u", "s"
+
+	svc := session.InMemoryService()
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: app, UserID: user, SessionID: sid}); err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: app, Agent: newConsoleHITLAgent(t), SessionService: svc})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	turn := func(msg *genai.Content) ([]pendingInterrupt, any) {
+		var events []*session.Event
+		var finalOutput any
+		for ev, err := range r.Run(ctx, user, sid, msg, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if ev == nil {
+				continue
+			}
+			if ev.LLMResponse.Content == nil && ev.Output != nil {
+				finalOutput = ev.Output
+			}
+			events = append(events, ev)
+		}
+		return collectPendingInterrupts(events), finalOutput
+	}
+
+	cycle := func(name string) any {
+		pending, _ := turn(genai.NewContentFromText("hi", genai.RoleUser))
+		if len(pending) != 1 {
+			t.Fatalf("fresh turn: got %d pending interrupts, want 1", len(pending))
+		}
+		reply := &genai.Content{
+			Role:  string(genai.RoleUser),
+			Parts: []*genai.Part{buildInterruptResponse(pending[0], name+"\n")},
+		}
+		_, out := turn(reply)
+		return out
+	}
+
+	if got, want := cycle("Wojtek"), "Hello, Wojtek!"; got != want {
+		t.Fatalf("cycle 1 greeting = %v, want %q", got, want)
+	}
+	if got, want := cycle("Karol"), "Hello, Karol!"; got != want {
+		t.Fatalf("cycle 2 greeting = %v, want %q", got, want)
+	}
+}
+
+// newConsoleHITLAgent builds a workflow agent shaped like
+// examples/workflow/hitl_simple: ask_name pauses on a unique interrupt
+// ID per request, greet returns the greeting for the reply.
+func newConsoleHITLAgent(t *testing.T) agent.Agent {
+	t.Helper()
+	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
+		func(ic agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			if err := emit(workflow.NewRequestInputEvent(ic, session.RequestInput{
+				InterruptID: "ask_name-" + uuid.NewString(),
+				Message:     "What's your name?",
+			})); err != nil {
+				return nil, err
+			}
+			return nil, workflow.ErrNodeInterrupted
+		},
+		workflow.NodeConfig{},
+	)
+	greet := workflow.NewFunctionNode("greet",
+		func(_ agent.Context, name string) (string, error) {
+			if name == "" {
+				name = "stranger"
+			}
+			return "Hello, " + name + "!", nil
+		},
+		workflow.NodeConfig{},
+	)
+	a, err := workflowagent.New(workflowagent.Config{
+		Name:  "hitl_simple",
+		Edges: workflow.Chain(workflow.Start, ask, greet),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+	return a
 }

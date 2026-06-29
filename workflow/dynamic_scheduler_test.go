@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"strconv"
@@ -24,9 +25,13 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/session"
 )
 
@@ -398,5 +403,70 @@ func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event
 			return
 		}
 		yield(nil, errors.New("boom"))
+	}
+}
+
+// errYieldNode yields a fixed error as its run error.
+type errYieldNode struct {
+	BaseNode
+	err error
+}
+
+func newErrYieldNode(name string, err error) *errYieldNode {
+	return &errYieldNode{BaseNode: NewBaseNode(name, "", NodeConfig{}), err: err}
+}
+
+func (n *errYieldNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	err := n.err
+	return func(yield func(*session.Event, error) bool) {
+		yield(nil, err)
+	}
+}
+
+// TestSubScheduler_RunNode_SpanStatusOnChildError asserts a delegated
+// child's invoke_node span is marked Error on a genuine failure but not
+// on parent cancellation.
+func TestSubScheduler_RunNode_SpanStatusOnChildError(t *testing.T) {
+	tests := []struct {
+		name       string
+		childErr   error
+		wantStatus codes.Code
+	}{
+		{
+			name:       "genuine_failure_marks_error",
+			childErr:   errors.New("boom"),
+			wantStatus: codes.Error,
+		},
+		{
+			name:       "parent_cancellation_not_marked_error",
+			childErr:   context.Canceled,
+			wantStatus: codes.Unset,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spanExp := tracetest.NewInMemoryExporter()
+			telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
+
+			child := newErrYieldNode("c", tc.childErr)
+			sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+			if _, err := sub.RunNode(child, nil, runNodeOptions{}); err == nil {
+				t.Fatal("RunNode: got nil error, want non-nil")
+			}
+
+			spans := spanExp.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans))
+			}
+			got := spans[0]
+			if got.Name != "invoke_node c" {
+				t.Errorf("span name = %q, want %q", got.Name, "invoke_node c")
+			}
+			if got.Status.Code != tc.wantStatus {
+				t.Errorf("span status = %v, want %v", got.Status.Code, tc.wantStatus)
+			}
+		})
 	}
 }

@@ -59,7 +59,7 @@ func upperFn(ctx agent.Context, input any) (any, error) {
 	}
 	val := stringsToUpper(s)
 	if val == "ALPHA" || val == "BETA" {
-		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+		ev := session.NewEvent(ctx, ctx.InvocationID())
 		ev.Output = val
 		ev.Routes = []string{val}
 		return ev, nil

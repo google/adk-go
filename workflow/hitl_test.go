@@ -227,7 +227,7 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 		hitlDownstreamRan.Store(true)
 	})
 	plainNode := newHitlNode("plain", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
-		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+		ev := session.NewEvent(ctx, ctx.InvocationID())
 		ev.Output = "done"
 		yield(ev, nil)
 	})

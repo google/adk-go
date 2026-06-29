@@ -154,7 +154,7 @@ func newSessionWithEvent(t *testing.T, text string) session.Session {
 	if err != nil {
 		t.Fatalf("session.Create: %v", err)
 	}
-	ev := session.NewEvent("inv-existing")
+	ev := session.NewEvent(t.Context(), "inv-existing")
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
 		Role:  genai.RoleUser,
@@ -172,8 +172,9 @@ func newSessionWithEvent(t *testing.T, text string) session.Session {
 	return getResp.Session
 }
 
-func seedEvent(text string) *session.Event {
-	ev := session.NewEvent("inv-seed")
+func seedEvent(t *testing.T, text string) *session.Event {
+	t.Helper()
+	ev := session.NewEvent(t.Context(), "inv-seed")
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
 		Role:  genai.RoleUser,
@@ -190,7 +191,7 @@ func TestWrappedSession_SeedNotPersisted(t *testing.T) {
 
 	base := newSessionWithEvent(t, "existing turn")
 	baseLen := base.Events().Len()
-	seed := seedEvent("transient node input")
+	seed := seedEvent(t, "transient node input")
 	wrapped := newWrappedSession(base, seed)
 
 	if got, want := wrapped.Events().Len(), baseLen+1; got != want {

@@ -688,7 +688,7 @@ func TestPreprocess_Toolset(t *testing.T) {
 // mirroring what the parallel-call producer emits for a normal tool.
 func fnRespEvent(t *testing.T, text string) *session.Event {
 	t.Helper()
-	ev := session.NewEventWithContext(t.Context(), "inv")
+	ev := session.NewEvent(t.Context(), "inv")
 	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",

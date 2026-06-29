@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/platform"
@@ -177,11 +176,19 @@ type NodeInfo struct {
 // binary data, stash the bytes via agent.Artifacts and put a URI
 // string in Payload.
 type RequestInput struct {
-	// InterruptID is the stable correlation key for this request.
-	// It identifies the intent of the prompt (e.g. "manager_approval",
-	// "human_review"). If empty when the node yields the event, the
-	// engine fills in a UUID so the downstream contract is always a
-	// non-empty string.
+	// InterruptID correlates this request with the response that
+	// resumes it; the reply is routed back by matching this ID.
+	// Prefer a value that is unique per request: leave it empty and
+	// the engine fills in a fresh UUID (the recommended default), or
+	// build your own from a readable prefix plus a UUID
+	// (e.g. "manager_approval-"+uuid).
+	//
+	// Avoid reusing one fixed literal across separate runs in the same
+	// session. ADK clients — notably the Dev UI — track answered
+	// requests by this ID and will not re-prompt for an ID already
+	// resolved earlier in the session, so a later run that reuses it
+	// shows no input box. Mirrors adk-python RequestInput.interrupt_id,
+	// which defaults to a fresh UUID.
 	InterruptID string `json:"interruptId"`
 
 	// Message is the human-readable description of what is being
@@ -212,26 +219,11 @@ func (e *Event) IsFinalResponse() bool {
 
 // NewEvent creates a new event defining now as the timestamp.
 //
-// Deprecated: Use [NewEventWithContext] instead so that platform-installed time
-// and UUID providers (see [platform.WithTimeProvider] and
-// [platform.WithUUIDProvider]) are honored. NewEvent always uses the wall clock
-// and a random UUID.
-func NewEvent(invocationID string) *Event {
-	return &Event{
-		ID:           uuid.NewString(),
-		InvocationID: invocationID,
-		Timestamp:    time.Now(),
-		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
-}
-
-// NewEventWithContext creates a new event defining now as the timestamp.
-//
 // The event ID and timestamp are obtained through the platform package, so a
 // time or UUID provider installed on ctx (see [platform.WithTimeProvider] and
 // [platform.WithUUIDProvider]) controls them. This lets callers such as
 // workflow engines produce deterministic, replay-safe events.
-func NewEventWithContext(ctx context.Context, invocationID string) *Event {
+func NewEvent(ctx context.Context, invocationID string) *Event {
 	return &Event{
 		ID:           platform.NewUUID(ctx),
 		InvocationID: invocationID,
