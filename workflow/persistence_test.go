@@ -17,6 +17,7 @@ package workflow
 import (
 	"iter"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -37,6 +38,19 @@ func (e sliceEvents) All() iter.Seq[*session.Event] {
 		}
 	}
 }
+
+// fakeSession backs ReconstructRunState, which reads only Events(); the
+// rest are stubs.
+type fakeSession struct {
+	events session.Events
+}
+
+func (s fakeSession) ID() string                { return "test-session" }
+func (s fakeSession) AppName() string           { return "test-app" }
+func (s fakeSession) UserID() string            { return "test-user" }
+func (s fakeSession) State() session.State      { return nil }
+func (s fakeSession) Events() session.Events    { return s.events }
+func (s fakeSession) LastUpdateTime() time.Time { return time.Time{} }
 
 func modelEvent(path, text string, messageAsOutput bool) *session.Event {
 	ev := &session.Event{
@@ -178,12 +192,18 @@ func TestEventNodeName(t *testing.T) {
 	}
 }
 
-// TestScanHistory_InvocationScope verifies rehydration is scoped to one
-// logical run: a stable interrupt ID resolved in an earlier invocation
-// must not shadow the same ID freshly raised in the current invocation
-// (the examples/workflow/hitl_simple re-run bug).
-func TestScanHistory_InvocationScope(t *testing.T) {
-	nodes := map[string]Node{"ask": newDummyNode("ask")}
+// TestReconstructRunState_InvocationScope verifies rehydration is scoped
+// to one logical run: a stable interrupt ID resolved in an earlier
+// invocation must not shadow the same ID freshly raised in the current
+// invocation (the examples/workflow/hitl_simple re-run bug). It drives
+// the public ReconstructRunState so the production resume path is
+// exercised end to end, not just the internal scan helper.
+func TestReconstructRunState_InvocationScope(t *testing.T) {
+	ask := newDummyNode("ask")
+	wf, err := New("hitl-rerun", []Edge{{From: Start, To: ask}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 
 	raise := func(invID string) *session.Event {
 		return &session.Event{
@@ -203,18 +223,40 @@ func TestScanHistory_InvocationScope(t *testing.T) {
 		return ev
 	}
 
-	// Run 1 (inv1) fully resolved; run 2 (inv2) freshly raised, unresolved.
-	events := sliceEvents{raise("inv1"), resolve("inv1"), raise("inv2")}
+	// Both runs reuse interrupt ID "iid": run 1 (inv1) raised and
+	// resolved, run 2 (inv2) freshly raised.
+	sess := fakeSession{events: sliceEvents{raise("inv1"), resolve("inv1"), raise("inv2")}}
 
-	// Scoped to the current run: the prior run's resolution is invisible,
-	// so the interrupt is still pending.
-	if s := scanHistory(events, nodes, "inv2")["ask"]; s == nil || len(unresolvedInterrupts(s)) != 1 {
-		t.Fatalf("inv2 scope: want 1 unresolved interrupt, got %+v", s)
+	// Scanning inv2, the prior run's resolution is out of scope, so the
+	// reused ID counts as unresolved and "ask" rehydrates as still waiting.
+	state, err := wf.ReconstructRunState(sess, "inv2")
+	if err != nil {
+		t.Fatalf("ReconstructRunState(inv2) error = %v", err)
+	}
+	if ns := nodeState(t, state, "ask"); ns.Status != NodeWaiting ||
+		len(ns.Interrupts) != 1 || ns.Interrupts[0] != "iid" {
+		t.Errorf("inv2 ask = %+v, want NodeWaiting on interrupt [iid]", ns)
 	}
 
-	// Unscoped: the prior run's resolution leaks in and wrongly marks the
-	// interrupt resolved — the leak the invocation scope prevents.
-	if s := scanHistory(events, nodes, "")["ask"]; s == nil || len(unresolvedInterrupts(s)) != 0 {
-		t.Fatalf("no scope: want 0 unresolved (demonstrates the leak), got %+v", s)
+	// inv1's own resolution is in scope, so the same node resolves —
+	// proving the scope isolates runs rather than merely hiding history.
+	state, err = wf.ReconstructRunState(sess, "inv1")
+	if err != nil {
+		t.Fatalf("ReconstructRunState(inv1) error = %v", err)
 	}
+	if ns := nodeState(t, state, "ask"); ns.Status != NodeCompleted || len(ns.Interrupts) != 0 {
+		t.Errorf("inv1 ask = %+v, want NodeCompleted with no pending interrupts", ns)
+	}
+}
+
+func nodeState(t *testing.T, state *RunState, name string) *NodeState {
+	t.Helper()
+	if state == nil {
+		t.Fatalf("ReconstructRunState returned nil state, want node %q", name)
+	}
+	ns := state.Nodes[name]
+	if ns == nil {
+		t.Fatalf("no NodeState for %q; nodes = %+v", name, state.Nodes)
+	}
+	return ns
 }
