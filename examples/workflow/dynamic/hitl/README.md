@@ -18,14 +18,14 @@ graph LR
     User[User]
     subgraph "ADK Application Workflow"
         Start((Start)) --> G[Dynamic Node: hitl_demo]
-        G -.->|"1st pass: RunNode"| A[Node: ask_name]
-        A -.->|"RequestInput, pause"| G
+        G -.->|"2. 1st pass: RunNode(ask_name)"| A[Node: ask_name]
+        A -.->|"3. RequestInput, pause"| G
         G --> End((End))
     end
-    User -- "start" --> Start
-    A -- "What's your name?" --> User
-    User -- "Alice (resume)" --> G
-    End -- "Hello, Alice!" --> User
+    User -- "1. start" --> Start
+    A -- "4. What's your name?" --> User
+    User -- "5. Alice (resume)" --> G
+    End -- "6. Hello, Alice!" --> User
 ```
 
 - **First pass:** `hitl_demo` finds no resumed input, so it runs `ask_name`, which emits a `RequestInput` event (keyed by an invocation-derived `InterruptID`) and returns `ErrNodeInterrupted` — the run pauses.

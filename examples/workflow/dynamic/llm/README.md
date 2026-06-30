@@ -31,12 +31,12 @@ graph LR
     User[User]
     subgraph "ADK Application Workflow"
         Start((Start)) --> D[Dynamic Node: greeter_workflow]
-        D -.->|"RunNode(input)"| G[Agent Node: greeter LLM]
-        G -.->|"one-sentence greeting"| D
+        D -.->|"2. RunNode(input)"| G[Agent Node: greeter LLM]
+        G -.->|"3. one-sentence greeting"| D
         D --> End((End))
     end
-    User -- "hi" --> Start
-    End -- "Hello! How can I help you today?" --> User
+    User -- "1. hi" --> Start
+    End -- "4. Hello! How can I help you today?" --> User
 ```
 
 Solid arrows are static graph edges; the dotted arrows are the imperative `RunNode` call into the wrapped `LlmAgent`. The `greeter` agent's only instruction is to greet the user in exactly one short sentence.

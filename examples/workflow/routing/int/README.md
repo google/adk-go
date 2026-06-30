@@ -24,8 +24,8 @@ graph LR
         M --> End
         H --> End
     end
-    User -- "any message" --> Start
-    End -- "rolled 8 — handling HIGH range" --> User
+    User -- "1. any message" --> Start
+    End -- "2. rolled 8 — handling HIGH range" --> User
 ```
 
 `roll_die` returns an `int`; `route_by_value` emits an event whose `Routes` is the stringified value and whose `Output` is the value itself, so the matched handler receives a typed `int`. Each `MultiRoute[int]` edge matches a set of values (the LOW / MID / HIGH ranges).

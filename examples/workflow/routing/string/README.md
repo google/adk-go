@@ -25,8 +25,8 @@ graph LR
         S --> End
         E --> End
     end
-    User -- "What time is it?" --> Start
-    End -- "answering question: What time is it?" --> User
+    User -- "1. What time is it?" --> Start
+    End -- "2. answering question: What time is it?" --> User
 ```
 
 ## Running the sample

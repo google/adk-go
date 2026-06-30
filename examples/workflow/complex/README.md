@@ -24,18 +24,18 @@ graph LR
     User[User]
     subgraph "ADK Application Workflow"
         Start((Start))
-        Start --> R1[Node: RenewableEnergyResearcher]
-        Start --> R2[Node: EVResearcher]
-        Start --> R3[Node: CarbonCaptureResearcher]
+        Start -->|"2. fan-out (parallel)"| R1[Node: RenewableEnergyResearcher]
+        Start -->|"2. fan-out (parallel)"| R2[Node: EVResearcher]
+        Start -->|"2. fan-out (parallel)"| R3[Node: CarbonCaptureResearcher]
         R1 --> J[Join Node: gather]
         R2 --> J
         R3 --> J
-        J --> F[Node: format_summaries]
-        F --> S[Node: SynthesisAgent LLM]
+        J -->|"3. gathered map"| F[Node: format_summaries]
+        F -->|"4. prompt"| S[Node: SynthesisAgent LLM]
         S --> End((End))
     end
-    User -- "any message" --> Start
-    End -- "structured report" --> User
+    User -- "1. any message" --> Start
+    End -- "5. structured report" --> User
 ```
 
 `Start` fans out to three researchers that run concurrently; the `gather` join node is the barrier that waits for all three and hands its successor a `map[nodeName]output`; `format_summaries` turns that map into one prompt; and the `SynthesisAgent` merges everything into the final report.

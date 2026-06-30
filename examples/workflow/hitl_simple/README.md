@@ -21,10 +21,10 @@ graph LR
         N1 --> N2[Node: greet]
         N2 --> End((End))
     end
-    User -- "hello" --> Start
-    N1 -- "What's your name?" --> User
-    User -- "Alice" --> N2
-    End -- "Hello, Alice!" --> User
+    User -- "1. hello" --> Start
+    N1 -- "2. What's your name?" --> User
+    User -- "3. Alice" --> N2
+    End -- "4. Hello, Alice!" --> User
 ```
 
 1. **ask_name**: an emitting `FunctionNode` that yields a `RequestInput` (with a fresh per-request `InterruptID`) and interrupts the run.

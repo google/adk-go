@@ -21,16 +21,15 @@ graph LR
     User[User]
     subgraph "ADK Application Workflow"
         Start((Start)) --> G[Node: greet]
-        G -.->|"re-run on resume"| G
         G --> End((End))
     end
     User -- "1. hello" --> Start
     G -- "2. What's your name? (1st pass)" --> User
-    User -- "3. Alice" --> G
+    User -- "3. Alice (re-run on resume)" --> G
     End -- "4. Hello, Alice!" --> User
 ```
 
-The numbered edges are the user ↔ application exchange, in order. The dotted self-loop is the re-entry that happens *between steps 3 and 4*: the same `greet` node executes twice — first it asks and pauses (step 2), then after the reply (step 3) it is re-run from the top and produces the greeting (step 4). The `InterruptID` embeds the invocation ID so the reply still correlates across the re-run within a single run, yet a later run re-prompts.
+The numbered edges are the user ↔ application exchange, in order. Because `RerunOnResume = &true`, the reply at step 3 re-enters `greet` (instead of flowing on to a successor, as it would in [`../hitl_simple`](../hitl_simple)), so the same node executes twice: first it asks and pauses (step 2), then on resume it is re-run from the top and produces the greeting (step 4). The `InterruptID` embeds the invocation ID so the reply still correlates across the re-run within a single run, yet a later run re-prompts.
 
 ## Running the sample
 

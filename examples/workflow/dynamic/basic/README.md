@@ -16,12 +16,12 @@ graph LR
     User[User]
     subgraph "ADK Application Workflow"
         Start((Start)) --> D[Dynamic Node: my_workflow]
-        D -.->|"RunNode(hello)"| C[Node: hello_node]
-        C -.->|"returns 'Hello World'"| D
+        D -.->|"2. RunNode(hello)"| C[Node: hello_node]
+        C -.->|"3. returns 'Hello World'"| D
         D --> End((End))
     end
-    User -- "any message" --> Start
-    End -- "Hello World" --> User
+    User -- "1. any message" --> Start
+    End -- "4. Hello World" --> User
 ```
 
 Solid arrows are static graph edges; dotted arrows are imperative `RunNode` calls made from inside the dynamic node's body. `hello_node` ignores its input and returns the constant `"Hello World"`. Dynamic nodes default to `RerunOnResume = &true`, which is required for the re-entry/resume model (see [`../hitl`](../hitl)).
