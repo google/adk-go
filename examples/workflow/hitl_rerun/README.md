@@ -24,13 +24,13 @@ graph LR
         G -.->|"re-run on resume"| G
         G --> End((End))
     end
-    User -- "hello" --> Start
-    G -- "1st pass: What's your name?" --> User
-    User -- "Alice" --> G
-    End -- "Hello, Alice!" --> User
+    User -- "1. hello" --> Start
+    G -- "2. What's your name? (1st pass)" --> User
+    User -- "3. Alice" --> G
+    End -- "4. Hello, Alice!" --> User
 ```
 
-The dotted self-loop is the re-entry: the same `greet` node executes twice — once to ask (and pause), once to answer. The `InterruptID` embeds the invocation ID so the reply still correlates across the re-run within a single run, yet a later run re-prompts.
+The numbered edges are the user ↔ application exchange, in order. The dotted self-loop is the re-entry that happens *between steps 3 and 4*: the same `greet` node executes twice — first it asks and pauses (step 2), then after the reply (step 3) it is re-run from the top and produces the greeting (step 4). The `InterruptID` embeds the invocation ID so the reply still correlates across the re-run within a single run, yet a later run re-prompts.
 
 ## Running the sample
 
