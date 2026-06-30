@@ -292,12 +292,14 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello there")
 		if got == nil {
 			t.Fatal("llmagent.PrepareLLMAgentInput returned nil; want non-nil event")
+			return
 		}
 		if got.Author != "user" {
 			t.Errorf("Author = %q, want %q", got.Author, "user")
 		}
 		if got.Content == nil || got.Content.Role != genai.RoleUser {
 			t.Fatalf("Content/Role mismatch: %+v", got.Content)
+			return
 		}
 		if len(got.Content.Parts) != 1 || got.Content.Parts[0].Text != "hello there" {
 			t.Errorf("Parts = %+v, want one text part 'hello there'", got.Content.Parts)
@@ -315,6 +317,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		got := llmagent.PrepareLLMAgentInput(a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
+			return
 		}
 		if got.Content.Role != genai.RoleUser {
 			t.Errorf("Role = %q, want %q (must be forced to user)", got.Content.Role, genai.RoleUser)
@@ -332,9 +335,11 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		got := llmagent.PrepareLLMAgentInput(a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
+			return
 		}
 		if len(got.Content.Parts) != 1 {
 			t.Fatalf("Parts count = %d, want 1", len(got.Content.Parts))
+			return
 		}
 		text := got.Content.Parts[0].Text
 		// JSON map iteration order is non-deterministic; check both keys present.
@@ -352,6 +357,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
+			return
 		}
 		if got.IsolationScope != scope {
 			t.Errorf("IsolationScope = %q, want %q", got.IsolationScope, scope)
@@ -365,6 +371,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
+			return
 		}
 		if got.IsolationScope != "" {
 			t.Errorf("IsolationScope = %q, want empty", got.IsolationScope)
@@ -398,6 +405,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
+			return
 		}
 		if ev.Output != nil {
 			t.Errorf("Output = %v on FC event, want nil (skipped)", ev.Output)
