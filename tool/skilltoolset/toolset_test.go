@@ -79,6 +79,12 @@ func TestProcessRequest(t *testing.T) {
 			t.Errorf("ProcessRequest: got %q, want to contain %q", gotText, want)
 		}
 	}
+	if !strings.Contains(gotText, "`load_skill` tool with `name=\"<SKILL_NAME>\"`") {
+		t.Errorf("ProcessRequest: default instruction should document load_skill name parameter, got %q", gotText)
+	}
+	if strings.Contains(gotText, "`load_skill` tool with `skill_name=\"<SKILL_NAME>\"`") {
+		t.Errorf("ProcessRequest: default instruction documents unsupported load_skill skill_name parameter")
+	}
 }
 
 func TestProcessRequest_NoSkills(t *testing.T) {
