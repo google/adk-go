@@ -28,7 +28,8 @@
 //     a map[nodeName]output;
 //   - a FunctionNode transforming the join's map into a single prompt;
 //   - a single-turn AgentNode consuming a predecessor's output mid-graph;
-//   - per-node RetryConfig guarding the flaky (model + search) calls;
+//   - a resilientModel wrapper (see resilient_model.go) that times out,
+//     retries, and fails open on stalled Google Search calls;
 //   - the default in-memory session service (nothing to configure).
 //
 // Requires GOOGLE_API_KEY in the environment.
@@ -72,6 +73,18 @@ const (
 	carbonResearcher          = "CarbonCaptureResearcher"
 	synthesisAgent            = "SynthesisAgent"
 )
+
+// Resilience budget for every agent's model calls: each is bounded by
+// callTimeout and retried up to callAttempts times before failing open.
+const (
+	callTimeout  = 30 * time.Second
+	callAttempts = 3
+)
+
+// synthesisFallback is the minimal report emitted if every synthesis
+// attempt stalls.
+const synthesisFallback = "## Recent Sustainable Technology Advancements\n\n" +
+	"(report unavailable: the synthesis step timed out — please re-run)"
 
 // Each researcher targets one fixed, independent topic — the whole point of
 // fanning out is that no researcher depends on another's result.
@@ -139,34 +152,40 @@ func formatSummaries(_ agent.Context, gathered map[string]any) (string, error) {
 // keeps main thin and the graph wiring easy to follow; nothing here calls the
 // model, it only assembles the graph.
 func newResearchPipeline(m model.LLM) (agent.Agent, error) {
-	researcher := func(name, instruction string) (agent.Agent, error) {
+	// Each researcher wraps the shared model in a resilientModel so a
+	// stalled Google Search call degrades to its fallback instead of
+	// hanging the pipeline. Search runs inside the Gemini model.
+	researcher := func(name, instruction, fallback string) (agent.Agent, error) {
 		return llmagent.New(llmagent.Config{
 			Name:        name,
-			Model:       m,
+			Model:       newResilientModel(m, callTimeout, callAttempts, fallback),
 			Description: "researches one topic and returns a short summary",
 			Instruction: instruction,
-			// Each researcher grounds its summary with Google Search.
-			// The tool runs inside the Gemini model; no local execution.
-			Tools: []tool.Tool{geminitool.GoogleSearch{}},
+			Tools:       []tool.Tool{geminitool.GoogleSearch{}},
 		})
 	}
 
-	renewableAgent, err := researcher(renewableResearcher, renewableInstruction)
+	renewableAgent, err := researcher(renewableResearcher, renewableInstruction,
+		"(no findings: renewable-energy research timed out)")
 	if err != nil {
 		return nil, fmt.Errorf("creating renewable researcher: %w", err)
 	}
-	electricVehicleAgent, err := researcher(electricVehicleResearcher, electricVehicleInstruction)
+	electricVehicleAgent, err := researcher(electricVehicleResearcher, electricVehicleInstruction,
+		"(no findings: electric-vehicle research timed out)")
 	if err != nil {
 		return nil, fmt.Errorf("creating EV researcher: %w", err)
 	}
-	carbonAgent, err := researcher(carbonResearcher, carbonInstruction)
+	carbonAgent, err := researcher(carbonResearcher, carbonInstruction,
+		"(no findings: carbon-capture research timed out)")
 	if err != nil {
 		return nil, fmt.Errorf("creating carbon researcher: %w", err)
 	}
 
+	// Synthesis does no Google Search, but is still wrapped so a stalled
+	// call fails open to a minimal report rather than hanging the run.
 	synthAgent, err := llmagent.New(llmagent.Config{
 		Name:        synthesisAgent,
-		Model:       m,
+		Model:       newResilientModel(m, callTimeout, callAttempts, synthesisFallback),
 		Description: "merges the research summaries into one structured report",
 		Instruction: synthesisInstruction,
 	})
@@ -174,34 +193,25 @@ func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 		return nil, fmt.Errorf("creating synthesis agent: %w", err)
 	}
 
-	// Retry the flaky model + search calls with exponential backoff. The
-	// deterministic formatter needs no retries.
-	llmNodeConfig := workflow.NodeConfig{
-		RetryConfig: &workflow.RetryConfig{
-			MaxAttempts:   3,
-			InitialDelay:  time.Second,
-			MaxDelay:      10 * time.Second,
-			BackoffFactor: 2.0,
-			Jitter:        0.5,
-		},
-	}
-
+	// resilientModel already bounds, retries, and fails open on each call,
+	// so the nodes need no scheduler-level RetryConfig or Timeout.
+	//
 	// Wrapping an LlmAgent in an AgentNode defaults it to single-turn mode,
 	// so the synthesis node consumes the formatter's output instead of the
 	// chat history — which is why it may sit mid-graph rather than at Start.
-	renewableNode, err := workflow.NewAgentNode(renewableAgent, llmNodeConfig)
+	renewableNode, err := workflow.NewAgentNode(renewableAgent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("creating renewable node: %w", err)
 	}
-	electricVehicleNode, err := workflow.NewAgentNode(electricVehicleAgent, llmNodeConfig)
+	electricVehicleNode, err := workflow.NewAgentNode(electricVehicleAgent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("creating EV node: %w", err)
 	}
-	carbonNode, err := workflow.NewAgentNode(carbonAgent, llmNodeConfig)
+	carbonNode, err := workflow.NewAgentNode(carbonAgent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("creating carbon node: %w", err)
 	}
-	synthNode, err := workflow.NewAgentNode(synthAgent, llmNodeConfig)
+	synthNode, err := workflow.NewAgentNode(synthAgent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("creating synthesis node: %w", err)
 	}
