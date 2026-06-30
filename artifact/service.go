@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -267,7 +268,7 @@ type ArtifactVersion struct {
 	Version        int64
 	CanonicalURI   string
 	CustomMetadata map[string]any
-	CreateTime     float64
+	CreateTime     time.Time
 	MimeType       string
 }
 
