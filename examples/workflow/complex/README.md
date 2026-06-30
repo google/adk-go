@@ -5,8 +5,6 @@ A non-trivial graph that fans out to three researchers, gathers their results at
 - **Concept:** Fan-out to concurrent agents, fan-in at a `JoinNode`, then synthesize (`AddFanOut` + `AddFanIn` + `NewJoinNode`).
 - **Needs LLM?** Yes (Gemini with Google Search grounding)
 
-For the fan-out half on its own (no join), see [`../fanout`](../fanout).
-
 ## Goal
 
 Demonstrate the engine's parallel-branch primitives end to end: three researcher agents run concurrently on independent topics, a join barrier waits for all of them, a function node reshapes the gathered results into one prompt, and a single-turn synthesis agent merges everything into one structured report.

@@ -5,7 +5,7 @@ The minimal end-to-end HITL workflow: two nodes where the first pauses for input
 - **Concept:** Two-node HITL handoff — pause with `RequestInput`, resume into the next node.
 - **Needs LLM?** No
 
-Related variants: [`../hitl_rerun`](../hitl_rerun) (single re-entry node) and [`../hitl_llm`](../hitl_llm) (adds an `LlmAgent` and a revise loop).
+Related variant: [`../hitl_rerun`](../hitl_rerun) — the same scenario as a single re-entry node.
 
 ## Goal
 
