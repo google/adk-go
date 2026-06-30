@@ -93,13 +93,37 @@ type MockInvocationContext struct {
 	context.Context
 	sess        session.Session
 	userContent *genai.Content
+	agent       agent.Agent
+	branch      string
+}
+
+// WithICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return m
+	}
+	res := *m
+	if d.UserContent != nil {
+		res.userContent = *d.UserContent
+	}
+	if d.Agent != nil {
+		res.agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
+	}
+
+	return &res
 }
 
 func (m *MockInvocationContext) Session() session.Session        { return m.sess }
 func (m *MockInvocationContext) InvocationID() string            { return "test-inv-id" }
 func (m *MockInvocationContext) UserContent() *genai.Content     { return m.userContent }
 func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
-func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
+func (m *MockInvocationContext) Agent() agent.Agent              { return m.agent }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
 func (m *MockInvocationContext) Branch() string                  { return "" }

@@ -289,9 +289,17 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		if ac, ok := ctx.(agent.Context); ok {
 			ancestors = ac.OutputForAncestors()
 		}
-		c = agent.NewDynamicNodeContext(agent.NewNodeContext(ctx, nil), wfPath, "1", nil, ancestors)
+		runID := "1"
+		var subScheduler agent.DynamicSubScheduler = nil
+		delta := &agent.CommonContextDelta{
+			Path:               &wfPath,
+			RunID:              &runID,
+			OutputForAncestors: &ancestors,
+			SubScheduler:       &subScheduler,
+		}
+		c = agent.PromoteWithDelta(ctx, delta)
 	} else {
-		c = agent.NewNodeContext(ctx, nil)
+		c = agent.Promote(ctx)
 	}
 	return w.RunNode(c, userInput(c))
 }

@@ -367,27 +367,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// so an ambient deadline on the workflow invocation still
 	// applies.
 	cfg := n.Config()
-	var (
-		nodeCtx context.Context
-		cancel  context.CancelFunc
-	)
-	if cfg.Timeout > 0 {
-		nodeCtx, cancel = s.parentCtx.WithAgentTimeout(cfg.Timeout)
-	} else {
-		nodeCtx, cancel = s.parentCtx.WithAgentCancel()
-	}
-	// Order matters: WithContext sets up per-node cancellation on
-	// the underlying InvocationContext; withBranch then wraps the
-	// result in branchOverride. Reversing would either lose the
-	// cancellation context or strip the branch override.
-
-	if s.parentCtx == nil {
-		panic("nil parent context")
-	}
-	perNodeCtx := s.parentCtx.WithAgentContext(nodeCtx)
-	perNodeCtx = perNodeCtx.WithBranch(branch)
-
-	perNodeCtx = agent.NewNodeContext(perNodeCtx, resumeInputs)
+	var cancel context.CancelFunc
 
 	nodePath := name + "@1"
 	if p := s.parentCtx.Path(); p != "" {
@@ -395,7 +375,26 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	} else if s.graph.isRootWrapper {
 		nodePath = ""
 	}
-	perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, s.terminalAncestors(name))
+
+	runID := "1"
+	ofa := s.terminalAncestors(name)
+	var dss agent.DynamicSubScheduler
+	perNodeCtx := s.parentCtx.WithDelta(&agent.CommonContextDelta{
+		ResumeInputs: &resumeInputs,
+		InvocationContextDelta: &agent.InvocationContextDelta{
+			Branch: &branch,
+		},
+		Path:               &nodePath,
+		RunID:              &runID,
+		SubScheduler:       &dss,
+		OutputForAncestors: &ofa,
+	})
+
+	if cfg.Timeout > 0 {
+		perNodeCtx, cancel = perNodeCtx.WithAgentTimeout(cfg.Timeout)
+	} else {
+		perNodeCtx, cancel = perNodeCtx.WithAgentCancel()
+	}
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning

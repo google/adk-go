@@ -204,7 +204,7 @@ func newStubNodeContext(t *testing.T, a agent.Agent, isolationScope string) agen
 		IsolationScope: isolationScope,
 		InvocationID:   "inv-test",
 	})
-	return agent.NewNodeContext(ic, nil)
+	return agent.NewContext(ic)
 }
 
 func makeLLMAgent(t *testing.T, name string, opts ...func(*llmagent.Config)) agent.Agent {

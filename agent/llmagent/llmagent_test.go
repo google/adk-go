@@ -1244,9 +1244,8 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
 	}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
 
-	events := w.Run(exCtx)
+	events := w.Run(mockCtx)
 	for ev, err := range events {
 		if err != nil {
 			t.Fatalf("workflow run failed: %v", err)
@@ -1313,10 +1312,10 @@ func TestLLMAgent_WorkflowIntegration_OutputKeyDoesNotDuplicateOutput(t *testing
 	}
 
 	runCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
-	exCtx := agent.NewNodeContext(&mockInvocationContext{
+	exCtx := agent.NewContext(&mockInvocationContext{
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
-	}, nil)
+	})
 
 	for _, err := range w.Run(exCtx) {
 		if err != nil {
@@ -1366,6 +1365,10 @@ func (m *mockInvocationContext) IsolationScope() string          { return "" }
 func (m *mockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *mockInvocationContext) Ended() bool                     { return false }
 func (m *mockInvocationContext) EndInvocation()                  {}
+
+func (m *mockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
 
 func (m *mockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	cp := *m

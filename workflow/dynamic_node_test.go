@@ -251,7 +251,7 @@ func drainDynamic(t *testing.T, n Node, input any) []*session.Event {
 
 func drainDynamicWithErr(t *testing.T, n Node, input any) ([]*session.Event, error) {
 	t.Helper()
-	parent := agent.NewNodeContext(newMockCtx(t), nil)
+	parent := agent.NewContext(newMockCtx(t))
 	var events []*session.Event
 	for ev, err := range n.Run(parent, input) {
 		if err != nil {

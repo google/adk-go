@@ -293,7 +293,7 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	// the sub-scheduler in the value chain before building the tool context.
 	orchestrator := workflow.NewDynamicNode("orchestrator",
 		func(ctx agent.Context, _ string, _ func(*session.Event) error) (any, error) {
-			toolCtx, err := agent.NewCleanToolContext(ctx, "fc-id", &session.EventActions{}, nil)
+			toolCtx, err := agent.NewCleanToolContextTestOnly(ctx, "fc-id", &session.EventActions{}, nil)
 			if err != nil {
 				return nil, fmt.Errorf("cannot agent.NewCleanToolContext: %w", err)
 			}
@@ -414,4 +414,8 @@ func (c *fakeInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	cp := *c
 	cp.Context = ctx
 	return &cp
+}
+
+func (c *fakeInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return c
 }

@@ -114,6 +114,8 @@ type InvocationContext interface {
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
+
+	WithICDelta(d *InvocationContextDelta) InvocationContext
 }
 
 // ReadonlyContext provides read-only access to invocation context data.
@@ -215,11 +217,6 @@ type Context interface {
 	// dynamic children.
 	RunID() string
 
-	// WithBranch returns a Context whose Branch() returns the
-	// given value; all other fields (path, runID, subScheduler,
-	// resumeInputs, embedded InvocationContext) are preserved.
-	WithBranch(branch string) Context
-
 	// SubScheduler is non-nil only when this context belongs to a
 	// dynamic-node activation; RunNode uses it to schedule children.
 	SubScheduler() DynamicSubScheduler
@@ -237,4 +234,7 @@ type Context interface {
 	// into this activation when it runs as a WithUseAsOutput child;
 	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	OutputForAncestors() []string
+
+	// WithDelta returns a copy of source context with applied delta d
+	WithDelta(d *CommonContextDelta) Context
 }

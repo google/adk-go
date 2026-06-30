@@ -55,7 +55,9 @@ func TestWithContext(t *testing.T) {
 
 	key := testKey{}
 	val := "val"
-	got := inv.WithContext(context.WithValue(baseCtx, key, val))
+
+	ctx := context.WithValue(baseCtx, key, val)
+	got := inv.WithICDelta(&agent.InvocationContextDelta{Context: &ctx})
 
 	if got.Value(key) != val {
 		t.Errorf("WithContext() did not update context")

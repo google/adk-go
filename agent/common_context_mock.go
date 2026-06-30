@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// ContextMock defines mocking logic (makes creating your own mocks easier if embedded)
 type ContextMock struct{}
 
 // WithAgentCancel implements [Context].
@@ -212,6 +213,14 @@ func (c *ContextMock) WithAgentContext(ctx context.Context) Context {
 
 func (c *ContextMock) OutputForAncestors() []string {
 	return nil
+}
+
+func (c *ContextMock) WithDelta(d *CommonContextDelta) Context {
+	return c
+}
+
+func (c *ContextMock) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	return c
 }
 
 var (

@@ -86,7 +86,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 			}
 
 			mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 			events := node.Run(exCtx, tc.input)
 
 			count := 0
@@ -139,7 +139,7 @@ func TestFunctionNode_RunDoesNotValidate(t *testing.T) {
 	}
 
 	mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	count := 0
 	for ev, err := range node.Run(exCtx, Input{Value: "hello"}) {
 		if err != nil {
@@ -241,7 +241,7 @@ func TestFunctionNodeDirectEventPropagation(t *testing.T) {
 
 	node := NewFunctionNode[string, *session.Event]("event_proc", fn, defaultNodeConfig)
 	mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	events := node.Run(exCtx, "hello")
 
@@ -401,7 +401,7 @@ func TestNewFunctionNodeFromState(t *testing.T) {
 				state: &mockStateForTest{data: tc.stateData},
 			}
 			mockCtx := &MockInvocationContext{Context: t.Context(), sess: mockSess}
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 
 			events := node.Run(exCtx, tc.input)
 
@@ -664,7 +664,7 @@ func TestFunctionNode_ValidatesInputOnAssertionHitPath(t *testing.T) {
 
 	runOnce := func(t *testing.T, node *FunctionNode, input Input) error {
 		t.Helper()
-		exCtx := agent.NewNodeContext(newMockCtx(t), nil)
+		exCtx := agent.NewContext(newMockCtx(t))
 		for _, err := range node.Run(exCtx, input) {
 			if err != nil {
 				return err
@@ -707,7 +707,7 @@ func TestFunctionNode_ValidatesInputOnAssertionHitPath(t *testing.T) {
 func runFunctionNodeOnce[OUT any](t *testing.T, fn func(ctx agent.Context, input any) (OUT, error), input any) *session.Event {
 	t.Helper()
 	node := NewFunctionNode[any, OUT]("n", fn, defaultNodeConfig)
-	exCtx := agent.NewNodeContext(&MockInvocationContext{Context: t.Context(), sess: nil}, nil)
+	exCtx := agent.NewContext(&MockInvocationContext{Context: t.Context(), sess: nil})
 
 	var got *session.Event
 	count := 0

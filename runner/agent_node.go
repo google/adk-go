@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
@@ -190,28 +189,26 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 }
 
 // newAgentContext builds the per-agent InvocationContext, inheriting
-// services and branch from ctx (mirrors workflow.AgentNode). The fresh
-// context drops the node's sub-scheduler, so it is re-stashed in the
-// value chain — letting a tool inside the agent (e.g. SingleTurnTool)
-// recover it via RunNode.
+// everything from ctx (mirrors workflow.AgentNode). WithDelta copies the
+// parent context and overrides only Agent and UserContent, while resetting
+// Path/RunID/OutputForAncestors for the fresh activation. The node's
+// sub-scheduler is not in the delta, so it is carried over unchanged by the
+// copy — letting a tool inside the agent (e.g. SingleTurnTool) recover it
+// via RunNode.
 func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:          ctx.Artifacts(),
-		Memory:             ctx.Memory(),
-		Session:            ctx.Session(),
-		Branch:             ctx.Branch(),
-		Agent:              a,
-		UserContent:        userContent,
-		RunConfig:          ctx.RunConfig(),
-		EndInvocation:      ctx.Ended(),
-		InvocationID:       ctx.InvocationID(),
-		Path:               ctx.Path(),
-		OutputForAncestors: ctx.OutputForAncestors(),
-	})
-	// TODO(kdroste): copy original SubScheduler??
-	nc := agent.NewNodeContext(ic, nil)
-	dnc := agent.NewDynamicNodeContext(nc, "", "", ctx.SubScheduler(), nil)
-	return dnc
+	path := ""
+	runID := ""
+	outputForAncestors := []string{}
+	delta := &agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{
+			Agent:       &a,
+			UserContent: &userContent,
+		},
+		RunID:              &runID,
+		Path:               &path,
+		OutputForAncestors: &outputForAncestors,
+	}
+	return ctx.WithDelta(delta)
 }
 
 // inputToUserContent converts a node input value into a user Content for

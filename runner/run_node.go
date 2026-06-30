@@ -246,7 +246,7 @@ func (r *Runner) newNodeInvocationContext(
 		RunConfig:    &cfg,
 		InvocationID: resolveInvocationID(storedSession, msg),
 	})
-	resCtx := agent.NewNodeContext(ic, nil)
+	resCtx := agent.NewContext(ic)
 	return resCtx
 }
 

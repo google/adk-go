@@ -101,7 +101,7 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 			return
 		}
 		if ok {
-			exCtx := agent.NewNodeContext(ctx, nil)
+			exCtx := agent.Promote(ctx)
 			for ev, err := range a.workflow.Resume(exCtx, state, responses) {
 				if !yield(ev, err) {
 					return

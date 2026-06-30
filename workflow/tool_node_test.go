@@ -222,7 +222,7 @@ func TestToolNode_Run(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateInput failed: %v", err)
 			}
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 			events := node.Run(exCtx, validatedInput)
 
 			var got string

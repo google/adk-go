@@ -136,7 +136,15 @@ func (m *StrictContextMock) Artifacts() Artifacts { panic("not implemented") }
 // State implements [Context].
 func (m *StrictContextMock) State() session.State { panic("not implemented") }
 
-// Tool context methods.
+// ToolContext methods.
+
+// WithDelta implements [Context].
+func (m *StrictContextMock) WithDelta(d *CommonContextDelta) Context { panic("unimplemented") }
+
+// WithICDelta implements [Context].
+func (m *StrictContextMock) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	panic("unimplemented")
+}
 
 // FunctionCallID implements [Context].
 func (m *StrictContextMock) FunctionCallID() string { panic("not implemented") }
