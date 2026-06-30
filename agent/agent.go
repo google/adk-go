@@ -380,6 +380,18 @@ func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationCon
 	if d.UserContent != nil {
 		res.userContent = *d.UserContent
 	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.isolationScope = *d.IsolationScope
+	}
+	if d.Agent != nil {
+		res.agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
 	return &res
 }
 

@@ -244,7 +244,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// as its own span. startNodeSpan returns a context carrying the span.
 	span, spanCtx := startNodeSpan(childCtx, child)
 	defer span.End()
-	childCtx = childCtx.WithAgentContext(spanCtx)
+	childCtx = spanCtx
 
 	// rawErr is the unwrapped child/emit error. The returned err wraps
 	// the cause with "%w: %v", dropping context.Canceled from the chain,

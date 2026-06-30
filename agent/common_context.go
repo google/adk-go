@@ -55,8 +55,11 @@ func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context 
 // Please mind that if you already have commonContext, you should use WithDelta to
 // create child contextes
 func NewContext(parent InvocationContext) Context {
-	if _, ok := parent.(*commonContext); ok {
-		panic("Should not happen")
+	if p, ok := parent.(*commonContext); ok {
+		return &commonContext{
+			Context:           p.Context,
+			invocationContext: p.invocationContext,
+		}
 	}
 	return &commonContext{
 		Context:           parent,
@@ -480,7 +483,8 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 	return resp, nil
 }
 
-func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
+// NewCleanToolContextTestOnly is intended only for tests. Do not use for other purposes, please!
+func NewCleanToolContextTestOnly(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
 	c, ok := ctx.(*commonContext)
 	if !ok {
 		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
@@ -498,6 +502,5 @@ func NewCleanToolContext(ctx Context, functionCallID string, actions *session.Ev
 		subScheduler:      c.subScheduler,
 	}
 
-	// res := c.newCleanToolContext(functionCallID, actions, confirmation)
 	return res, nil
 }
