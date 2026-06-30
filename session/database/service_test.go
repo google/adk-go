@@ -21,9 +21,9 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/session/sessiontestsuite"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/sessiontestsuite"
 )
 
 func Test_databaseService(t *testing.T) {

@@ -28,8 +28,8 @@ import (
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
-	"google.golang.org/adk/internal/sessionutils"
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/platform"
 )
 
 type stateMap map[string]any

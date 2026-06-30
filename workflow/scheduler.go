@@ -28,9 +28,9 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/telemetry"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/session"
 )
 
 // defaultEventQueueCapacity bounds the buffered channel between

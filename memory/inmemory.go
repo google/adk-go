@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.

@@ -19,10 +19,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/workflowinternal"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/workflowinternal"
 )
 
 // TestResponseDeferrer_Contract verifies that TaskAgentTool

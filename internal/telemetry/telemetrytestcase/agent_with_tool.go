@@ -15,7 +15,7 @@
 package telemetrytestcase
 
 import (
-	"google.golang.org/adk/internal/telemetry/telemetrytest"
+	"google.golang.org/adk/v2/internal/telemetry/telemetrytest"
 )
 
 // AgentWithToolCase is the expected root span emitted by the

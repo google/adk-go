@@ -17,7 +17,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/server/agentengine/controllers"
+	"google.golang.org/adk/v2/server/agentengine/controllers"
 )
 
 // StreamReasoningEngineAPIRouter defines the routes for the Streaming version of Reasoning Engine.

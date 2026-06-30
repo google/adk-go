@@ -17,8 +17,8 @@ package artifact_test
 import (
 	"testing"
 
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/internal/artifact/tests"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/artifact/tests"
 )
 
 func TestInMemoryArtifactService(t *testing.T) {

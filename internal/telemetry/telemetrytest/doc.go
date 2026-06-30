@@ -30,6 +30,6 @@
 // telemetrytestcase package; the runners that drive the agent and
 // compare actual vs expected live in the telemetry/functionaltest
 // test package. Functional tests use the shared
-// [google.golang.org/adk/internal/testutil.MockModel] as the
+// [google.golang.org/adk/v2/internal/testutil.MockModel] as the
 // deterministic LLM stand-in.
 package telemetrytest

@@ -18,8 +18,8 @@ import (
 	"slices"
 	"testing"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // TestWorkflow_PathingParity verifies hierarchical event pathing and OutputFor
