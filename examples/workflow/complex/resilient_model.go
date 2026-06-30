@@ -25,26 +25,16 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// resilientModel wraps a model.LLM to bound and, as a last resort, paper
-// over flaky calls — specifically Gemini's Google Search grounding, which
-// intermittently stalls with neither a response nor an error.
-//
-// Why it exists: a bare model call has no per-call deadline, so a stalled
-// grounding request hangs forever. A workflow.RetryConfig does not help —
-// it only retries calls that *return* an error, and a hang returns
-// nothing. And because the pipeline fans out to three researchers behind a
-// JoinNode barrier, a single stalled researcher would hang (or, with a
-// plain timeout, fail) the whole run.
-//
-// resilientModel addresses all three:
-//   - timeout: every attempt runs under its own context.WithTimeout, so a
-//     stall becomes a context.DeadlineExceeded instead of an infinite wait;
-//   - retry: timed-out/errored attempts are retried (a fresh deadline
-//     each time) after a short fixed backoff;
-//   - fail-open: if every attempt is exhausted it returns a single
-//     fallback model message instead of an error, so the JoinNode still
-//     fires and the synthesis agent still produces a report from whatever
-//     did succeed (graceful degradation rather than a dead pipeline).
+// resilientModel wraps a model.LLM to guard against Gemini's Google Search
+// grounding, which intermittently stalls with neither a response nor an
+// error. A bare call has no deadline (so a stall hangs forever) and
+// workflow.RetryConfig only retries calls that return an error, so neither
+// helps. resilientModel instead:
+//   - bounds each attempt with context.WithTimeout, turning a stall into a
+//     DeadlineExceeded;
+//   - retries timed-out/errored attempts after a short backoff;
+//   - fails open after the last attempt, returning a fallback message so
+//     the JoinNode still fires and the pipeline still produces a report.
 //
 // It implements model.LLM, so any agent can use it transparently.
 type resilientModel struct {
@@ -54,8 +44,7 @@ type resilientModel struct {
 	fallback string        // model text returned when every attempt fails
 }
 
-// retryBackoff is the fixed pause between attempts. It is deliberately
-// small relative to the per-attempt timeout, which does the real work.
+// retryBackoff is the fixed pause between attempts.
 const retryBackoff = time.Second
 
 // newResilientModel wraps inner. attempts is clamped to a minimum of 1.
@@ -70,8 +59,7 @@ func newResilientModel(inner model.LLM, timeout time.Duration, attempts int, fal
 func (m *resilientModel) Name() string { return m.inner.Name() }
 
 // GenerateContent implements model.LLM. Each attempt is buffered so a
-// half-streamed-then-failed attempt is discarded cleanly before a retry;
-// the caller only ever observes one successful attempt (or the fallback).
+// partially streamed failure is discarded cleanly before a retry.
 func (m *resilientModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var lastErr error
@@ -87,10 +75,8 @@ func (m *resilientModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 			}
 			lastErr = err
 
-			// A cancelled *parent* context is a real abort (the user quit
-			// or a sibling node failed), not our per-attempt timeout:
-			// propagate it so the node is treated as cancelled, not failed
-			// over to the fallback.
+			// A cancelled parent context is a real abort, not our
+			// per-attempt timeout: propagate it instead of failing open.
 			if ctx.Err() != nil {
 				yield(nil, ctx.Err())
 				return
@@ -127,9 +113,9 @@ func (m *resilientModel) tryOnce(ctx context.Context, req *model.LLMRequest, str
 	return buffered, nil
 }
 
-// fallbackResponse is a plain final model message (no function calls, not
-// partial), so session.Event.IsFinalResponse reports true and the
-// AgentNode adopts m.fallback as the node's output.
+// fallbackResponse is a plain final model message, so
+// session.Event.IsFinalResponse reports true and the AgentNode adopts
+// m.fallback as the node's output.
 func (m *resilientModel) fallbackResponse() *model.LLMResponse {
 	return &model.LLMResponse{
 		Content: &genai.Content{

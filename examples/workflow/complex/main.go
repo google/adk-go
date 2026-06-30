@@ -28,10 +28,8 @@
 //     a map[nodeName]output;
 //   - a FunctionNode transforming the join's map into a single prompt;
 //   - a single-turn AgentNode consuming a predecessor's output mid-graph;
-//   - a resilientModel wrapper (see resilient_model.go) that bounds each
-//     flaky Google Search call with a per-call timeout, retries it, and —
-//     if it keeps stalling — fails open to a short fallback so the JoinNode
-//     still fires and a report is still produced;
+//   - a resilientModel wrapper (see resilient_model.go) that times out,
+//     retries, and fails open on stalled Google Search calls;
 //   - the default in-memory session service (nothing to configure).
 //
 // Requires GOOGLE_API_KEY in the environment.
@@ -76,16 +74,15 @@ const (
 	synthesisAgent            = "SynthesisAgent"
 )
 
-// Resilience budget applied to every agent's model calls: each call is
-// bounded by callTimeout and retried up to callAttempts times before
-// failing open to the agent's fallback.
+// Resilience budget for every agent's model calls: each is bounded by
+// callTimeout and retried up to callAttempts times before failing open.
 const (
 	callTimeout  = 30 * time.Second
 	callAttempts = 3
 )
 
 // synthesisFallback is the minimal report emitted if every synthesis
-// attempt stalls; it keeps the run from ending silently.
+// attempt stalls.
 const synthesisFallback = "## Recent Sustainable Technology Advancements\n\n" +
 	"(report unavailable: the synthesis step timed out — please re-run)"
 
@@ -156,9 +153,8 @@ func formatSummaries(_ agent.Context, gathered map[string]any) (string, error) {
 // model, it only assembles the graph.
 func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 	// Each researcher wraps the shared model in a resilientModel so a
-	// stalled Google Search call degrades to its topic-specific fallback
-	// instead of hanging or failing the whole pipeline. The Search tool
-	// runs inside the Gemini model; no local execution.
+	// stalled Google Search call degrades to its fallback instead of
+	// hanging the pipeline. Search runs inside the Gemini model.
 	researcher := func(name, instruction, fallback string) (agent.Agent, error) {
 		return llmagent.New(llmagent.Config{
 			Name:        name,
@@ -197,10 +193,8 @@ func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 		return nil, fmt.Errorf("creating synthesis agent: %w", err)
 	}
 
-	// The resilientModel wrapper already bounds and retries each call (and
-	// fails open), so the nodes themselves need no scheduler-level
-	// RetryConfig or Timeout. NodeConfig still offers both for nodes whose
-	// failures should instead be retried or surfaced by the engine.
+	// resilientModel already bounds, retries, and fails open on each call,
+	// so the nodes need no scheduler-level RetryConfig or Timeout.
 	//
 	// Wrapping an LlmAgent in an AgentNode defaults it to single-turn mode,
 	// so the synthesis node consumes the formatter's output instead of the
