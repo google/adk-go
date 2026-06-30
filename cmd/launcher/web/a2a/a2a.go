@@ -110,7 +110,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 				ProtocolVersion: a2av0.Version,
 			},
 		},
-		Version:      "1.0.0",
+		Version:      "2.0.0",
 		Skills:       adka2a.BuildAgentSkills(rootAgent),
 		Capabilities: a2acore.AgentCapabilities{Streaming: true},
 	}
