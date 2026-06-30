@@ -189,10 +189,12 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 }
 
 // newAgentContext builds the per-agent InvocationContext, inheriting
-// services and branch from ctx (mirrors workflow.AgentNode). The fresh
-// context drops the node's sub-scheduler, so it is re-stashed in the
-// value chain — letting a tool inside the agent (e.g. SingleTurnTool)
-// recover it via RunNode.
+// everything from ctx (mirrors workflow.AgentNode). WithDelta copies the
+// parent context and overrides only Agent and UserContent, while resetting
+// Path/RunID/OutputForAncestors for the fresh activation. The node's
+// sub-scheduler is not in the delta, so it is carried over unchanged by the
+// copy — letting a tool inside the agent (e.g. SingleTurnTool) recover it
+// via RunNode.
 func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
 	path := ""
 	runID := ""

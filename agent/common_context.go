@@ -501,6 +501,5 @@ func NewCleanToolContextTestOnly(ctx Context, functionCallID string, actions *se
 		toolConfirmation:  confirmation,
 		subScheduler:      c.subScheduler,
 	}
-
 	return res, nil
 }
