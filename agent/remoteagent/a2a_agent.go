@@ -14,7 +14,7 @@
 
 // Package remoteagent allows using a remote ADK agents.
 //
-// Deprecated: Use google.golang.org/adk/agent/remoteagent/v2 instead.
+// Deprecated: Use google.golang.org/adk/v2/agent/remoteagent/v2 instead.
 package remoteagent
 
 import (
@@ -33,10 +33,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	v2 "google.golang.org/adk/agent/remoteagent/v2"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	v2 "google.golang.org/adk/v2/agent/remoteagent/v2"
+	"google.golang.org/adk/v2/server/adka2a"
+	"google.golang.org/adk/v2/session"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.

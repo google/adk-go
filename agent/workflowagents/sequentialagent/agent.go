@@ -21,11 +21,11 @@ import (
 	"log"
 	"sync"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // New creates a SequentialAgent.

@@ -15,7 +15,7 @@
 // Package functionaltest contains hermetic functional tests for ADK
 // telemetry: each Test* function builds a real ADK agent
 // (llmagent, workflowagent, ...) backed by a hermetic
-// [google.golang.org/adk/internal/testutil.MockModel], drives it
+// [google.golang.org/adk/v2/internal/testutil.MockModel], drives it
 // through a real Runner, and asserts the emitted span tree + log
 // records against the expected shape declared in the
 // telemetrytestcase package.

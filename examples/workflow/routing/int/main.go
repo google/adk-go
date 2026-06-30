@@ -26,12 +26,12 @@ import (
 	"math/rand/v2"
 	"os"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/workflowagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/workflow"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // rollDie ignores the user message; the random number is what

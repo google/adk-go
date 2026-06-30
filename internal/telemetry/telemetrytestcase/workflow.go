@@ -15,7 +15,7 @@
 package telemetrytestcase
 
 import (
-	"google.golang.org/adk/internal/telemetry/telemetrytest"
+	"google.golang.org/adk/v2/internal/telemetry/telemetrytest"
 )
 
 // WorkflowCase is the expected span+log tree for the canonical

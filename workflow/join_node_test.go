@@ -22,7 +22,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/v2/agent"
 )
 
 // TestJoinNode_E2E_FanInTwoBranches verifies that with two

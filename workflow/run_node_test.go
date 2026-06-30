@@ -23,8 +23,8 @@ import (
 	"sync"
 	"testing"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestRunNode_ErrInvalidRunNodeContext_OnStaticContext(t *testing.T) {

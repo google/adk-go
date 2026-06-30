@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/v2/agent"
 )
 
 // TestParallelWorker_PerItemSubBranch verifies that ParallelWorker

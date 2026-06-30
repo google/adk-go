@@ -26,8 +26,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/version"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/model"
 )
 
 // captureMessageContentEnvVar is the OpenTelemetry-spec env var

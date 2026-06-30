@@ -21,9 +21,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
-	"google.golang.org/adk/workflow"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // pendingInterrupt is one HITL prompt the agent emitted on the

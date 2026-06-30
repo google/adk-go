@@ -24,9 +24,9 @@ import (
 
 	"go.opentelemetry.io/otel/codes"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/session"
 )
 
 // dynamicSubScheduler runs the children of one dynamic-node activation.

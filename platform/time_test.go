@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/platform"
 )
 
 func TestNowDefaultUsesWallClock(t *testing.T) {

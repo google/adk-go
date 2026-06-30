@@ -23,8 +23,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 )
 
 func TestReadonlyContext(t *testing.T) {
