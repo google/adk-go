@@ -16,11 +16,10 @@
 package toolutils
 
 import (
-	"fmt"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
+	pubtoolutils "google.golang.org/adk/tool/toolutils"
 )
 
 type Tool interface {
@@ -32,38 +31,10 @@ type Tool interface {
 // all of them are consolidated into one genai tool that has all the function declarations
 // provided by the tools. So, if there is already a tool with a function declaration,
 // it appends another to it; otherwise, it creates a new genai tool.
+//
+// It delegates to the public google.golang.org/adk/tool/toolutils package; the
+// internal Tool interface satisfies the public Packable interface because they
+// have identical method sets.
 func PackTool(req *model.LLMRequest, tool Tool) error {
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
-	}
-
-	name := tool.Name()
-
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = tool
-
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if decl := tool.Declaration(); decl == nil {
-		return nil
-	}
-	// Find an existing genai.Tool with FunctionDeclarations
-	var funcTool *genai.Tool
-	for _, tool := range req.Config.Tools {
-		if tool != nil && tool.FunctionDeclarations != nil {
-			funcTool = tool
-			break
-		}
-	}
-	if funcTool == nil {
-		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{tool.Declaration()},
-		})
-	} else {
-		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, tool.Declaration())
-	}
-	return nil
+	return pubtoolutils.PackTool(req, tool)
 }
