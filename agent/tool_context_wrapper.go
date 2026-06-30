@@ -32,6 +32,16 @@ type toolContextWrapper struct {
 	context Context
 }
 
+// WithDelta implements [Context].
+func (c *toolContextWrapper) WithDelta(d *CommonContextDelta) Context {
+	return c.context.WithDelta(d)
+}
+
+// WithICDelta implements [Context].
+func (c *toolContextWrapper) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	return c.context.WithICDelta(d)
+}
+
 // WithAgentCancel implements [Context].
 func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 	// this one is needed for tool context.

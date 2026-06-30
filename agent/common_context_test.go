@@ -20,27 +20,26 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-// customContextDecorator is a non-commonContext struct that wraps a Context.
-// When passed to ADK constructors like NewNodeContext or NewContext, the
-// constructor does not short-circuit (since it is not *commonContext) and
-// re-wraps it in a new commonContext envelope.
-type customContextDecorator struct {
-	Context
-}
-
 func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 	t.Parallel()
 
 	baseIC := &invocationContext{
 		Context: t.Context(),
 	}
-	baseCtx := NewContext(baseIC)
 
 	wantPath := "wf/child@123"
 	wantAncestors := []string{"wf/root", "wf/parent"}
-
+	runID := "123"
+	var subScheduler DynamicSubScheduler = nil
 	// Create a dynamic node context that explicitly populates path and outputForAncestors.
-	dynCtx := NewDynamicNodeContext(baseCtx, wantPath, "123", nil, wantAncestors)
+	delta := &CommonContextDelta{
+		Path:               &wantPath,
+		OutputForAncestors: &wantAncestors,
+		RunID:              &runID,
+		SubScheduler:       &subScheduler,
+	}
+
+	dynCtx := PromoteWithDelta(baseIC, delta)
 
 	tests := []struct {
 		name         string
@@ -53,24 +52,11 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 			},
 		},
 		{
-			name: "NewNodeContext wrapping custom decorator (delegates fallback to c.Context)",
-			buildWrapped: func(parent Context) Context {
-				decorator := &customContextDecorator{Context: parent}
-				return NewNodeContext(decorator, nil)
-			},
-		},
-		{
-			name: "NewContext wrapping custom decorator (delegates fallback to c.Context)",
-			buildWrapped: func(parent Context) Context {
-				decorator := &customContextDecorator{Context: parent}
-				return NewContext(decorator)
-			},
-		},
-		{
 			name: "NewToolContext wrapping branchOverride adapter (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
-				branched := &branchOverride{Context: parent, branch: "parallel-branch"}
-				return NewToolContext(branched, "call-id-1", nil, nil)
+				tc := NewToolContext(parent, "call-id-1", nil, nil)
+				branch := "parallel-branch"
+				return tc.WithDelta(&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
 			},
 		},
 	}

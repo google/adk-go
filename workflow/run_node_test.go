@@ -29,7 +29,7 @@ import (
 
 func TestRunNode_ErrInvalidRunNodeContext_OnStaticContext(t *testing.T) {
 	t.Skip()
-	ctx := agent.NewNodeContext(newMockCtx(t), nil) // no subScheduler attached
+	ctx := agent.NewContext(newMockCtx(t)) // no subScheduler attached
 	_, err := RunNode[string](ctx, newStubNode("c", "x"), nil)
 	if !errors.Is(err, ErrInvalidRunNodeContext) {
 		t.Errorf("err = %v, want ErrInvalidRunNodeContext", err)

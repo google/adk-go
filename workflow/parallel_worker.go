@@ -119,7 +119,8 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			}
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
-			itemCtx := workerCtx.WithBranch(itemBranch)
+
+			itemCtx := workerCtx.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &itemBranch}})
 			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
 		}
 

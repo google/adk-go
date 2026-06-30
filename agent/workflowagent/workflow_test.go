@@ -54,6 +54,11 @@ type MockInvocationContext struct {
 	myAgent     agent.Agent
 }
 
+// WithICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 func (m *MockInvocationContext) Session() session.Session {
 	return m.sess
 }

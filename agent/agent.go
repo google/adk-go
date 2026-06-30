@@ -169,34 +169,15 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			})
 		})
 		defer endSpan()
-		// TODO: verify&update the setup here. Should we branch etc.
 
-		// create a node context based on spanCtx and ctx
-		// case 1: ctx is Context
-		// case 2: ctx is InvocationContext and is not Context
+		var aa Agent = a
+		var newCtx context.Context = ctx.WithContext(spanCtx)
 
-		ic := &invocationContext{
-			Context:   ctx.WithContext(spanCtx),
-			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
+		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
-			invocationID:   ctx.InvocationID(),
-			branch:         ctx.Branch(),
-			isolationScope: ctx.IsolationScope(),
-			userContent:    ctx.UserContent(),
-			runConfig:      ctx.RunConfig(),
-			endInvocation:  ctx.Ended(),
-		}
-
-		var nodeCtx Context
-		if parentCC, ok := ctx.(Context); ok {
-			nc := NewNodeContext(ic, nil)
-			nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
-		} else {
-			nodeCtx = NewNodeContext(ic, nil)
-		}
+		nodeCtx := PromoteWithDelta(ctx, &CommonContextDelta{
+			InvocationContextDelta: icDelta,
+		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
@@ -388,6 +369,30 @@ type invocationContext struct {
 	userContent    *genai.Content
 	runConfig      *RunConfig
 	endInvocation  bool
+}
+
+// Apply implements [InvocationContext].
+func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	if d.UserContent != nil {
+		res.userContent = *d.UserContent
+	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.isolationScope = *d.IsolationScope
+	}
+	if d.Agent != nil {
+		res.agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+	return &res
 }
 
 func (c *invocationContext) Agent() Agent {

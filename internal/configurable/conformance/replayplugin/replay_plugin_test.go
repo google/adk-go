@@ -493,6 +493,10 @@ type MockCallbackContext struct {
 	agentName    string
 }
 
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 func (m *MockCallbackContext) State() session.State                    { return m.state }
 func (m *MockCallbackContext) ReadonlyState() session.ReadonlyState    { return m.state }
 func (m *MockCallbackContext) InvocationID() string                    { return m.invocationID }

@@ -247,6 +247,7 @@ func resolveTools(ctx context.Context, parentPath string, toolConfigs []ToolConf
 	var toolsets []tool.Toolset
 	for _, tc := range toolConfigs {
 		if tc.Name != "" {
+			// TODO(kdroste): move to invocationContext?
 			ctx = context.WithValue(ctx, parentPathKey, parentPath)
 			a, ts, err := ResolveToolReference(ctx, tc.Name, tc.Args)
 			if err != nil {

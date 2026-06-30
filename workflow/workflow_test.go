@@ -41,6 +41,22 @@ type MockInvocationContext struct {
 	sess           session.Session
 	userContent    *genai.Content
 	isolationScope string
+	branch         string
+}
+
+// WithICDelta implements [agent.InvocationContext].
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return m
+	}
+	res := *m
+	if d.IsolationScope != nil {
+		res.isolationScope = *d.IsolationScope
+	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
+	}
+	return &res
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
@@ -80,7 +96,7 @@ func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, f
 func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
-func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) Branch() string                  { return m.branch }
 func (m *MockInvocationContext) IsolationScope() string          { return m.isolationScope }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *MockInvocationContext) Ended() bool                     { return false }
@@ -101,7 +117,7 @@ func TestFunctionNode(t *testing.T) {
 
 	// Create a mock context
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	// Run the node
 	events := node.Run(exCtx, "hello")

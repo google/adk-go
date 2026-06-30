@@ -348,7 +348,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				}
 			}
-
+			// TODO(kdroste): refactor underlying context
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
@@ -673,7 +673,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			var nextStream iter.Seq2[*session.Event, error]
 			if nr, ok := nextAgent.(nodeRunner); ok {
-				nextStream = nr.RunNode(agent.NewNodeContext(ctx, nil), nil)
+				nextStream = nr.RunNode(agent.Promote(ctx), nil)
 			} else {
 				nextStream = nextAgent.Run(ctx)
 			}

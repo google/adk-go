@@ -159,7 +159,7 @@ func TestJoinNode_RunIsPassthrough(t *testing.T) {
 	n := NewJoinNode("join")
 
 	input := map[string]any{"a": "x", "b": 42}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	events := drain(t, n.Run(exCtx, input))
 
 	if len(events) != 1 {

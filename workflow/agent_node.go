@@ -114,7 +114,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			InvocationID:   ctx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
-		exCtx := agent.NewNodeContext(agentCtx, nil)
+		exCtx := agent.NewContext(agentCtx)
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]

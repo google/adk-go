@@ -436,21 +436,8 @@ type llmAgent struct {
 type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	// TODO(kdroste): branch context? SubScheduler?
-
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:      ctx.Artifacts(),
-		Memory:         ctx.Memory(),
-		Session:        ctx.Session(),
-		Branch:         ctx.Branch(),
-		IsolationScope: ctx.IsolationScope(),
-		Agent:          a,
-		UserContent:    ctx.UserContent(),
-		RunConfig:      ctx.RunConfig(),
-		InvocationID:   ctx.InvocationID(),
-	})
-
-	ctx = agent.NewContextForAgent(ctx, ic)
+	var ag agent.Agent = a
+	ctx = ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &ag})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,

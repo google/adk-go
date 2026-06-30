@@ -93,7 +93,7 @@ func TestParallelWorker_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 			events := pw.Run(exCtx, tc.input)
 
 			var gotOutput []any
@@ -146,7 +146,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	input := []any{1, 2, 3, 4}
 
 	done := make(chan struct{})
@@ -199,7 +199,7 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	input := []any{1, 2}
 
 	events := pw.Run(exCtx, input)
@@ -327,7 +327,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	input := []any{"a", "b"}
 
 	events := pw.Run(exCtx, input)
@@ -392,7 +392,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	input := []any{"a", "b", "c"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	events := pw.Run(exCtx, input)
 
 	var gotErr error
@@ -442,9 +442,10 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// TODO(kdroste): refactor underlying context
 	ctx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: ctx}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	input := []any{1, 2}
 
 	done := make(chan struct{})
@@ -508,7 +509,7 @@ func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	input := []any{"a", "b", "c"}
 
 	done := make(chan struct{})

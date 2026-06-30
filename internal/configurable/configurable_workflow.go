@@ -89,6 +89,8 @@ func newWorkflowAgent(ctx context.Context, data []byte, configPath string) (agen
 
 	// We track loaded sub-agents to populate the Agent hierarchy
 	var subAgents []agent.Agent
+
+	// TODO(kdroste): move to invocationContext?
 	edgeParserCtx := context.WithValue(ctx, subAgentsCollectorKey, &subAgents)
 
 	edges, err := parseEdges(edgeParserCtx, configPath, cfg.Edges)

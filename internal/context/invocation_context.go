@@ -42,6 +42,7 @@ type InvocationContextParams struct {
 	OutputForAncestors          []string
 }
 
+// TODO(kdroste): merge with agent.InvocationContext implementation in agent package, if possible.
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	if params.InvocationID == "" {
 		params.InvocationID = "e-" + platform.NewUUID(ctx)
@@ -126,3 +127,27 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 var _ agent.InvocationContext = (*InvocationContext)(nil)
+
+func (c *InvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	if d.UserContent != nil {
+		res.params.UserContent = *d.UserContent
+	}
+	if d.Agent != nil {
+		res.params.Agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+	if d.Branch != nil {
+		res.params.Branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.params.IsolationScope = *d.IsolationScope
+	}
+
+	return &res
+}
