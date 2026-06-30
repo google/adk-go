@@ -3,6 +3,7 @@
 We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
+-   [Branches](#branches)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
     -   [Review our community guidelines](#review-our-community-guidelines)
@@ -16,6 +17,42 @@ We'd love to accept your patches and contributions to this project.
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
+
+## Branches
+
+ADK Go uses two long-lived branches:
+
+-   **`main`** — the actively developed 2.x line. This is the default branch and
+    the base for new pull requests.
+-   **`v1`** — the maintenance branch for the 1.x line. Target this branch only
+    for fixes that need to ship to 1.x.
+
+As part of the ADK Go 2.0 release the previous `main` was renamed to `v1`, and
+the `v2` development branch became `main`. GitHub automatically retargets open
+pull requests and migrates branch protection, but **existing local clones must
+be re-synced** — running `git pull` on an old `main` reports diverged history
+because the branch now points at a different line.
+
+To move a local clone whose `main` still tracks the old 1.x line over to the new
+layout:
+
+```bash
+git fetch origin --prune
+git branch -m main v1            # your old "main" is the v1 (1.x) line
+git branch -u origin/v1 v1       # track origin/v1
+git switch -c main origin/main   # check out the new main (2.x)
+git remote set-head origin -a
+```
+
+If you don't need the 1.x line locally, reset your `main` to the new one instead
+(this discards local `main` commits that aren't pushed elsewhere):
+
+```bash
+git fetch origin --prune
+git switch main
+git reset --hard origin/main
+git remote set-head origin -a
+```
 
 ## Before you begin
 
