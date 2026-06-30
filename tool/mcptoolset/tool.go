@@ -22,11 +22,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
@@ -83,7 +83,7 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *mcpTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
@@ -91,7 +91,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)

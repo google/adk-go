@@ -20,11 +20,11 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // New creates an instance of the logging plugin.
@@ -191,7 +191,7 @@ func (p *loggingPlugin) afterRun(ctx agent.InvocationContext) {
 	p.log(fmt.Sprintf("   Final Agent: %s", agentName))
 }
 
-func (p *loggingPlugin) beforeAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+func (p *loggingPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
 	p.log("🤖 AGENT STARTING")
 	p.log(fmt.Sprintf("   Agent Name: %s", ctx.AgentName()))
 	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
@@ -201,14 +201,14 @@ func (p *loggingPlugin) beforeAgent(ctx agent.CallbackContext) (*genai.Content, 
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+func (p *loggingPlugin) afterAgent(ctx agent.Context) (*genai.Content, error) {
 	p.log("🤖 AGENT COMPLETED")
 	p.log(fmt.Sprintf("   Agent Name: %s", ctx.AgentName()))
 	p.log(fmt.Sprintf("   Invocation ID: %s", ctx.InvocationID()))
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *loggingPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	p.log("🧠 LLM REQUEST")
 	modelName := "default"
 	if req.Model != "" {
@@ -240,7 +240,7 @@ func (p *loggingPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMReq
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func (p *loggingPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
 	p.log("🧠 LLM RESPONSE")
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
 
@@ -272,14 +272,14 @@ func (p *loggingPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMRes
 	return nil, nil
 }
 
-func (p *loggingPlugin) onModelError(ctx agent.CallbackContext, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
+func (p *loggingPlugin) onModelError(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
 	p.log("🧠 LLM ERROR")
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
 	p.log(fmt.Sprintf("   Error: %v", err))
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *loggingPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	p.log("🔧 TOOL STARTING")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
@@ -288,7 +288,7 @@ func (p *loggingPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterTool(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL COMPLETED")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
@@ -301,7 +301,7 @@ func (p *loggingPlugin) afterTool(ctx agent.ToolContext, t tool.Tool, args, resu
 	return nil, nil
 }
 
-func (p *loggingPlugin) onToolError(ctx agent.ToolContext, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL ERROR")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))

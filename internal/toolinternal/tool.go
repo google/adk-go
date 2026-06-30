@@ -20,23 +20,29 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 type FunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx agent.ToolContext, args any) (result map[string]any, err error)
+	Run(ctx agent.Context, args any) (result map[string]any, err error)
 }
 
 type StreamingFunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	RunStream(ctx agent.ToolContext, args any) iter.Seq2[string, error]
+	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
 type RequestProcessor interface {
-	ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error
+	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
+}
+
+// ResponseDeferrer allows to skip generation of the FR by the tool.
+// Used in the cases when FR is generated externally (e.g. TaskAgentTool)
+type ResponseDeferrer interface {
+	DefersResponse() bool
 }

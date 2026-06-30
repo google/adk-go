@@ -29,10 +29,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/session"
 )
 
 func getFreePort(t *testing.T) int {
@@ -75,7 +75,7 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 		Name: "HelloWorldAgent",
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEventWithContext(ic, ic.InvocationID())
+				event := session.NewEvent(ic, ic.InvocationID())
 				event.Content = genai.NewContentFromText(wantMessage, genai.RoleModel)
 				yield(event, nil)
 			}

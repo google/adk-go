@@ -29,17 +29,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/exampletool"
-	"google.golang.org/adk/tool/exitlooptool"
-	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/adk/tool/mcptoolset"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/exampletool"
+	"google.golang.org/adk/v2/tool/exitlooptool"
+	"google.golang.org/adk/v2/tool/geminitool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
 type AgentFactory func(ctx context.Context, configBytes []byte, configPath string) (agent.Agent, error)
@@ -69,6 +69,10 @@ func init() {
 	if err := Register("SequentialAgent", newSequentialAgent); err != nil {
 		panic(err)
 	}
+	if err := Register("Workflow", newWorkflowAgent); err != nil {
+		panic(err)
+	}
+
 	err := RegisterToolFactory("exit_loop", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
 		return exitlooptool.New()
 	})

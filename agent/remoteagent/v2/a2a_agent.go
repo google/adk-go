@@ -28,18 +28,18 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"github.com/a2aproject/a2a-go/v2/log"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
-	"google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.
 //
 // If it returns non-nil result or error, the actual call is skipped and the returned value is used
 // as the agent invocation result.
-type BeforeA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.SendMessageRequest) (*session.Event, error)
+type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest) (*session.Event, error)
 
 // A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error)
@@ -49,7 +49,7 @@ type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageReq
 // decides to not emit an A2A event.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
-type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
+type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
 
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client A2AClient, taskInfo a2a.TaskInfo, cause error)

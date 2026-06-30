@@ -22,9 +22,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 )
 
 type mockLiveAgent struct {
@@ -76,7 +76,7 @@ func TestRunner_RunLive_Callbacks(t *testing.T) {
 		Agent: testAgent,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
-				yield(session.NewEventWithContext(ctx, ctx.InvocationID()), nil)
+				yield(session.NewEvent(ctx, ctx.InvocationID()), nil)
 			}, nil
 		},
 	}
@@ -221,7 +221,7 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
 				// 1. Partial Transcription
-				ev1 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev1 := session.NewEvent(ctx, ctx.InvocationID())
 				ev1.LLMResponse.Partial = true
 				ev1.LLMResponse.OutputTranscription = &genai.Transcription{Text: "Hello"}
 				if !yield(ev1, nil) {
@@ -229,7 +229,7 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 				}
 
 				// 2. Function Call (happening during transcription)
-				ev2 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev2 := session.NewEvent(ctx, ctx.InvocationID())
 				ev2.LLMResponse.Content = &genai.Content{
 					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "test_func"}}},
 				}
@@ -238,7 +238,7 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 				}
 
 				// 3. Final Transcription
-				ev3 := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev3 := session.NewEvent(ctx, ctx.InvocationID())
 				ev3.LLMResponse.OutputTranscription = &genai.Transcription{Text: "Hello there."}
 				if !yield(ev3, nil) {
 					return

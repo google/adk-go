@@ -25,12 +25,12 @@ import (
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/configurable/conformance/replayplugin/recording"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable/conformance/replayplugin/recording"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type recordPlugin struct {
@@ -83,7 +83,7 @@ func (p *recordPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 	return nil, err
 }
 
-func (p *recordPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *recordPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	on, err := p.isRecordModeOn(ctx.State())
 	if err != nil || !on {
 		return nil, nil
@@ -101,7 +101,7 @@ func (p *recordPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 	return nil, nil
 }
 
-func (p *recordPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
 	on, recordErr := p.isRecordModeOn(ctx.State())
 	if recordErr != nil || !on {
 		return nil, nil
@@ -126,7 +126,7 @@ func (p *recordPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResp
 	return nil, nil
 }
 
-func (p *recordPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	on, err := p.isRecordModeOn(ctx.State())
 	if err != nil || !on {
 		return nil, nil
@@ -147,7 +147,7 @@ func (p *recordPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[s
 	return nil, nil
 }
 
-func (p *recordPlugin) afterTool(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *recordPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	on, recordErr := p.isRecordModeOn(ctx.State())
 	if recordErr != nil || !on {
 		return nil, nil

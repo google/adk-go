@@ -21,13 +21,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/workflowinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // New is a constructor for LLMAgent.
@@ -76,6 +77,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
+			Mode:                     cfg.Mode,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
@@ -123,7 +125,57 @@ func New(cfg Config) (agent.Agent, error) {
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
 
+	if err := installTaskTools(a); err != nil {
+		return nil, err
+	}
+
 	return a, nil
+}
+
+func installTaskTools(a *llmAgent) error {
+	state := llminternal.Reveal(a)
+
+	if state.Mode == llminternal.ModeTask {
+		finishTool, err := workflowinternal.NewFinishTaskTool(a)
+		if err != nil {
+			return fmt.Errorf("installing `finish_task` tool for agent %q: %w", a.Name(), err)
+		}
+		state.Tools = append(state.Tools, finishTool)
+	}
+
+	for _, sub := range a.SubAgents() {
+		subInternal, ok := sub.(llminternal.Agent)
+		if !ok {
+			continue
+		}
+		subState := llminternal.Reveal(subInternal)
+		if subState.Mode == llminternal.ModeUnset {
+			subState.Mode = llminternal.ModeChat
+		}
+
+		switch subState.Mode {
+		case llminternal.ModeSingleTurn:
+			t, err := workflowinternal.NewSingleTurnTool(sub)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to install `single_turn` agent tool for sub-agent %q of %q: %w",
+					sub.Name(), a.Name(), err,
+				)
+			}
+			state.Tools = append(state.Tools, t)
+		case llminternal.ModeTask:
+			t, err := workflowinternal.NewTaskAgentTool(sub)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to install `task` agent tool for sub-agent %q of %q: %w",
+					sub.Name(), a.Name(), err,
+				)
+			}
+			state.Tools = append(state.Tools, t)
+		}
+	}
+
+	return nil
 }
 
 // Config of the LLMAgent.
@@ -280,25 +332,50 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// Mode is the delegation mode for this agent.
+	//
+	// Options:
+	//   ModeChat: Standard chat agent reachable via transfer_to_agent.
+	//   ModeTask: Task agent that chats with the user to accomplish a task.
+	//   ModeSingleTurn: Agents that complete a task without chatting with the user.
+	//
+	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
+	Mode Mode
 }
+
+// Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.
+type Mode = llminternal.Mode
+
+const (
+	// ModeUnset means the mode has not been set explicitly.
+	ModeUnset = llminternal.ModeUnset
+	// ModeChat is the standard chat agent reachable via transfer_to_agent.
+	ModeChat = llminternal.ModeChat
+	// ModeTask is a task agent that chats with the user to accomplish a task.
+	ModeTask = llminternal.ModeTask
+	// ModeSingleTurn is an agent that completes a task without chatting with
+	// the user.
+	ModeSingleTurn = llminternal.ModeSingleTurn
+)
 
 // BeforeModelCallback that is called before sending a request to the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model call is skipped
 // and the returned response/error is used.
-type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
 // BeforeToolCallback is executed before a tool's Run method.
 //
@@ -310,7 +387,7 @@ type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMR
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
-type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
 // regardless of whether the tool returned a result or an error.
@@ -319,13 +396,13 @@ type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[str
 // If a callback returns a non-nil result or an error:
 //   - execution of remaining callbacks stops
 //   - the returned result and/or error is used as the final tool output
-type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // OnToolErrorCallback that is called when receiving an error response from tool execution.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string
@@ -359,17 +436,8 @@ type llmAgent struct {
 type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	// TODO: branch context?
-	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:    ctx.Artifacts(),
-		Memory:       ctx.Memory(),
-		Session:      ctx.Session(),
-		Branch:       ctx.Branch(),
-		Agent:        a,
-		UserContent:  ctx.UserContent(),
-		RunConfig:    ctx.RunConfig(),
-		InvocationID: ctx.InvocationID(),
-	})
+	var ag agent.Agent = a
+	ctx = ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &ag})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,
@@ -395,14 +463,15 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:    ctx.Artifacts(),
-		Memory:       ctx.Memory(),
-		Session:      ctx.Session(),
-		Branch:       ctx.Branch(),
-		Agent:        a,
-		UserContent:  ctx.UserContent(),
-		RunConfig:    ctx.RunConfig(),
-		InvocationID: ctx.InvocationID(),
+		Artifacts:      ctx.Artifacts(),
+		Memory:         ctx.Memory(),
+		Session:        ctx.Session(),
+		Branch:         ctx.Branch(),
+		IsolationScope: ctx.IsolationScope(),
+		Agent:          a,
+		UserContent:    ctx.UserContent(),
+		RunConfig:      ctx.RunConfig(),
+		InvocationID:   ctx.InvocationID(),
 	})
 
 	f := &llminternal.Flow{
@@ -479,6 +548,10 @@ func (a *llmAgent) FindAgent(name string) agent.Agent {
 		return a
 	}
 	return a.Agent.FindSubAgent(name)
+}
+
+func (a *llmAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
+	return RunLLMAgentAsNode(a, ctx, nodeInput)
 }
 
 // InstructionProvider allows to create instructions dynamically. It is called

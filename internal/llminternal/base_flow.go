@@ -29,56 +29,36 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/agent/runconfig"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal/googlellm"
-	"google.golang.org/adk/internal/plugininternal/plugincontext"
-	"google.golang.org/adk/internal/telemetry"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // ErrModelNotConfigured is returned when the model is not configured.
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
 
-// BeforeModelCallback is called before sending a request to the model.
-//
-// If it returns non-nil result or error, the actual call is skipped and the returned value is used
-// as the model invocation result.
-type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-// AfterModelCallback is called after receiving a response from the model.
-//
-// If it returns non-nil result or error, the returned value is used as the model invocation result.
-type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
-// OnModelErrorCallback is called when the model returns an error.
-//
-// If it returns non-nil result or error, the returned value is used as the model invocation result.
-type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
-// BeforeToolCallback is called before executing a tool call.
-//
-// If it returns non-nil result or error, the actual tool call is skipped and the returned value is
-// used as the tool invocation result.
-type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
-// AfterToolCallback is called after executing a tool call.
-//
-// If it returns non-nil result or error, the returned value is used as the tool invocation result.
-type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
-// OnToolErrorCallback is called when the tool returns an error.
-//
-// If it returns non-nil result or error, the returned value is used as the tool invocation result.
-type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // Flow is a base implementation of the agent flow.
 type Flow struct {
@@ -135,7 +115,9 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			if lastEvent == nil || lastEvent.IsFinalResponse() {
+			// A thought-only ("thinking") turn reports as final but has no
+			// answer; don't stop on it — call the model again.
+			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
@@ -146,6 +128,26 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 		}
 	}
+}
+
+// isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
+// whose parts are all model "thinking" (Thought) parts — no surfaced answer.
+// Thought signatures ride on substantive parts (text, function calls), which
+// are not Thought, so any such part makes the turn non-thought-only.
+func isThoughtOnlyTurn(ev *session.Event) bool {
+	if ev == nil || ev.LLMResponse.Partial {
+		return false
+	}
+	content := ev.LLMResponse.Content
+	if content == nil || len(content.Parts) == 0 {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p != nil && !p.Thought {
+			return false
+		}
+	}
+	return true
 }
 
 type activeTask struct {
@@ -346,7 +348,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				}
 			}
-
+			// TODO(kdroste): refactor underlying context
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
@@ -401,7 +403,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								}
 							}
 						}
-						ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
 						select {
@@ -666,7 +668,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
 				return
 			}
-			for ev, err := range nextAgent.Run(ctx) {
+			type nodeRunner interface {
+				RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+			}
+			var nextStream iter.Seq2[*session.Event, error]
+			if nr, ok := nextAgent.(nodeRunner); ok {
+				nextStream = nr.RunNode(agent.Promote(ctx), nil)
+			} else {
+				nextStream = nextAgent.Run(ctx)
+			}
+			for ev, err := range nextStream {
 				if !yield(ev, err) || err != nil { // forward
 					return
 				}
@@ -950,7 +961,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
 	utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.ID = resp.eventID // TODO change NewEvent to accept event id
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
@@ -1007,7 +1018,7 @@ Suggested fixes:
 }
 
 type cancelledToolContext struct {
-	agent.ToolContext
+	agent.Context
 	cancelCtx context.Context
 }
 
@@ -1088,10 +1099,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
 						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
-						cancelCtx, cancel := context.WithCancel(toolCtx)
+						cancelCtx, cancel := toolCtx.WithAgentCancel()
 						cancelToolCtx := &cancelledToolContext{
-							ToolContext: toolCtx,
-							cancelCtx:   cancelCtx,
+							Context:   toolCtx,
+							cancelCtx: cancelCtx,
 						}
 						if impl, ok := liveSess.(*liveSessionImpl); ok {
 							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
@@ -1151,8 +1162,16 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
-			// TODO: handle long-running tool.
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			if result == nil {
+				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
+					return
+				}
+				if curTool != nil && curTool.IsLongRunning() {
+					return
+				}
+			}
+
+			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",
@@ -1201,7 +1220,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	return mergedEvent, nil
 }
 
-func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
+func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
 	pluginManager := pluginManagerFromContext(toolCtx)
 	if pluginManager != nil {
 		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
@@ -1212,7 +1231,7 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
@@ -1259,7 +1278,7 @@ func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionToo
 	return response
 }
 
-func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
+func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
 	for _, callback := range f.BeforeToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs)
 		if err != nil {
@@ -1274,7 +1293,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.To
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
@@ -1290,7 +1309,7 @@ func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinte
 	return fResult, fErr
 }
 
-func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.OnToolErrorCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fErr)
 		if err != nil {
@@ -1315,23 +1334,29 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	}
 	var parts []*genai.Part
 	var actions *session.EventActions
+	var result *session.Event // first non-nil event, reused as the merged result
 	for _, ev := range events {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
+		if result == nil {
+			result = ev
+		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
 		actions = mergeEventActions(actions, &ev.Actions)
 	}
-	// reuse events[0]
-	ev := events[0]
-	ev.LLMResponse = model.LLMResponse{
+	// All entries were nil (e.g. every call was long-running/deferred).
+	if result == nil {
+		return nil, nil
+	}
+	result.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,
 		},
 	}
-	ev.Actions = *actions
-	return ev, nil
+	result.Actions = *actions
+	return result, nil
 }
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {
@@ -1389,10 +1414,10 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
-	RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
-	RunOnModelErrorCallback(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
-	RunBeforeToolCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error)
-	RunAfterToolCallback(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
-	RunOnToolErrorCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+	RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+	RunAfterModelCallback(cctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+	RunOnModelErrorCallback(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+	RunBeforeToolCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error)
+	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }

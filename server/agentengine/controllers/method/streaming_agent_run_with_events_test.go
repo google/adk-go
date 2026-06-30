@@ -24,12 +24,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/agentengine/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/server/agentengine/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 type agentSpaceStreamResponse struct {
@@ -156,7 +156,7 @@ func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(cc agent.Context) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},
@@ -214,7 +214,7 @@ func TestStreamJSONL_AgentSpaceAcceptsReturnedBackendSessionID(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(cc agent.Context) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},

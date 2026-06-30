@@ -28,15 +28,15 @@ import (
 	"strconv"
 	"strings"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 
 	"google.golang.org/genai"
 )
@@ -79,7 +79,7 @@ var (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
@@ -126,7 +126,7 @@ func main() {
 }
 
 // requestVacationDays simulates the *initiation* of a long-running ticket creation task.
-func requestVacationDays(ctx agent.ToolContext, args RequestVacationArgs) (*RequestVacationResults, error) {
+func requestVacationDays(ctx agent.Context, args RequestVacationArgs) (*RequestVacationResults, error) {
 	log.Printf("TOOL_EXEC: 'requestVacationDays' called with days: %d for user %s (Call ID: %s)\n", args.Days, args.UserID, ctx.FunctionCallID())
 
 	if args.Days <= 0 {

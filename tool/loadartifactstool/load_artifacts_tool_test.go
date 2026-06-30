@@ -21,13 +21,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool/loadartifactstool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
 func TestLoadArtifactsTool_Run(t *testing.T) {
@@ -277,7 +277,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
-func createToolContext(t *testing.T) agent.ToolContext {
+func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{

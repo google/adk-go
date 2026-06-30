@@ -29,18 +29,18 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 const modelName = "gemini-2.5-flash"
@@ -298,7 +298,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("search_tool_%s", name),
 			Description: "Search for information on the web",
 		},
-		func(ctx agent.ToolContext, args struct{ Query string }) (string, error) {
+		func(ctx agent.Context, args struct{ Query string }) (string, error) {
 			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
 		},
 	)
@@ -311,7 +311,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("analyze_tool_%s", name),
 			Description: "Analyze data and return insights",
 		},
-		func(ctx agent.ToolContext, args struct{ Data string }) (string, error) {
+		func(ctx agent.Context, args struct{ Data string }) (string, error) {
 			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
 		},
 	)
@@ -483,7 +483,7 @@ func TestParallelAgent_StateSync(t *testing.T) {
 			}
 		},
 		AfterAgentCallbacks: []agent.AfterAgentCallback{
-			func(c agent.CallbackContext) (*genai.Content, error) {
+			func(c agent.Context) (*genai.Content, error) {
 				gotValue, gotErr = c.State().Get("test_key")
 				return nil, nil
 			},

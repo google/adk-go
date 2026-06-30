@@ -23,10 +23,10 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
-	aiplatformutil "google.golang.org/adk/util/aiplatform"
-	vertexaiutil "google.golang.org/adk/util/vertexai"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/session"
+	aiplatformutil "google.golang.org/adk/v2/util/aiplatform"
+	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
 
 	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"

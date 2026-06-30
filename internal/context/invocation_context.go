@@ -19,9 +19,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 type InvocationContextParams struct {
@@ -29,16 +29,20 @@ type InvocationContextParams struct {
 	Memory    agent.Memory
 	Session   session.Session
 
-	Branch string
-	Agent  agent.Agent
+	Branch         string
+	IsolationScope string
+	Agent          agent.Agent
 
 	UserContent                 *genai.Content
 	RunConfig                   *agent.RunConfig
 	EndInvocation               bool
 	InvocationID                string
 	LiveSessionResumptionHandle string
+	Path                        string
+	OutputForAncestors          []string
 }
 
+// TODO(kdroste): merge with agent.InvocationContext implementation in agent package, if possible.
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	if params.InvocationID == "" {
 		params.InvocationID = "e-" + platform.NewUUID(ctx)
@@ -65,6 +69,10 @@ func (c *InvocationContext) Agent() agent.Agent {
 
 func (c *InvocationContext) Branch() string {
 	return c.params.Branch
+}
+
+func (c *InvocationContext) IsolationScope() string {
+	return c.params.IsolationScope
 }
 
 func (c *InvocationContext) InvocationID() string {
@@ -113,4 +121,33 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	return &newCtx
 }
 
+// ResumedInput always returns (nil, false) for the base
+// invocation context. Implementations that carry a resume payload
+// override this method.
+func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
 var _ agent.InvocationContext = (*InvocationContext)(nil)
+
+func (c *InvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	if d.UserContent != nil {
+		res.params.UserContent = *d.UserContent
+	}
+	if d.Agent != nil {
+		res.params.Agent = *d.Agent
+	}
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+	if d.Branch != nil {
+		res.params.Branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.params.IsolationScope = *d.IsolationScope
+	}
+
+	return &res
+}

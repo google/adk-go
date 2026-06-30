@@ -21,12 +21,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/llminternal/googlellm"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 const (
@@ -66,7 +66,7 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 // createFinalModelResponseEvent creates a final model response event from set_model_response JSON.
 func createFinalModelResponseEvent(invocationContext agent.InvocationContext, response string) *session.Event {
 	// Create a proper model response event
-	finalEvent := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
+	finalEvent := session.NewEvent(invocationContext, invocationContext.InvocationID())
 	finalEvent.Author = invocationContext.Agent().Name()
 	finalEvent.Branch = invocationContext.Branch()
 	finalEvent.Content = &genai.Content{
@@ -99,6 +99,12 @@ func needOutputSchemaProcessor(state *State) bool {
 	if state == nil || state.Model == nil {
 		return false
 	}
+	// Task-mode agents already have a structured-output mechanism:
+	// the auto-injected finish_task tool whose declaration mirrors
+	// the agent's OutputSchema.
+	if state.Mode == ModeTask {
+		return false
+	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
 	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
 }
@@ -128,7 +134,7 @@ func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *setModelResponseTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *setModelResponseTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type for set_model_response: %T", args)

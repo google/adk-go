@@ -17,7 +17,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
 // DebugAPIRouter defines the routes for the Debug API.

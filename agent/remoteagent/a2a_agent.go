@@ -14,7 +14,7 @@
 
 // Package remoteagent allows using a remote ADK agents.
 //
-// Deprecated: Use google.golang.org/adk/agent/remoteagent/v2 instead.
+// Deprecated: Use google.golang.org/adk/v2/agent/remoteagent/v2 instead.
 package remoteagent
 
 import (
@@ -33,17 +33,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	v2 "google.golang.org/adk/agent/remoteagent/v2"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	v2 "google.golang.org/adk/v2/agent/remoteagent/v2"
+	"google.golang.org/adk/v2/server/adka2a"
+	"google.golang.org/adk/v2/session"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.
 //
 // If it returns non-nil result or error, the actual call is skipped and the returned value is used
 // as the agent invocation result.
-type BeforeA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error)
+type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams) (*session.Event, error)
 
 // A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
@@ -53,7 +53,7 @@ type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendPar
 // decides to not emit an A2A event.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
-type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
+type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
 
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, taskInfo a2a.TaskInfo, cause error)
@@ -199,7 +199,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.BeforeRequestCallbacks != nil {
 		v1Cfg.BeforeRequestCallbacks = make([]v2.BeforeA2ARequestCallback, 0, len(cfg.BeforeRequestCallbacks))
 		for _, cb := range cfg.BeforeRequestCallbacks {
-			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.CallbackContext, req *a2av2.SendMessageRequest) (*session.Event, error) {
+			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.Context, req *a2av2.SendMessageRequest) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				resp, err := cb(ctx, legacyReq)
 				if resp != nil || err != nil { // short-circuit, no need to convert the request back
@@ -219,7 +219,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AfterRequestCallbacks != nil {
 		v1Cfg.AfterRequestCallbacks = make([]v2.AfterA2ARequestCallback, 0, len(cfg.AfterRequestCallbacks))
 		for _, cb := range cfg.AfterRequestCallbacks {
-			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *a2av2.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.Context, req *a2av2.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				newResp, newErr := cb(ctx, legacyReq, resp, err)
 				if newResp != nil || newErr != nil { // short-circuit, no need to convert the request back

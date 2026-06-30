@@ -36,20 +36,20 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 const (
@@ -574,7 +574,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -599,7 +599,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -794,7 +794,7 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
-			func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+			func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 				if eventCount < 3 {
 					eventCount++
 					return nil, nil
@@ -886,7 +886,7 @@ func newLongRunningTool(t *testing.T) tool.Tool {
 		Name:          approvalToolName,
 		Description:   "Request approval before proceeding.",
 		IsLongRunning: true,
-	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
+	}, func(ctx agent.Context, x map[string]any) (approval, error) {
 		return approval{Status: approvalStatusPending, TicketID: a2a.NewContextID()}, nil
 	})
 	if err != nil {
@@ -901,7 +901,7 @@ func newToolConfirmation(t *testing.T) tool.Tool {
 	requestApproval, err := functiontool.New(functiontool.Config{
 		Name:        approvalToolName,
 		Description: "Request approval before proceeding.",
-	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
+	}, func(ctx agent.Context, x map[string]any) (approval, error) {
 		confirmation := ctx.ToolConfirmation()
 		if confirmation == nil {
 			ticketID := a2a.NewContextID()

@@ -1,0 +1,472 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package workflow
+
+import (
+	"context"
+	"errors"
+	"iter"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/session"
+)
+
+func TestValidateCustomRunID(t *testing.T) {
+	tests := []struct {
+		id      string
+		wantErr bool
+	}{
+		{"", true},    // empty
+		{"123", true}, // purely numeric
+		{"0", true},   // purely numeric
+		{"a/b", true}, // contains /
+		{"a@b", true}, // contains @
+		{"order-7", false},
+		{"abc", false},
+		{"v2-attempt-3", false},
+		{"7a", false}, // mixed
+	}
+	for _, tc := range tests {
+		t.Run(tc.id, func(t *testing.T) {
+			err := validateCustomRunID(tc.id)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateCustomRunID(%q) err = %v, wantErr = %v", tc.id, err, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrInvalidRunID) {
+				t.Errorf("validateCustomRunID(%q) err = %v, want errors.Is ErrInvalidRunID", tc.id, err)
+			}
+		})
+	}
+}
+
+func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+
+	for i := 1; i <= 3; i++ {
+		got, err := sub.ResolveByRunID("childA", "")
+		if err != nil {
+			t.Fatalf("resolveRunID childA #%d: %v", i, err)
+		}
+		if got != strconv.Itoa(i) {
+			t.Errorf("childA #%d got %q, want %q", i, got, strconv.Itoa(i))
+		}
+	}
+	// Independent counter per child name.
+	got, _ := sub.ResolveByRunID("childB", "")
+	if got != "1" {
+		t.Errorf("childB first invocation got %q, want \"1\"", got)
+	}
+}
+
+func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+	const goroutines = 64
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	seen := sync.Map{}
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			id, err := sub.ResolveByRunID("worker", "")
+			if err != nil {
+				t.Errorf("resolveRunID: %v", err)
+				return
+			}
+			if _, dup := seen.LoadOrStore(id, struct{}{}); dup {
+				t.Errorf("duplicate run id %q", id)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestSubScheduler_Counter_CustomIDDoesNotIncrement(t *testing.T) {
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+
+	if _, err := sub.ResolveByRunID("c", "order-1"); err != nil {
+		t.Fatalf("custom id: %v", err)
+	}
+	got, _ := sub.ResolveByRunID("c", "")
+	if got != "1" {
+		t.Errorf("auto id after custom got %q, want \"1\" (custom must not bump counter)", got)
+	}
+}
+
+func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
+	child := newStubNode("greeter", "hello")
+	var forwarded []*session.Event
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", func(ev *session.Event) error {
+		forwarded = append(forwarded, ev)
+		return nil
+	})
+
+	out, err := sub.RunNode(child, "world", runNodeOptions{})
+	if err != nil {
+		t.Fatalf("runNode: %v", err)
+	}
+	if out != "hello" {
+		t.Errorf("output = %v, want \"hello\"", out)
+	}
+	if len(forwarded) != 1 {
+		t.Fatalf("forwarded events = %d, want 1", len(forwarded))
+	}
+	if forwarded[0].Output != "hello" {
+		t.Errorf("forwarded event Output = %v, want \"hello\"", forwarded[0].Output)
+	}
+}
+
+func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
+	child := newStubNode("processor", nil)
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+	if _, err := sub.RunNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
+		t.Fatalf("runNode: %v", err)
+	}
+	// The child must have observed its agent.Context populated with the
+	// composite path; verify via the stub's captured context.
+	if got, want := child.lastPath, "wf/processor@order-42"; got != want {
+		t.Errorf("child Path() = %q, want %q", got, want)
+	}
+}
+
+func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
+	child := newRequestInputNode("asker", "approve?")
+	var forwarded []*session.Event
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", func(ev *session.Event) error {
+		forwarded = append(forwarded, ev)
+		return nil
+	})
+
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
+	if !errors.Is(err, ErrNodeInterrupted) {
+		t.Fatalf("err = %v, want ErrNodeInterrupted", err)
+	}
+	var nre *NodeRunError
+	if !errors.As(err, &nre) {
+		t.Fatalf("err is not *NodeRunError: %v", err)
+	}
+	if nre.ChildPath != "wf/asker@1" {
+		t.Errorf("ChildPath = %q, want %q", nre.ChildPath, "wf/asker@1")
+	}
+	if len(forwarded) != 1 || forwarded[0].RequestedInput == nil {
+		t.Errorf("forwarded events = %+v, want 1 RequestedInput event", forwarded)
+	}
+}
+
+func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
+	child := newInterruptThenFailNode("flaky")
+	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
+	if !errors.Is(err, ErrNodeFailed) {
+		t.Errorf("err = %v, want ErrNodeFailed", err)
+	}
+	if errors.Is(err, ErrNodeInterrupted) {
+		t.Errorf("err = %v; ErrNodeInterrupted must not leak when child fails after RequestInput", err)
+	}
+}
+
+// TestSubScheduler_RehydrateCache_InvocationScope verifies that
+// rehydrateCache serves a child's output from cache only when the
+// terminal event belongs to the current invocation. Auto-counter
+// run-ids reset to 1 on every fresh activation, so a later user turn
+// reuses the same childPath ("wf/child@1"); without the invocation
+// filter the prior turn's output would be replayed and the child would
+// never re-run — the regression behind the empty second turn of the
+// dynamic workflow example. The current-invocation case must still hit
+// to preserve within-invocation resume/dedup.
+//
+// MockInvocationContext.InvocationID() is "test-invocation-id".
+func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
+	const childPath = "wf/child@1"
+	event := func(invocationID, output string) *session.Event {
+		return &session.Event{
+			InvocationID: invocationID,
+			Output:       output,
+			NodeInfo:     &session.NodeInfo{Path: childPath},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		events    sliceEvents
+		wantHit   bool
+		wantValue any
+	}{
+		{
+			name:    "other invocation ignored",
+			events:  sliceEvents{event("prev-invocation", "stale")},
+			wantHit: false,
+		},
+		{
+			name:      "current invocation wins over prior",
+			events:    sliceEvents{event("prev-invocation", "stale"), event("test-invocation-id", "fresh")},
+			wantHit:   true,
+			wantValue: "fresh",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newMockCtx(t)
+			ctx.sess = &eventsSession{events: tc.events}
+			sub := newDynamicSubScheduler(agent.NewContext(ctx), "wf", noopEmit).(*dynamicSubScheduler)
+
+			out, ok := sub.lookupCachedOutput(childPath)
+			if ok != tc.wantHit {
+				t.Fatalf("lookupCachedOutput(%q) hit = %v, want %v (out=%v)", childPath, ok, tc.wantHit, out)
+			}
+			if ok && out != tc.wantValue {
+				t.Errorf("cached output = %v, want %v", out, tc.wantValue)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Test fixtures and helpers
+// =============================================================================
+
+func noopEmit(*session.Event) error { return nil }
+
+// eventsSession is a minimal session.Session exposing a fixed event
+// history; only Events() is consulted by rehydrateCache.
+type eventsSession struct {
+	events session.Events
+}
+
+func (s *eventsSession) ID() string                { return "test-session" }
+func (s *eventsSession) AppName() string           { return "test-app" }
+func (s *eventsSession) UserID() string            { return "test-user" }
+func (s *eventsSession) State() session.State      { return nil }
+func (s *eventsSession) Events() session.Events    { return s.events }
+func (s *eventsSession) LastUpdateTime() time.Time { return time.Time{} }
+
+func newTopLevelCtx(t *testing.T) agent.Context {
+	t.Helper()
+	return agent.NewContext(newMockCtx(t))
+}
+
+// stubNode emits one Event{Output: out} and exits.
+type stubNode struct {
+	BaseNode
+	out        any
+	lastPath   string
+	lastBranch string
+	lastScope  string
+}
+
+func newStubNode(name string, out any) *stubNode {
+	return &stubNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		out:      out,
+	}
+}
+
+func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	n.lastPath = ctx.Path()
+	n.lastBranch = ctx.Branch()
+	n.lastScope = ctx.IsolationScope()
+	out := n.out
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{Output: out}, nil)
+	}
+}
+
+// newSchemaStubNode returns a stubNode carrying an output schema so the
+// dynamic sub-scheduler invokes ValidateOutput on its yielded output.
+func newSchemaStubNode(name string, schema *jsonschema.Resolved, out any) *stubNode {
+	return &stubNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		out:      out,
+	}
+}
+
+func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
+	schema := resolveTestSchema[testSchemaInput](t)
+
+	t.Run("valid_passes", func(t *testing.T) {
+		child := newSchemaStubNode("ok", schema, map[string]any{"value": "hi"})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		out, err := sub.RunNode(child, nil, runNodeOptions{})
+		if err != nil {
+			t.Fatalf("runNode: %v", err)
+		}
+		gotMap, ok := out.(map[string]any)
+		if !ok || gotMap["value"] != "hi" {
+			t.Errorf("output = %v, want map value=hi", out)
+		}
+	})
+
+	t.Run("invalid_fails", func(t *testing.T) {
+		child := newSchemaStubNode("bad", schema, map[string]any{"value": 123})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		_, err := sub.RunNode(child, nil, runNodeOptions{})
+		if !errors.Is(err, ErrNodeFailed) {
+			t.Fatalf("err = %v, want ErrNodeFailed", err)
+		}
+		if !strings.Contains(err.Error(), "output validation failed") {
+			t.Errorf("err = %q, want substring %q", err.Error(), "output validation failed")
+		}
+	})
+}
+
+// messageAsOutputNode emits a final model-text event whose content IS
+// its output (NodeInfo.MessageAsOutput set, Event.Output nil), like an
+// LlmAgent node in single_turn mode.
+type messageAsOutputNode struct {
+	BaseNode
+	text string
+}
+
+func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
+	return &messageAsOutputNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		text:     text,
+	}
+}
+
+func (n *messageAsOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	text := n.text
+	return func(yield func(*session.Event, error) bool) {
+		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
+		ev.LLMResponse.Content = &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: text}},
+		}
+		yield(ev, nil)
+	}
+}
+
+// requestInputNode emits one RequestedInput event and exits cleanly.
+type requestInputNode struct {
+	BaseNode
+	message string
+}
+
+func newRequestInputNode(name, msg string) *requestInputNode {
+	return &requestInputNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		message:  msg,
+	}
+}
+
+func (n *requestInputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{
+			RequestedInput: &session.RequestInput{
+				InterruptID: "iid-1",
+				Message:     n.message,
+			},
+		}, nil)
+	}
+}
+
+// interruptThenFailNode yields RequestedInput, then yields an error.
+type interruptThenFailNode struct{ BaseNode }
+
+func newInterruptThenFailNode(name string) *interruptThenFailNode {
+	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
+}
+
+func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if !yield(&session.Event{
+			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},
+		}, nil) {
+			return
+		}
+		yield(nil, errors.New("boom"))
+	}
+}
+
+// errYieldNode yields a fixed error as its run error.
+type errYieldNode struct {
+	BaseNode
+	err error
+}
+
+func newErrYieldNode(name string, err error) *errYieldNode {
+	return &errYieldNode{BaseNode: NewBaseNode(name, "", NodeConfig{}), err: err}
+}
+
+func (n *errYieldNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	err := n.err
+	return func(yield func(*session.Event, error) bool) {
+		yield(nil, err)
+	}
+}
+
+// TestSubScheduler_RunNode_SpanStatusOnChildError asserts a delegated
+// child's invoke_node span is marked Error on a genuine failure but not
+// on parent cancellation.
+func TestSubScheduler_RunNode_SpanStatusOnChildError(t *testing.T) {
+	tests := []struct {
+		name       string
+		childErr   error
+		wantStatus codes.Code
+	}{
+		{
+			name:       "genuine_failure_marks_error",
+			childErr:   errors.New("boom"),
+			wantStatus: codes.Error,
+		},
+		{
+			name:       "parent_cancellation_not_marked_error",
+			childErr:   context.Canceled,
+			wantStatus: codes.Unset,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spanExp := tracetest.NewInMemoryExporter()
+			telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
+
+			child := newErrYieldNode("c", tc.childErr)
+			sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+			if _, err := sub.RunNode(child, nil, runNodeOptions{}); err == nil {
+				t.Fatal("RunNode: got nil error, want non-nil")
+			}
+
+			spans := spanExp.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans))
+			}
+			got := spans[0]
+			if got.Name != "invoke_node c" {
+				t.Errorf("span name = %q, want %q", got.Name, "invoke_node c")
+			}
+			if got.Status.Code != tc.wantStatus {
+				t.Errorf("span status = %v, want %v", got.Status.Code, tc.wantStatus)
+			}
+		})
+	}
+}

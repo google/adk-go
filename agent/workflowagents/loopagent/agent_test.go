@@ -24,14 +24,14 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestNewLoopAgent(t *testing.T) {
@@ -306,13 +306,13 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 
 type EmptyArgs struct{}
 
-func exampleFunctionThatEscalates(ctx agent.ToolContext, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalates(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = false
 	return map[string]string{}, nil
 }
 
-func exampleFunctionThatEscalatesAndSkips(ctx agent.ToolContext, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalatesAndSkips(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil

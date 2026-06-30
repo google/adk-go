@@ -18,12 +18,12 @@ import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
-	"google.golang.org/adk/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/skilltoolset/internal/skilltool"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
 const (
@@ -104,7 +104,7 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
 // the list of available skills and the system instruction explaining to the
 // agent what it can do with these skills.
-func (ts *SkillToolset) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (ts *SkillToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	skills, err := ts.source.ListFrontmatters(ctx)
 	if err != nil {
 		return err

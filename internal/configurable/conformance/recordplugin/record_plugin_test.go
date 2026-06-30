@@ -16,6 +16,7 @@ package recordplugin_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"os"
 	"path/filepath"
@@ -26,14 +27,13 @@ import (
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/configurable/conformance/recordplugin"
-	"google.golang.org/adk/internal/configurable/conformance/replayplugin/recording"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable/conformance/recordplugin"
+	"google.golang.org/adk/v2/internal/configurable/conformance/replayplugin/recording"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestRecordPlugin(t *testing.T) {
@@ -447,26 +447,33 @@ type MockInvocationContext struct {
 	invocationID string
 }
 
+func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
 func (m *MockInvocationContext) Session() session.Session                                { return m.session }
 func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
 func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
 func (m *MockInvocationContext) Branch() string                                          { return "" }
+func (m *MockInvocationContext) IsolationScope() string                                  { return "" }
 func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil }
 func (m *MockInvocationContext) EndInvocation()                                          {}
 func (m *MockInvocationContext) Ended() bool                                             { return false }
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
 func (m *MockInvocationContext) Value(key any) any                                       { return nil }
+func (m *MockInvocationContext) ResumedInput(string) (any, bool)                         { return nil, false }
 func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
 func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
 func (m *MockInvocationContext) Err() error                                              { return nil }
 
 type MockCallbackContext struct {
-	state        session.State
-	invocationID string
-	agentName    string
+	agent.ContextMock // inherit mocking responses
+	state             session.State
+	invocationID      string
+	agentName         string
 }
 
 func (m *MockCallbackContext) State() session.State                    { return m.state }
@@ -477,18 +484,24 @@ func (m *MockCallbackContext) AppName() string                         { return 
 func (m *MockCallbackContext) Branch() string                          { return "" }
 func (m *MockCallbackContext) SessionID() string                       { return "mock-session-id" }
 func (m *MockCallbackContext) UserID() string                          { return "mock-user" }
-func (m *MockCallbackContext) UserContent() *genai.Content             { return nil }
-func (m *MockCallbackContext) Artifacts() agent.Artifacts              { return nil }
-func (m *MockCallbackContext) Value(key any) any                       { return nil }
 func (m *MockCallbackContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
-func (m *MockCallbackContext) Done() <-chan struct{}                   { return nil }
-func (m *MockCallbackContext) Err() error                              { return nil }
+
+func (m *MockCallbackContext) RequestConfirmation(hint string, payload any) error {
+	return fmt.Errorf("RequestConfirmation() is not supported for MockCallbackContext")
+}
+
+func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
+}
+
+var _ agent.Context = (*MockCallbackContext)(nil)
 
 type MockToolContext struct {
-	state          session.State
-	invocationID   string
-	agentName      string
-	functionCallID string
+	agent.ContextMock // inherit mocking responses
+	state             session.State
+	invocationID      string
+	agentName         string
+	functionCallID    string
 }
 
 func (m *MockToolContext) State() session.State                 { return m.state }
@@ -496,22 +509,6 @@ func (m *MockToolContext) ReadonlyState() session.ReadonlyState { return m.state
 func (m *MockToolContext) InvocationID() string                 { return m.invocationID }
 func (m *MockToolContext) AgentName() string                    { return m.agentName }
 func (m *MockToolContext) FunctionCallID() string               { return m.functionCallID }
-func (m *MockToolContext) Actions() *session.EventActions       { return nil }
-func (m *MockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	return nil, nil
-}
-func (m *MockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (m *MockToolContext) RequestConfirmation(hint string, payload any) error   { return nil }
-func (m *MockToolContext) AppName() string                                      { return "mock-app" }
-func (m *MockToolContext) Branch() string                                       { return "" }
-func (m *MockToolContext) SessionID() string                                    { return "mock-session-id" }
-func (m *MockToolContext) UserID() string                                       { return "mock-user" }
-func (m *MockToolContext) UserContent() *genai.Content                          { return nil }
-func (m *MockToolContext) Artifacts() agent.Artifacts                           { return nil }
-func (m *MockToolContext) Value(key any) any                                    { return nil }
-func (m *MockToolContext) Deadline() (deadline time.Time, ok bool)              { return time.Time{}, false }
-func (m *MockToolContext) Done() <-chan struct{}                                { return nil }
-func (m *MockToolContext) Err() error                                           { return nil }
 
 type MockTool struct {
 	NameVal string

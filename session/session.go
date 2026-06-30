@@ -20,11 +20,11 @@ import (
 	"iter"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/google/jsonschema-go/jsonschema"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // Session represents a series of interactions between a user and agents.
@@ -108,6 +108,11 @@ type Event struct {
 	// Branch is used when multiple sub-agent shouldn't see their peer agents'
 	// conversation history.
 	Branch string
+	// IsolationScope, when set, restricts which agent contexts include this
+	// event in LLM prompt history: an event is visible only when
+	// event.IsolationScope equals the agent's isolation scope (exact match;
+	// empty sees only empty). Empty for non-scoped events.
+	IsolationScope string `json:"isolationScope,omitempty"`
 	// Author is the name of the event's author
 	Author string
 
@@ -117,6 +122,87 @@ type Event struct {
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
+	// Routing information for workflow execution
+	Routes []string
+	// RequestedInput, when non-nil, signals that the workflow node
+	// emitting this event is asking for human input and is about to
+	// pause. The workflow scheduler observes this field at event
+	// dispatch time and transitions the corresponding node to
+	// NodeWaiting on the activation's completion. UI surfaces read
+	// the same field to render the prompt.
+	//
+	// At most one event per node activation may carry this field.
+	RequestedInput *RequestInput
+
+	// Output is the generic data output from a workflow node.
+	Output any
+
+	// NodeInfo carries workflow-node metadata for events emitted
+	// inside a workflow. Nil for non-workflow events.
+	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
+}
+
+// NodeInfo carries the per-event metadata identifying which node in
+// a workflow activation emitted it.
+type NodeInfo struct {
+	// Path is the composite path of the emitting node within its
+	// workflow activation. Empty for top-level static nodes;
+	// "<parent_path>/<child_name>@<run_id>" for dynamic children.
+	// The scheduler uses it to scope per-activation Output/Routes
+	// invariants to the emitter, allowing dynamic nodes to forward
+	// children's terminal events alongside their own.
+	Path string `json:"path,omitempty"`
+
+	// MessageAsOutput marks that this event's content IS the node's
+	// output: when set and Event.Output is nil, readers derive the
+	// node output from the event's model text. Mirrors adk-python's
+	// node_info.message_as_output.
+	MessageAsOutput bool `json:"messageAsOutput,omitempty"`
+
+	// OutputFor lists the node paths this event's Output counts for: the
+	// emitter plus any WithUseAsOutput delegating ancestors, so one event
+	// stands in for a whole delegation chain rather than each level
+	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
+	OutputFor []string `json:"outputFor,omitempty"`
+}
+
+// RequestInput describes a single human-in-the-loop prompt emitted
+// by a workflow node. It travels on Event.RequestedInput from the
+// node, through the scheduler, out to the UI surface; the matching
+// response is routed back by InterruptID.
+//
+// JSON-marshallable: persisted in session.State across pause/resume
+// turns. Payload is typed any and must be JSON-encodable; for
+// binary data, stash the bytes via agent.Artifacts and put a URI
+// string in Payload.
+type RequestInput struct {
+	// InterruptID correlates this request with the response that
+	// resumes it; the reply is routed back by matching this ID.
+	// Prefer a value that is unique per request: leave it empty and
+	// the engine fills in a fresh UUID (the recommended default), or
+	// build your own from a readable prefix plus a UUID
+	// (e.g. "manager_approval-"+uuid).
+	//
+	// Avoid reusing one fixed literal across separate runs in the same
+	// session. ADK clients — notably the Dev UI — track answered
+	// requests by this ID and will not re-prompt for an ID already
+	// resolved earlier in the session, so a later run that reuses it
+	// shows no input box. Mirrors adk-python RequestInput.interrupt_id,
+	// which defaults to a fresh UUID.
+	InterruptID string `json:"interruptId"`
+
+	// Message is the human-readable description of what is being
+	// asked. Surfaced in UI as the prompt text. Optional.
+	Message string `json:"message,omitempty"`
+
+	// ResponseSchema, when non-nil, is the JSON schema the user's
+	// response payload must conform to.
+	ResponseSchema *jsonschema.Schema `json:"responseSchema,omitempty"`
+
+	// Payload is optional context the UI may render alongside the
+	// prompt (e.g. the document to approve, the proposed parameters).
+	// Carried through opaquely; the engine does not interpret it.
+	Payload any `json:"payload,omitempty"`
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.
@@ -133,26 +219,11 @@ func (e *Event) IsFinalResponse() bool {
 
 // NewEvent creates a new event defining now as the timestamp.
 //
-// Deprecated: Use [NewEventWithContext] instead so that platform-installed time
-// and UUID providers (see [platform.WithTimeProvider] and
-// [platform.WithUUIDProvider]) are honored. NewEvent always uses the wall clock
-// and a random UUID.
-func NewEvent(invocationID string) *Event {
-	return &Event{
-		ID:           uuid.NewString(),
-		InvocationID: invocationID,
-		Timestamp:    time.Now(),
-		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
-}
-
-// NewEventWithContext creates a new event defining now as the timestamp.
-//
 // The event ID and timestamp are obtained through the platform package, so a
 // time or UUID provider installed on ctx (see [platform.WithTimeProvider] and
 // [platform.WithUUIDProvider]) controls them. This lets callers such as
 // workflow engines produce deterministic, replay-safe events.
-func NewEventWithContext(ctx context.Context, invocationID string) *Event {
+func NewEvent(ctx context.Context, invocationID string) *Event {
 	return &Event{
 		ID:           platform.NewUUID(ctx),
 		InvocationID: invocationID,

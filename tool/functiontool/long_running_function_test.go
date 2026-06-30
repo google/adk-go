@@ -23,12 +23,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestNewLongRunningFunctionTool(t *testing.T) {
@@ -40,7 +40,7 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 		Result string `json:"result"` // the operation result
 	}
 
-	handler := func(ctx agent.ToolContext, input SumArgs) (SumResult, error) {
+	handler := func(ctx agent.Context, input SumArgs) (SumResult, error) {
 		return SumResult{Result: "Processing sum"}, nil
 	}
 	sumTool, err := functiontool.New(functiontool.Config{
@@ -81,7 +81,7 @@ type IncArgs struct{}
 
 func TestLongRunningFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx agent.ToolContext, x IncArgs) (map[string]string, error) {
+	increaseByOne := func(ctx agent.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
 		return map[string]string{"status": "pending"}, nil
 	}
@@ -90,7 +90,7 @@ func TestLongRunningFunctionFlow(t *testing.T) {
 
 func TestLongRunningStringFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx agent.ToolContext, x IncArgs) (string, error) {
+	increaseByOne := func(ctx agent.Context, x IncArgs) (string, error) {
 		functionCalled++
 		return "pending", nil
 	}
@@ -98,7 +98,7 @@ func TestLongRunningStringFunctionFlow(t *testing.T) {
 }
 
 // --- Test Suite ---
-func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx agent.ToolContext, x IncArgs) (Out, error), resultKey string, callCount *int) {
+func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx agent.Context, x IncArgs) (Out, error), resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
 		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
@@ -267,7 +267,7 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 
 	type IncArgs struct{}
 
-	increaseByOne := func(ctx agent.ToolContext, x IncArgs) (map[string]string, error) {
+	increaseByOne := func(ctx agent.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
 		return map[string]string{"status": "pending"}, nil
 	}

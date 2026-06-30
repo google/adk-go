@@ -36,7 +36,7 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/v2/artifact"
 )
 
 // gcsService is a google cloud storage implementation of the Service.
@@ -400,7 +400,7 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 			Version:        version,
 			CanonicalURI:   canonicalURI,
 			CustomMetadata: customMeta,
-			CreateTime:     float64(attrs.Created.Unix()),
+			CreateTime:     attrs.Created,
 			MimeType:       attrs.ContentType,
 		},
 	}, nil

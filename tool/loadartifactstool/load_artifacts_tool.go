@@ -25,11 +25,11 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
@@ -85,7 +85,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *artifactsTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -117,7 +117,7 @@ func (t *artifactsTool) Run(ctx agent.ToolContext, args any) (map[string]any, er
 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
-func (t *artifactsTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (t *artifactsTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequ
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *artifactsTool) appendInitialInstructions(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -151,7 +151,7 @@ func (t *artifactsTool) appendInitialInstructions(ctx agent.ToolContext, req *mo
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}

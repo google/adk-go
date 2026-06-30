@@ -22,13 +22,13 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
 func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 	event.Author = ctx.Agent().Name()
 	event.Branch = ctx.Branch()
 	return event

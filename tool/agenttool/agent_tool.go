@@ -24,16 +24,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowinternal"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // agentTool implements a tool that allows an agent to call another agent.
@@ -84,41 +85,13 @@ func (t *agentTool) IsLongRunning() bool {
 // If the agent does not have an input schema, a default schema with a
 // "request" string parameter is used.
 func (t *agentTool) Declaration() *genai.FunctionDeclaration {
-	decl := &genai.FunctionDeclaration{
-		Name:        t.Name(),
-		Description: t.Description(),
-	}
-
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	if ok && llmAgent != nil {
-		// TODO - understand what build_function_declaration does in python and apply if needed.
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
-
-	if agentInputSchema != nil {
-		decl.Parameters = agentInputSchema
-	} else {
-		decl.Parameters = &genai.Schema{
-			Type: "OBJECT",
-			Properties: map[string]*genai.Schema{
-				"request": {Type: "STRING"},
-			},
-			Required: []string{"request"},
-		}
-	}
-	// TODO - understand how _api_variant affects response type.
-	return decl
+	return workflowinternal.MakeFunctionDeclaration(t.agent)
 }
 
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result.
-func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, error) {
+func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
@@ -251,6 +224,6 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
-func (t *agentTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *agentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }

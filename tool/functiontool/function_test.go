@@ -28,18 +28,18 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/typeutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type SumArgs struct {
@@ -50,7 +50,7 @@ type SumResult struct {
 	Sum int `json:"sum"` // the sum of two integers
 }
 
-func sumFunc(ctx agent.ToolContext, input SumArgs) (SumResult, error) {
+func sumFunc(ctx agent.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 
@@ -65,7 +65,7 @@ func ExampleNew() {
 	_ = sumTool // use the tool
 }
 
-func createToolContext(t *testing.T) agent.ToolContext {
+func createToolContext(t *testing.T) agent.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
@@ -101,7 +101,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx agent.ToolContext, input Args) (Result, error) {
+	weatherReport := func(ctx agent.Context, input Args) (Result, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -202,7 +202,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type IntOutput struct {
 		Result int `json:"result"`
 	}
-	identityFunc := func(ctx agent.ToolContext, input IntInput) (IntOutput, error) {
+	identityFunc := func(ctx agent.Context, input IntInput) (IntOutput, error) {
 		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -220,7 +220,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type StringOutput struct {
 		Result string `json:"result"`
 	}
-	stringIdentityFunc := func(ctx agent.ToolContext, input StringInput) (StringOutput, error) {
+	stringIdentityFunc := func(ctx agent.Context, input StringInput) (StringOutput, error) {
 		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
@@ -266,7 +266,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx agent.ToolContext, input Args) (string, error) {
+	weatherReport := func(ctx agent.Context, input Args) (string, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -356,7 +356,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 			Name:        "sum_map",
 			Description: "sums numbers provided in a map input",
 		},
-		func(ctx agent.ToolContext, input map[string]int) (Output, error) {
+		func(ctx agent.Context, input map[string]int) (Output, error) {
 			return Output{Sum: input["a"] + input["b"]}, nil
 		})
 	if err != nil {
@@ -441,7 +441,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx agent.ToolContext, input Args) (any, error) {
+	}, func(ctx agent.Context, input Args) (any, error) {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)
@@ -553,7 +553,7 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ agent.ToolContext, _ SimpleArgs) (string, error) {
+func okFunc(_ agent.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
@@ -927,7 +927,7 @@ type TestResult struct {
 
 func TestNew_RequireConfirmationProvider_Validation(t *testing.T) {
 	// A dummy handler to satisfy the function signature
-	dummyHandler := func(_ agent.ToolContext, _ TestArgs) (TestResult, error) {
+	dummyHandler := func(_ agent.Context, _ TestArgs) (TestResult, error) {
 		return TestResult{Value: 1}, nil
 	}
 
@@ -1038,7 +1038,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "string_tool",
 					Description: "a tool with string input",
-				}, func(ctx agent.ToolContext, input string) (string, error) {
+				}, func(ctx agent.Context, input string) (string, error) {
 					return input, nil
 				})
 			},
@@ -1050,7 +1050,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "int_tool",
 					Description: "a tool with int input",
-				}, func(ctx agent.ToolContext, input int) (int, error) {
+				}, func(ctx agent.Context, input int) (int, error) {
 					return input, nil
 				})
 			},
@@ -1062,7 +1062,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "bool_tool",
 					Description: "a tool with bool input",
-				}, func(ctx agent.ToolContext, input bool) (bool, error) {
+				}, func(ctx agent.Context, input bool) (bool, error) {
 					return input, nil
 				})
 			},
@@ -1088,7 +1088,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		Value string `json:"value"`
 	}
 
-	panicHandler := func(ctx agent.ToolContext, input Args) (string, error) {
+	panicHandler := func(ctx agent.Context, input Args) (string, error) {
 		panic("intentional panic for testing")
 	}
 

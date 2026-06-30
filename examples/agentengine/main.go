@@ -24,18 +24,18 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/agentengine"
-	vertexaiMem "google.golang.org/adk/memory/vertexai"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session/vertexai"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	vertexaiutil "google.golang.org/adk/util/vertexai"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/agentengine"
+	vertexaiMem "google.golang.org/adk/v2/memory/vertexai"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session/vertexai"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
 )
 
 // Args defines the input structure for the memory search tool.
@@ -53,8 +53,8 @@ const (
 )
 
 // memorySearchToolFunc is the implementation of the memory search tool.
-// This function demonstrates accessing memory via agent.ToolContext.
-func memorySearchToolFunc(tctx agent.ToolContext, args Args) (Result, error) {
+// This function demonstrates accessing memory via agent.Context.
+func memorySearchToolFunc(tctx agent.Context, args Args) (Result, error) {
 	// The SearchMemory function is available on the context.
 	searchResults, err := tctx.SearchMemory(tctx, args.Query)
 	if err != nil {
@@ -82,7 +82,7 @@ func main() {
 	location := os.Getenv("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION")
 	agentEngineID := os.Getenv("GOOGLE_CLOUD_AGENT_ENGINE_ID")
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
 		Backend:  genai.BackendVertexAI,
 		Project:  projectID,
 		Location: location,
@@ -98,7 +98,7 @@ func main() {
 	type Output struct {
 		Result int `json:"result"`
 	}
-	handler := func(ctx agent.ToolContext, input Input) (Output, error) {
+	handler := func(ctx agent.Context, input Input) (Output, error) {
 		return Output{
 			Result: input.Min + rand.IntN(input.Max-input.Min+1),
 		}, nil

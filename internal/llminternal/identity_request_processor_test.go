@@ -20,10 +20,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
 )
 
 func TestIdentityRequestProcessor(t *testing.T) {
@@ -72,6 +72,14 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			wantNoSI: true,
 		},
 		{
+			name: "NoOpForSingleTurnMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "single_turn"})),
+				s:     &State{Mode: ModeSingleTurn},
+			},
+			wantNoSI: true,
+		},
+		{
 			name: "EmptyDescription",
 			agent: &mockLLMAgent{
 				Agent: utils.Must(agent.New(agent.Config{
@@ -99,6 +107,39 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				"Be concise.",
 				"You are an agent.",
 				"Your internal name is \"append_agent\".",
+			},
+		},
+		{
+			name: "SkipsForSingleTurnMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "single_turn_agent",
+					Description: "A single-shot worker.",
+				})),
+				s: &State{Mode: ModeSingleTurn},
+			},
+			wantNoSI: true,
+		},
+		{
+			name: "EmittedForChatMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "chat_agent"})),
+				s:     &State{Mode: ModeChat},
+			},
+			wantContains: []string{
+				"You are an agent.",
+				"Your internal name is \"chat_agent\".",
+			},
+		},
+		{
+			name: "EmittedForTaskMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "task_agent"})),
+				s:     &State{Mode: ModeTask},
+			},
+			wantContains: []string{
+				"You are an agent.",
+				"Your internal name is \"task_agent\".",
 			},
 		},
 	}

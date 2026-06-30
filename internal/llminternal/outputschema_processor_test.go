@@ -23,12 +23,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTool struct {
@@ -41,7 +41,7 @@ func (m *mockTool) IsLongRunning() bool { return false }
 func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
-func (m *mockTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) { return nil, nil }
+func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) { return nil, nil }
 
 type mockLLM struct {
 	model.LLM
