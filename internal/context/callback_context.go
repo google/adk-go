@@ -15,8 +15,8 @@
 package context
 
 import (
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // NewCallbackContext returns a callback context suitable for model, tool, and

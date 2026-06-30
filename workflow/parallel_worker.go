@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // ParallelWorker runs a wrapped node in parallel for each item in the input list.

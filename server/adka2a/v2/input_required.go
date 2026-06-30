@@ -24,8 +24,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/session"
 )
 
 type inputRequiredProcessor struct {

@@ -22,9 +22,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 type userFunctionCall struct {

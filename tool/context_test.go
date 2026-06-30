@@ -17,9 +17,9 @@ package tool_test
 import (
 	"testing"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestNewToolContext_Interfaces(t *testing.T) {

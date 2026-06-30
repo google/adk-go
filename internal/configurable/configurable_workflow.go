@@ -23,8 +23,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/workflow"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // nodeFunctionRegistry stores pre-registered custom node functions.

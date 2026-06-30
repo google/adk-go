@@ -8,10 +8,10 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - google.golang.org/adk
+        - google.golang.org/adk/v2
     gofumpt:
       extra-rules: true
-      module-path: google.golang.org/adk
+      module-path: google.golang.org/adk/v2
 
 linters:
   enable:

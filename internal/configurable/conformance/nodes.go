@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/configurable"
-	"google.golang.org/adk/internal/typeutil"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable"
+	"google.golang.org/adk/v2/internal/typeutil"
 )
 
 func uppercaseFormatter(ctx agent.Context, input any) (any, error) {

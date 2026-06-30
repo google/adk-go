@@ -31,9 +31,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	vertexaiutil "google.golang.org/adk/util/vertexai"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
 
 	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
 	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"

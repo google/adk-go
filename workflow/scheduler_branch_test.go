@@ -18,7 +18,7 @@ import (
 	"sync"
 	"testing"
 
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/v2/agent"
 )
 
 // branchRecorder returns a FunctionNode that captures the

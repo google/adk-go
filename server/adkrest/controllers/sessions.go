@@ -21,8 +21,8 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 // TODO: Confirm error handling and target semantic for REST API.

@@ -19,7 +19,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // LRT-bearing events are "final" by IsFinalResponse() but represent

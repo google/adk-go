@@ -23,8 +23,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/session"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // gen_ai.operation.name attribute values for the agent / workflow /
