@@ -17,6 +17,7 @@ package launcher
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
@@ -63,4 +64,9 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+	// HTTPMiddleware is applied in order to the HTTP handler before serving.
+	// Each entry wraps the handler returned by the previous one. The first
+	// middleware in the slice is the outermost (runs first on inbound requests).
+	// A nil or empty slice is a no-op; existing callers are unaffected.
+	HTTPMiddleware []func(http.Handler) http.Handler
 }

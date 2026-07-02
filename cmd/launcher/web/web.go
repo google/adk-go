@@ -182,12 +182,17 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 	log.Println()
 
+	var handler http.Handler = router
+	for i := len(config.HTTPMiddleware) - 1; i >= 0; i-- {
+		handler = config.HTTPMiddleware[i](handler)
+	}
+
 	srv := http.Server{
 		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
-		Handler:      router,
+		Handler:      handler,
 	}
 
 	errChan := make(chan error, 1)
