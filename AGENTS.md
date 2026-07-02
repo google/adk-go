@@ -36,8 +36,9 @@ A change is complete only when all of these pass locally:
 
 ## Repository layout
 
-- `agent/`     Agent interface + types (`llmagent`, `workflowagents`, `remoteagent`)
+- `agent/`     Agent interface + types (`llmagent`, `workflowagent(s)`, `remoteagent`)
 - `runner/`    Execution engine that drives the run loop
+- `workflow/`  Node/graph-based workflow engine for multi-agent apps
 - `model/`     LLM abstraction (`gemini`, `apigee`)
 - `tool/`      Tool/Toolset interface + built-in tools (incl. `skilltoolset/`, `mcptoolset/`)
 - `session/`   Conversation state + events
@@ -46,6 +47,7 @@ A change is complete only when all of these pass locally:
 - `server/`    HTTP servers (`adkrest` is primary; `adka2a`, `agentengine`)
 - `cmd/`       CLI (`adkgo`) and server launchers
 - `telemetry/`, `util/`   Public helper packages
+- `platform/`  Overridable seams for time & UUID generation (deterministic tests)
 - `internal/`  Private packages — NOT public API; `internal/httprr` is vendored
 - `examples/`  Runnable example agents (quickstart, tools, a2a, skills, …)
 
