@@ -57,6 +57,7 @@ type agentEngineServiceFlags struct {
 	serverPort    int
 	agentEngineID string
 	memoryBank    memoryBankFlags
+	secrets       []string
 }
 
 type buildFlags struct {
@@ -105,11 +106,50 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
+	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.secrets, "secret", nil, "Secret env var mapping in ENV=SECRET:VERSION format. Repeat this flag to pass multiple secrets.")
 	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.memoryBank.deploy, "mem_deploy", false, "If set to true then memory bank will be deployed too")
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "publishers/google/models/gemini-2.5-flash", "Name of the model to be used for memory generation - for list you can GET"+
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models. It will be prefixed with projects/<project_name>/locations/<region> forming for instance full model name like "+
 		" 'projects/project_name/locations/us-central1/publishers/google/models/gemini-2.5-flash'")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+}
+
+func parseSecretEnvVars(secrets []string) ([]*aiplatformpb.SecretEnvVar, error) {
+	var secretEnvVars []*aiplatformpb.SecretEnvVar
+	for _, secret := range secrets {
+		envName, secretRef, ok := strings.Cut(secret, "=")
+		if !ok || envName == "" || secretRef == "" {
+			return nil, fmt.Errorf("invalid secret %q: expected ENV=SECRET:VERSION", secret)
+		}
+		secretName, secretVersion, ok := strings.Cut(secretRef, ":")
+		if !ok || secretName == "" || secretVersion == "" {
+			return nil, fmt.Errorf("invalid secret %q: expected ENV=SECRET:VERSION", secret)
+		}
+		secretEnvVars = append(secretEnvVars, &aiplatformpb.SecretEnvVar{
+			Name: envName,
+			SecretRef: &aiplatformpb.SecretRef{
+				Secret:  secretName,
+				Version: secretVersion,
+			},
+		})
+	}
+	return secretEnvVars, nil
+}
+
+func (f *deployAgentEngineFlags) deploymentSpec() (*aiplatformpb.ReasoningEngineSpec_DeploymentSpec, error) {
+	secretEnvVars, err := parseSecretEnvVars(f.agentEngine.secrets)
+	if err != nil {
+		return nil, err
+	}
+	return &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+		Env: []*aiplatformpb.EnvVar{
+			{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+			{Name: "NUM_WORKERS", Value: "1"},
+			{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+			{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+		},
+		SecretEnv: secretEnvVars,
+	}, nil
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -254,6 +294,10 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				return fmt.Errorf("cannot marshal methods: %w", err)
 			}
 			p("Methods:", string(methodsJSON))
+			deploymentSpec, err := f.deploymentSpec()
+			if err != nil {
+				return err
+			}
 
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
@@ -273,18 +317,8 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 							},
 						},
 						AgentFramework: "google-adk",
-						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
-							},
-						},
-						ClassMethods: methods,
+						DeploymentSpec: deploymentSpec,
+						ClassMethods:   methods,
 					},
 				},
 			}
@@ -354,6 +388,10 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				return fmt.Errorf("cannot marshal methods: %w", err)
 			}
 			p("Methods:", string(methodsJSON))
+			deploymentSpec, err := f.deploymentSpec()
+			if err != nil {
+				return err
+			}
 
 			req := &aiplatformpb.UpdateReasoningEngineRequest{
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
@@ -375,6 +413,10 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 					},
 				},
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
+			}
+			if len(f.agentEngine.secrets) > 0 {
+				req.ReasoningEngine.Spec.DeploymentSpec = deploymentSpec
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.deployment_spec")
 			}
 
 			if f.agentEngine.memoryBank.deploy {
