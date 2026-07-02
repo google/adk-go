@@ -299,6 +299,102 @@ func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T)
 	}
 }
 
+// TestGenerateRequestConfirmationEventStableOrder verifies that the emitted
+// confirmation parts (and the parallel LongRunningToolIDs slice) are ordered by
+// funcID, regardless of the (randomized) Go map iteration order of
+// RequestedToolConfirmations, and that repeated calls produce identical order.
+func TestGenerateRequestConfirmationEventStableOrder(t *testing.T) {
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+		branch:       "main",
+	}
+
+	// funcIDs whose sorted order is call_a, call_b, call_c, call_d, but which
+	// are inserted into the map / parts in a different order.
+	sortedFuncIDs := []string{"call_a", "call_b", "call_c", "call_d"}
+	insertionOrder := []string{"call_c", "call_a", "call_d", "call_b"}
+
+	functionCallParts := make([]*genai.Part, 0, len(insertionOrder))
+	requestedConfirmations := make(map[string]toolconfirmation.ToolConfirmation, len(insertionOrder))
+	for _, id := range insertionOrder {
+		functionCallParts = append(functionCallParts, &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				ID:   id,
+				Name: "test_tool",
+				Args: map[string]any{"arg": id},
+			},
+		})
+		requestedConfirmations[id] = toolconfirmation.ToolConfirmation{
+			Hint: "confirm " + id,
+		}
+	}
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: functionCallParts,
+			},
+		},
+	}
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: requestedConfirmations,
+		},
+	}
+
+	// orderOf returns the originating funcIDs in the order the parts were
+	// emitted, by reading back the originalFunctionCall arg of each generated
+	// adk_request_confirmation call.
+	orderOf := func(t *testing.T, ev *session.Event) []string {
+		t.Helper()
+		if ev == nil || ev.Content == nil {
+			t.Fatalf("expected non-nil event with content, got %#v", ev)
+		}
+		if got, want := len(ev.Content.Parts), len(sortedFuncIDs); got != want {
+			t.Fatalf("got %d parts, want %d", got, want)
+		}
+		if got, want := len(ev.LongRunningToolIDs), len(sortedFuncIDs); got != want {
+			t.Fatalf("got %d LongRunningToolIDs, want %d", got, want)
+		}
+		ids := make([]string, 0, len(ev.Content.Parts))
+		for i, part := range ev.Content.Parts {
+			if part.FunctionCall == nil {
+				t.Fatalf("part %d has nil FunctionCall", i)
+			}
+			if got, want := part.FunctionCall.Name, toolconfirmation.FunctionCallName; got != want {
+				t.Fatalf("part %d FunctionCall.Name = %q, want %q", i, got, want)
+			}
+			orig, ok := part.FunctionCall.Args["originalFunctionCall"].(*genai.FunctionCall)
+			if !ok {
+				t.Fatalf("part %d missing originalFunctionCall arg, got %#v", i, part.FunctionCall.Args["originalFunctionCall"])
+			}
+			ids = append(ids, orig.ID)
+
+			// LongRunningToolIDs must be the generated request-confirmation
+			// call ID at the same index (parallel slices).
+			if got, want := ev.LongRunningToolIDs[i], part.FunctionCall.ID; got != want {
+				t.Errorf("LongRunningToolIDs[%d] = %q, want %q (the request-confirmation call ID)", i, got, want)
+			}
+		}
+		return ids
+	}
+
+	first := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	gotOrder := orderOf(t, first)
+	if diff := cmp.Diff(sortedFuncIDs, gotOrder); diff != "" {
+		t.Errorf("parts not in sorted funcID order (-want +got):\n%s", diff)
+	}
+
+	// Repeated calls must produce an identical ordering.
+	for i := 0; i < 10; i++ {
+		next := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+		if diff := cmp.Diff(gotOrder, orderOf(t, next)); diff != "" {
+			t.Errorf("ordering not stable on call %d (-first +next):\n%s", i, diff)
+		}
+	}
+}
+
 func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
 	ctx := &mockInvocationContext{
 		invocationID: "inv_1",
