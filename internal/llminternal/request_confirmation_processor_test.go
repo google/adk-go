@@ -144,6 +144,50 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 		}
 	}
 
+	createReplayEvents := func() []*session.Event {
+		events := createConfirmationEvents(true)
+		userConfirmation := toolconfirmation.ToolConfirmation{Confirmed: true}
+		userConfirmationJSON, _ := json.Marshal(userConfirmation)
+		userConfirmationResponse := map[string]any{
+			"response": string(userConfirmationJSON),
+		}
+		events = append(events,
+			&session.Event{
+				Author: "testAgent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							},
+						},
+					},
+				},
+			},
+			&session.Event{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     toolconfirmation.FunctionCallName,
+									ID:       mockConfirmationFunctionCallID,
+									Response: userConfirmationResponse,
+								},
+							},
+						},
+					},
+				},
+			},
+		)
+		return events
+	}
+
 	// 2. Define the test cases
 	tests := []struct {
 		name       string
@@ -233,6 +277,11 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 					},
 				},
 			},
+		},
+		{
+			name:       "ReplayAfterToolResponse",
+			events:     createReplayEvents(),
+			wantEvents: nil,
 		},
 	}
 
