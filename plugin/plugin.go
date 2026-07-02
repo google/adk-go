@@ -40,9 +40,10 @@ type Config struct {
 	AfterModelCallback   llmagent.AfterModelCallback
 	OnModelErrorCallback llmagent.OnModelErrorCallback
 
-	BeforeToolCallback  llmagent.BeforeToolCallback
-	AfterToolCallback   llmagent.AfterToolCallback
-	OnToolErrorCallback llmagent.OnToolErrorCallback
+	BeforeToolCallback          llmagent.BeforeToolCallback
+	AfterToolCallback           llmagent.AfterToolCallback
+	OnToolErrorCallback         llmagent.OnToolErrorCallback
+	OnGuardrailBlockedCallback  llmagent.OnGuardrailBlockedCallback
 
 	CloseFunc func() error
 }
@@ -59,9 +60,10 @@ func New(cfg Config) (*Plugin, error) {
 		beforeModelCallback:   cfg.BeforeModelCallback,
 		afterModelCallback:    cfg.AfterModelCallback,
 		onModelErrorCallback:  cfg.OnModelErrorCallback,
-		beforeToolCallback:    cfg.BeforeToolCallback,
-		afterToolCallback:     cfg.AfterToolCallback,
-		onToolErrorCallback:   cfg.OnToolErrorCallback,
+		beforeToolCallback:         cfg.BeforeToolCallback,
+		afterToolCallback:          cfg.AfterToolCallback,
+		onToolErrorCallback:        cfg.OnToolErrorCallback,
+		onGuardrailBlockedCallback: cfg.OnGuardrailBlockedCallback,
 		closeFunc:             cfg.CloseFunc,
 	}
 
@@ -91,9 +93,10 @@ type Plugin struct {
 	afterModelCallback   llmagent.AfterModelCallback
 	onModelErrorCallback llmagent.OnModelErrorCallback
 
-	beforeToolCallback  llmagent.BeforeToolCallback
-	afterToolCallback   llmagent.AfterToolCallback
-	onToolErrorCallback llmagent.OnToolErrorCallback
+	beforeToolCallback         llmagent.BeforeToolCallback
+	afterToolCallback          llmagent.AfterToolCallback
+	onToolErrorCallback        llmagent.OnToolErrorCallback
+	onGuardrailBlockedCallback llmagent.OnGuardrailBlockedCallback
 
 	closeFunc func() error
 }
@@ -156,6 +159,10 @@ func (p *Plugin) AfterToolCallback() llmagent.AfterToolCallback {
 
 func (p *Plugin) OnToolErrorCallback() llmagent.OnToolErrorCallback {
 	return p.onToolErrorCallback
+}
+
+func (p *Plugin) OnGuardrailBlockedCallback() llmagent.OnGuardrailBlockedCallback {
+	return p.onGuardrailBlockedCallback
 }
 
 type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai.Content, error)
