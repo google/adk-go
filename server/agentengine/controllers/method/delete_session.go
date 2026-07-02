@@ -86,9 +86,12 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 		return fmt.Errorf("json.Unmarshal() failed: %v", err)
 	}
 
+	// Bind the deletion to the authenticated caller identity.
+	effectiveUserID := resolveUserID(ctx, req.Input.UserID)
+
 	ssReq := &session.DeleteRequest{
 		AppName:   g.agentEngineID,
-		UserID:    req.Input.UserID,
+		UserID:    effectiveUserID,
 		SessionID: req.Input.SessionID,
 	}
 	err = g.sessionservice.Delete(ctx, ssReq)

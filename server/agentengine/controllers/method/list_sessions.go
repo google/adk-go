@@ -79,9 +79,12 @@ func (l *listSessionHandler) Handle(ctx context.Context, rw http.ResponseWriter,
 		return fmt.Errorf("json.Unmarshal() failed: %v", err)
 	}
 
+	// Bind the listing to the authenticated caller identity.
+	effectiveUserID := resolveUserID(ctx, req.Input.UserID)
+
 	ssReq := &session.ListRequest{
 		AppName: l.agentEngineID,
-		UserID:  req.Input.UserID,
+		UserID:  effectiveUserID,
 	}
 	resp, err := l.sessionservice.List(ctx, ssReq)
 	if err != nil {

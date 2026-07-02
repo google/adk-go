@@ -86,9 +86,12 @@ func (g *getSessionHandler) Handle(ctx context.Context, rw http.ResponseWriter, 
 		return fmt.Errorf("json.Unmarshal() failed: %v", err)
 	}
 
+	// Bind the operation to the authenticated caller identity.
+	effectiveUserID := resolveUserID(ctx, req.Input.UserID)
+
 	ssReq := &session.GetRequest{
 		AppName:   g.agentEngineID,
-		UserID:    req.Input.UserID,
+		UserID:    effectiveUserID,
 		SessionID: req.Input.SessionID,
 	}
 	resp, err := g.sessionservice.Get(ctx, ssReq)
