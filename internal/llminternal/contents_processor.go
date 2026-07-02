@@ -103,7 +103,9 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
-			filtered = append(filtered, ConvertForeignEvent(ev))
+			if converted := ConvertForeignEvent(ev); converted != nil {
+				filtered = append(filtered, converted)
+			}
 		} else {
 			filtered = append(filtered, ev)
 		}
@@ -566,6 +568,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		if p.Thought {
+			continue
+		}
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
@@ -582,6 +587,11 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}
+	}
+
+	// If all parts were thoughts, nothing meaningful remains after the header.
+	if len(converted.Parts) == 1 {
+		return nil
 	}
 
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.
