@@ -42,6 +42,7 @@ type webConfig struct {
 	idleTimeout     time.Duration
 	shutdownTimeout time.Duration
 	otelToCloud     bool
+	useH2C          bool
 }
 
 // webLauncher can launch web server
@@ -190,6 +191,17 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		Handler:      router,
 	}
 
+	if w.config.useH2C {
+		// Enable both HTTP/1 and cleartext HTTP/2 on the same listener. Existing
+		// REST, Web UI, A2A, and trigger routes continue to work over HTTP/1.1,
+		// while custom web sublaunchers can register handlers that require h2c,
+		// such as native gRPC servers.
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		srv.Protocols = protocols
+	}
+
 	errChan := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -236,6 +248,7 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
+	fs.BoolVar(&config.useH2C, "h2c", false, "Enable cleartext HTTP/2 (h2c) on the web server listener.")
 
 	return &webLauncher{
 		config:       config,
