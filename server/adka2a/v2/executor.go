@@ -383,7 +383,8 @@ func (e *Executor) writeFinalTaskStatus(
 			return
 		}
 	}
-	if partialReset != nil {
+	// Do not send artifacts for input-required tasks to maintain compatibility with adk-python/adk-web
+	if partialReset != nil && status.Status.State != a2a.TaskStateInputRequired {
 		if !yield(partialReset, nil) {
 			return
 		}
