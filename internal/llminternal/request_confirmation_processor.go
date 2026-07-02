@@ -135,6 +135,11 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
+			removeAlreadyCompletedTools(events, k, confirmationEventIndex, toolsToResumeByFunctionCallID)
+			if len(toolsToResumeByFunctionCallID) == 0 {
+				continue
+			}
+
 			// TODO consider forward or backward pass instead of nested loops
 			// Remove the tools that have already been confirmed.
 			for j := len(events) - 1; j > confirmationEventIndex; j-- {
@@ -167,6 +172,21 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			if !yield(ev, err) {
 				return
 			}
+		}
+	}
+}
+
+func removeAlreadyCompletedTools(events []*session.Event, startIndex, endIndex int, toolsToResume map[string]*confirmedCall) {
+	for j := startIndex + 1; j < endIndex; j++ {
+		responses := utils.FunctionResponses(events[j].Content)
+		if len(responses) == 0 {
+			continue
+		}
+		for _, resp := range responses {
+			delete(toolsToResume, resp.ID)
+		}
+		if len(toolsToResume) == 0 {
+			return
 		}
 	}
 }
