@@ -57,6 +57,7 @@ type agentEngineServiceFlags struct {
 	serverPort    int
 	agentEngineID string
 	memoryBank    memoryBankFlags
+	envVars       []string
 }
 
 type buildFlags struct {
@@ -110,6 +111,21 @@ func init() {
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models. It will be prefixed with projects/<project_name>/locations/<region> forming for instance full model name like "+
 		" 'projects/project_name/locations/us-central1/publishers/google/models/gemini-2.5-flash'")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.envVars, "env", nil, "Additional environment variable in KEY=VALUE format. Repeatable.")
+}
+
+// parseEnvVars converts a slice of "KEY=VALUE" strings into EnvVar protos.
+// Returns an error for any entry that does not contain "=".
+func parseEnvVars(raw []string) ([]*aiplatformpb.EnvVar, error) {
+	vars := make([]*aiplatformpb.EnvVar, 0, len(raw))
+	for _, s := range raw {
+		parts := strings.SplitN(s, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid --env value %q: expected KEY=VALUE", s)
+		}
+		vars = append(vars, &aiplatformpb.EnvVar{Name: parts[0], Value: parts[1]})
+	}
+	return vars, nil
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -255,6 +271,17 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 			p("Methods:", string(methodsJSON))
 
+			defaultEnv := []*aiplatformpb.EnvVar{
+				{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+				{Name: "NUM_WORKERS", Value: "1"},
+				{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+				{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+			}
+			extraEnv, err := parseEnvVars(f.agentEngine.envVars)
+			if err != nil {
+				return err
+			}
+
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
@@ -274,12 +301,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 						},
 						AgentFramework: "google-adk",
 						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
+							Env: append(defaultEnv, extraEnv...),
 							SecretEnv: []*aiplatformpb.SecretEnvVar{
 								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
 							},
@@ -355,6 +377,11 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 			}
 			p("Methods:", string(methodsJSON))
 
+			extraEnv, err := parseEnvVars(f.agentEngine.envVars)
+			if err != nil {
+				return err
+			}
+
 			req := &aiplatformpb.UpdateReasoningEngineRequest{
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
 					Name: name,
@@ -375,6 +402,19 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 					},
 				},
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
+			}
+
+			if len(extraEnv) > 0 {
+				defaultEnv := []*aiplatformpb.EnvVar{
+					{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+					{Name: "NUM_WORKERS", Value: "1"},
+					{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+					{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+				}
+				req.ReasoningEngine.Spec.DeploymentSpec = &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+					Env: append(defaultEnv, extraEnv...),
+				}
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.deployment_spec")
 			}
 
 			if f.agentEngine.memoryBank.deploy {
