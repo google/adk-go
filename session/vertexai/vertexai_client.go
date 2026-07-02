@@ -253,14 +253,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 		return err
 	}
 
-	var eventState *aiplatformpb.EventActions
-	// Convert and set the initial state if provided
-	if len(event.Actions.StateDelta) > 0 {
-		sessionState, err := toStructPB(event.Actions.StateDelta)
-		if err != nil {
-			return fmt.Errorf("failed to convert state to structpb: %w", err)
-		}
-		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
+	eventActions, err := createAiplatformpbEventActions(event)
+	if err != nil {
+		return fmt.Errorf("failed to convert event actions: %w", err)
 	}
 
 	content, err := createAiplatformpbContent(event)
@@ -293,7 +288,7 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 			Author:        event.Author,
 			InvocationId:  event.InvocationID,
 			Content:       content,
-			Actions:       eventState,
+			Actions:       eventActions,
 			EventMetadata: metadata,
 			ErrorCode:     event.ErrorCode,
 			ErrorMessage:  event.ErrorMessage,
@@ -405,9 +400,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions: session.EventActions{
-				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
-			},
+			Actions:      aiplatformToSessionEventActions(rpcResp.Actions),
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -434,6 +427,46 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		return events[len(events)-numRecentEvents:], nil
 	}
 	return events, nil
+}
+
+func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventActions, error) {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+		return nil, nil
+	}
+
+	actions := &aiplatformpb.EventActions{}
+	if len(event.Actions.StateDelta) > 0 {
+		sessionState, err := toStructPB(event.Actions.StateDelta)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
+		}
+		actions.StateDelta = sessionState
+	}
+	if len(event.Actions.ArtifactDelta) > 0 {
+		actions.ArtifactDelta = make(map[string]int32, len(event.Actions.ArtifactDelta))
+		for name, version := range event.Actions.ArtifactDelta {
+			actions.ArtifactDelta[name] = int32(version)
+		}
+	}
+	return actions, nil
+}
+
+func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session.EventActions {
+	if actions == nil {
+		return session.EventActions{}
+	}
+
+	eventActions := session.EventActions{}
+	if actions.StateDelta != nil {
+		eventActions.StateDelta = filterNilValues(actions.StateDelta.AsMap())
+	}
+	if len(actions.ArtifactDelta) > 0 {
+		eventActions.ArtifactDelta = make(map[string]int64, len(actions.ArtifactDelta))
+		for name, version := range actions.ArtifactDelta {
+			eventActions.ArtifactDelta[name] = int64(version)
+		}
+	}
+	return eventActions
 }
 
 func sessionIdBySessionName(sn string) (string, error) {
