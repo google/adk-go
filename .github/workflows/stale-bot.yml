@@ -1,0 +1,44 @@
+name: Stale Issue Auditor
+
+# Thin caller: the bot's code lives in google/adk-samples
+# (go/github-bots/stale-issues). This workflow only supplies adk-go's triggers,
+# permissions, the maintainer list, and the model secret; the reusable workflow
+# runs in this repo's context, so the built-in GITHUB_TOKEN writes to adk-go.
+#
+# NOTE: pin the `uses:` ref to the merged commit SHA of the adk-samples reusable
+# workflow (replace `@main`) once https://github.com/google/adk-samples/pull/2080
+# lands, and add a `GEMINI_API_KEY` repository secret. Keep `maintainers` in sync
+# with the ADK Go team.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Audit only this issue number (blank = sweep).'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without modifying issues.'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    if: github.repository == 'google/adk-go'
+    permissions:
+      issues: write
+      contents: read
+    uses: google/adk-samples/.github/workflows/go-stale-issues.yml@main
+    with:
+      issue_number: ${{ inputs.issue }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      maintainers: 'wolo-lab,foxfrikses,dpasiukevich,hanorik,kdroste-google,jjsasha63,baptmont,karolpiotrowicz'
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
