@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/guardrail"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
@@ -63,14 +64,20 @@ func New(cfg Config) (agent.Agent, error) {
 		onToolErrorCallback = append(onToolErrorCallback, llminternal.OnToolErrorCallback(c))
 	}
 
+	onGuardrailBlockedCallbacks := make([]llminternal.OnGuardrailBlockedCallback, 0, len(cfg.OnGuardrailBlockedCallbacks))
+	for _, c := range cfg.OnGuardrailBlockedCallbacks {
+		onGuardrailBlockedCallbacks = append(onGuardrailBlockedCallbacks, llminternal.OnGuardrailBlockedCallback(c))
+	}
+
 	a := &llmAgent{
-		model:                 cfg.Model,
-		beforeModelCallbacks:  beforeModelCallbacks,
-		afterModelCallbacks:   afterModelCallbacks,
-		onModelErrorCallbacks: onModelErrorCallbacks,
-		beforeToolCallbacks:   beforeToolCallbacks,
-		afterToolCallbacks:    afterToolCallbacks,
-		onToolErrorCallbacks:  onToolErrorCallback,
+		model:                       cfg.Model,
+		beforeModelCallbacks:        beforeModelCallbacks,
+		afterModelCallbacks:         afterModelCallbacks,
+		onModelErrorCallbacks:       onModelErrorCallbacks,
+		beforeToolCallbacks:         beforeToolCallbacks,
+		afterToolCallbacks:          afterToolCallbacks,
+		onToolErrorCallbacks:        onToolErrorCallback,
+		onGuardrailBlockedCallbacks: onGuardrailBlockedCallbacks,
 		instruction:           cfg.Instruction,
 		inputSchema:           cfg.InputSchema,
 		outputSchema:          cfg.OutputSchema,
@@ -326,6 +333,11 @@ type Config struct {
 
 	OnToolErrorCallbacks []OnToolErrorCallback
 
+	// OnGuardrailBlockedCallbacks are called when a BeforeToolCallback returns
+	// *guardrail.ErrGuardrailBlocked. This allows custom responses for policy
+	// denials, distinct from unexpected runtime errors.
+	OnGuardrailBlockedCallbacks []OnGuardrailBlockedCallback
+
 	// OutputKey is an optional parameter to specify the key in session state for the agent output.
 	//
 	// Typical uses cases are:
@@ -404,6 +416,12 @@ type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[
 // is replaced with the returned response/error.
 type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
+// OnGuardrailBlockedCallback is called when a BeforeToolCallback returns
+// *guardrail.ErrGuardrailBlocked, signalling a policy denial rather than an
+// unexpected runtime error. Returning a non-nil map replaces the default
+// blocked-tool response sent back to the model.
+type OnGuardrailBlockedCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err *guardrail.ErrGuardrailBlocked) (map[string]any, error)
+
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string
 
@@ -425,9 +443,10 @@ type llmAgent struct {
 	instruction           string
 	onModelErrorCallbacks []llminternal.OnModelErrorCallback
 
-	beforeToolCallbacks  []llminternal.BeforeToolCallback
-	afterToolCallbacks   []llminternal.AfterToolCallback
-	onToolErrorCallbacks []llminternal.OnToolErrorCallback
+	beforeToolCallbacks         []llminternal.BeforeToolCallback
+	afterToolCallbacks          []llminternal.AfterToolCallback
+	onToolErrorCallbacks        []llminternal.OnToolErrorCallback
+	onGuardrailBlockedCallbacks []llminternal.OnGuardrailBlockedCallback
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -446,9 +465,10 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		BeforeModelCallbacks:  a.beforeModelCallbacks,
 		AfterModelCallbacks:   a.afterModelCallbacks,
 		OnModelErrorCallbacks: a.onModelErrorCallbacks,
-		BeforeToolCallbacks:   a.beforeToolCallbacks,
-		AfterToolCallbacks:    a.afterToolCallbacks,
-		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
+		BeforeToolCallbacks:         a.beforeToolCallbacks,
+		AfterToolCallbacks:          a.afterToolCallbacks,
+		OnToolErrorCallbacks:        a.onToolErrorCallbacks,
+		OnGuardrailBlockedCallbacks: a.onGuardrailBlockedCallbacks,
 	}
 
 	return func(yield func(*session.Event, error) bool) {
@@ -481,9 +501,10 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 		BeforeModelCallbacks:  a.beforeModelCallbacks,
 		AfterModelCallbacks:   a.afterModelCallbacks,
 		OnModelErrorCallbacks: a.onModelErrorCallbacks,
-		BeforeToolCallbacks:   a.beforeToolCallbacks,
-		AfterToolCallbacks:    a.afterToolCallbacks,
-		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
+		BeforeToolCallbacks:         a.beforeToolCallbacks,
+		AfterToolCallbacks:          a.afterToolCallbacks,
+		OnToolErrorCallbacks:        a.onToolErrorCallbacks,
+		OnGuardrailBlockedCallbacks: a.onGuardrailBlockedCallbacks,
 	}
 
 	sess, innerIter, err := f.RunLive(ctx)

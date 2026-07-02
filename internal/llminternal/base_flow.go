@@ -30,6 +30,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/guardrail"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -60,6 +61,12 @@ type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[
 
 type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
+// OnGuardrailBlockedCallback is called when a BeforeToolCallback returns
+// *guardrail.ErrGuardrailBlocked, signalling a policy denial rather than an
+// unexpected runtime error. Returning a non-nil map replaces the default
+// blocked-tool response sent back to the model.
+type OnGuardrailBlockedCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err *guardrail.ErrGuardrailBlocked) (map[string]any, error)
+
 // Flow is a base implementation of the agent flow.
 type Flow struct {
 	Model model.LLM
@@ -70,9 +77,10 @@ type Flow struct {
 	BeforeModelCallbacks  []BeforeModelCallback
 	AfterModelCallbacks   []AfterModelCallback
 	OnModelErrorCallbacks []OnModelErrorCallback
-	BeforeToolCallbacks   []BeforeToolCallback
-	AfterToolCallbacks    []AfterToolCallback
-	OnToolErrorCallbacks  []OnToolErrorCallback
+	BeforeToolCallbacks          []BeforeToolCallback
+	AfterToolCallbacks           []AfterToolCallback
+	OnToolErrorCallbacks         []OnToolErrorCallback
+	OnGuardrailBlockedCallbacks  []OnGuardrailBlockedCallback
 }
 
 var (
@@ -1231,6 +1239,17 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
+func (f *Flow) runOnGuardrailBlockedCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+	pluginManager := pluginManagerFromContext(toolCtx)
+	if pluginManager != nil {
+		result, err := pluginManager.RunOnGuardrailBlockedCallback(toolCtx, tool, fArgs, blocked)
+		if result != nil || err != nil {
+			return result, err
+		}
+	}
+	return f.invokeOnGuardrailBlockedCallbacks(toolCtx, tool, fArgs, blocked)
+}
+
 func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
@@ -1248,11 +1267,28 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 
 	var errorResponse map[string]any
 	var cbErr error
-	if err != nil && pluginManager != nil {
-		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-	}
-	if err != nil && errorResponse == nil && cbErr == nil {
-		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	if err != nil {
+		var blocked *guardrail.ErrGuardrailBlocked
+		if errors.As(err, &blocked) {
+			if pluginManager != nil {
+				errorResponse, cbErr = pluginManager.RunOnGuardrailBlockedCallback(toolCtx, tool, fArgs, blocked)
+			}
+			if errorResponse == nil && cbErr == nil {
+				errorResponse, cbErr = f.invokeOnGuardrailBlockedCallbacks(toolCtx, tool, fArgs, blocked)
+			}
+			if errorResponse == nil && cbErr == nil {
+				// Default: return the policy denial reason as a structured response.
+				errorResponse = map[string]any{"error": err.Error()}
+				err = nil
+			}
+		} else {
+			if pluginManager != nil {
+				errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+			}
+			if errorResponse == nil && cbErr == nil {
+				errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+			}
+		}
 	}
 	if errorResponse != nil || cbErr != nil {
 		response = errorResponse
@@ -1323,6 +1359,19 @@ func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool,
 	}
 	// If no callback returned a result/error, return the original result/error.
 	return nil, fErr
+}
+
+func (f *Flow) invokeOnGuardrailBlockedCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+	for _, callback := range f.OnGuardrailBlockedCallbacks {
+		result, err := callback(toolCtx, tool, fArgs, blocked)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
+	return nil, nil
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
@@ -1420,4 +1469,5 @@ type pluginManager interface {
 	RunBeforeToolCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error)
 	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+	RunOnGuardrailBlockedCallback(ctx agent.Context, t tool.Tool, args map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error)
 }
