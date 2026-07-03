@@ -37,7 +37,7 @@ func newTestTransport(srv *httptest.Server) *restTransport {
 // newTestClient returns a Client whose transport talks to srv, exercising the
 // full method -> get -> restTransport -> HTTP path.
 func newTestClient(srv *httptest.Server) *Client {
-	return &Client{transport: newTestTransport(srv)}
+	return &Client{transport: newTestTransport(srv), httpClient: srv.Client()}
 }
 
 func TestRestTransport_Get_RelativePathAndHeaders(t *testing.T) {
