@@ -16,10 +16,7 @@ package agentregistry
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,55 +67,6 @@ func TestNew_WiresRestTransport(t *testing.T) {
 	}
 	if rt.userProject != "my-project" {
 		t.Errorf("userProject = %q, want my-project", rt.userProject)
-	}
-}
-
-// fakeTransport records the last Get call and replays a canned JSON response.
-type fakeTransport struct {
-	gotPath   string
-	gotParams url.Values
-	respJSON  string
-	err       error
-}
-
-func (f *fakeTransport) Get(_ context.Context, resourcePath string, params url.Values, v any) error {
-	f.gotPath = resourcePath
-	f.gotParams = params
-	if f.err != nil {
-		return f.err
-	}
-	if v != nil && f.respJSON != "" {
-		return json.Unmarshal([]byte(f.respJSON), v)
-	}
-	return nil
-}
-
-func TestClient_get_Delegates(t *testing.T) {
-	ft := &fakeTransport{respJSON: `{"agents":[{"displayName":"Foo"}]}`}
-	c := &Client{transport: ft}
-
-	params := url.Values{}
-	params.Set("filter", "x")
-	var page AgentsPage
-	if err := c.get(context.Background(), "agents", params, &page); err != nil {
-		t.Fatalf("get() error = %v", err)
-	}
-	if ft.gotPath != "agents" {
-		t.Errorf("forwarded path = %q, want agents", ft.gotPath)
-	}
-	if ft.gotParams.Get("filter") != "x" {
-		t.Errorf("forwarded params = %v, want filter=x", ft.gotParams)
-	}
-	if len(page.Agents) != 1 || page.Agents[0].DisplayName != "Foo" {
-		t.Errorf("decoded page = %+v, want one agent Foo", page)
-	}
-}
-
-func TestClient_get_PropagatesError(t *testing.T) {
-	sentinel := errors.New("boom")
-	c := &Client{transport: &fakeTransport{err: sentinel}}
-	if err := c.get(context.Background(), "agents", nil, nil); !errors.Is(err, sentinel) {
-		t.Errorf("get() error = %v, want %v", err, sentinel)
 	}
 }
 
