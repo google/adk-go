@@ -1,0 +1,352 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agentregistry
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"google.golang.org/adk/v2/agent"
+	remoteagent "google.golang.org/adk/v2/agent/remoteagent/v2"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
+)
+
+// egressConfig holds the resolved options shared by the factory helpers.
+type egressConfig struct {
+	httpClient *http.Client
+	headers    map[string]string
+}
+
+func applyRemoteAgentOptions(opts []RemoteAgentOption) egressConfig {
+	var ec egressConfig
+	for _, opt := range opts {
+		opt(&ec)
+	}
+	return ec
+}
+
+func applyMcpToolsetOptions(opts []McpToolsetOption) egressConfig {
+	var ec egressConfig
+	for _, opt := range opts {
+		opt(&ec)
+	}
+	return ec
+}
+
+// RemoteAgentOption customizes [Client.RemoteAgent].
+type RemoteAgentOption func(*egressConfig)
+
+// McpToolsetOption customizes [Client.McpToolset].
+type McpToolsetOption func(*egressConfig)
+
+// WithA2AHTTPClient sets the HTTP client used to reach the remote A2A agent.
+func WithA2AHTTPClient(c *http.Client) RemoteAgentOption {
+	return func(e *egressConfig) { e.httpClient = c }
+}
+
+// WithA2AHeaders adds static headers to every request sent to the remote A2A
+// agent.
+func WithA2AHeaders(h map[string]string) RemoteAgentOption {
+	return func(e *egressConfig) { e.headers = h }
+}
+
+// WithMcpHTTPClient sets the HTTP client used to reach the MCP server. It
+// overrides the default (an Application Default Credentials client for
+// *.googleapis.com endpoints).
+func WithMcpHTTPClient(c *http.Client) McpToolsetOption {
+	return func(e *egressConfig) { e.httpClient = c }
+}
+
+// WithMcpHeaders adds static headers to every request sent to the MCP server.
+func WithMcpHeaders(h map[string]string) McpToolsetOption {
+	return func(e *egressConfig) { e.headers = h }
+}
+
+// egressClient selects the HTTP client used to reach an endpoint at rawURL.
+// Precedence: an explicit override, then (only when autoADC is set and the
+// endpoint is a Google API) the registry's authenticated client, then a default
+// client. Static headers, if any, are layered on via a cloned client so shared
+// clients are never mutated.
+func (c *Client) egressClient(rawURL string, ec egressConfig, autoADC bool) *http.Client {
+	base := ec.httpClient
+	if base == nil {
+		if autoADC && isGoogleAPI(rawURL) {
+			base = c.httpClient
+		} else {
+			base = http.DefaultClient
+		}
+	}
+	return clientWithHeaders(base, ec.headers)
+}
+
+// isGoogleAPI reports whether rawURL points at a Google API endpoint. It mirrors
+// adk-python's _is_google_api.
+func isGoogleAPI(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "googleapis.com" || strings.HasSuffix(host, ".googleapis.com")
+}
+
+// clientWithHeaders returns a client that adds the given static headers to every
+// request. If there are no headers, base is returned unchanged. Otherwise base
+// is shallow-copied so the caller's client is not mutated.
+func clientWithHeaders(base *http.Client, headers map[string]string) *http.Client {
+	if len(headers) == 0 {
+		return base
+	}
+	clone := *base
+	clone.Transport = &headerRoundTripper{base: base.Transport, headers: headers}
+	return &clone
+}
+
+// headerRoundTripper adds a fixed set of headers to each request.
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt := h.base
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	req = req.Clone(req.Context())
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
+	}
+	return rt.RoundTrip(req)
+}
+
+// cardTypeA2AAgentCard is the Card.Type value for an embedded A2A agent card.
+const cardTypeA2AAgentCard = "A2A_AGENT_CARD"
+
+// defaultA2AProtocolVersion is used when the registry does not report one.
+const defaultA2AProtocolVersion = "0.3.0"
+
+// RemoteAgent resolves a registered A2A agent into an [agent.Agent] usable as a
+// sub-agent. name is the full agent resource name.
+//
+// The agent card is taken from the registry's embedded card when present, and
+// otherwise synthesized from the agent's discrete fields. Egress auth is left to
+// the caller: pass [WithA2AHTTPClient] (and/or [WithA2AHeaders]) to authenticate
+// requests to the remote agent.
+func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAgentOption) (agent.Agent, error) {
+	info, err := c.GetAgent(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	card, agentName, description, err := agentCard(info, name)
+	if err != nil {
+		return nil, err
+	}
+
+	ec := applyRemoteAgentOptions(opts)
+	egress := c.egressClient(cardURL(card), ec, false)
+
+	return remoteagent.NewA2A(remoteagent.A2AConfig{
+		Name:           agentName,
+		Description:    description,
+		AgentCard:      card,
+		ClientProvider: remoteagent.NewA2AClientProvider(a2aClientFactory(card, egress)),
+	})
+}
+
+// a2aClientFactory builds an A2A client factory for the given card and HTTP
+// client. Besides the SDK's current-version transports, it registers a
+// compatibility transport for each (binding, protocolVersion) the card
+// advertises. Agent Registry commonly reports an older A2A protocol version
+// (e.g. 0.3.0) than the SDK's current one, and the a2a-go factory matches
+// transports by (protocol, version); without a matching compat transport,
+// client creation fails with "no compatible transports found".
+func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.Factory {
+	opts := []a2aclient.FactoryOption{
+		a2aclient.WithJSONRPCTransport(httpClient),
+		a2aclient.WithRESTTransport(httpClient),
+	}
+	seen := make(map[string]bool)
+	for _, iface := range card.SupportedInterfaces {
+		// The current-version transports above already cover a2a.Version.
+		if iface == nil || iface.ProtocolVersion == "" || iface.ProtocolVersion == a2a.Version {
+			continue
+		}
+		var factory a2aclient.TransportFactory
+		switch iface.ProtocolBinding {
+		case a2a.TransportProtocolJSONRPC:
+			factory = jsonrpcTransportFactory(httpClient)
+		case a2a.TransportProtocolHTTPJSON:
+			factory = restTransportFactory(httpClient)
+		default:
+			continue
+		}
+		key := string(iface.ProtocolBinding) + "@" + string(iface.ProtocolVersion)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		opts = append(opts, a2aclient.WithCompatTransport(iface.ProtocolVersion, iface.ProtocolBinding, factory))
+	}
+	return a2aclient.NewFactory(opts...)
+}
+
+func restTransportFactory(httpClient *http.Client) a2aclient.TransportFactory {
+	return a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+		u, err := url.Parse(iface.URL)
+		if err != nil {
+			return nil, fmt.Errorf("agentregistry: parsing endpoint URL %q: %w", iface.URL, err)
+		}
+		return a2aclient.NewRESTTransport(u, httpClient), nil
+	})
+}
+
+func jsonrpcTransportFactory(httpClient *http.Client) a2aclient.TransportFactory {
+	return a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+		return a2aclient.NewJSONRPCTransport(iface.URL, httpClient), nil
+	})
+}
+
+// agentCard resolves an [a2a.AgentCard] plus the cleaned agent name and
+// description for a registered agent, using the embedded card when available and
+// otherwise synthesizing one. resourceName is used as a fallback name.
+func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, description string, err error) {
+	if info.Card != nil && info.Card.Type == cardTypeA2AAgentCard && len(info.Card.Content) > 0 {
+		var embedded a2a.AgentCard
+		if err := json.Unmarshal(info.Card.Content, &embedded); err != nil {
+			return nil, "", "", fmt.Errorf("agentregistry: decoding embedded agent card for %q: %w", resourceName, err)
+		}
+		agentName := cleanName(embedded.Name)
+		if agentName == "" {
+			agentName = cleanName(resourceName)
+		}
+		return &embedded, agentName, embedded.Description, nil
+	}
+
+	url, version, transport, ok := connectionURI(info.Protocols, nil, protocolTypeA2AAgent, "")
+	if !ok {
+		return nil, "", "", fmt.Errorf("agentregistry: A2A connection URI not found for agent %q", resourceName)
+	}
+
+	displayName := info.DisplayName
+	if displayName == "" {
+		displayName = resourceName
+	}
+	agentName := cleanName(displayName)
+
+	// Default to HTTP+JSON for an unrecognized binding (as adk-python does).
+	if transport == "" {
+		transport = a2a.TransportProtocolHTTPJSON
+	}
+	protocolVersion := version
+	if protocolVersion == "" {
+		protocolVersion = defaultA2AProtocolVersion
+	}
+
+	card = &a2a.AgentCard{
+		Name:        agentName,
+		Description: info.Description,
+		Version:     info.Version,
+		SupportedInterfaces: []*a2a.AgentInterface{{
+			URL:             url,
+			ProtocolBinding: transport,
+			ProtocolVersion: a2a.ProtocolVersion(protocolVersion),
+		}},
+		Skills:             toA2ASkills(info.Skills),
+		Capabilities:       a2a.AgentCapabilities{Streaming: false},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
+	}
+	return card, agentName, info.Description, nil
+}
+
+// cardURL returns the first supported-interface URL of a card, or "".
+func cardURL(card *a2a.AgentCard) string {
+	for _, iface := range card.SupportedInterfaces {
+		if iface != nil && iface.URL != "" {
+			return iface.URL
+		}
+	}
+	return ""
+}
+
+// toA2ASkills converts registry skills to A2A skills.
+func toA2ASkills(skills []Skill) []a2a.AgentSkill {
+	if len(skills) == 0 {
+		return nil
+	}
+	out := make([]a2a.AgentSkill, 0, len(skills))
+	for _, s := range skills {
+		out = append(out, a2a.AgentSkill{
+			ID:          s.ID,
+			Name:        s.Name,
+			Description: s.Description,
+			Tags:        s.Tags,
+			Examples:    s.Examples,
+		})
+	}
+	return out
+}
+
+// McpToolset resolves a registered MCP server into a [tool.Toolset] backed by a
+// streamable-HTTP MCP connection. name is the full MCP server resource name.
+//
+// The endpoint is resolved preferring the JSONRPC binding, then HTTP_JSON. By
+// default, requests to *.googleapis.com endpoints are authenticated with the
+// registry's Application Default Credentials; use [WithMcpHTTPClient] and/or
+// [WithMcpHeaders] to override or augment egress.
+func (c *Client) McpToolset(ctx context.Context, name string, opts ...McpToolsetOption) (tool.Toolset, error) {
+	server, err := c.GetMcpServer(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	uri, ok := mcpEndpointURI(server)
+	if !ok {
+		return nil, fmt.Errorf("agentregistry: MCP server endpoint URI not found for %q", name)
+	}
+
+	ec := applyMcpToolsetOptions(opts)
+	egress := c.egressClient(uri, ec, true)
+
+	return mcptoolset.New(mcptoolset.Config{
+		Transport: &mcp.StreamableClientTransport{
+			Endpoint:   uri,
+			HTTPClient: egress,
+		},
+	})
+}
+
+// mcpEndpointURI returns the MCP server's connection URI, preferring the JSONRPC
+// binding and falling back to HTTP_JSON (parity with adk-python).
+func mcpEndpointURI(server *McpServer) (string, bool) {
+	if uri, _, _, ok := connectionURI(server.Protocols, server.Interfaces, "", a2a.TransportProtocolJSONRPC); ok {
+		return uri, true
+	}
+	if uri, _, _, ok := connectionURI(server.Protocols, server.Interfaces, "", a2a.TransportProtocolHTTPJSON); ok {
+		return uri, true
+	}
+	return "", false
+}
