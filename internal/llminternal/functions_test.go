@@ -16,15 +16,16 @@ package llminternal
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type mockAgent struct {
@@ -54,6 +55,12 @@ func (m *mockInvocationContext) Agent() agent.Agent {
 func (m *mockInvocationContext) Branch() string {
 	return m.branch
 }
+
+func (m *mockInvocationContext) Deadline() (time.Time, bool)     { return time.Time{}, false }
+func (m *mockInvocationContext) Done() <-chan struct{}           { return nil }
+func (m *mockInvocationContext) Err() error                      { return nil }
+func (m *mockInvocationContext) Value(any) any                   { return nil }
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{
@@ -250,5 +257,81 @@ func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
 
 	if got.InvocationID != "inv_1" {
 		t.Errorf("expected InvocationID=\"inv_1\", got %q", got.InvocationID)
+	}
+}
+
+func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T) {
+	thoughtSignature := []byte("test-thought-signature")
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+	}
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						ThoughtSignature: thoughtSignature,
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+							Args: map[string]any{"arg": "val"},
+						},
+					},
+				},
+			},
+		},
+	}
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "Are you sure?"},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
+		t.Fatalf("expected one confirmation part, got %#v", got)
+	}
+	if diff := cmp.Diff(thoughtSignature, got.Content.Parts[0].ThoughtSignature); diff != "" {
+		t.Errorf("ThoughtSignature mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+	}
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+							Args: map[string]any{"arg": "val"},
+						},
+					},
+				},
+			},
+		},
+	}
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "Are you sure?"},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
+		t.Fatalf("expected one confirmation part, got %#v", got)
+	}
+	if len(got.Content.Parts[0].ThoughtSignature) != 0 {
+		t.Errorf("ThoughtSignature = %q, want empty", got.Content.Parts[0].ThoughtSignature)
 	}
 }

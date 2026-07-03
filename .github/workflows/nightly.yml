@@ -22,7 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Run govulncheck
-      uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+      # NOTE: pinned to master HEAD instead of a tag. The latest release (v1.0.4)
+      # internally uses actions/checkout@v4.1.1 and actions/setup-go@v5.0.0 (Node 20),
+      # which are deprecated. master uses checkout v6.0.2 + setup-go v6.2.0 (Node 24).
+      # TODO: re-pin to a tagged release once upstream tags one past v1.0.4.
+      uses: golang/govulncheck-action@31f7c5463448f83528bd771c2d978d940080c9fd # master, post-v1.0.4 (Node 24)
       with:
            go-version-file: go.mod
            repo-checkout: true

@@ -26,7 +26,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 )
 
 func TestLogRequest(t *testing.T) {
@@ -289,6 +289,7 @@ func TestLogRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogRequest(ctx, tc.req, tc.backend)
 
@@ -503,6 +504,7 @@ func TestLogResponse(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogResponse(t.Context(), tc.resp, tc.backend)
 
@@ -576,7 +578,7 @@ func TestSpanIDPropagation(t *testing.T) {
 	}
 }
 
-func setup(t *testing.T, elided bool) *inMemoryExporter {
+func setup(t *testing.T, capture bool) *inMemoryExporter {
 	exporter := &inMemoryExporter{}
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)),
@@ -587,11 +589,12 @@ func setup(t *testing.T, elided bool) *inMemoryExporter {
 		otelLogger = originalLogger
 	})
 
-	original := getGenAICaptureMessageContent()
-	SetGenAICaptureMessageContent(elided)
-	t.Cleanup(func() {
-		SetGenAICaptureMessageContent(original)
-	})
+	if capture {
+		t.Setenv(captureMessageContentEnvVar, "true")
+	} else {
+		t.Setenv(captureMessageContentEnvVar, "")
+	}
+
 	return exporter
 }
 

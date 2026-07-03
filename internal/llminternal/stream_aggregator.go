@@ -16,7 +16,6 @@ package llminternal
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"maps"
 	"reflect"
@@ -24,8 +23,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/llminternal/converters"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/internal/llminternal/converters"
+	"google.golang.org/adk/v2/model"
 )
 
 // streamingResponseAggregator aggregates partial streaming responses.
@@ -36,6 +35,8 @@ type streamingResponseAggregator struct {
 	groundingMetadata *genai.GroundingMetadata
 	citationMetadata  *genai.CitationMetadata
 	response          *model.LLMResponse
+
+	currentThoughtSignature []byte
 
 	sequence             []*genai.Part
 	currentTextBuffer    string
@@ -57,14 +58,11 @@ func NewStreamingResponseAggregator() *streamingResponseAggregator {
 // also yielding an aggregated response if the GenerateContentResponse has zero parts or is audio data
 func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		if len(genResp.Candidates) == 0 {
-			// shouldn't happen?
-			yield(nil, fmt.Errorf("empty response"))
-			return
-		}
-		candidate := genResp.Candidates[0]
 		resp := converters.Genai2LLMResponse(genResp)
-		resp.TurnComplete = candidate.FinishReason != ""
+		if len(genResp.Candidates) > 0 {
+			candidate := genResp.Candidates[0]
+			resp.TurnComplete = candidate.FinishReason != ""
+		}
 		// Aggregate the response and check if an intermediate event to yield was created
 		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {
 			if !yield(aggrResp, nil) {
@@ -102,6 +100,9 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 		if reflect.ValueOf(*part).IsZero() {
 			continue
 		}
+		if len(part.ThoughtSignature) > 0 {
+			s.currentThoughtSignature = part.ThoughtSignature
+		}
 		if part.Text != "" {
 			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
@@ -135,6 +136,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 	} else {
 		if part.FunctionCall.Name != "" {
 			s.flushTextBufferToSequence()
+			if part.ThoughtSignature == nil && s.currentThoughtSignature != nil {
+				part.ThoughtSignature = s.currentThoughtSignature
+			}
+			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
 		}
 	}
@@ -303,16 +308,8 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 		errorCode := ""
 		errorMessage := ""
 		if s.finishReason != genai.FinishReasonStop {
-			if s.response.ErrorCode != "" {
-				errorCode = s.response.ErrorCode
-			} else {
-				errorCode = "error"
-			}
-			if s.response.ErrorMessage != "" {
-				errorMessage = s.response.ErrorMessage
-			} else {
-				errorMessage = "error"
-			}
+			errorCode = s.response.ErrorCode
+			errorMessage = s.response.ErrorMessage
 		}
 
 		return &model.LLMResponse{
@@ -325,6 +322,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			CitationMetadata:  s.citationMetadata,
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
+			FinishReason:      s.finishReason,
 		}
 	}
 	return nil

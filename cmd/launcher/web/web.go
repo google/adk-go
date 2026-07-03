@@ -27,11 +27,11 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/internal/telemetry"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
+	"google.golang.org/adk/v2/cmd/launcher/universal"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/session"
 )
 
 // webConfig contains parameters for launching web server
@@ -112,7 +112,7 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	keyToSublauncher := make(map[string]Sublauncher)
 	for _, l := range w.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
-			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
+			return nil, fmt.Errorf("cannot create web launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
 		}
 		keyToSublauncher[l.Keyword()] = l
 	}

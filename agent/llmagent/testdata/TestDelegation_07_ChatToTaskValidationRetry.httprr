@@ -1,0 +1,282 @@
+httprr trace v1
+1132 1873
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 900
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is 21 plus 21?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any arithmetic question, call the solver sub-agent\nEXACTLY ONCE with a request restating the question. Reply with the\nanswer in one short sentence. Do NOT call solver more than once.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Delegates to solver and reports the answer.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the integer answer to a simple arithmetic question.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"solver","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:56:35 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1445
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "solver",
+              "args": {
+                "request": "What is 21 plus 21?"
+              },
+              "id": "jr6iqvyp"
+            },
+            "thoughtSignature": "EoQECoEEAQw51sdysr7FL3ymtQBAadngxhtuHL8Ae5bs//WuEITgU5ebtU49b/wTqMB+VbQuQEtOZK4yZmF2k1Az9BBU14NRkxycs881PUO04IF3TmpGEazFlZQvSnRsP23n6MV7mxCREOIfskuzcCalFGChHHOje7aak4z5H7Fe8hHeTpEnIGQTPw4MstJKccwP1nywMLPyNXIIRlukvUfQgitAU/evy1UF0y72wg9uNpb3zMPMIbE+DzVxwpsjJB4nHNuSd71Pvwku1cSZlPBKAnS04B0uCkVQsxfvAsKkZET9B7LbhV8TrhIRfhOALtgPhDOpTxexehul65b9mZynW4LRIro8TRs+OnkEK48TYWe3AKzei2n7X/mzZORt6EdMZ+sLmQ/iJCv32JUVYuRc/47DWErtcX3spGeU8soc9t5kOjhA0Sqs/mSqcFc8YZALTw4ilgekMh2t/PJYlNq3C9uO22wFUn5BGS/F5Vk6vkbqOrD+RZmV9BHpWWpa06FtCwg0UTVNsZ7pjj2ts8L5AV10QYeGRYW9VSiy6DOMQPvRJS+9gsrFVxPxQ9cMqD1maYUblH5VJGRoqaDTwEvxRj29LM/KoVupU7G654i7ftfTuvLFulgp29KZ004Nc55s6ibgUZe85mUTcCR1OCNl0gCXsPqqGBd+LSSUh6WLXeJQ4+5t"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 168,
+    "candidatesTokenCount": 23,
+    "totalTokenCount": 309,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 168
+      }
+    ],
+    "thoughtsTokenCount": 118,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "Yn0yapKBHdHxnsEPtOaHoA8"
+}
+1944 2847
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1711
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"What is 21 plus 21?\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You answer one arithmetic question. On your FIRST\nfinish_task call, intentionally pass a wrong field name (\"wrong_field\"\ninstead of \"answer\") so the validation fails. On your SECOND call,\ncorrect it and pass {\"answer\": \u003cinteger\u003e}. Never give up; the\nvalidation error message will tell you what to fix.\n\nYou are an agent. Your internal name is \"solver\". The description about you is \"Returns the integer answer to a simple arithmetic question.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"answer":{"description":"The numeric answer.","type":"INTEGER"}},"required":["answer"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:56:38 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2640
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "wrong_field": 42
+              },
+              "id": "dmyvsg54"
+            },
+            "thoughtSignature": "EuQJCuEJAQw51seAtTlu5ofD76RuGnIRa7ANTS8G9r2nuFCZ+ABrZSsIQktOOD7mQdJNmfdIL8dDAXEdgRPUApzP5X/J7ybspz0Ir3nGXqZ5ozfhpm7Y+NAHKaEGuqPfviEljoBdDX6rsSG3qU2RZPH+OgT35nYWffLoJeWldSxEy+qRDPcQpdeqbLTPCgCAIvFC9wY6Dk2ueGP7zBGSgzXKF+7K5STqhPI1KFbnafaK6e7zBaBn5GPQOdJYTrk0rfrc7JpU0+c5xLAnQqvuTwpTmgL33I3TipXrtmr7Zs174O/C9gZTlSqZ5lQiVOx5eQjq6O+jW2jN2CN3h5ffvg9G1+pK3KmX216+298KXerh7rYMOlr7yJ4uZYvdiyYXyHbDPbLWymiDexvZBmJwk1IJYl2aAkHkZBTsPP7lqcAdBR5H4kZbNzVprIOTXFF0ciY7hktq/sK+G1BiMb31cbtEvVrF+to5ojIbCzKz6wDQ4bh/zVvEIAYCDVFXLw25wVsO4qI30dlVuWx3lrc3BAXoQGk/5ayrJ27DVi/rq4ixPGJUraCDCfOmBe8gdj4tP4yjmWwIlQpgZnRnmV0+3/Umkz8Nb3HH+GBNmRissSh/52ylo1cSp21MvsJXEQLByCf1+KWhJNLTRCZNJwMD+YkTQ3QW85Z79RUlOxqffOSwAV+u/lN6ZrMtJjs6I6KzF2k6I2bn9rw2xHF+PvmNs83HYQnsy8v/a5LtGrPOyK3Iw4MvnYJLGzjUCKD5JkRT4KfJTxYOk8XsK5CjwN2tdux3tVO/StPv9bCcbYcB4L/BFUkOm757e5FIRK8NBI2+2zwjm7/68Q91Gdb1aUPkYyhE1WSvFRiZT+HvkCwZgGYHXRrBNAaYLNydlPpAfNNIUp6IcMubFbAixKk8vgp8HAyd1ilxdqTecgyI7MDLObWrmuD+evwL6p6D9PVZpimbiYNoLi9uPpqm4qIsB/VXEvezJ7YNNVUU2SFBIJ61BEDbBvYya9090oMmsen6TYJJqupgmSAKzF8+XiB3gPR9wkcDonqYyEekApt2mOj3vBH3NJ1KD++Vdi19ekpMJbg7XgUXCRUhFcEGOzZPdLMOpDUTjNAthxgS2qBlHGkajDzYA4nrasoKHSthnq5Iov9Snc7jvtNcirUevv6ppxjyA2YvbFTDeBqwQ3KUujPhIwU6dBCG6JYgUyRSh/Bv3donmWyfngdE7TLyJWgog5mOeFTAAOwkW42qYzeu2oEXOpKHbCulkVGB+vi9dUOVyY5xsdiqybEI3J/JWVK7cCFjZucZhT34uOeu6fbVLQbpJFVgiIc3fEBPmg0BEnykiRPV6DGbQiYrcoeWZeGUUZPJ7Ui0QXQp9uQYDffIKq0Mk6CZnOKPGnH6kxnm5yuxKlF8xnilO/S1lF85dJTrOife0SPrwSVWCIrh222Sc45uu6DdeuLy2HvFYIKs6sizIp1YuhKkzKyem4G57pg28HmGE+75oH/LKY3GSslbeoRpkKFPQ64eA2UTh15xbRXItgmpPuSV+6ROibP61O9QrA+LK5bDB0pYkBUhu56EPwHpTXnD+/ZJwBgh0GeQq+jrZc3azN+Yj3aqeNIReD+0/csjX4NcVVFsBj+p2nD/Fb9cvhhd4jXArP53AQE+iXL25T+HB0Z8ZMZ3wA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 353,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 700,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 353
+      }
+    ],
+    "thoughtsTokenCount": 330,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "Y30yaqSYOIXNnsEP9se9wAo"
+}
+4109 1405
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3876
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"What is 21 plus 21?\"}"}],"role":"user"},{"parts":[{"functionCall":{"args":{"wrong_field":42},"id":"dmyvsg54","name":"finish_task"},"thoughtSignature":"EuQJCuEJAQw51seAtTlu5ofD76RuGnIRa7ANTS8G9r2nuFCZ+ABrZSsIQktOOD7mQdJNmfdIL8dDAXEdgRPUApzP5X/J7ybspz0Ir3nGXqZ5ozfhpm7Y+NAHKaEGuqPfviEljoBdDX6rsSG3qU2RZPH+OgT35nYWffLoJeWldSxEy+qRDPcQpdeqbLTPCgCAIvFC9wY6Dk2ueGP7zBGSgzXKF+7K5STqhPI1KFbnafaK6e7zBaBn5GPQOdJYTrk0rfrc7JpU0+c5xLAnQqvuTwpTmgL33I3TipXrtmr7Zs174O/C9gZTlSqZ5lQiVOx5eQjq6O+jW2jN2CN3h5ffvg9G1+pK3KmX216+298KXerh7rYMOlr7yJ4uZYvdiyYXyHbDPbLWymiDexvZBmJwk1IJYl2aAkHkZBTsPP7lqcAdBR5H4kZbNzVprIOTXFF0ciY7hktq/sK+G1BiMb31cbtEvVrF+to5ojIbCzKz6wDQ4bh/zVvEIAYCDVFXLw25wVsO4qI30dlVuWx3lrc3BAXoQGk/5ayrJ27DVi/rq4ixPGJUraCDCfOmBe8gdj4tP4yjmWwIlQpgZnRnmV0+3/Umkz8Nb3HH+GBNmRissSh/52ylo1cSp21MvsJXEQLByCf1+KWhJNLTRCZNJwMD+YkTQ3QW85Z79RUlOxqffOSwAV+u/lN6ZrMtJjs6I6KzF2k6I2bn9rw2xHF+PvmNs83HYQnsy8v/a5LtGrPOyK3Iw4MvnYJLGzjUCKD5JkRT4KfJTxYOk8XsK5CjwN2tdux3tVO/StPv9bCcbYcB4L/BFUkOm757e5FIRK8NBI2+2zwjm7/68Q91Gdb1aUPkYyhE1WSvFRiZT+HvkCwZgGYHXRrBNAaYLNydlPpAfNNIUp6IcMubFbAixKk8vgp8HAyd1ilxdqTecgyI7MDLObWrmuD+evwL6p6D9PVZpimbiYNoLi9uPpqm4qIsB/VXEvezJ7YNNVUU2SFBIJ61BEDbBvYya9090oMmsen6TYJJqupgmSAKzF8+XiB3gPR9wkcDonqYyEekApt2mOj3vBH3NJ1KD++Vdi19ekpMJbg7XgUXCRUhFcEGOzZPdLMOpDUTjNAthxgS2qBlHGkajDzYA4nrasoKHSthnq5Iov9Snc7jvtNcirUevv6ppxjyA2YvbFTDeBqwQ3KUujPhIwU6dBCG6JYgUyRSh/Bv3donmWyfngdE7TLyJWgog5mOeFTAAOwkW42qYzeu2oEXOpKHbCulkVGB+vi9dUOVyY5xsdiqybEI3J/JWVK7cCFjZucZhT34uOeu6fbVLQbpJFVgiIc3fEBPmg0BEnykiRPV6DGbQiYrcoeWZeGUUZPJ7Ui0QXQp9uQYDffIKq0Mk6CZnOKPGnH6kxnm5yuxKlF8xnilO/S1lF85dJTrOife0SPrwSVWCIrh222Sc45uu6DdeuLy2HvFYIKs6sizIp1YuhKkzKyem4G57pg28HmGE+75oH/LKY3GSslbeoRpkKFPQ64eA2UTh15xbRXItgmpPuSV+6ROibP61O9QrA+LK5bDB0pYkBUhu56EPwHpTXnD+/ZJwBgh0GeQq+jrZc3azN+Yj3aqeNIReD+0/csjX4NcVVFsBj+p2nD/Fb9cvhhd4jXArP53AQE+iXL25T+HB0Z8ZMZ3wA=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"dmyvsg54","name":"finish_task","response":{"error":"Invoking `finish_task()` failed due to validation errors:\noutput arg: '\"wrong_field\"' does not exist in schema properties\nYou could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters with correct types."}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You answer one arithmetic question. On your FIRST\nfinish_task call, intentionally pass a wrong field name (\"wrong_field\"\ninstead of \"answer\") so the validation fails. On your SECOND call,\ncorrect it and pass {\"answer\": \u003cinteger\u003e}. Never give up; the\nvalidation error message will tell you what to fix.\n\nYou are an agent. Your internal name is \"solver\". The description about you is \"Returns the integer answer to a simple arithmetic question.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"answer":{"description":"The numeric answer.","type":"INTEGER"}},"required":["answer"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:56:39 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1021
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "answer": 42
+              },
+              "id": "uf0amaey"
+            },
+            "thoughtSignature": "Eq8BCqwBAQw51sfO++lX0lSLM4Uip/sdzB+0KzRyYmScT54SImwbis9Uxk8hJyVZ7JqGaZQeIjT3pGA9zJHxDu29smJTkvere6DRkaf9tJi7jideJiq/X5qfMr52q9C7nGIoBUYudLv1bfciYKXHhaTr0mXBJZAmJdQaoTd8mIHWyjPbhHzVm7ojneQNvxjcC7C83bLDkwb+wP6xDjj9SauISlCjVX4oyG474IDklE4E1A=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 765,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 812,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 765
+      }
+    ],
+    "thoughtsTokenCount": 32,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "Zn0yavaxIq-nkdUP5NarqAo"
+}
+2072 1227
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1839
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is 21 plus 21?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"What is 21 plus 21?"},"id":"jr6iqvyp","name":"solver"},"thoughtSignature":"EoQECoEEAQw51sdysr7FL3ymtQBAadngxhtuHL8Ae5bs//WuEITgU5ebtU49b/wTqMB+VbQuQEtOZK4yZmF2k1Az9BBU14NRkxycs881PUO04IF3TmpGEazFlZQvSnRsP23n6MV7mxCREOIfskuzcCalFGChHHOje7aak4z5H7Fe8hHeTpEnIGQTPw4MstJKccwP1nywMLPyNXIIRlukvUfQgitAU/evy1UF0y72wg9uNpb3zMPMIbE+DzVxwpsjJB4nHNuSd71Pvwku1cSZlPBKAnS04B0uCkVQsxfvAsKkZET9B7LbhV8TrhIRfhOALtgPhDOpTxexehul65b9mZynW4LRIro8TRs+OnkEK48TYWe3AKzei2n7X/mzZORt6EdMZ+sLmQ/iJCv32JUVYuRc/47DWErtcX3spGeU8soc9t5kOjhA0Sqs/mSqcFc8YZALTw4ilgekMh2t/PJYlNq3C9uO22wFUn5BGS/F5Vk6vkbqOrD+RZmV9BHpWWpa06FtCwg0UTVNsZ7pjj2ts8L5AV10QYeGRYW9VSiy6DOMQPvRJS+9gsrFVxPxQ9cMqD1maYUblH5VJGRoqaDTwEvxRj29LM/KoVupU7G654i7ftfTuvLFulgp29KZ004Nc55s6ibgUZe85mUTcCR1OCNl0gCXsPqqGBd+LSSUh6WLXeJQ4+5t"}],"role":"model"},{"parts":[{"functionResponse":{"id":"jr6iqvyp","name":"solver","response":{"answer":42}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any arithmetic question, call the solver sub-agent\nEXACTLY ONCE with a request restating the question. Reply with the\nanswer in one short sentence. Do NOT call solver more than once.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Delegates to solver and reports the answer.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the integer answer to a simple arithmetic question.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"solver","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:56:40 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1016
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "21 plus 21 is 42.",
+            "thoughtSignature": "EsIBCr8BAQw51scFho5xFOMB716irYLIPNMglyfb6Ibpnq/PridnuSmSXCRv4d6KNqdGm6OYkrfNZQn1BNe1oDzFjvcBb15FqawoOHIqQyFkwmV5omPr9XgymvmB7a//gC5sPutwbC6uG6aLsd+AQFyUbpMLVvOav0oSPjl5Q1bOlKb5RoK/d1S03TUA1rPU4e5C1AdF2T0ZPIvkMeK0jKN0CwRUEwkubR9CU+41rN0R/XLftaaiX26PPuBMf/YJ+WSFWQY="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 320,
+    "candidatesTokenCount": 11,
+    "totalTokenCount": 377,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 320
+      }
+    ],
+    "thoughtsTokenCount": 46,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "Z30yapimJKOtkdUP34nq-Ao"
+}
+2497 3062
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2264
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is 21 plus 21?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"What is 21 plus 21?"},"id":"jr6iqvyp","name":"solver"},"thoughtSignature":"EoQECoEEAQw51sdysr7FL3ymtQBAadngxhtuHL8Ae5bs//WuEITgU5ebtU49b/wTqMB+VbQuQEtOZK4yZmF2k1Az9BBU14NRkxycs881PUO04IF3TmpGEazFlZQvSnRsP23n6MV7mxCREOIfskuzcCalFGChHHOje7aak4z5H7Fe8hHeTpEnIGQTPw4MstJKccwP1nywMLPyNXIIRlukvUfQgitAU/evy1UF0y72wg9uNpb3zMPMIbE+DzVxwpsjJB4nHNuSd71Pvwku1cSZlPBKAnS04B0uCkVQsxfvAsKkZET9B7LbhV8TrhIRfhOALtgPhDOpTxexehul65b9mZynW4LRIro8TRs+OnkEK48TYWe3AKzei2n7X/mzZORt6EdMZ+sLmQ/iJCv32JUVYuRc/47DWErtcX3spGeU8soc9t5kOjhA0Sqs/mSqcFc8YZALTw4ilgekMh2t/PJYlNq3C9uO22wFUn5BGS/F5Vk6vkbqOrD+RZmV9BHpWWpa06FtCwg0UTVNsZ7pjj2ts8L5AV10QYeGRYW9VSiy6DOMQPvRJS+9gsrFVxPxQ9cMqD1maYUblH5VJGRoqaDTwEvxRj29LM/KoVupU7G654i7ftfTuvLFulgp29KZ004Nc55s6ibgUZe85mUTcCR1OCNl0gCXsPqqGBd+LSSUh6WLXeJQ4+5t"}],"role":"model"},{"parts":[{"functionResponse":{"id":"jr6iqvyp","name":"solver","response":{"answer":42}}}],"role":"user"},{"parts":[{"text":"21 plus 21 is 42.","thoughtSignature":"EsIBCr8BAQw51scFho5xFOMB716irYLIPNMglyfb6Ibpnq/PridnuSmSXCRv4d6KNqdGm6OYkrfNZQn1BNe1oDzFjvcBb15FqawoOHIqQyFkwmV5omPr9XgymvmB7a//gC5sPutwbC6uG6aLsd+AQFyUbpMLVvOav0oSPjl5Q1bOlKb5RoK/d1S03TUA1rPU4e5C1AdF2T0ZPIvkMeK0jKN0CwRUEwkubR9CU+41rN0R/XLftaaiX26PPuBMf/YJ+WSFWQY="}],"role":"model"},{"parts":[{"text":"What was the answer to the previous question?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any arithmetic question, call the solver sub-agent\nEXACTLY ONCE with a request restating the question. Reply with the\nanswer in one short sentence. Do NOT call solver more than once.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Delegates to solver and reports the answer.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the integer answer to a simple arithmetic question.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"solver","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:56:43 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2780
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The answer to the previous question was 42.",
+            "thoughtSignature": "Eo4MCosMAQw51seL6nC3CRLCa8wZ4vZ8g/zWW3rogB+A2fA4WJ9jYjfOQtNP1fBeCo4TM9MVfCF/izOwNanqoT/F+paGmq4QyD6h4XHMLELXFdUWRQibcpgZQeFjHVFwbAVmWNWcqWbkkq/2igaYKMtGqxlC3KC9rcjy6pzrGr88C4SezgyCWhUmgC8jDfJ8q4h+y+hvEVH6NA8mq37cJIDEqrbvxD49y5AIECz0XNYM8yllGJUcKFBAUMax0NHpRgM2Pb125J2bfRHP31wYBHpsMEG7HtCEGj3f1tWxbnqCN7OvzoRJKT5yVlbVVnTbEog09oUv6zSgEh/cV72xDZVL0kovykWFOVsFDe0PBf2yHS6+CK83lNJHc5hZxP9Yk/ZZlbpitxHRT7XyeQBJZbiuD8XGFCaNO2Bv95ISpHpfQ1weO/g9lg8gXaZDx20U3u+s2b5kLgd2+DnG1qTI9qBVupSQqplzsiE4aLzpS1gke6ePPC7ebmPsnM7hYbc+0Q/QGPffh2sp5PmEWAYBroOox5be9ZlTOSf5Im51JNXUtDVFuS9PohEprQcK888ESqIY0qftBXwOz8sJqkFu/R7Mv62IeLlqHvtJppAfkE2oI9wxXxyU6hGc6JV3o7ojO7HcNWvjNr6qjA/1HQL5z2rgQwraA1t3tNsV0annX9ACkea9jo52HzFBCrIV/kt8qoE53ZdQtYwq0byDLyj98jZ9hNAtjm2WFkaOKIUwcU2GsRlDLJtq0/6zygUbhDYL9w2ZG4ge/PbNX5Qgy9Yuj3x2mhrjE/9f9xtzzwzg8pVSdTEmEmtsxLwsOtmp+/Y46TvDDd3Dv+ArHOaRlP2tynG4GuJTOzGqq8vOso6AqCrzom8OvSlW2NHq4faazC2y5tfnwiz9SQNJFCy4bepWgkqq7LPD58vet2RNdhEm9fzny6wGso6o4uusZuQ3FsAkybt+fJwajB+4GECNiH6v/HZLBKkxFnrZtreDD3sib192ZsPHNwHbN6rnDcVmyZkZMBdfvaYG7OLpbyYoqQ1vv/rWoXO6r0J48qJRHv3em/uWTeGzKZBVR0AC6Dwtqa8WaI+HIxaHZuzwmHB8XBtOkocX6gcnLSPew4rTGZ2pjGwcZRrGIGXikt39JK+VUtWmiA7LR0OxXFjfKWoYQkSftfCOBb3ekgi4o6ShCxOb74IHRoIsZnKxnxsYWU6PnUdKSsV8oKPHWmwXbON7LufNuPdlHPPQkQ/qzyEvoPZwaH13/wnvss8s1hZKV8F7luXdsxVLqPMqEKMIpnV3OM6GVYBndq4ee1vHgKjXPYfSInkqia258qVYbHZS6lFGp0IVm8jeagOUEtMN903bwxPOIMjI0amA0a6BDLEjPQIKTElewbceMoTF5fJ9N5vhTu6LYaty7sxVfV/Afxm9J2bJliSGhNrjsTPoc+WmAygeEOJz6lOUk5Co1YuTPFq8MpeCF8vrPBJ6cdt4Ja8U4mxHau/i2YRjwgSUfRZFlICd0DsnCGm30sJE7NMagHBFDDd8JhGWjEBAyTWKAT2M4evwZs6viM3U8OTvwok+/QAx95yLlk4rvM4NLjvZUapXPqxhmu8Mz2BJGsfVWfgfxLlfAkoXNfHCZU4M06/nWG/lX8TCqAWXCtntM/BRQiio9SfM8Tjf5ZqYYtIXBgCDydreul/GwnNbiBUT60QcrFP5ZamyQiwCf/zp3Pf89gbhLsj3kCQQVmQW3wOSFmotkR4Wt3W2xdfWsTwA/ZSOGhFein+EfME1Rgwd82jFY+af1415qBarSj9/TpyI7ZxL5bj0FKnQEKk/36WIal0oCwbHC1qnh0J8StbUNTsCxp2QZ5totVXcV8V4rclIsO84ODO2XMDVlQ1PrBfN6wDaCmSWXErLkV7FrBLiVJcLe2s3EvsKtn2jM9WD6+YNwidz9GqAMDgSYDHgMcK2RauKCq8O0cUlzfaqUx9iQHqg08ROo0xyu2UB9jHBMikD9y9sgdyw9bXzxtsgUQJ1mnfWWPYZrXEtq8NdWPSmA0HOwVQwQ3soNIhlpi9wxvzAuv/XqAeeU2E="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 388,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 749,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 388
+      }
+    ],
+    "thoughtsTokenCount": 351,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "aH0yapKwJq-nkdUPk9erqAo"
+}

@@ -21,14 +21,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func ptr[T any](v T) *T {
@@ -145,6 +145,160 @@ func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 	}
 	if args["unit"] != "celsius" {
 		t.Errorf("expected unit 'celsius', got '%v'", args["unit"])
+	}
+}
+
+func TestThoughtSignaturePropagationToFirstFunctionCallSeparateResponses(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	testThoughtSignature := []byte("test_signature_123")
+
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							// Emulate an executable code part carrying thought signature
+							ThoughtSignature: testThoughtSignature,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "hello"},
+							},
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "world"},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	// The first function call should get the propagated thought signature
+	fcPart1 := parts[1]
+	if fcPart1.FunctionCall == nil || fcPart1.FunctionCall.Name != "print" {
+		t.Fatal("expected first function call to be print")
+	}
+	if string(fcPart1.ThoughtSignature) != string(testThoughtSignature) {
+		t.Errorf("expected first function call to have thought signature %s, got %s", string(testThoughtSignature), string(fcPart1.ThoughtSignature))
+	}
+
+	// The second function call should NOT get the signature (as intended by user)
+	fcPart2 := parts[2]
+	if fcPart2.FunctionCall == nil || fcPart2.FunctionCall.Name != "print" {
+		t.Fatal("expected second function call to be print")
+	}
+	if len(fcPart2.ThoughtSignature) > 0 {
+		t.Errorf("expected second function call to have no thought signature, but got %s", string(fcPart2.ThoughtSignature))
+	}
+}
+
+func TestThoughtSignaturePropagationToFirstFunctionCallSingleResponse(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	testThoughtSignature := []byte("test_signature_123")
+
+	chunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							// Emulate an executable code part carrying thought signature
+							ThoughtSignature: testThoughtSignature,
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "hello"},
+							},
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "world"},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	// The first function call should get the propagated thought signature
+	fcPart1 := parts[1]
+	if fcPart1.FunctionCall == nil || fcPart1.FunctionCall.Name != "print" {
+		t.Fatal("expected first function call to be print")
+	}
+	if string(fcPart1.ThoughtSignature) != string(testThoughtSignature) {
+		t.Errorf("expected first function call to have thought signature %s, got %s", string(testThoughtSignature), string(fcPart1.ThoughtSignature))
+	}
+
+	// The second function call should NOT get the signature (as intended by user)
+	fcPart2 := parts[2]
+	if fcPart2.FunctionCall == nil || fcPart2.FunctionCall.Name != "print" {
+		t.Fatal("expected second function call to be print")
+	}
+	if len(fcPart2.ThoughtSignature) > 0 {
+		t.Errorf("expected second function call to have no thought signature, but got %s", string(fcPart2.ThoughtSignature))
 	}
 }
 
@@ -475,7 +629,7 @@ type GetWeatherArgs struct {
 	Location string `json:"location"`
 }
 
-func getWeather(ctx tool.Context, args GetWeatherArgs) (map[string]any, error) {
+func getWeather(ctx agent.Context, args GetWeatherArgs) (map[string]any, error) {
 	return map[string]any{
 		"temperature": 22,
 		"condition":   "sunny",
@@ -791,7 +945,7 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 		CallID string `json:"call_id"`
 	}
 
-	trackExecution := func(ctx tool.Context, args TrackExecutionArgs) (string, error) {
+	trackExecution := func(ctx agent.Context, args TrackExecutionArgs) (string, error) {
 		executionLog = append(executionLog, args.CallID)
 		return "Executed: " + args.CallID, nil
 	}
@@ -844,5 +998,149 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 	}
 	if functionResponseEvents != 1 {
 		t.Errorf("Expected 1 function response event, got %d", functionResponseEvents)
+	}
+}
+
+func TestMetadataVertexAISSEStream(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	emptyTextChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: genai.NewContentFromText("", "model")},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// Simulate the leading metadata-only SSE chunk that Vertex AI emits for
+	// gemini-3-flash-preview + googleSearch grounding: no Candidates at all.
+	metadataChunk := &genai.GenerateContentResponse{
+		// Candidates is intentionally nil / empty.
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// The real content arrives in the next chunk.
+	contentChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Here are some movie recommendations."}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	stream := []*genai.GenerateContentResponse{emptyTextChunk, metadataChunk, metadataChunk, emptyTextChunk, metadataChunk, metadataChunk, contentChunk}
+
+	for _, chunk := range stream {
+		for resp, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+			_ = resp
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+
+	if len(finalResponse.Content.Parts) == 0 {
+		t.Fatal("expected content parts in the final response, got none")
+	}
+
+	if finalResponse.Content.Parts[0].Text != "Here are some movie recommendations." {
+		t.Errorf("unexpected text in final response: %q", finalResponse.Content.Parts[0].Text)
+	}
+}
+
+func TestMetadataOnlyChunkDoesNotAbortStream(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Simulate the leading metadata-only SSE chunk that Vertex AI emits for
+	// gemini-3-flash-preview + googleSearch grounding: no Candidates at all.
+	metadataChunk := &genai.GenerateContentResponse{
+		// Candidates is intentionally nil / empty.
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// The real content arrives in the next chunk.
+	contentChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Here are some movie recommendations."}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{metadataChunk, contentChunk} {
+		for resp, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+			_ = resp
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+
+	if len(finalResponse.Content.Parts) == 0 {
+		t.Fatal("expected content parts in the final response, got none")
+	}
+
+	if finalResponse.Content.Parts[0].Text != "Here are some movie recommendations." {
+		t.Errorf("unexpected text in final response: %q", finalResponse.Content.Parts[0].Text)
+	}
+}
+
+func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Simulate an LLM chunk that reports UNEXPECTED_TOOL_CALL
+	chunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Some text"}},
+				},
+				FinishReason: genai.FinishReasonUnexpectedToolCall,
+			},
+		},
+	}
+
+	for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatalf("Close should return a valid response")
+	}
+
+	if finalResponse.FinishReason != genai.FinishReasonUnexpectedToolCall {
+		t.Errorf("Expected FinishReason '%s', got '%s'", genai.FinishReasonUnexpectedToolCall, finalResponse.FinishReason)
+	}
+
+	if finalResponse.ErrorCode != "" {
+		t.Errorf("ErrorCode was unexpectedly overwritten to '%s'", finalResponse.ErrorCode)
+	}
+
+	if finalResponse.ErrorMessage != "" {
+		t.Errorf("ErrorMessage was unexpectedly overwritten to '%s'", finalResponse.ErrorMessage)
 	}
 }

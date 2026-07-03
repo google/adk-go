@@ -16,15 +16,30 @@ package remoteagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"strings"
+	"iter"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
 )
+
+// A2AClient abstracts a2a-go client so that we can use different SDK versions.
+type A2AClient interface {
+	// SendMessage sends a message to the remote agent and returns the result.
+	SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error)
+	// SendStreamingMessage sends a message to the remote agent and returns a stream of events.
+	SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error]
+	// CancelTask cancels a task on the remote agent.
+	CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error)
+	// Destroy is called in the end of agent invocation.
+	Destroy() error
+}
+
+// A2AClientProvider creates an [A2AClient].
+type A2AClientProvider interface {
+	// CreateClient creates an [A2AClient].
+	CreateClient(context.Context, *a2a.AgentCard) (A2AClient, error)
+}
 
 // RemoteAgentState holds the internal state of a remote agent.
 type RemoteAgentState struct {
@@ -34,25 +49,23 @@ type RemoteAgentState struct {
 
 // A2AServerConfig is used to describe and configure a remote agent.
 type A2AServerConfig struct {
-	// AgentCardSource can be either an http(s) URL or a local file path. If a2a.AgentCard
-	// is not provided, the source is used to resolve the card during the first agent invocation.
-	AgentCard       *a2a.AgentCard
-	AgentCardSource string
-	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
-	CardResolveOptions []agentcard.ResolveOption
-	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
-	ClientFactory *a2aclient.Factory
+	// AgentCard is a static agent card.
+	AgentCard *a2a.AgentCard
+	// AgentCardProvider resolves an agent card lazily.
+	AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
+	// ClientProvider is used to create an [A2AClient] implementation.
+	ClientProvider A2AClientProvider
 }
 
-func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, *a2aclient.Client, error) {
-	card, err := resolveAgentCard(ctx, cfg)
+func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {
+	card, err := ResolveAgentCard(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent card resolution failed: %w", err)
 	}
 
-	var client *a2aclient.Client
-	if cfg.ClientFactory != nil {
-		client, err = cfg.ClientFactory.CreateFromCard(ctx, card)
+	var client A2AClient
+	if cfg.ClientProvider != nil {
+		client, err = cfg.ClientProvider.CreateClient(ctx, card)
 	} else {
 		client, err = a2aclient.NewFromCard(ctx, card)
 	}
@@ -62,27 +75,12 @@ func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard,
 	return card, client, nil
 }
 
-func resolveAgentCard(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, error) {
+func ResolveAgentCard(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, error) {
 	if cfg.AgentCard != nil {
 		return cfg.AgentCard, nil
 	}
-
-	if strings.HasPrefix(cfg.AgentCardSource, "http://") || strings.HasPrefix(cfg.AgentCardSource, "https://") {
-		card, err := agentcard.DefaultResolver.Resolve(ctx, cfg.AgentCardSource, cfg.CardResolveOptions...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
-		}
-		return card, nil
+	if cfg.AgentCardProvider != nil {
+		return cfg.AgentCardProvider(ctx)
 	}
-
-	fileBytes, err := os.ReadFile(cfg.AgentCardSource)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read agent card from %q: %w", cfg.AgentCardSource, err)
-	}
-
-	var card a2a.AgentCard
-	if err := json.Unmarshal(fileBytes, &card); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
-	}
-	return &card, nil
+	return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be set")
 }

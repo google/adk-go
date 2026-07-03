@@ -17,16 +17,16 @@ package llminternal
 import (
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
-// NOTE: The trigger for this in ADK Go is usually a tool.Context.RequestConfirmation call,
+// NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,
 // not parsing a function_response_event like in the Python example.
 // This function assumes you have a list of confirmations to process.
 func generateRequestConfirmationEvent(
@@ -43,31 +43,34 @@ func generateRequestConfirmationEvent(
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
-		functionCalls[call.ID] = call
+	functionCallParts := make(map[string]*genai.Part, len(functionCallEvent.Content.Parts))
+	for _, part := range functionCallEvent.Content.Parts {
+		if part.FunctionCall != nil {
+			functionCallParts[part.FunctionCall.ID] = part
+		}
 	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalFunctionCall, ok := functionCalls[funcID]
-		if !ok || originalFunctionCall == nil {
+		originalPart, ok := functionCallParts[funcID]
+		if !ok || originalPart.FunctionCall == nil {
 			continue
 		}
 
 		// Prepare arguments for the adk_request_confirmation call
 		args := map[string]any{
-			"originalFunctionCall": originalFunctionCall,
+			"originalFunctionCall": originalPart.FunctionCall,
 			"toolConfirmation":     confirmation,
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			ID:   utils.GenerateFunctionCallID(),
+			ID:   utils.GenerateFunctionCallID(invocationContext),
 			Name: toolconfirmation.FunctionCallName,
 			Args: args,
 		}
 
 		parts = append(parts, &genai.Part{
-			FunctionCall: requestConfirmationFC,
+			FunctionCall:     requestConfirmationFC,
+			ThoughtSignature: originalPart.ThoughtSignature,
 		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
@@ -76,7 +79,7 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	ev := session.NewEvent(invocationContext.InvocationID())
+	ev := session.NewEvent(invocationContext, invocationContext.InvocationID())
 	ev.Author = invocationContext.Agent().Name()
 	ev.Branch = invocationContext.Branch()
 	ev.LLMResponse = model.LLMResponse{
