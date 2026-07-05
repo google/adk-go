@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/session"
 )
@@ -84,10 +85,11 @@ func TestHTTPMiddleware_AppliedOutermostFirst(t *testing.T) {
 	defer cancel()
 
 	webLauncher := web.NewLauncher(&minimalSublauncher{})
+	l := universal.NewLauncher(webLauncher)
 	errCh := make(chan error, 1)
 	go func() {
 		args := []string{fmt.Sprintf("--port=%d", port), "stub"}
-		errCh <- webLauncher.Execute(ctx, config, args)
+		errCh <- l.Execute(ctx, config, args)
 	}()
 
 	// Wait for the server to start accepting connections.
