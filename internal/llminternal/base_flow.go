@@ -1057,14 +1057,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	}
 
 	fnResponseEvents := make([]*session.Event, len(fnCalls))
-	var wg sync.WaitGroup
 
+	// Tool calls run via the context's task runner: concurrent goroutines by
+	// default, or a caller-installed runner (platform.WithTaskRunner).
+	tasks := make([]func(context.Context), len(fnCalls))
 	for i, fnCall := range fnCalls {
-		wg.Add(1)
-		go func(i int, fnCall *genai.FunctionCall) {
-			defer wg.Done()
-
-			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
+		tasks[i] = func(taskCtx context.Context) {
+			sctx, span := telemetry.StartExecuteToolSpan(taskCtx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
 				Args:     fnCall.Args,
 			})
@@ -1210,9 +1209,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			})
 
 			fnResponseEvents[i] = ev
-		}(i, fnCall)
+		}
 	}
-	wg.Wait()
+	platform.RunTasks(ctx, tasks)
 	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
