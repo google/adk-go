@@ -444,10 +444,16 @@ func trimTempDeltaState(event *Event) *Event {
 		}
 	}
 
-	// Replace the old map with the newly filtered one.
-	event.Actions.StateDelta = filteredStateDelta
+	// If no keys were filtered out, return the original event without copying.
+	if len(filteredStateDelta) == len(event.Actions.StateDelta) {
+		return event
+	}
 
-	return event
+	// Create a copy of the event to avoid mutating the original.
+	eventCopy := *event
+	eventCopy.Actions.StateDelta = filteredStateDelta
+
+	return &eventCopy
 }
 
 // updateSessionState updates the session state based on the event state delta.
