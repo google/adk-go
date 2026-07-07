@@ -20,9 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
 	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
@@ -294,5 +298,123 @@ func TestWithConfirmation(t *testing.T) {
 				t.Errorf("toolRan = %v, want %v", toolRan, tt.wantToolRan)
 			}
 		})
+	}
+}
+
+type mockCustomRequestTool struct {
+	tool.Tool
+	decl                 *genai.FunctionDeclaration
+	processRequestCalled *bool
+}
+
+func (m *mockCustomRequestTool) Declaration() *genai.FunctionDeclaration { return m.decl }
+func (m *mockCustomRequestTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func (m *mockCustomRequestTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	*m.processRequestCalled = true
+	return nil
+}
+
+func TestWithConfirmation_ProcessRequest(t *testing.T) {
+	processRequestCalled := false
+	baseTool, err := functiontool.New(functiontool.Config{Name: "customReqTool"}, func(ctx agent.Context, input struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+
+	customTool := &mockCustomRequestTool{
+		Tool:                 baseTool,
+		decl:                 &genai.FunctionDeclaration{Name: "customReqTool"},
+		processRequestCalled: &processRequestCalled,
+	}
+
+	ts := &testToolset{tools: []tool.Tool{customTool}}
+	cts := tool.WithConfirmation(ts, true, nil)
+
+	tools, err := cts.Tools(nil)
+	if err != nil {
+		t.Fatalf("cts.Tools() failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("cts.Tools() returned %d tools, want 1", len(tools))
+	}
+
+	processor, ok := tools[0].(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatalf("wrapped tool does not implement RequestProcessor")
+	}
+
+	req := &model.LLMRequest{}
+	if err := processor.ProcessRequest(nil, req); err != nil {
+		t.Fatalf("ProcessRequest() failed: %v", err)
+	}
+
+	if !processRequestCalled {
+		t.Errorf("expected wrapped tool's ProcessRequest to be called, but it was not")
+	}
+}
+
+type mockCustomRequestPackingTool struct {
+	tool.Tool
+	decl                 *genai.FunctionDeclaration
+	processRequestCalled *bool
+}
+
+func (m *mockCustomRequestPackingTool) Declaration() *genai.FunctionDeclaration { return m.decl }
+func (m *mockCustomRequestPackingTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func (m *mockCustomRequestPackingTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	*m.processRequestCalled = true
+	return toolutils.PackTool(req, m)
+}
+
+func TestWithConfirmation_ProcessRequest_Packing(t *testing.T) {
+	processRequestCalled := false
+	baseTool, err := functiontool.New(functiontool.Config{Name: "customPackingTool"}, func(ctx agent.Context, input struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+
+	customTool := &mockCustomRequestPackingTool{
+		Tool:                 baseTool,
+		decl:                 &genai.FunctionDeclaration{Name: "customPackingTool"},
+		processRequestCalled: &processRequestCalled,
+	}
+
+	ts := &testToolset{tools: []tool.Tool{customTool}}
+	cts := tool.WithConfirmation(ts, true, nil)
+
+	tools, err := cts.Tools(nil)
+	if err != nil {
+		t.Fatalf("cts.Tools() failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("cts.Tools() returned %d tools, want 1", len(tools))
+	}
+
+	processor, ok := tools[0].(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatalf("wrapped tool does not implement RequestProcessor")
+	}
+
+	req := &model.LLMRequest{}
+	if err := processor.ProcessRequest(nil, req); err != nil {
+		t.Fatalf("ProcessRequest() failed: %v", err)
+	}
+
+	if !processRequestCalled {
+		t.Errorf("expected wrapped tool's ProcessRequest to be called, but it was not")
+	}
+
+	if req.Tools["customPackingTool"] != tools[0] {
+		t.Errorf("expected req.Tools[%q] to be the confirmation wrapper %T, got %T", "customPackingTool", tools[0], req.Tools["customPackingTool"])
 	}
 }
