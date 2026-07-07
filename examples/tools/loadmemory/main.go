@@ -25,22 +25,22 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/loadmemorytool"
-	"google.golang.org/adk/tool/preloadmemorytool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/loadmemorytool"
+	"google.golang.org/adk/v2/tool/preloadmemorytool"
 )
 
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -170,7 +170,7 @@ func createPreviousSessionWithHistory(
 	}
 
 	for _, e := range events {
-		event := session.NewEventWithContext(ctx, "previous-session")
+		event := session.NewEvent(ctx, "previous-session")
 		event.Author = e.author
 		event.LLMResponse = model.LLMResponse{
 			Content: genai.NewContentFromText(e.content, genai.Role(e.author)),

@@ -22,10 +22,10 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type mockAgent struct {
@@ -56,10 +56,11 @@ func (m *mockInvocationContext) Branch() string {
 	return m.branch
 }
 
-func (m *mockInvocationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (m *mockInvocationContext) Done() <-chan struct{}       { return nil }
-func (m *mockInvocationContext) Err() error                  { return nil }
-func (m *mockInvocationContext) Value(any) any               { return nil }
+func (m *mockInvocationContext) Deadline() (time.Time, bool)     { return time.Time{}, false }
+func (m *mockInvocationContext) Done() <-chan struct{}           { return nil }
+func (m *mockInvocationContext) Err() error                      { return nil }
+func (m *mockInvocationContext) Value(any) any                   { return nil }
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{

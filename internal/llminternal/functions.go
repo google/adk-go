@@ -17,16 +17,16 @@ package llminternal
 import (
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
-// NOTE: The trigger for this in ADK Go is usually a agent.ToolContext.RequestConfirmation call,
+// NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,
 // not parsing a function_response_event like in the Python example.
 // This function assumes you have a list of confirmations to process.
 func generateRequestConfirmationEvent(
@@ -79,7 +79,7 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	ev := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
+	ev := session.NewEvent(invocationContext, invocationContext.InvocationID())
 	ev.Author = invocationContext.Agent().Name()
 	ev.Branch = invocationContext.Branch()
 	ev.LLMResponse = model.LLMResponse{

@@ -30,14 +30,14 @@ import (
 	v2asrv "github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adka2a"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestCompat_OldExecutor_Direct(t *testing.T) {
@@ -117,7 +117,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text = "modified-by-agent-callback"
 						}
@@ -142,7 +142,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						req.Message = legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "42"})
 						return nil, nil
 					},
@@ -161,7 +161,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						return &session.Event{
 							LLMResponse: model.LLMResponse{
 								Content: genai.NewContentFromText("cached-response", genai.RoleModel),
@@ -181,7 +181,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.Converter = func(ctx agent.InvocationContext, req *legacyA2A.MessageSendParams, event legacyA2A.Event, err error) (*session.Event, error) {
-					ev := session.NewEventWithContext(ctx, "custom")
+					ev := session.NewEvent(ctx, "custom")
 					ev.Author = ctx.Agent().Name()
 					ev.LLMResponse = model.LLMResponse{
 						Content:      genai.NewContentFromText("converted", genai.RoleModel),
@@ -246,13 +246,13 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-first"
 						}
 						return nil, nil
 					},
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-second"
 						}
@@ -563,7 +563,7 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 }
 
 func newUserHello() *session.Event {
-	event := session.NewEventWithContext(context.Background(), "invocation")
+	event := session.NewEvent(context.Background(), "invocation")
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
 		Content: genai.NewContentFromText("hello", genai.RoleUser),

@@ -20,7 +20,7 @@ import (
 
 	"github.com/mitchellh/mapstructure"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // Session represents an agent's session.

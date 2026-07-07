@@ -21,9 +21,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestSessionEvents_YieldedPresence(t *testing.T) {
@@ -33,7 +33,7 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// 1. Yield a test event
-				testEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				testEvent := session.NewEvent(ctx, ctx.InvocationID())
 				testEvent.Content = genai.NewContentFromText("Initial test event", genai.RoleModel)
 				if !yield(testEvent, nil) {
 					return
@@ -53,7 +53,7 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 				}
 
 				// 3. Yield the result of the check
-				resultEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				resultEvent := session.NewEvent(ctx, ctx.InvocationID())
 				if found {
 					resultEvent.Content = genai.NewContentFromText("Found initial event in session", genai.RoleModel)
 				} else {

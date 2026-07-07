@@ -18,19 +18,18 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/geminitool"
+	"google.golang.org/adk/v2/tool/loadartifactstool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func TestTypes(t *testing.T) {
@@ -54,7 +53,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{}, func(_ agent.ToolContext, input intInput) (intOutput, error) {
+				return functiontool.New(functiontool.Config{}, func(_ agent.Context, input intInput) (intOutput, error) {
 					return intOutput(input), nil
 				})
 			},
@@ -113,10 +112,31 @@ func TestTypes(t *testing.T) {
 }
 
 type testContext struct {
+	agent.ContextMock
 	context.Context
 	toolConfirmationResult    *toolconfirmation.ToolConfirmation
 	requestConfirmationCalled bool
 	eventActions              *session.EventActions
+}
+
+// Deadline implements [agent.InvocationContext].
+func (c *testContext) Deadline() (deadline time.Time, ok bool) {
+	return c.Context.Deadline()
+}
+
+// Done implements [agent.InvocationContext].
+func (c *testContext) Done() <-chan struct{} {
+	return c.Context.Done()
+}
+
+// Err implements [agent.InvocationContext].
+func (c *testContext) Err() error {
+	return c.Context.Err()
+}
+
+// Value implements [agent.InvocationContext].
+func (c *testContext) Value(key any) any {
+	return c.Context.Value(key)
 }
 
 func (c *testContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
@@ -138,16 +158,15 @@ func (c *testContext) FunctionCallID() string { return "test-function-call-id" }
 func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (c *testContext) AgentName() string                    { return "test-agent" }
-func (c *testContext) ReadonlyState() session.ReadonlyState { return nil }
-func (c *testContext) State() session.State                 { return nil }
-func (c *testContext) Artifacts() agent.Artifacts           { return nil }
-func (c *testContext) InvocationID() string                 { return "test-invocation-id" }
-func (c *testContext) UserContent() *genai.Content          { return nil }
-func (c *testContext) AppName() string                      { return "test-app" }
-func (c *testContext) Branch() string                       { return "test-branch" }
-func (c *testContext) SessionID() string                    { return "test-session-id" }
-func (c *testContext) UserID() string                       { return "test-user-id" }
+func (c *testContext) AgentName() string                                       { return "test-agent" }
+func (c *testContext) InvocationID() string                                    { return "test-invocation-id" }
+func (c *testContext) AppName() string                                         { return "test-app" }
+func (c *testContext) Branch() string                                          { return "test-branch" }
+func (c *testContext) SessionID() string                                       { return "test-session-id" }
+func (c *testContext) UserID() string                                          { return "test-user-id" }
+func (m *testContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
+
+var _ agent.InvocationContext = (*testContext)(nil)
 
 type testToolset struct {
 	tools []tool.Tool
@@ -160,7 +179,7 @@ func (tts *testToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
 
 func TestWithConfirmation(t *testing.T) {
 	toolRan := false
-	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx agent.ToolContext, input struct{}) (struct{}, error) {
+	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx agent.Context, input struct{}) (struct{}, error) {
 		toolRan = true
 		return struct{}{}, nil
 	})

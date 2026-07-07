@@ -1,0 +1,280 @@
+httprr trace v1
+829 2197
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 597
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Run the chained tools."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Call the sub agent exactly once with a brief description\nof what to do, then report its answer in one sentence.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Delegates to sub and reports the answer.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Chains tool_one then tool_two.","name":"sub","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 24 Jun 2026 09:08:04 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=6956
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "sub",
+              "args": {
+                "request": "Execute the chained tools."
+              },
+              "id": "axn9agj2"
+            },
+            "thoughtSignature": "EvIFCu8FAQw51sceP5YPkC6Qp/GcPbjSYLPaV6Qf4AKaYqY+VBsrTOom9Tb1GcY9vJ/8I+xHg8xZnOcS4uJqu3vKaYHq4vqqU8L0MdVQWcncaUbWDZhu9acZ0c4++/DBwxQvBUpEv2ZtycQp0ap14jtbomTsCq//eiB/3wJZGrfkWkkrCL6aN2ISX4HzCpkKFgFKROkZe2bertFV/DV2xC5y+D2O33Qzjt5ZwQZIdPKbes4K7WoB+4ko5+j2EpdUPURsSLW6jSXaDXI1CbzwT8kikvAIvBVc0He79EGTsj+uWWA4+mHVMuNmJ25nrAEVm8HHV1ZxjQn6yB1J2Bl6AKMGsBCERipo6NOrYZ8xZZzubPtxR69xn/DQGQ8dhYFAvflo/BhIgH2IE27+Uj82ASDXe8LSA5C1uNKGh2QCQk2OzgRpHxpLz0rCEYjozb7Q7baMACTAsjoadrmqD0Fce+7KbcM2NbOBKp4LtORseUX8FuRsqNrO5ZnlsUa8cUwvy0oCzLFBpijH/ybRo86z2ONvxdDjycC1HZQ4bTH4fChYUlN91qEr1QFu8utLbdWuJ4ZX+3gd13VQ0u5GjbOyWeRf93GFKX8HnzBog6WBbrK7IjbTrHblVlPKK477D/63s1fTthBSr4KMfMfrHLB1VWO0s2r/4YWv5EozIdO2QsuDlKXZoNZFi1dge7x4j5SPiOphxpap/Jj6OveQS80Rp1p8+wfSq7XvrEy6G9MSQ87N4N2aZzIWNIYomaY2g6OVooPusR2aqyww7GPBwKvaBmyUufXtKHEmmOuGSJJhCdVQGyq57ucDAYu+goldPWMYMD4DzoXnB3ZYkBVc+SHN/U2zcDdNt07zWx5FwcZni2NpfT5ZSqVeT8zUGIwxCpJBgFAHyCEpts5zPhH3/CCNGSl1KipPscGnlfuXdqXUPEVU6eEPaHq+NwECkFgTpYgtVnGO9iqLjKKVVCc/ZdWhnbjcPCa2+cS7o4qE04sZeoWgr9i55w=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 104,
+    "candidatesTokenCount": 18,
+    "totalTokenCount": 297,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 104
+      }
+    ],
+    "thoughtsTokenCount": 175,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "bZ47arDsLPTqkdUPsNvO8A8"
+}
+1602 1554
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1369
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Execute the chained tools.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Call tool_one to obtain a token, then call tool_two with\nthat exact token, then report the result string. Call each tool at most once.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Returns a fixed token string. Call this first.","name":"tool_one","parametersJsonSchema":{"additionalProperties":false,"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"}},{"description":"Echoes the token returned by tool_one.","name":"tool_two","parametersJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"result":{"type":"string"}},"required":["result"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 24 Jun 2026 09:08:13 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=9207
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "tool_one",
+              "args": {},
+              "id": "bjqewbip"
+            },
+            "thoughtSignature": "EsMCCsACAQw51sdHSo0GnWh304cgbKiISOjA/Qf0kGutWLExt6Qidi1QQpUeYfX5GTrlEo65YeEDVk7AFg8GDjFfRS5UIdYJJbtpqStY840Tuy2Z8bb10aby7qsVit3ST+TluKa/gUDWxl9/GRXQrOzocKAF2mSiVH/RBl3XU8be0LQ0bo0Sv+AnBRC6eU1s5XlQqz2v98kuei1zVvLiJZUhc4PAxlJCmgOoSsJeLz/HZWBwgnbWM/mKOEOzrnMJ0ToaUD1YpMUtlpKiRXOzKelGNyo3GHfxN0cBX+eXwW4q/RhvZsNrVwOsykGQ68yiHGy2ZY8wrtpi8zfZa1qv9NymcxoxpAjNz1EveP8sm6Lg5YfOuk5q1oOhFJlTyTCUrMLcAiwag4Zg1niwcEdn8a3TPJvPADeTWsrVzpPq+8mmmy947F8="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 268,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 346,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 268
+      }
+    ],
+    "thoughtsTokenCount": 68,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "dJ47avb8K5LinsEPubfw-AQ"
+}
+2255 1372
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2022
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Execute the chained tools.\"}"}],"role":"user"},{"parts":[{"functionCall":{"id":"bjqewbip","name":"tool_one"},"thoughtSignature":"EsMCCsACAQw51sdHSo0GnWh304cgbKiISOjA/Qf0kGutWLExt6Qidi1QQpUeYfX5GTrlEo65YeEDVk7AFg8GDjFfRS5UIdYJJbtpqStY840Tuy2Z8bb10aby7qsVit3ST+TluKa/gUDWxl9/GRXQrOzocKAF2mSiVH/RBl3XU8be0LQ0bo0Sv+AnBRC6eU1s5XlQqz2v98kuei1zVvLiJZUhc4PAxlJCmgOoSsJeLz/HZWBwgnbWM/mKOEOzrnMJ0ToaUD1YpMUtlpKiRXOzKelGNyo3GHfxN0cBX+eXwW4q/RhvZsNrVwOsykGQ68yiHGy2ZY8wrtpi8zfZa1qv9NymcxoxpAjNz1EveP8sm6Lg5YfOuk5q1oOhFJlTyTCUrMLcAiwag4Zg1niwcEdn8a3TPJvPADeTWsrVzpPq+8mmmy947F8="}],"role":"model"},{"parts":[{"functionResponse":{"id":"bjqewbip","name":"tool_one","response":{"token":"alpha-42"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Call tool_one to obtain a token, then call tool_two with\nthat exact token, then report the result string. Call each tool at most once.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Returns a fixed token string. Call this first.","name":"tool_one","parametersJsonSchema":{"additionalProperties":false,"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"}},{"description":"Echoes the token returned by tool_one.","name":"tool_two","parametersJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"result":{"type":"string"}},"required":["result"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 24 Jun 2026 09:08:16 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2578
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "tool_two",
+              "args": {
+                "token": "alpha-42"
+              },
+              "id": "8t7zjdck"
+            },
+            "thoughtSignature": "EpYBCpMBAQw51se4RqRA8/ZZcDvoBMxjamPbFyEC93pAU2vWrkwsruoLP3i8TjetqOLvfLU7VZc41eUTFntppbzMq/HeA0YB3E9r/dq6edF+mHi6Q81j1RF72XPo5vbksWLeKZpBgIOVbpC1cIHEYKMmEhkHaV6MeD0xszepUVrkePkoyoACUxv4lMJ2Kj99gn3a5evKK0jx"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 363,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 414,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 363
+      }
+    ],
+    "thoughtsTokenCount": 32,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "fZ47apqiN9fjnsEP-MnRaA"
+}
+2709 1242
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2476
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Execute the chained tools.\"}"}],"role":"user"},{"parts":[{"functionCall":{"id":"bjqewbip","name":"tool_one"},"thoughtSignature":"EsMCCsACAQw51sdHSo0GnWh304cgbKiISOjA/Qf0kGutWLExt6Qidi1QQpUeYfX5GTrlEo65YeEDVk7AFg8GDjFfRS5UIdYJJbtpqStY840Tuy2Z8bb10aby7qsVit3ST+TluKa/gUDWxl9/GRXQrOzocKAF2mSiVH/RBl3XU8be0LQ0bo0Sv+AnBRC6eU1s5XlQqz2v98kuei1zVvLiJZUhc4PAxlJCmgOoSsJeLz/HZWBwgnbWM/mKOEOzrnMJ0ToaUD1YpMUtlpKiRXOzKelGNyo3GHfxN0cBX+eXwW4q/RhvZsNrVwOsykGQ68yiHGy2ZY8wrtpi8zfZa1qv9NymcxoxpAjNz1EveP8sm6Lg5YfOuk5q1oOhFJlTyTCUrMLcAiwag4Zg1niwcEdn8a3TPJvPADeTWsrVzpPq+8mmmy947F8="}],"role":"model"},{"parts":[{"functionResponse":{"id":"bjqewbip","name":"tool_one","response":{"token":"alpha-42"}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"token":"alpha-42"},"id":"8t7zjdck","name":"tool_two"},"thoughtSignature":"EpYBCpMBAQw51se4RqRA8/ZZcDvoBMxjamPbFyEC93pAU2vWrkwsruoLP3i8TjetqOLvfLU7VZc41eUTFntppbzMq/HeA0YB3E9r/dq6edF+mHi6Q81j1RF72XPo5vbksWLeKZpBgIOVbpC1cIHEYKMmEhkHaV6MeD0xszepUVrkePkoyoACUxv4lMJ2Kj99gn3a5evKK0jx"}],"role":"model"},{"parts":[{"functionResponse":{"id":"8t7zjdck","name":"tool_two","response":{"result":"got alpha-42"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Call tool_one to obtain a token, then call tool_two with\nthat exact token, then report the result string. Call each tool at most once.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Returns a fixed token string. Call this first.","name":"tool_one","parametersJsonSchema":{"additionalProperties":false,"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"}},{"description":"Echoes the token returned by tool_one.","name":"tool_two","parametersJsonSchema":{"additionalProperties":false,"properties":{"token":{"type":"string"}},"required":["token"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"result":{"type":"string"}},"required":["result"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 24 Jun 2026 09:08:23 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=6566
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The execution of the chained tools is complete. The result string returned by tool_two is: \"got alpha-42\".",
+            "thoughtSignature": "EokBCoYBAQw51sfxzCd/f1yMCVUp9tcG+18UhIPbbn5PEOG0WXGvpqm5aO2u8XGKeIc/VJ9F3FzrFnWV40AeQfMiPFujIgfFA+ZP/92go5uf0lLnhMH9cQPk0VacTzNAeeTabeSLw3G3aPvUpvljF4A7r9n4Ajyv4sgS4hddzuO1c032yrRcsvIPx7o="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 432,
+    "candidatesTokenCount": 26,
+    "totalTokenCount": 480,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 432
+      }
+    ],
+    "thoughtsTokenCount": 22,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "gJ47ao-wHtmN7M8Pwv3VuQM"
+}
+2198 1509
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1965
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Run the chained tools."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Execute the chained tools."},"id":"axn9agj2","name":"sub"},"thoughtSignature":"EvIFCu8FAQw51sceP5YPkC6Qp/GcPbjSYLPaV6Qf4AKaYqY+VBsrTOom9Tb1GcY9vJ/8I+xHg8xZnOcS4uJqu3vKaYHq4vqqU8L0MdVQWcncaUbWDZhu9acZ0c4++/DBwxQvBUpEv2ZtycQp0ap14jtbomTsCq//eiB/3wJZGrfkWkkrCL6aN2ISX4HzCpkKFgFKROkZe2bertFV/DV2xC5y+D2O33Qzjt5ZwQZIdPKbes4K7WoB+4ko5+j2EpdUPURsSLW6jSXaDXI1CbzwT8kikvAIvBVc0He79EGTsj+uWWA4+mHVMuNmJ25nrAEVm8HHV1ZxjQn6yB1J2Bl6AKMGsBCERipo6NOrYZ8xZZzubPtxR69xn/DQGQ8dhYFAvflo/BhIgH2IE27+Uj82ASDXe8LSA5C1uNKGh2QCQk2OzgRpHxpLz0rCEYjozb7Q7baMACTAsjoadrmqD0Fce+7KbcM2NbOBKp4LtORseUX8FuRsqNrO5ZnlsUa8cUwvy0oCzLFBpijH/ybRo86z2ONvxdDjycC1HZQ4bTH4fChYUlN91qEr1QFu8utLbdWuJ4ZX+3gd13VQ0u5GjbOyWeRf93GFKX8HnzBog6WBbrK7IjbTrHblVlPKK477D/63s1fTthBSr4KMfMfrHLB1VWO0s2r/4YWv5EozIdO2QsuDlKXZoNZFi1dge7x4j5SPiOphxpap/Jj6OveQS80Rp1p8+wfSq7XvrEy6G9MSQ87N4N2aZzIWNIYomaY2g6OVooPusR2aqyww7GPBwKvaBmyUufXtKHEmmOuGSJJhCdVQGyq57ucDAYu+goldPWMYMD4DzoXnB3ZYkBVc+SHN/U2zcDdNt07zWx5FwcZni2NpfT5ZSqVeT8zUGIwxCpJBgFAHyCEpts5zPhH3/CCNGSl1KipPscGnlfuXdqXUPEVU6eEPaHq+NwECkFgTpYgtVnGO9iqLjKKVVCc/ZdWhnbjcPCa2+cS7o4qE04sZeoWgr9i55w=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"axn9agj2","name":"sub","response":{"result":"The execution of the chained tools is complete. The result string returned by tool_two is: \"got alpha-42\"."}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Call the sub agent exactly once with a brief description\nof what to do, then report its answer in one sentence.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Delegates to sub and reports the answer.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Chains tool_one then tool_two.","name":"sub","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 24 Jun 2026 09:08:34 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=11166
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The sub agent successfully executed the chained tools, returning the final result \"got alpha-42\".",
+            "thoughtSignature": "EtgCCtUCAQw51sczgXmHnynZ9mI95S597m/E8dRk87doM4w20DviP3Or63rFBx8lFfsoj8DjtkDHZAUiwSwG4JE5F+342iOSQRSQkKTv+s6v9cOk16c4yrR/p14pD/kvoDuztYGXRxXHKilUsaCuxo+79GAOk1iJrncXmXQw4/GqGtie3l1VhbD40ENRP5o7LPb5gjkxRWsrZAhFWRVUCW+B1Ufe/9O/kqBHHg0QyvqrnPH+U0/dbwmVssoS6NJiAzTPUwu8je8zZspbeV0VllSNM2WOkFO5poi7KsjRGY1XrlOKVDbp4Tc7coYQzcbZOgqRV7KNxkmlyiH3xr329G8dsqeTASmZvHc6w99f2BEoe8KyhNudWgp5pONediq2JJ1krJ4JmeRHYCD6yFavMRTG8BIbQYUwHuHuljFN29uUBguBvJOLcUH+jvW2LnUI0Us68fj+eHAyrAQ="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 334,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 423,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 334
+      }
+    ],
+    "thoughtsTokenCount": 69,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "h547aq_yA-Pi7M8Pu4u0CQ"
+}

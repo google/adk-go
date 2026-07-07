@@ -25,7 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/v2/artifact"
 )
 
 func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (artifact.Service, error)) {

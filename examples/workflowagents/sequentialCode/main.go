@@ -22,18 +22,18 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/model/gemini"
 )
 
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("failed to create model: %s", err)
 	}

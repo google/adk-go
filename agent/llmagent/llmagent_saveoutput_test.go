@@ -20,8 +20,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 type MockOutputSchema struct {
@@ -133,6 +133,80 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			if !reflect.DeepEqual(gotStateDelta, tc.wantStateDelta) {
 				t.Errorf("stateDelta mismatch:\ngot = %v\nwant = %v", gotStateDelta, tc.wantStateDelta)
 			}
+
+			// Output is stamped by the node wrapper, not here (adk-python
+			// __maybe_save_output_to_state parity).
+			if tc.event.Output != nil {
+				t.Errorf("event.Output = %v, want nil (only state_delta may be written here)", tc.event.Output)
+			}
 		})
+	}
+}
+
+// newSessionWithEvent returns an in-memory session.Session preloaded
+// with a single user-authored event.
+func newSessionWithEvent(t *testing.T, text string) session.Session {
+	t.Helper()
+	svc := session.InMemoryService()
+	createResp, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ev := session.NewEvent(t.Context(), "inv-existing")
+	ev.Author = "user"
+	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromText(text)},
+	}}
+	if err := svc.AppendEvent(t.Context(), createResp.Session, ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	getResp, err := svc.Get(t.Context(), &session.GetRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("session.Get: %v", err)
+	}
+	return getResp.Session
+}
+
+func seedEvent(t *testing.T, text string) *session.Event {
+	t.Helper()
+	ev := session.NewEvent(t.Context(), "inv-seed")
+	ev.Author = "user"
+	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromText(text)},
+	}}
+	return ev
+}
+
+// TestWrappedSession_SeedNotPersisted asserts the single_turn
+// node-input contract: the seed is visible through the wrapped view but
+// never written to the underlying session history.
+func TestWrappedSession_SeedNotPersisted(t *testing.T) {
+	t.Parallel()
+
+	base := newSessionWithEvent(t, "existing turn")
+	baseLen := base.Events().Len()
+	seed := seedEvent(t, "transient node input")
+	wrapped := newWrappedSession(base, seed)
+
+	if got, want := wrapped.Events().Len(), baseLen+1; got != want {
+		t.Errorf("wrapped.Events().Len() = %d, want %d", got, want)
+	}
+	if got := wrapped.Events().At(wrapped.Events().Len() - 1); got != seed {
+		t.Errorf("last wrapped event = %v, want the seed", got)
+	}
+
+	if got := base.Events().Len(); got != baseLen {
+		t.Errorf("underlying session length = %d, want %d; seed must not persist", got, baseLen)
+	}
+	for ev := range base.Events().All() {
+		if ev == seed {
+			t.Fatal("seed leaked into the underlying session history")
+		}
 	}
 }

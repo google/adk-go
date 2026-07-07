@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/platform"
 )
 
 func TestNowDefaultUsesWallClock(t *testing.T) {
@@ -57,6 +57,7 @@ func TestWithTimeProviderDerivedContext(t *testing.T) {
 	fixed := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
 	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixed })
 
+	// TODO(kdroste): refactor underlying context
 	// A context derived from the provider context must keep the provider.
 	derived, cancel := context.WithCancel(ctx)
 	defer cancel()

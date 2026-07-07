@@ -28,10 +28,10 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/server/agentengine/controllers"
-	"google.golang.org/adk/server/agentengine/controllers/method"
-	"google.golang.org/adk/server/agentengine/internal/routers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/agentengine/controllers"
+	"google.golang.org/adk/v2/server/agentengine/controllers/method"
+	"google.golang.org/adk/v2/server/agentengine/internal/routers"
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.

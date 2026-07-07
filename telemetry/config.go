@@ -26,10 +26,6 @@ type config struct {
 	// Enables/disables telemetry export to GCP.
 	oTelToCloud bool
 
-	// genAICaptureMessageContent enables/disables logging of message content. The default value is taken from OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env variable.
-	// If set to true, the message content will be logged in message body. Otherwise it will be elided.
-	genAICaptureMessageContent bool
-
 	// gcpResourceProject is used as the gcp.project.id resource attribute.
 	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
 	gcpResourceProject string
@@ -136,14 +132,6 @@ func WithTracerProvider(tp *sdktrace.TracerProvider) Option {
 func WithLoggerProvider(lp *sdklog.LoggerProvider) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.loggerProvider = lp
-		return nil
-	})
-}
-
-// WithGenAICaptureMessageContent overrides the default [config.genAICaptureMessageContent].
-func WithGenAICaptureMessageContent(capture bool) Option {
-	return optionFunc(func(cfg *config) error {
-		cfg.genAICaptureMessageContent = capture
 		return nil
 	})
 }

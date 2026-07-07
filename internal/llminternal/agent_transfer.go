@@ -24,13 +24,13 @@ import (
 	"github.com/google/safehtml/template"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // From src/google/adk/flows/llm_flows/auto_flow.py
@@ -159,12 +159,12 @@ func (t *TransferToAgentTool) enums() []string {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
 // Run implements types.Tool.
-func (t *TransferToAgentTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}
@@ -182,10 +182,16 @@ func (t *TransferToAgentTool) Run(ctx agent.ToolContext, args any) (map[string]a
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)
 
-func transferTargets(agent, parent agent.Agent) []agent.Agent {
-	targets := slices.Clone(agent.SubAgents())
+func transferTargets(curAgent, parent agent.Agent) []agent.Agent {
+	var targets []agent.Agent
+	for _, sub := range curAgent.SubAgents() {
+		if isUntransferableMode(sub) {
+			continue
+		}
+		targets = append(targets, sub)
+	}
 
-	llmAgent := asLLMAgent(agent)
+	llmAgent := asLLMAgent(curAgent)
 	llmParent := asLLMAgent(parent)
 
 	if llmParent == nil {
@@ -201,13 +207,32 @@ func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	if !llmAgent.internal().DisallowTransferToPeers {
 		if shouldUseAutoFlow(parent) {
 			for _, peer := range parent.SubAgents() {
-				if peer.Name() != agent.Name() {
-					targets = append(targets, peer)
+				if peer.Name() == curAgent.Name() {
+					continue
 				}
+				if isUntransferableMode(peer) {
+					continue
+				}
+				targets = append(targets, peer)
 			}
 		}
 	}
 	return targets
+}
+
+// isUntransferableMode skips the agents which have different delegation
+// mechanism (e.g. task & single_turn agents are handled by llmagent
+// wrapper code).
+func isUntransferableMode(a agent.Agent) bool {
+	llmA := asLLMAgent(a)
+	if llmA == nil {
+		return false
+	}
+	switch llmA.internal().Mode {
+	case ModeTask, ModeSingleTurn:
+		return true
+	}
+	return false
 }
 
 func asLLMAgent(agent agent.Agent) Agent {
@@ -282,7 +307,16 @@ var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
 func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
-	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
+	cur := asLLMAgent(curAgent)
+	// Suppress transfer instructions for task / single_turn agents:
+	// they reach their callees via FC delegation (TaskAgentTool /
+	// SingleTurnTool), not via transfer.
+	switch cur.internal().Mode {
+	case ModeTask, ModeSingleTurn:
+		return "", nil
+	}
+
+	if cur.internal().DisallowTransferToParent {
 		parent = nil
 	}
 

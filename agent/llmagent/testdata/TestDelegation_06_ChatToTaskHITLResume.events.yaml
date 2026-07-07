@@ -1,0 +1,135 @@
+- author: user
+  role: user
+  parts:
+    - text: Please perform the irreversible action.
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: executor
+        id: ail38ig8
+        args:
+            request: Perform the irreversible action as requested by the user.
+  node_info:
+    path: coordinator
+- author: executor
+  isolation_scope: ail38ig8
+  role: model
+  parts:
+    - function_call:
+        name: confirm
+        id: jdgix5m0
+  node_info:
+    path: coordinator/executor@ail38ig8
+- author: executor
+  isolation_scope: ail38ig8
+  role: user
+  parts:
+    - function_response:
+        name: confirm
+        id: jdgix5m0
+        response:
+            error: error tool "confirm" requires confirmation, please approve or reject
+  node_info:
+    path: coordinator/executor@ail38ig8
+  actions:
+    skip_summarization: true
+    requested_tool_confirmations:
+        jdgix5m0:
+            confirmed: false
+            hint: Please approve or reject the tool call confirm() by responding with a FunctionResponse with an expected ToolConfirmation payload.
+            payload: null
+- author: executor
+  isolation_scope: ail38ig8
+  role: model
+  long_running_tool_ids:
+    - adk-id-1
+  parts:
+    - function_call:
+        name: adk_request_confirmation
+        id: adk-id-1
+        args:
+            originalFunctionCall:
+                id: jdgix5m0
+                args: {}
+                name: confirm
+                partialargs: []
+                willcontinue: null
+            toolConfirmation:
+                hint: Please approve or reject the tool call confirm() by responding with a FunctionResponse with an expected ToolConfirmation payload.
+                confirmed: false
+                payload: null
+  node_info:
+    path: coordinator/executor@ail38ig8
+- author: user
+  isolation_scope: ail38ig8
+  role: user
+  parts:
+    - function_response:
+        name: adk_request_confirmation
+        id: adk-id-1
+        response:
+            confirmed: true
+- author: executor
+  isolation_scope: ail38ig8
+  role: user
+  parts:
+    - function_response:
+        name: confirm
+        id: jdgix5m0
+        response:
+            result: Approved. Proceeding.
+  node_info:
+    path: coordinator/executor@ail38ig8
+- author: executor
+  isolation_scope: ail38ig8
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: 7p8w0zxz
+        args:
+            done: true
+  node_info:
+    path: coordinator/executor@ail38ig8
+- author: executor
+  isolation_scope: ail38ig8
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: 7p8w0zxz
+        response:
+            result: Task completed.
+  output:
+    done: true
+  node_info:
+    path: coordinator/executor@ail38ig8
+    output_for:
+        - coordinator/executor@ail38ig8
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: executor
+        id: ail38ig8
+        response:
+            done: true
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: I have successfully completed the requested irreversible action.
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: Did the action complete successfully?
+- author: coordinator
+  role: model
+  parts:
+    - text: Yes, the action completed successfully.
+  node_info:
+    path: coordinator

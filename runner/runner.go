@@ -24,20 +24,21 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/agent/runconfig"
-	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	imemory "google.golang.org/adk/internal/memory"
-	"google.golang.org/adk/internal/plugininternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	imemory "google.golang.org/adk/v2/internal/memory"
+	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowinternal"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 )
 
 // Config is used to create a [Runner].
@@ -65,13 +66,23 @@ type PluginConfig struct {
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	stateDelta map[string]any
+	stateDelta       map[string]any
+	yieldUserMessage bool
 }
 
 // WithStateDelta sets a state delta for the run invocation.
 func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
+	}
+}
+
+// WithYieldUserMessage makes Run yield the user message event (after it is
+// appended to the session) before any agent/node events. Mirrors
+// adk-python's yield_user_message. Currently honored by the node path.
+func WithYieldUserMessage() RunOption {
+	return func(o *runOptions) {
+		o.yieldUserMessage = true
 	}
 }
 
@@ -125,6 +136,29 @@ type Runner struct {
 	autoCreateSession bool
 }
 
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err == nil {
+		return getResp.Session, nil
+	}
+	if !r.autoCreateSession {
+		return nil, err
+	}
+	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createResp.Session, nil
+}
+
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
@@ -138,34 +172,64 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		var storedSession session.Session
-		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
-		if err != nil {
-			if !r.autoCreateSession {
-				yield(nil, err)
-				return
-			}
-			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-				AppName:   r.appName,
-				UserID:    userID,
-				SessionID: sessionID,
-			})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			storedSession = createResp.Session
-		} else {
-			storedSession = getResp.Session
-		}
-
-		agentToRun, err := r.findAgentToRun(storedSession, msg)
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
 			yield(nil, err)
+			return
+		}
+
+		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
+		// (the Go equivalent of adk-python's _run_node_async, reached for
+		// an LlmAgent root).
+
+		if isLlmAgent(r.rootAgent) {
+			llmInternalAgent, ok := r.rootAgent.(llminternal.Agent)
+			if !ok {
+				yield(nil, fmt.Errorf("agent %s is not an LlmAgent", r.rootAgent.Name()))
+				return
+			}
+
+			llmInternalState := llminternal.Reveal(llmInternalAgent)
+
+			if llmInternalState.Mode == "" {
+				// LlmAgent as root agent must have chat mode.
+				llmInternalState.Mode = llminternal.ModeChat
+			}
+
+			if llmInternalState.Mode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+				return
+			}
+
+			hasTaskSubAgent := func() bool {
+				for _, subAgent := range r.rootAgent.SubAgents() {
+					if !isLlmAgent(subAgent) {
+						continue
+					}
+					llmInternalSubAgent := llminternal.Reveal(subAgent.(llminternal.Agent))
+					if llmInternalSubAgent.Mode == llminternal.ModeTask {
+						return true
+					}
+				}
+				return false
+			}
+
+			var agentToRun agent.Agent
+
+			// when the chat coordinator has task-mode sub-agents,
+			// the wrapper handles delegation via ctx.run_node. Don't let
+			// the legacy sub-agent picker bypass the coordinator on resume.
+			if hasTaskSubAgent() {
+				agentToRun = r.rootAgent
+			} else {
+				agentToRun, err = r.findAgentToRun(storedSession, msg)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+			}
+
+			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
 			return
 		}
 
@@ -195,15 +259,17 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:   artifacts,
-			Memory:      memoryImpl,
-			Session:     storedSession,
-			Agent:       agentToRun,
-			UserContent: msg,
-			RunConfig:   &cfg,
+		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:    artifacts,
+			Memory:       memoryImpl,
+			Session:      storedSession,
+			Agent:        r.rootAgent,
+			UserContent:  msg,
+			RunConfig:    &cfg,
+			InvocationID: resolveInvocationID(storedSession, msg),
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		ctx := agent.NewContext(ic)
+		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -217,7 +283,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
 			if earlyExitResult != nil || err != nil {
-				earlyExitEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
+				earlyExitEvent := session.NewEvent(ctx, ctx.InvocationID())
 				earlyExitEvent.Author = "user"
 				earlyExitEvent.LLMResponse = model.LLMResponse{
 					Content: msg,
@@ -231,12 +297,20 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range agentToRun.Run(ctx) {
+		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
 				if !yield(event, err) {
 					return
 				}
 				continue
+			}
+
+			if event != nil && !event.LLMResponse.Partial {
+				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+					clone := *event
+					clone.Output = nil
+					event = &clone
+				}
 			}
 
 			if pluginManager != nil {
@@ -297,7 +371,7 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 		}
 
 		if !isFunctionResponse {
-			event := session.NewEventWithContext(s.iCtx, s.iCtx.InvocationID())
+			event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
 			event.Author = "user"
 			event.LLMResponse = model.LLMResponse{
 				Content: req.Content,
@@ -331,27 +405,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	var storedSession session.Session
-	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   r.appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	})
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
-		if !r.autoCreateSession {
-			return nil, nil, err
-		}
-		createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		storedSession = createResp.Session
-	} else {
-		storedSession = getResp.Session
+		return nil, nil, err
 	}
 
 	// msg is nil for Live run as it's streaming
@@ -406,7 +462,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			return nil, nil, err
 		}
 		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEventWithContext(iCtx, iCtx.InvocationID())
+			earlyExitEvent := session.NewEvent(iCtx, iCtx.InvocationID())
 			earlyExitEvent.Author = agentToRun.Name()
 			earlyExitEvent.LLMResponse = model.LLMResponse{
 				Content: earlyExitResult,
@@ -441,6 +497,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					return
 				}
 				continue
+			}
+
+			if event != nil && !event.LLMResponse.Partial {
+				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+					clone := *event
+					clone.Output = nil
+					event = &clone
+				}
 			}
 
 			if r.pluginManager != nil {
@@ -530,26 +594,22 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}, wrappedIter, nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.Context, *session.Event, error) {
 	if msg == nil {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
 		if err != nil {
-			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
+			return ctx, nil, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
 			msg = modifiedMsg
-			// update ctx user message
-			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Artifacts:    ctx.Artifacts(),
-				Memory:       ctx.Memory(),
-				Session:      ctx.Session(),
-				Agent:        ctx.Agent(),
-				UserContent:  msg,
-				RunConfig:    ctx.RunConfig(),
-				InvocationID: ctx.InvocationID(),
+
+			ctx = ctx.WithDelta(&agent.CommonContextDelta{
+				InvocationContextDelta: &agent.InvocationContextDelta{
+					UserContent: &msg,
+				},
 			})
 		}
 	}
@@ -562,7 +622,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return ctx, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return ctx, nil, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -571,7 +631,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 		}
 	}
 
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
@@ -580,11 +640,49 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	if stateDelta != nil {
 		event.Actions.StateDelta = stateDelta
 	}
+	if event.IsolationScope == "" {
+		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
+			event.IsolationScope = iso
+		}
+	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return ctx, fmt.Errorf("failed to append event to sessionService: %w", err)
+		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return ctx, nil
+	return ctx, event, nil
+}
+
+// findActiveTaskIsolationScope returns the most recent isolation_scope that has
+// not yet been closed by a successful finish_task FunctionResponse.
+func findActiveTaskIsolationScope(sess session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	events := sess.Events()
+	finished := map[string]struct{}{}
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil || ev.IsolationScope == "" {
+			continue
+		}
+		scope := ev.IsolationScope
+		for _, fr := range utils.FunctionResponses(ev.Content) {
+			if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
+				continue
+			}
+			if result, ok := fr.Response["result"]; ok {
+				if s, ok := result.(string); ok && s == workflowinternal.FinishTaskSuccessResult {
+					finished[scope] = struct{}{}
+				}
+			}
+			break
+		}
+		if _, done := finished[scope]; done {
+			continue
+		}
+		return scope
+	}
+	return ""
 }
 
 // findAgentToRun returns the agent that should handle the next request based on

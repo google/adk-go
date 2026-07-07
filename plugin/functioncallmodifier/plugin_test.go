@@ -25,23 +25,23 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin/functioncallmodifier"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin/functioncallmodifier"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ agent.ToolContext, _ SimpleArgs) (string, error) {
+func okFunc(_ agent.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
@@ -346,6 +346,7 @@ type mockAgent struct {
 func (m *mockAgent) Name() string               { return m.name }
 func (m *mockAgent) Description() string        { return m.description }
 func (m *mockAgent) InputSchema() *genai.Schema { return m.inputSchema }
+func (m *mockAgent) SubAgents() []agent.Agent   { return nil }
 
 func createAgentTool(t *testing.T, name, desc string, schema *genai.Schema) tool.Tool {
 	t.Helper()
