@@ -185,16 +185,14 @@ type runnableTool interface {
 	Run(ctx agent.Context, args any) (result map[string]any, err error)
 }
 
-type requestProcessor interface {
-	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
-}
-
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
 func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	if rp, ok := t.runnableTool.(requestProcessor); ok {
+	if rp, ok := t.runnableTool.(interface {
+		ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
+	}); ok {
 		_, existedBefore := req.Tools[t.Name()]
 		if err := rp.ProcessRequest(ctx, req); err != nil {
 			return err
