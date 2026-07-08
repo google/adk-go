@@ -485,6 +485,59 @@ func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID
 	return resp.Session
 }
 
+// TestNewInMemory verifies the convenience constructor wires all three
+// in-memory services, enables session auto-creation, and runs end to end
+// without any manual service or session setup.
+func TestNewInMemory(t *testing.T) {
+	t.Parallel()
+
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+
+	r, err := NewInMemory(appName, testAgent)
+	if err != nil {
+		t.Fatalf("NewInMemory() error = %v", err)
+	}
+
+	if r.sessionService == nil {
+		t.Error("NewInMemory() sessionService = nil, want in-memory service")
+	}
+	if r.artifactService == nil {
+		t.Error("NewInMemory() artifactService = nil, want in-memory service")
+	}
+	if r.memoryService == nil {
+		t.Error("NewInMemory() memoryService = nil, want in-memory service")
+	}
+	if !r.autoCreateSession {
+		t.Error("NewInMemory() autoCreateSession = false, want true")
+	}
+
+	// A run must succeed without pre-creating the session (auto-create on).
+	ctx := t.Context()
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() error = %v", err)
+		}
+	}
+
+	if _, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Errorf("expected auto-created session to exist, got error: %v", err)
+	}
+}
+
 func TestRunner_AutoCreateSession(t *testing.T) {
 	t.Parallel()
 
