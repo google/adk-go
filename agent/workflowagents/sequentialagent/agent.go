@@ -78,6 +78,9 @@ type sequentialAgent struct{}
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range ctx.Agent().SubAgents() {
+			if ctx.Ended() {
+				return
+			}
 			for event, err := range subAgent.Run(ctx) {
 				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
 				if !yield(event, err) {
@@ -166,6 +169,9 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
+			if ctx.Ended() {
+				return
+			}
 			liveAgent, ok := subAgent.(interface {
 				RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 			})

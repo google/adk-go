@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
@@ -368,7 +369,7 @@ type invocationContext struct {
 	isolationScope string
 	userContent    *genai.Content
 	runConfig      *RunConfig
-	endInvocation  bool
+	endInvocation  *atomic.Bool
 }
 
 // Apply implements [InvocationContext].
@@ -432,10 +433,16 @@ func (c *invocationContext) RunConfig() *RunConfig {
 }
 
 func (c *invocationContext) EndInvocation() {
-	c.endInvocation = true
+	if c.endInvocation != nil {
+		c.endInvocation.Store(true)
+	}
 }
 
 func (c *invocationContext) Ended() bool {
+	return c.endInvocation != nil && c.endInvocation.Load()
+}
+
+func (c *invocationContext) EndInvocationPtr() *atomic.Bool {
 	return c.endInvocation
 }
 
