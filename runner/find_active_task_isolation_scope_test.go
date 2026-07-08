@@ -15,7 +15,6 @@
 package runner
 
 import (
-	"context"
 	"testing"
 
 	"google.golang.org/genai"
@@ -169,7 +168,7 @@ func TestFindActiveTaskIsolationScope_NilSession(t *testing.T) {
 // each event in order, preserving IsolationScope.
 func buildSessionWithEvents(t *testing.T, events []*session.Event) session.Session {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	svc := session.InMemoryService()
 	resp, err := svc.Create(ctx, &session.CreateRequest{
 		AppName: "test-app",

@@ -170,7 +170,7 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 }
 
 func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName := "testApp"
 	userID := "testUser"
 	sessionID := "testSession"
@@ -294,7 +294,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 // TestRunner_PluginModifiesUserMessage guards that a plugin modifying the
 // user message still yields a full run context.
 func TestRunner_PluginModifiesUserMessage(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName := "testApp"
 	userID := "testUser"
 	sessionID := "testSession"

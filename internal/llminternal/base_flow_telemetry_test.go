@@ -119,7 +119,7 @@ func TestGenerateContentTracing(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -178,7 +178,7 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -238,7 +238,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -339,7 +339,7 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	for range generateContent(ctx, modelMock, req, true) {
 	}
 
