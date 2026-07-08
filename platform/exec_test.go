@@ -38,7 +38,7 @@ func TestRunTasksDefaultRunsAllTasks(t *testing.T) {
 			mu.Unlock()
 		}
 	}
-	platform.RunTasks(context.Background(), tasks)
+	platform.RunTasks(t.Context(), tasks)
 
 	if got := count.Load(); got != n {
 		t.Fatalf("ran %d tasks, want %d", got, n)
@@ -52,8 +52,8 @@ func TestRunTasksDefaultRunsAllTasks(t *testing.T) {
 
 func TestRunTasksEmptyIsNoOp(t *testing.T) {
 	// Neither a nil nor an empty slice should block or panic.
-	platform.RunTasks(context.Background(), nil)
-	platform.RunTasks(context.Background(), []func(context.Context){})
+	platform.RunTasks(t.Context(), nil)
+	platform.RunTasks(t.Context(), []func(context.Context){})
 }
 
 func TestWithTaskRunnerIsUsed(t *testing.T) {
@@ -72,7 +72,7 @@ func TestWithTaskRunnerIsUsed(t *testing.T) {
 		}
 	}
 
-	ctx := platform.WithTaskRunner(context.Background(), seq)
+	ctx := platform.WithTaskRunner(t.Context(), seq)
 	tasks := make([]func(context.Context), n)
 	for i := range tasks {
 		tasks[i] = func(context.Context) {
@@ -93,7 +93,7 @@ func TestWithTaskRunnerIsUsed(t *testing.T) {
 
 func TestWithTaskRunnerNilFallsBack(t *testing.T) {
 	var count atomic.Int64
-	ctx := platform.WithTaskRunner(context.Background(), nil)
+	ctx := platform.WithTaskRunner(t.Context(), nil)
 	tasks := []func(context.Context){
 		func(context.Context) { count.Add(1) },
 		func(context.Context) { count.Add(1) },
@@ -113,7 +113,7 @@ func TestRunTasksDefaultPassesContext(t *testing.T) {
 	// a context derived from (carrying the values of) the parent ctx.
 	const n = 8
 	const want = "sentinel-value"
-	parent := context.WithValue(context.Background(), sentinelKey{}, want)
+	parent := context.WithValue(t.Context(), sentinelKey{}, want)
 
 	var mu sync.Mutex
 	got := make([]any, n)
@@ -148,7 +148,7 @@ func TestWithTaskRunnerReceivesPerTaskContext(t *testing.T) {
 		}
 	}
 
-	ctx := platform.WithTaskRunner(context.Background(), perTask)
+	ctx := platform.WithTaskRunner(t.Context(), perTask)
 	got := make([]any, n)
 	tasks := make([]func(context.Context), n)
 	for i := range tasks {

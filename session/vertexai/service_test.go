@@ -158,6 +158,8 @@ func deleteAll(t *testing.T, v session.Service) {
 }
 
 func deleteAllFromApp(t *testing.T, v session.Service, app string) {
+	// Not t.Context(): this runs from t.Cleanup, where t.Context() is already
+	// canceled, which would fail the List/Delete calls below.
 	cleanupCtx := context.Background()
 	sessionsResp, err := v.List(cleanupCtx, &session.ListRequest{
 		AppName: app,

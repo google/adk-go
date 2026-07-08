@@ -46,7 +46,7 @@ func TestNewLLMSingleMatch(t *testing.T) {
 		return &stubLLM{name: name}, nil
 	})
 
-	llm, err := NewLLM(context.Background(), "registry-test-single-001")
+	llm, err := NewLLM(t.Context(), "registry-test-single-001")
 	if err != nil {
 		t.Fatalf("NewLLM returned unexpected error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestRegisterDuplicatePatternPanics(t *testing.T) {
 func TestNewLLMNoMatch(t *testing.T) {
 	// A name that no registered pattern can match.
 	const name = "registry-test-no-such-provider-xyzzy-0000"
-	_, err := NewLLM(context.Background(), name)
+	_, err := NewLLM(t.Context(), name)
 	if err == nil {
 		t.Fatalf("NewLLM(%q) returned nil error, want no-match error", name)
 	}
@@ -103,7 +103,7 @@ func TestNewLLMMultipleMatchesError(t *testing.T) {
 		return &stubLLM{name: "specific"}, nil
 	})
 
-	llm, err := NewLLM(context.Background(), name)
+	llm, err := NewLLM(t.Context(), name)
 	if err == nil {
 		t.Fatalf("NewLLM(%q) returned %v, want ambiguous-match error", name, llm)
 	}
@@ -136,7 +136,7 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 		// scheduling; either outcome is fine, we only care about race safety.
 		go func() {
 			defer wg.Done()
-			_, _ = NewLLM(context.Background(), "registry-test-concurrent-"+suffix+"-x")
+			_, _ = NewLLM(t.Context(), "registry-test-concurrent-"+suffix+"-x")
 		}()
 	}
 
