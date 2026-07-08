@@ -539,7 +539,7 @@ func TestLogResponse(t *testing.T) {
 }
 
 func TestSpanIDPropagation(t *testing.T) {
-	ctx, span := otel.Tracer("test").Start(context.Background(), "test")
+	ctx, span := otel.Tracer("test").Start(t.Context(), "test")
 	defer span.End()
 
 	exporter := setup(t, false)

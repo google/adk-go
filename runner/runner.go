@@ -121,6 +121,22 @@ func New(cfg Config) (*Runner, error) {
 	}, nil
 }
 
+// NewInMemory creates a [Runner] backed entirely by in-memory session,
+// artifact, and memory services, with session auto-creation enabled. It mirrors
+// adk-python's InMemoryRunner and is intended for local development and tests,
+// not production. Use [New] when you need to supply your own services or
+// plugins.
+func NewInMemory(appName string, a agent.Agent) (*Runner, error) {
+	return New(Config{
+		AppName:           appName,
+		Agent:             a,
+		SessionService:    session.InMemoryService(),
+		ArtifactService:   artifact.InMemoryService(),
+		MemoryService:     memory.InMemoryService(),
+		AutoCreateSession: true,
+	})
+}
+
 // Runner manages the execution of the agent within a session, handling message
 // processing, event generation, and interaction with various services like
 // artifact storage, session management, and memory.

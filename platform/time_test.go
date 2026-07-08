@@ -24,7 +24,7 @@ import (
 
 func TestNowDefaultUsesWallClock(t *testing.T) {
 	before := time.Now()
-	got := platform.Now(context.Background())
+	got := platform.Now(t.Context())
 	after := time.Now()
 
 	if got.Before(before) || got.After(after) {
@@ -46,7 +46,7 @@ func TestNowNilContext(t *testing.T) {
 
 func TestWithTimeProviderOverridesNow(t *testing.T) {
 	fixed := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixed })
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixed })
 
 	if got := platform.Now(ctx); !got.Equal(fixed) {
 		t.Errorf("Now() = %v, want %v", got, fixed)
@@ -55,7 +55,7 @@ func TestWithTimeProviderOverridesNow(t *testing.T) {
 
 func TestWithTimeProviderDerivedContext(t *testing.T) {
 	fixed := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixed })
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixed })
 
 	// TODO(kdroste): refactor underlying context
 	// A context derived from the provider context must keep the provider.
@@ -68,7 +68,7 @@ func TestWithTimeProviderDerivedContext(t *testing.T) {
 }
 
 func TestWithTimeProviderNilFallsBack(t *testing.T) {
-	ctx := platform.WithTimeProvider(context.Background(), nil)
+	ctx := platform.WithTimeProvider(t.Context(), nil)
 
 	before := time.Now()
 	got := platform.Now(ctx)
@@ -83,7 +83,7 @@ func TestWithTimeProviderNestedOverride(t *testing.T) {
 	outer := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
 	inner := time.Date(2025, time.June, 7, 8, 9, 10, 0, time.UTC)
 
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return outer })
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return outer })
 	ctx = platform.WithTimeProvider(ctx, func() time.Time { return inner })
 
 	if got := platform.Now(ctx); !got.Equal(inner) {
@@ -93,7 +93,7 @@ func TestWithTimeProviderNestedOverride(t *testing.T) {
 
 func TestWithTimeProviderIsCalledEachTime(t *testing.T) {
 	var calls int
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time {
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time {
 		calls++
 		return time.Unix(int64(calls), 0).UTC()
 	})
