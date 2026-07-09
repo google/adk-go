@@ -871,7 +871,7 @@ func TestAgentNode_EndInvocationPropagated(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session"}
-	
+
 	wrappedCtx := &endInvContext{
 		Context: agent.NewContext(mockCtx),
 		ptr:     ptr,

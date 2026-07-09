@@ -15,7 +15,6 @@
 package llminternal_test
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -73,7 +72,7 @@ func newMockLlmAgent() (agent.Agent, []tool.Tool, error) {
 
 func createInvocationContext(t *testing.T, agnt agent.Agent, sess session.Session) agent.InvocationContext {
 	t.Helper()
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Agent:   agnt,
 		Session: sess,
 	})

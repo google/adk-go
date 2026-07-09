@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -195,7 +194,7 @@ And another optional artifact:
 				}
 			}
 			// Create invocation context
-			ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				Artifacts: artifacts,
 				Session:   createResp.Session,
 			})

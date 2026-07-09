@@ -183,3 +183,54 @@ func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 	// If it doesn't hang, the test passes (meaning no deadlock)
 	t.Log("AppendEvent did not deadlock")
 }
+
+func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:k1": "v1",
+				"sk":      "v2",
+			},
+		},
+	}
+
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// Verify that the input event pointer's StateDelta map was not mutated in place.
+	if _, exists := event.Actions.StateDelta["temp:k1"]; !exists {
+		t.Errorf("expected temp:k1 to be preserved on input event after AppendEvent, but it was removed: %v", event.Actions.StateDelta)
+	}
+	if event.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk to remain in input event, got: %v", event.Actions.StateDelta)
+	}
+
+	// Verify that the stored event in the session has temp keys stripped.
+	var storedEvent *session.Event
+	for ev := range createResp.Session.Events().All() {
+		storedEvent = ev
+	}
+	if storedEvent == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if _, exists := storedEvent.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("expected temp:k1 to be stripped from stored event, but it still exists: %v", storedEvent.Actions.StateDelta)
+	}
+	if storedEvent.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}

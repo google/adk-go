@@ -158,6 +158,8 @@ func deleteAll(t *testing.T, v session.Service) {
 }
 
 func deleteAllFromApp(t *testing.T, v session.Service, app string) {
+	// Not t.Context(): this runs from t.Cleanup, where t.Context() is already
+	// canceled, which would fail the List/Delete calls below.
 	cleanupCtx := context.Background()
 	sessionsResp, err := v.List(cleanupCtx, &session.ListRequest{
 		AppName: app,
@@ -223,4 +225,31 @@ func sanitizeFilename(name string) string {
 	safe = strings.ReplaceAll(safe, ",", "_")
 	safe = strings.ReplaceAll(safe, "/", "-")
 	return safe + ".replay"
+}
+
+func Test_trimTempDeltaState_PreservesInputEvent(t *testing.T) {
+	event := &session.Event{
+		ID: "event1",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:k1": "v1",
+				"sk":      "v2",
+			},
+		},
+	}
+
+	trimmed := trimTempDeltaState(event)
+
+	if trimmed == event {
+		t.Errorf("expected trimTempDeltaState to return a new event copy when stripping temp keys, got original pointer")
+	}
+	if _, exists := event.Actions.StateDelta["temp:k1"]; !exists {
+		t.Errorf("expected temp:k1 to be preserved on input event, but it was removed: %v", event.Actions.StateDelta)
+	}
+	if _, exists := trimmed.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("expected temp:k1 to be stripped from trimmed event copy, but it still exists: %v", trimmed.Actions.StateDelta)
+	}
+	if trimmed.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk on trimmed event, got: %v", trimmed.Actions.StateDelta)
+	}
 }
