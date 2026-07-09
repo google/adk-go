@@ -266,25 +266,14 @@ func (in *clientInit) result() (*Client, error) {
 	return in.client, nil
 }
 
-var _ auth.CredentialProvider = (*provider)(nil)
+var (
+	_ auth.CredentialProvider = (*provider)(nil)
+	_ auth.RefreshingProvider = (*provider)(nil)
+)
 
 // Credential implements [auth.CredentialProvider].
 func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
-	id, ok := agent.IdentityFromContext(ctx)
-	if !ok {
-		return nil, fmt.Errorf("%w: no ADK invocation identity on the context — not an agent invocation, or its session is unset", ErrNoActingUser)
-	}
-	if id.UserID == "" {
-		// No ids in the message: this text is fed to the model and persisted in
-		// the session, and every id here comes off the request.
-		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
-	}
-
-	// Before the cache read, because the Client is part of the cache key and a
-	// provider that has not built one yet has no slot, so nothing can be cached
-	// under it. Costs one mutex on the hot path; the client is built at most
-	// once.
-	client, err := p.resolveClient(ctx)
+	client, key, err := p.resolve(ctx)
 	if err != nil {
 		// Deliberately not qualified by resource: a client-init failure is about
 		// this process's own credentials, not about the resource, and every
@@ -294,8 +283,6 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		// provider to do it for them.
 		return nil, err
 	}
-
-	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}
 	// A store read error is non-fatal: fall through and fetch a fresh credential.
 	// A hit carrying no credential is a miss, though the interface forbids one:
 	// a third-party store is not worth failing closed over, and returning a nil
@@ -303,18 +290,85 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
 		return cred, nil
 	}
+	return p.fetch(ctx, client, key, "")
+}
 
+// Refresh implements [auth.RefreshingProvider]. The cached credential has just
+// been rejected downstream, so this deliberately does not read the cache: it
+// asks the service for a replacement and overwrites the entry.
+//
+// The rejected token itself is the ask. Both services take it as
+// forceRefreshToken and mint a new credential rather than returning the same
+// one — or start a fresh consent flow, which surfaces as an
+// [auth.ConsentRequiredError] exactly as it would on a cold resolve. Sending it
+// is best-effort: a credential this package cannot read a token out of refreshes
+// without the hint, which at worst gets the same credential back.
+func (p *provider) Refresh(ctx context.Context) (auth.Credential, error) {
+	client, key, err := p.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var prior string
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
+		prior = credentialToken(cred)
+	}
+	return p.fetch(ctx, client, key, prior)
+}
+
+// resolve names the acting user's cache entry and the client that will fill it.
+//
+// The client is resolved before the cache is read, because the Client is part of
+// the cache key and a provider that has not built one yet has no slot, so
+// nothing can be cached under it. Costs one mutex on the hot path; the client is
+// built at most once.
+func (p *provider) resolve(ctx context.Context) (*Client, auth.CredentialKey, error) {
+	id, ok := agent.IdentityFromContext(ctx)
+	if !ok {
+		return nil, auth.CredentialKey{}, fmt.Errorf("%w: no ADK invocation identity on the context — not an agent invocation, or its session is unset", ErrNoActingUser)
+	}
+	if id.UserID == "" {
+		// No ids in the message: this text is fed to the model and persisted in
+		// the session, and every id here comes off the request.
+		return nil, auth.CredentialKey{}, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
+	}
+	client, err := p.resolveClient(ctx)
+	if err != nil {
+		// Not attributed: a client-init failure is about this process's own
+		// credentials, not about the resource, and every provider in the process
+		// fails it identically. Attributing it would also stack the package prefix.
+		return nil, auth.CredentialKey{}, err
+	}
+	return client, auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}, nil
+}
+
+// fetch retrieves a credential from the service and caches it. priorToken, when
+// set, asks for a replacement for a credential that was just rejected.
+func (p *provider) fetch(ctx context.Context, client *Client, key auth.CredentialKey, priorToken string) (auth.Credential, error) {
 	r, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
-		UserID:      id.UserID,
+		UserID:      key.UserID,
 		Scopes:      p.scheme.Scopes,
 		ContinueURI: p.scheme.ContinueURI,
+		PriorToken:  priorToken,
 	})
 	if err != nil {
 		return nil, err
 	}
 	p.cache(ctx, key, r)
 	return r.Credential, nil
+}
+
+// credentialToken reads the token out of a resolved GCP credential, for the
+// force-refresh hint. A credential wrapped for extra headers yields "", and the
+// refresh then proceeds without the hint.
+func credentialToken(c auth.Credential) string {
+	switch v := c.(type) {
+	case auth.BearerCredential:
+		return v.Token
+	case auth.APIKeyCredential:
+		return v.Value
+	}
+	return ""
 }
 
 // cache stores r under key, best-effort: a store write failure must not fail

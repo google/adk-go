@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -474,6 +475,107 @@ func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) 
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 	return p
+}
+
+func TestProviderRefreshForcesNewToken(t *testing.T) {
+	// Both credential services mint a fresh token when the caller passes the
+	// prior (rejected) token as forceRefreshToken. Refresh must read the cached
+	// token and send it on both routes; the connector's Operation-wrapped
+	// response and Agent Identity's inline response only differ in the envelope.
+	tests := []struct {
+		name     string
+		resource string
+		endpoint func(cfg *gcp.Config, url string)
+		// success builds the service-specific success envelope carrying tok.
+		success func(tok string) string
+	}{
+		{
+			name:     "agent identity",
+			resource: "projects/p/locations/l/authProviders/ap",
+			endpoint: func(cfg *gcp.Config, url string) { cfg.AgentIdentityEndpoint = url },
+			success: func(tok string) string {
+				return fmt.Sprintf(`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
+			},
+		},
+		{
+			name:     "iam connector",
+			resource: "projects/p/locations/l/connectors/c",
+			endpoint: func(cfg *gcp.Config, url string) { cfg.ConnectorEndpoint = url },
+			success: func(tok string) string {
+				return fmt.Sprintf(`{"done":true,"response":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var lastForceRefreshToken string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					ForceRefreshToken string `json:"forceRefreshToken"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				lastForceRefreshToken = body.ForceRefreshToken
+				mu.Unlock()
+				tok := "tok1"
+				if body.ForceRefreshToken != "" {
+					tok = "tok2" // a forced refresh mints a new token
+				}
+				// Include an expiry so the credential is cached; Refresh reads the
+				// prior (cached) token from the store to send as forceRefreshToken.
+				_, _ = io.WriteString(w, tc.success(tok))
+			}))
+			defer srv.Close()
+
+			cfg := &gcp.Config{HTTPClient: srv.Client()}
+			tc.endpoint(cfg, srv.URL)
+			client, err := gcp.NewClient(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: tc.resource}, Client: client})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			rp, ok := p.(auth.RefreshingProvider)
+			if !ok {
+				t.Fatal("gcp provider does not implement auth.RefreshingProvider")
+			}
+
+			ctx := adkContext(t, "user-1")
+
+			// Prime the cache with the initial token.
+			if cred, err := p.Credential(ctx); err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok1" {
+				t.Fatalf("initial credential = %+v, want tok1", cred)
+			}
+
+			// Refresh sends the prior token and returns a new one.
+			cred, err := rp.Refresh(ctx)
+			if err != nil {
+				t.Fatalf("Refresh() error = %v", err)
+			}
+			mu.Lock()
+			got := lastForceRefreshToken
+			mu.Unlock()
+			if got != "tok1" {
+				t.Errorf("forceRefreshToken = %q, want %q (the prior token)", got, "tok1")
+			}
+			if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+				t.Errorf("refreshed credential = %+v, want tok2", cred)
+			}
+
+			// The refreshed credential replaces the cached one.
+			if cred, err := p.Credential(ctx); err != nil {
+				t.Fatalf("Credential() after refresh error = %v", err)
+			} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+				t.Errorf("cached credential after refresh = %+v, want tok2", cred)
+			}
+		})
+	}
 }
 
 // adkContext returns an ADK invocation context (recoverable via
