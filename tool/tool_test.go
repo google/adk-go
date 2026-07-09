@@ -267,7 +267,7 @@ func TestWithConfirmation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			toolRan = false
-			ctx := &testContext{Context: context.Background(), toolConfirmationResult: tt.toolConfirmation}
+			ctx := &testContext{Context: t.Context(), toolConfirmationResult: tt.toolConfirmation}
 
 			cts := tool.WithConfirmation(ts, tt.requireConfirmation, tt.provider)
 			tools, err := cts.Tools(nil)
