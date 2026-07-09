@@ -75,7 +75,12 @@ func (o connectorOperation) result(req Request) (outcome, error) {
 // Operation-wrapped response.
 func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1alpha/%s/credentials:retrieve", c.connectorURL, req.Resource)
-	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
+	body := retrieveRequest{
+		UserID:            req.UserID,
+		Scopes:            req.Scopes,
+		ContinueURI:       req.ContinueURI,
+		ForceRefreshToken: req.PriorToken,
+	}
 
 	var op connectorOperation
 	if err := c.doPost(ctx, url, body, &op, req.UserID, req.ContinueURI); err != nil {
