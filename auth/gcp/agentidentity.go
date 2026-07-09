@@ -22,9 +22,10 @@ import (
 // agentIdentityRequest is the JSON body for RetrieveCredentials (the auth
 // provider is bound to the URL path, not the body).
 type agentIdentityRequest struct {
-	UserID      string   `json:"userId,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	ContinueURI string   `json:"continueUri,omitempty"`
+	UserID            string   `json:"userId,omitempty"`
+	Scopes            []string `json:"scopes,omitempty"`
+	ContinueURI       string   `json:"continueUri,omitempty"`
+	ForceRefreshToken string   `json:"forceRefreshToken,omitempty"`
 }
 
 // agentIdentityResponse mirrors the RetrieveCredentialsResponse "result" oneof.
@@ -62,7 +63,12 @@ func (r agentIdentityResponse) result(resource string) (outcome, error) {
 // returned synchronously (no long-running-operation wrapper).
 func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1/%s/credentials:retrieve", c.agentIdentityURL, req.Resource)
-	body := agentIdentityRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
+	body := agentIdentityRequest{
+		UserID:            req.UserID,
+		Scopes:            req.Scopes,
+		ContinueURI:       req.ContinueURI,
+		ForceRefreshToken: req.PriorToken,
+	}
 
 	var out agentIdentityResponse
 	if err := c.doPost(ctx, url, body, &out); err != nil {

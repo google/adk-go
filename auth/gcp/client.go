@@ -125,6 +125,13 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// ForceRefresh asks the service to mint a fresh credential rather than return
+	// a cached one (used after a downstream rejection). Maps to the IAM Connector
+	// force_refresh flag.
+	ForceRefresh bool
+	// PriorToken is the previously issued (now rejected) token. The Agent
+	// Identity service uses it (force_refresh_token) to force a new one.
+	PriorToken string
 }
 
 // RetrieveCredential retrieves a credential for req, polling while the service
