@@ -91,8 +91,9 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		baseURL = customClientBaseURL()
 	}
 
-	// x-goog-user-project: quota project (env or ADC) if set, else ProjectID
-	// (matches adk-python). Resolved even for a caller-supplied client.
+	// x-goog-user-project quota header, adk-python precedence on the ADC path:
+	// GOOGLE_CLOUD_QUOTA_PROJECT, then creds' quota_project_id, then ProjectID.
+	// A caller-supplied client has no ADC creds, so only env var / ProjectID apply.
 	quotaProject := cfg.ProjectID
 	if qp := quotaProjectID(creds); qp != "" {
 		quotaProject = qp
