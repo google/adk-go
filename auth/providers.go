@@ -46,6 +46,19 @@ type CredentialProvider interface {
 	Credential(ctx context.Context) (Credential, error)
 }
 
+// RefreshingProvider is an optional [CredentialProvider] capability. After a
+// credential is rejected downstream (HTTP 401/403), [Transport] calls Refresh to
+// obtain a fresh credential — bypassing and replacing any cache — and retries
+// the request once. Providers without a cache, or that self-refresh (e.g. an
+// oauth2.TokenSource), need not implement it.
+type RefreshingProvider interface {
+	CredentialProvider
+
+	// Refresh resolves a fresh credential, discarding any cached value for the
+	// current invocation and forcing the underlying source to mint a new one.
+	Refresh(ctx context.Context) (Credential, error)
+}
+
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].
 type ProviderFunc func(ctx context.Context) (Credential, error)
 

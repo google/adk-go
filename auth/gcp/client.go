@@ -363,6 +363,10 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// PriorToken is the previously issued (now rejected) token. Both services
+	// take it as force_refresh_token to mint a fresh credential after a
+	// downstream rejection; empty on a normal fetch.
+	PriorToken string
 }
 
 // Retrieval is the result of [Client.RetrieveCredential].
@@ -562,6 +566,13 @@ type retrieveRequest struct {
 	UserID      string   `json:"userId,omitempty"`
 	Scopes      []string `json:"scopes,omitempty"`
 	ContinueURI string   `json:"continueUri,omitempty"`
+	// ForceRefreshToken carries the token that was just rejected, which asks the
+	// service to mint a replacement rather than return the same one. Both services
+	// take it under this name
+	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+	// RetrieveCredentialsRequest.forceRefreshToken); the older boolean
+	// force_refresh is gone from the API.
+	ForceRefreshToken string `json:"forceRefreshToken,omitempty"`
 }
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:

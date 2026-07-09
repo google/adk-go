@@ -16,6 +16,7 @@ package auth
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -28,6 +29,10 @@ import (
 // credentials are never shared across users. Refresh and caching belong to the
 // provider: a token-source-backed one refreshes itself, and a network-backed one
 // can cache in a [CredentialStore].
+//
+// When the provider implements [RefreshingProvider] and the base response is a
+// 401/403, Transport refreshes the credential and retries once — provided the
+// request body can be replayed.
 type Transport struct {
 	// Provider resolves the credential to apply. Required.
 	Provider CredentialProvider
@@ -65,14 +70,86 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("auth: provider returned nil credential")
 	}
 
-	// Clone before mutating: RoundTrip must not modify the caller's request.
-	req2 := req.Clone(req.Context())
-	if err := cred.Apply(req2.Header); err != nil {
-		return nil, fmt.Errorf("auth: apply credential: %w", err)
+	// From here the body is handed to the base RoundTripper (directly, or as a
+	// replay), which owns closing it.
+	reqBodyClosed = true
+
+	resp, err := applyAndSend(base, req, req.Body, cred)
+	if err != nil {
+		return resp, err
 	}
 
-	reqBodyClosed = true // base RoundTripper now owns closing the body.
-	return base.RoundTrip(req2)
+	// One refresh-and-retry on a downstream auth rejection, when the provider
+	// supports refresh and the request body can be replayed.
+	if !isAuthRejected(resp.StatusCode) {
+		return resp, nil
+	}
+	rp, ok := t.Provider.(RefreshingProvider)
+	if !ok {
+		return resp, nil
+	}
+	body, ok := replayBody(req)
+	if !ok {
+		return resp, nil
+	}
+	fresh, err := rp.Refresh(req.Context())
+	if err != nil || fresh == nil {
+		// Refresh failed (or returned no credential): release the replay body we
+		// opened and surface the original rejection rather than retry/panic.
+		_ = body.Close()
+		return resp, nil
+	}
+	drain(resp)
+	return applyAndSend(base, req, body, fresh)
+}
+
+// applyAndSend sends a clone of req (with the given body) after applying cred,
+// leaving the caller's request untouched. It closes body on an apply error,
+// otherwise the base RoundTripper owns it.
+func applyAndSend(base http.RoundTripper, req *http.Request, body io.ReadCloser, cred Credential) (*http.Response, error) {
+	out := req.Clone(req.Context())
+	out.Body = body
+	if err := cred.Apply(out.Header); err != nil {
+		if body != nil {
+			_ = body.Close()
+		}
+		return nil, fmt.Errorf("auth: apply credential: %w", err)
+	}
+	return base.RoundTrip(out)
+}
+
+func isAuthRejected(code int) bool {
+	return code == http.StatusUnauthorized || code == http.StatusForbidden
+}
+
+// replayBody returns a fresh copy of req's body for a retry. It reports false
+// when the body exists but cannot be replayed (no GetBody).
+func replayBody(req *http.Request) (io.ReadCloser, bool) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return http.NoBody, true
+	}
+	if req.GetBody == nil {
+		return nil, false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+// maxDrainBytes caps the pre-retry drain of a discarded response body.
+const maxDrainBytes = 4 << 10
+
+// drain reads and closes resp.Body so the connection can be reused before the
+// retry. The read is capped: an auth-rejection body is small, and a pathological
+// oversized one simply isn't drained (and so isn't reused) rather than read whole.
+func drain(resp *http.Response) {
+	if resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+	_ = resp.Body.Close()
 }
 
 var _ http.RoundTripper = (*Transport)(nil)
