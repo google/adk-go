@@ -102,10 +102,10 @@ func (c *Client) AllEndpoints(ctx context.Context, opts ...ListOption) iter.Seq2
 	})
 }
 
-// ModelName resolves an endpoint into a model resource name (e.g.
+// GetModelName resolves an endpoint into a model resource name (e.g.
 // "projects/<p>/locations/<l>/publishers/google/models/<model>"). endpointName
 // is the full endpoint resource name.
-func (c *Client) ModelName(ctx context.Context, endpointName string) (string, error) {
+func (c *Client) GetModelName(ctx context.Context, endpointName string) (string, error) {
 	endpoint, err := c.GetEndpoint(ctx, endpointName)
 	if err != nil {
 		return "", err

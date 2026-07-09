@@ -280,6 +280,32 @@ func TestClientAll(t *testing.T) {
 			wantRequests: 1,
 		},
 		{
+			// The paginator must forward opts (filter) on *every* page, not just
+			// the first. The handler 500s any request missing the filter, so if
+			// the token page dropped it, page 2 would error instead of yielding a2.
+			name: "filter is forwarded on every page",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("filter") != "type=A2A" {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"missing filter"}`))
+					return
+				}
+				switch r.URL.Query().Get("pageToken") {
+				case "":
+					_, _ = w.Write([]byte(`{"agents":[{"displayName":"a1"}],"nextPageToken":"tok2"}`))
+				case "tok2":
+					_, _ = w.Write([]byte(`{"agents":[{"displayName":"a2"}]}`))
+				default:
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			},
+			all: func(ctx context.Context, c *Client) iter.Seq2[string, error] {
+				return nameSeq(c.AllAgents(ctx, WithFilter("type=A2A")), func(a *Agent) string { return a.DisplayName })
+			},
+			wantNames:    []string{"a1", "a2"},
+			wantRequests: 2,
+		},
+		{
 			name: "mcpServers single page",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`{"mcpServers":[{"displayName":"one"},{"displayName":"two"}]}`))
@@ -338,7 +364,7 @@ func TestClientAll(t *testing.T) {
 	}
 }
 
-func TestModelName(t *testing.T) {
+func TestGetModelName(t *testing.T) {
 	tests := []struct {
 		name      string
 		respBody  string
@@ -373,18 +399,18 @@ func TestModelName(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := newTestClient(srv).ModelName(context.Background(), "projects/p/locations/l/endpoints/gemini")
+			got, err := newTestClient(srv).GetModelName(context.Background(), "projects/p/locations/l/endpoints/gemini")
 			if tc.wantErr {
 				if err == nil {
-					t.Errorf("ModelName() error = nil, want an error")
+					t.Errorf("GetModelName() error = nil, want an error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ModelName() error = %v", err)
+				t.Fatalf("GetModelName() error = %v", err)
 			}
 			if got != tc.wantModel {
-				t.Errorf("ModelName() = %q, want %q", got, tc.wantModel)
+				t.Errorf("GetModelName() = %q, want %q", got, tc.wantModel)
 			}
 		})
 	}
