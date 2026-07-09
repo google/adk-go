@@ -178,19 +178,7 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 	failedAttempts := 0
 
 	for {
-		var workerOutputs []any
-		var runErr error
-
-		for ev, err := range n.wrapped.Run(ctx, item) {
-			if err != nil {
-				runErr = err
-				break
-			}
-
-			if out, ok := extractOutput(ev); ok {
-				workerOutputs = append(workerOutputs, out)
-			}
-		}
+		workerOutputs, runErr := n.runWrappedOnce(ctx, item)
 
 		if runErr == nil {
 			// On success populate the output event.
@@ -216,6 +204,29 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 		resCh <- workerResult{index: idx, err: runErr}
 		return
 	}
+}
+
+// runWrappedOnce runs the wrapped node once for item under its own
+// invoke_node span, so each item and each retry attempt is a distinct
+// span. Kept a separate function so the deferred span.end() fires per
+// attempt instead of piling up across runWorker's retry loop.
+func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []any, err error) {
+	span, ctx := startNodeSpan(ctx, n.wrapped)
+	defer func() {
+		span.recordError(err, nil)
+		span.end()
+	}()
+
+	for ev, runErr := range n.wrapped.Run(ctx, item) {
+		if runErr != nil {
+			err = runErr
+			break
+		}
+		if out, ok := extractOutput(ev); ok {
+			outputs = append(outputs, out)
+		}
+	}
+	return outputs, err
 }
 
 func makeWorkerOutputEvent(outputs []any) *session.Event {

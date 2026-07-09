@@ -15,14 +15,10 @@
 package workflow
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
-
-	"go.opentelemetry.io/otel/codes"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
@@ -243,33 +239,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// cache lookup so a cached (WithRunID replay) hit is still emitted
 	// as its own span. startNodeSpan returns a context carrying the span.
 	span, spanCtx := startNodeSpan(childCtx, child)
-	defer span.End()
+	defer span.end()
 	childCtx = spanCtx
 
 	// rawErr is the unwrapped child/emit error. The returned err wraps
 	// the cause with "%w: %v", dropping context.Canceled from the chain,
 	// so span status is classified on rawErr rather than err.
 	var rawErr error
-
-	// Record genuine runtime failures on the span. Pauses (HITL
-	// ErrNodeInterrupted, WaitForOutput ErrNodeWaitingForOutput) and
-	// parent cancellation (context.Canceled) are expected control
-	// flow, not span errors — matching the top scheduler's runNode.
-	defer func() {
-		if err == nil {
-			return
-		}
-		classify := err
-		if rawErr != nil {
-			classify = rawErr
-		}
-		if !errors.Is(classify, context.Canceled) &&
-			!errors.Is(classify, ErrNodeInterrupted) &&
-			!errors.Is(classify, ErrNodeWaitingForOutput) {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-	}()
+	defer func() { span.recordError(err, rawErr) }()
 
 	// Cached (WithRunID replay): the child already ran, so publish its
 	// output for the delegation immediately. The span opened above still
