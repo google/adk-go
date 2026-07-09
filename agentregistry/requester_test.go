@@ -78,7 +78,7 @@ func TestRestRequester_Get_AbsoluteResourcePath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var got McpServer
+	var got MCPServer
 	name := "projects/p/locations/l/mcpServers/bar"
 	if err := newTestRequester(srv).Get(context.Background(), name, nil, &got); err != nil {
 		t.Fatalf("Get() error = %v", err)

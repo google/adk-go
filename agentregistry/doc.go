@@ -20,5 +20,5 @@
 // authenticated REST transport to the third-party (public) endpoint using
 // Application Default Credentials with mTLS endpoint selection, typed errors
 // ([APIError]), and the wire types returned by the service. Discovery methods
-// and the RemoteAgent/McpToolset factory helpers build on this foundation.
+// and the RemoteAgent/MCPToolset factory helpers build on this foundation.
 package agentregistry

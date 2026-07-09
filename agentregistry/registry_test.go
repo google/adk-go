@@ -17,9 +17,13 @@ package agentregistry
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
+	"google.golang.org/api/option/internaloption"
+	htransport "google.golang.org/api/transport"
 )
 
 func TestNew_Validation(t *testing.T) {
@@ -82,6 +86,39 @@ func TestNew_WiresRestRequester(t *testing.T) {
 			}
 			if rt.userProject != tc.wantUserProject {
 				t.Errorf("userProject = %q, want %q", rt.userProject, tc.wantUserProject)
+			}
+		})
+	}
+}
+
+// New's ADC path relies on htransport.NewHTTPClient returning the default
+// endpoint verbatim, "/v1" included (restRequester joins baseURL+"/"+path).
+// That branch needs credentials, so exercise the transport directly.
+func TestNewHTTPClientEndpointKeepsVersionPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		mtlsEnv string
+		want    string
+	}{
+		{name: "standard endpoint", mtlsEnv: "", want: baseURLProd},
+		{name: "mTLS endpoint", mtlsEnv: "always", want: baseURLMTLS},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", tc.mtlsEnv)
+			_, endpoint, err := htransport.NewHTTPClient(context.Background(),
+				option.WithoutAuthentication(),
+				internaloption.WithDefaultEndpoint(baseURLProd),
+				internaloption.WithDefaultMTLSEndpoint(baseURLMTLS),
+			)
+			if err != nil {
+				t.Fatalf("NewHTTPClient() error = %v", err)
+			}
+			if endpoint != tc.want {
+				t.Errorf("endpoint = %q, want %q", endpoint, tc.want)
+			}
+			if !strings.HasSuffix(endpoint, "/v1") {
+				t.Errorf("endpoint = %q, want %q suffix (version path must not be stripped)", endpoint, "/v1")
 			}
 		})
 	}

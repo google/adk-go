@@ -61,10 +61,10 @@ type Agent struct {
 	Card        *Card      `json:"card,omitempty"`
 }
 
-// McpServer is a registered MCP server.
-type McpServer struct {
+// MCPServer is a registered MCP server.
+type MCPServer struct {
 	Name        string      `json:"name,omitempty"`
-	McpServerID string      `json:"mcpServerId,omitempty"`
+	MCPServerID string      `json:"mcpServerId,omitempty"`
 	DisplayName string      `json:"displayName,omitempty"`
 	Description string      `json:"description,omitempty"`
 	Protocols   []Protocol  `json:"protocols,omitempty"`
@@ -89,9 +89,9 @@ type ListAgentsResponse struct {
 	NextPageToken string  `json:"nextPageToken,omitempty"`
 }
 
-// ListMcpServersResponse is one page of a [Client.ListMcpServers] response.
-type ListMcpServersResponse struct {
-	McpServers    []McpServer `json:"mcpServers,omitempty"`
+// ListMCPServersResponse is one page of a [Client.ListMCPServers] response.
+type ListMCPServersResponse struct {
+	MCPServers    []MCPServer `json:"mcpServers,omitempty"`
 	NextPageToken string      `json:"nextPageToken,omitempty"`
 }
 
