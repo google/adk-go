@@ -157,7 +157,7 @@ func newDelegationRunner(t *testing.T, root agent.Agent) *delegationRunner {
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
-	if _, err := svc.Create(context.Background(), &session.CreateRequest{
+	if _, err := svc.Create(t.Context(), &session.CreateRequest{
 		AppName:   delegationApp,
 		UserID:    delegationUser,
 		SessionID: delegationSession,
