@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
@@ -23,11 +24,62 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// FromContext returns the ADK [ReadonlyContext] carried by ctx, if present.
+//
+// ADK contexts embed context.Context and register a read-only view of themselves
+// under a private key, so code that only holds a context.Context — for example an
+// http.RoundTripper running deep beneath a tool call, past intermediaries that
+// wrap the context — can recover the invocation's identity (UserID, AppName,
+// SessionID) without threading a typed context through every layer.
+//
+// It returns (nil, false) for a context that does not descend from an ADK
+// context (a non-agent caller).
+func FromContext(ctx context.Context) (ReadonlyContext, bool) {
+	rc, ok := ctx.Value(adkcontext.SelfKey).(ReadonlyContext)
+	return rc, ok
+}
+
+// RequireContext is like [FromContext] but returns an error instead of a boolean
+// when ctx does not descend from an ADK context. It is a convenience for callers
+// (for example credential providers) that require the invocation identity.
+func RequireContext(ctx context.Context) (ReadonlyContext, error) {
+	rc, ok := FromContext(ctx)
+	if !ok {
+		return nil, errors.New("agent: context does not belong to an ADK invocation")
+	}
+	return rc, nil
+}
+
+// readonlyView exposes only the [ReadonlyContext] surface of an ADK context, so
+// a context recovered via [FromContext] cannot be widened back to a mutable
+// Context/InvocationContext. The wrapped context is held in an unexported field
+// (not embedded), so it is reachable neither by a type assertion nor by ordinary
+// reflection — reflect.Value.Interface panics on an unexported field.
+type readonlyView struct {
+	rc ReadonlyContext
+}
+
+func (v readonlyView) Deadline() (time.Time, bool)          { return v.rc.Deadline() }
+func (v readonlyView) Done() <-chan struct{}                { return v.rc.Done() }
+func (v readonlyView) Err() error                           { return v.rc.Err() }
+func (v readonlyView) Value(key any) any                    { return v.rc.Value(key) }
+func (v readonlyView) UserContent() *genai.Content          { return v.rc.UserContent() }
+func (v readonlyView) InvocationID() string                 { return v.rc.InvocationID() }
+func (v readonlyView) AgentName() string                    { return v.rc.AgentName() }
+func (v readonlyView) ReadonlyState() session.ReadonlyState { return v.rc.ReadonlyState() }
+func (v readonlyView) UserID() string                       { return v.rc.UserID() }
+func (v readonlyView) AppName() string                      { return v.rc.AppName() }
+func (v readonlyView) SessionID() string                    { return v.rc.SessionID() }
+func (v readonlyView) Branch() string                       { return v.rc.Branch() }
+
+var _ ReadonlyContext = readonlyView{}
 
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
@@ -342,6 +394,17 @@ func (c *commonContext) SessionID() string {
 
 func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
+}
+
+// Value implements context.Context. For the ADK self key it returns a read-only
+// view of this context (so [FromContext] can recover the identity without the
+// result being widened back to a mutable context); every other key delegates to
+// the embedded context, preserving existing behavior.
+func (c *commonContext) Value(key any) any {
+	if key == adkcontext.SelfKey {
+		return readonlyView{rc: c}
+	}
+	return c.Context.Value(key)
 }
 
 var (
