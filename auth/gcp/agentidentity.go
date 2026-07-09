@@ -62,7 +62,12 @@ func (r agentIdentityResponse) result(_ Request) (outcome, error) {
 // returned synchronously (no long-running-operation wrapper).
 func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1/%s/credentials:retrieve", c.agentIdentityURL, req.Resource)
-	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
+	body := retrieveRequest{
+		UserID:            req.UserID,
+		Scopes:            req.Scopes,
+		ContinueURI:       req.ContinueURI,
+		ForceRefreshToken: req.PriorToken,
+	}
 
 	var out agentIdentityResponse
 	if err := c.doPost(ctx, url, body, &out, req.UserID, req.ContinueURI); err != nil {
