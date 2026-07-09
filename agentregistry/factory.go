@@ -46,7 +46,7 @@ func applyRemoteAgentOptions(opts []RemoteAgentOption) egressConfig {
 	return ec
 }
 
-func applyMcpToolsetOptions(opts []McpToolsetOption) egressConfig {
+func applyMCPToolsetOptions(opts []MCPToolsetOption) egressConfig {
 	var ec egressConfig
 	for _, opt := range opts {
 		opt(&ec)
@@ -57,10 +57,14 @@ func applyMcpToolsetOptions(opts []McpToolsetOption) egressConfig {
 // RemoteAgentOption customizes [Client.RemoteAgent].
 type RemoteAgentOption func(*egressConfig)
 
-// McpToolsetOption customizes [Client.McpToolset].
-type McpToolsetOption func(*egressConfig)
+// MCPToolsetOption customizes [Client.MCPToolset].
+type MCPToolsetOption func(*egressConfig)
 
 // WithA2AHTTPClient sets the HTTP client used to reach the remote A2A agent.
+// A2A egress is not auto-authenticated, so set this to authenticate requests to
+// the remote agent. The default ([http.DefaultClient]) has no timeout; bound
+// egress on the client's Transport rather than via http.Client.Timeout, which
+// is a deadline over the whole request and would truncate streaming responses.
 func WithA2AHTTPClient(c *http.Client) RemoteAgentOption {
 	return func(e *egressConfig) { e.httpClient = c }
 }
@@ -71,15 +75,18 @@ func WithA2AHeaders(h map[string]string) RemoteAgentOption {
 	return func(e *egressConfig) { e.headers = h }
 }
 
-// WithMcpHTTPClient sets the HTTP client used to reach the MCP server. It
+// WithMCPHTTPClient sets the HTTP client used to reach the MCP server. It
 // overrides the default (an Application Default Credentials client for
-// *.googleapis.com endpoints).
-func WithMcpHTTPClient(c *http.Client) McpToolsetOption {
+// *.googleapis.com endpoints, else [http.DefaultClient]). The default has no
+// timeout; bound egress on the client's Transport rather than via
+// http.Client.Timeout, which is a deadline over the whole request and would
+// truncate streaming responses.
+func WithMCPHTTPClient(c *http.Client) MCPToolsetOption {
 	return func(e *egressConfig) { e.httpClient = c }
 }
 
-// WithMcpHeaders adds static headers to every request sent to the MCP server.
-func WithMcpHeaders(h map[string]string) McpToolsetOption {
+// WithMCPHeaders adds static headers to every request sent to the MCP server.
+func WithMCPHeaders(h map[string]string) MCPToolsetOption {
 	return func(e *egressConfig) { e.headers = h }
 }
 
@@ -166,7 +173,9 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 	}
 
 	ec := applyRemoteAgentOptions(opts)
-	egress := c.egressClient(cardURL(card), ec, false)
+	// A2A egress is not auto-authenticated (parity with adk-python), so the
+	// endpoint URL is irrelevant to client selection here.
+	egress := c.egressClient("", ec, false)
 
 	return remoteagent.NewA2A(remoteagent.A2AConfig{
 		Name:           agentName,
@@ -238,6 +247,11 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, des
 		if err := json.Unmarshal(info.Card.Content, &embedded); err != nil {
 			return nil, "", "", fmt.Errorf("agentregistry: decoding embedded agent card for %q: %w", resourceName, err)
 		}
+		// Fail fast: an interface-less card would otherwise only error at the
+		// first invocation, deep in the a2a client, without the resource name.
+		if len(embedded.SupportedInterfaces) == 0 {
+			return nil, "", "", fmt.Errorf("agentregistry: embedded agent card for %q has no supported interfaces", resourceName)
+		}
 		agentName := cleanName(embedded.Name)
 		if agentName == "" {
 			agentName = cleanName(resourceName)
@@ -282,17 +296,6 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, des
 	return card, agentName, info.Description, nil
 }
 
-// cardURL returns the first supported-interface URL of a card, or "".
-func cardURL(card *a2a.AgentCard) string {
-	for _, iface := range card.SupportedInterfaces {
-		if iface != nil && iface.URL != "" {
-			return iface.URL
-		}
-	}
-	return ""
-}
-
-// toA2ASkills converts registry skills to A2A skills.
 func toA2ASkills(skills []Skill) []a2a.AgentSkill {
 	if len(skills) == 0 {
 		return nil
@@ -310,15 +313,15 @@ func toA2ASkills(skills []Skill) []a2a.AgentSkill {
 	return out
 }
 
-// McpToolset resolves a registered MCP server into a [tool.Toolset] backed by a
+// MCPToolset resolves a registered MCP server into a [tool.Toolset] backed by a
 // streamable-HTTP MCP connection. name is the full MCP server resource name.
 //
 // The endpoint is resolved preferring the JSONRPC binding, then HTTP_JSON. By
 // default, requests to *.googleapis.com endpoints are authenticated with the
-// registry's Application Default Credentials; use [WithMcpHTTPClient] and/or
-// [WithMcpHeaders] to override or augment egress.
-func (c *Client) McpToolset(ctx context.Context, name string, opts ...McpToolsetOption) (tool.Toolset, error) {
-	server, err := c.GetMcpServer(ctx, name)
+// registry's Application Default Credentials; use [WithMCPHTTPClient] and/or
+// [WithMCPHeaders] to override or augment egress.
+func (c *Client) MCPToolset(ctx context.Context, name string, opts ...MCPToolsetOption) (tool.Toolset, error) {
+	server, err := c.GetMCPServer(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +331,7 @@ func (c *Client) McpToolset(ctx context.Context, name string, opts ...McpToolset
 		return nil, fmt.Errorf("agentregistry: MCP server endpoint URI not found for %q", name)
 	}
 
-	ec := applyMcpToolsetOptions(opts)
+	ec := applyMCPToolsetOptions(opts)
 	egress := c.egressClient(uri, ec, true)
 
 	return mcptoolset.New(mcptoolset.Config{
@@ -341,7 +344,7 @@ func (c *Client) McpToolset(ctx context.Context, name string, opts ...McpToolset
 
 // mcpEndpointURI returns the MCP server's connection URI, preferring the JSONRPC
 // binding and falling back to HTTP_JSON (parity with adk-python).
-func mcpEndpointURI(server *McpServer) (string, bool) {
+func mcpEndpointURI(server *MCPServer) (string, bool) {
 	if uri, _, _, ok := connectionURI(server.Protocols, server.Interfaces, "", a2a.TransportProtocolJSONRPC); ok {
 		return uri, true
 	}

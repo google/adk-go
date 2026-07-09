@@ -134,8 +134,43 @@ func TestClientWithHeaders_AppliesAndDoesNotMutateBase(t *testing.T) {
 	}
 }
 
+func TestRemoteAgentOptions(t *testing.T) {
+	client := &http.Client{}
+	headers := map[string]string{"X": "y"}
+	ec := applyRemoteAgentOptions([]RemoteAgentOption{
+		WithA2AHTTPClient(client),
+		WithA2AHeaders(headers),
+	})
+	if ec.httpClient != client {
+		t.Errorf("httpClient = %p, want %p", ec.httpClient, client)
+	}
+	if ec.headers["X"] != "y" {
+		t.Errorf(`headers["X"] = %q, want "y"`, ec.headers["X"])
+	}
+}
+
+func TestMCPToolsetOptions(t *testing.T) {
+	client := &http.Client{}
+	headers := map[string]string{"X": "y"}
+	ec := applyMCPToolsetOptions([]MCPToolsetOption{
+		WithMCPHTTPClient(client),
+		WithMCPHeaders(headers),
+	})
+	if ec.httpClient != client {
+		t.Errorf("httpClient = %p, want %p", ec.httpClient, client)
+	}
+	if ec.headers["X"] != "y" {
+		t.Errorf(`headers["X"] = %q, want "y"`, ec.headers["X"])
+	}
+}
+
 func TestAgentCard_EmbeddedFastPath(t *testing.T) {
-	embedded := a2a.AgentCard{Name: "My Agent", Description: "embedded desc", Version: "9"}
+	embedded := a2a.AgentCard{
+		Name:                "My Agent",
+		Description:         "embedded desc",
+		Version:             "9",
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("https://a.example", a2a.TransportProtocolJSONRPC)},
+	}
 	content, err := json.Marshal(embedded)
 	if err != nil {
 		t.Fatalf("marshal embedded card: %v", err)
@@ -155,6 +190,20 @@ func TestAgentCard_EmbeddedFastPath(t *testing.T) {
 	// The embedded card itself is used verbatim (its name is not rewritten).
 	if card.Name != "My Agent" || card.Version != "9" {
 		t.Errorf("card = %+v, want the embedded card unchanged", card)
+	}
+}
+
+func TestAgentCard_EmbeddedNoInterfaces(t *testing.T) {
+	// An embedded card without supported interfaces must fail fast (with the
+	// resource name) rather than only at the first invocation.
+	content, err := json.Marshal(a2a.AgentCard{Name: "My Agent"})
+	if err != nil {
+		t.Fatalf("marshal embedded card: %v", err)
+	}
+	info := &Agent{Card: &Card{Type: "A2A_AGENT_CARD", Content: content}}
+
+	if _, _, _, err := agentCard(info, "projects/p/locations/l/agents/a"); err == nil {
+		t.Error("agentCard() error = nil, want an error for an embedded card with no supported interfaces")
 	}
 }
 
@@ -299,16 +348,16 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 	}
 }
 
-func TestMcpEndpointURI(t *testing.T) {
+func TestMCPEndpointURI(t *testing.T) {
 	tests := []struct {
 		name    string
-		server  *McpServer
+		server  *MCPServer
 		wantURI string
 		wantOK  bool
 	}{
 		{
 			name: "prefers jsonrpc over http_json",
-			server: &McpServer{Interfaces: []Interface{
+			server: &MCPServer{Interfaces: []Interface{
 				{URL: "https://s/http", ProtocolBinding: "HTTP_JSON"},
 				{URL: "https://s/jsonrpc", ProtocolBinding: "JSONRPC"},
 			}},
@@ -317,7 +366,7 @@ func TestMcpEndpointURI(t *testing.T) {
 		},
 		{
 			name: "falls back to http_json",
-			server: &McpServer{Interfaces: []Interface{
+			server: &MCPServer{Interfaces: []Interface{
 				{URL: "https://s/http", ProtocolBinding: "HTTP_JSON"},
 			}},
 			wantURI: "https://s/http",
@@ -325,7 +374,7 @@ func TestMcpEndpointURI(t *testing.T) {
 		},
 		{
 			name: "reads from protocols too",
-			server: &McpServer{Protocols: []Protocol{{
+			server: &MCPServer{Protocols: []Protocol{{
 				Interfaces: []Interface{{URL: "https://s/jsonrpc", ProtocolBinding: "JSONRPC"}},
 			}}},
 			wantURI: "https://s/jsonrpc",
@@ -333,12 +382,12 @@ func TestMcpEndpointURI(t *testing.T) {
 		},
 		{
 			name:   "no supported binding",
-			server: &McpServer{Interfaces: []Interface{{URL: "https://s/grpc", ProtocolBinding: "GRPC"}}},
+			server: &MCPServer{Interfaces: []Interface{{URL: "https://s/grpc", ProtocolBinding: "GRPC"}}},
 			wantOK: false,
 		},
 		{
 			name:   "empty",
-			server: &McpServer{},
+			server: &MCPServer{},
 			wantOK: false,
 		},
 	}
@@ -352,7 +401,7 @@ func TestMcpEndpointURI(t *testing.T) {
 	}
 }
 
-func TestMcpToolset_Integration(t *testing.T) {
+func TestMCPToolset_Integration(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{
 			"displayName": "Data MCP",
@@ -362,22 +411,22 @@ func TestMcpToolset_Integration(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ts, err := newTestClient(srv).McpToolset(t.Context(), "projects/p/locations/l/mcpServers/data")
+	ts, err := newTestClient(srv).MCPToolset(t.Context(), "projects/p/locations/l/mcpServers/data")
 	if err != nil {
-		t.Fatalf("McpToolset() error = %v", err)
+		t.Fatalf("MCPToolset() error = %v", err)
 	}
 	if ts == nil {
-		t.Fatal("McpToolset() = nil, want a toolset")
+		t.Fatal("MCPToolset() = nil, want a toolset")
 	}
 }
 
-func TestMcpToolset_NoEndpoint(t *testing.T) {
+func TestMCPToolset_NoEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"displayName": "Data MCP"}`)) // no interfaces
 	}))
 	defer srv.Close()
 
-	if _, err := newTestClient(srv).McpToolset(t.Context(), "projects/p/locations/l/mcpServers/data"); err == nil {
-		t.Error("McpToolset() error = nil, want an error when no endpoint URI is present")
+	if _, err := newTestClient(srv).MCPToolset(t.Context(), "projects/p/locations/l/mcpServers/data"); err == nil {
+		t.Error("MCPToolset() error = nil, want an error when no endpoint URI is present")
 	}
 }
