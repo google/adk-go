@@ -219,32 +219,12 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// update the in-memory session
-	if err := sess.appendEvent(event); err != nil {
+	processedEvent, err := sess.appendEvent(event)
+	if err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
-	eventCopy := &Event{
-		ID:             event.ID,
-		InvocationID:   event.InvocationID,
-		Timestamp:      event.Timestamp,
-		Author:         event.Author,
-		Branch:         event.Branch,
-		IsolationScope: event.IsolationScope,
-		Actions: EventActions{
-			StateDelta:                 maps.Clone(event.Actions.StateDelta),
-			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
-			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
-			TransferToAgent:            event.Actions.TransferToAgent,
-			Escalate:                   event.Actions.Escalate,
-			SkipSummarization:          event.Actions.SkipSummarization,
-		},
-		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
-		Routes:             slices.Clone(event.Routes),
-		RequestedInput:     event.RequestedInput,
-		LLMResponse:        event.LLMResponse,
-		Output:             event.Output,
-		NodeInfo:           event.NodeInfo,
-	}
+	eventCopy := cloneEventForStorage(processedEvent)
 
 	// update the in-memory session service
 	stored_session.events = append(stored_session.events, eventCopy)
@@ -349,22 +329,22 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-func (s *session) appendEvent(event *Event) error {
+func (s *session) appendEvent(event *Event) (*Event, error) {
 	if event.Partial {
-		return nil
+		return nil, nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := updateSessionState(s, event); err != nil {
-		return fmt.Errorf("error on appendEvent: %w", err)
+		return nil, fmt.Errorf("error on appendEvent: %w", err)
 	}
 	processedEvent := trimTempDeltaState(event)
 
 	s.events = append(s.events, processedEvent)
 	s.updatedAt = event.Timestamp
-	return nil
+	return processedEvent, nil
 }
 
 type events []*Event
@@ -454,6 +434,47 @@ func trimTempDeltaState(event *Event) *Event {
 	eventCopy.Actions.StateDelta = filteredStateDelta
 
 	return &eventCopy
+}
+
+// cloneEventForStorage returns an isolated copy of an event for the session store.
+// Map and slice fields are deep-cloned only when non-empty.
+func cloneEventForStorage(event *Event) *Event {
+	if event == nil {
+		return nil
+	}
+	copied := &Event{
+		ID:             event.ID,
+		InvocationID:   event.InvocationID,
+		Timestamp:      event.Timestamp,
+		Author:         event.Author,
+		Branch:         event.Branch,
+		IsolationScope: event.IsolationScope,
+		Actions: EventActions{
+			TransferToAgent:   event.Actions.TransferToAgent,
+			Escalate:          event.Actions.Escalate,
+			SkipSummarization: event.Actions.SkipSummarization,
+		},
+		RequestedInput: event.RequestedInput,
+		LLMResponse:    event.LLMResponse,
+		Output:         event.Output,
+		NodeInfo:       event.NodeInfo,
+	}
+	if len(event.Actions.StateDelta) > 0 {
+		copied.Actions.StateDelta = maps.Clone(event.Actions.StateDelta)
+	}
+	if len(event.Actions.ArtifactDelta) > 0 {
+		copied.Actions.ArtifactDelta = maps.Clone(event.Actions.ArtifactDelta)
+	}
+	if len(event.Actions.RequestedToolConfirmations) > 0 {
+		copied.Actions.RequestedToolConfirmations = maps.Clone(event.Actions.RequestedToolConfirmations)
+	}
+	if len(event.LongRunningToolIDs) > 0 {
+		copied.LongRunningToolIDs = slices.Clone(event.LongRunningToolIDs)
+	}
+	if len(event.Routes) > 0 {
+		copied.Routes = slices.Clone(event.Routes)
+	}
+	return copied
 }
 
 // updateSessionState updates the session state based on the event state delta.
