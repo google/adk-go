@@ -18,6 +18,8 @@ import (
 	"context"
 	"iter"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -679,9 +681,11 @@ func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
 }
 
 func TestCompat_A2ACleanupPropagation(t *testing.T) {
+	remoteTaskIDChan, remoteCleanupCalledChan := make(chan legacyA2A.TaskID, 1), make(chan struct{}, 2)
+	// Artifact text the mock subagent streams; the cancel step keys off it.
+	const remoteArtifactText = "remote-subagent-working"
 	// Remote A2A server publishes a submitted task and start generating artifact updates
 	// until it detects a context cancelation
-	remoteTaskIDChan, remoteCleanupCalledChan := make(chan legacyA2A.TaskID, 1), make(chan struct{}, 2)
 	serverB := startLegacyA2AServer(t, &mockLegacyExecutor{
 		cancelFn: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
 			event := legacyA2A.NewStatusUpdateEvent(reqCtx, legacyA2A.TaskStateCanceled, nil)
@@ -694,7 +698,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 				return err
 			}
 			for ctx.Err() == nil {
-				if err := queue.Write(ctx, legacyA2A.NewArtifactEvent(reqCtx, legacyA2A.TextPart{Text: "foo"})); err != nil {
+				if err := queue.Write(ctx, legacyA2A.NewArtifactEvent(reqCtx, legacyA2A.TextPart{Text: remoteArtifactText})); err != nil {
 					return err
 				}
 				time.Sleep(1 * time.Millisecond)
@@ -731,27 +735,44 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 
 	client := newLegacyA2AClient(t, serverA)
 
-	// Send a streaming message in a detached goroutine, passing status update through chan
+	// Join the detached streaming/cancel goroutines before teardown; a late
+	// t.Errorf from an in-flight RPC on a finished test would panic.
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan legacyA2A.Event, 10)
+	remoteStreamingChan := make(chan struct{})
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(statusUpdateEventChan)
+		remoteStreaming := false
 		msg := legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "work"})
 		for event, err := range client.SendStreamingMessage(t.Context(), &legacyA2A.MessageSendParams{Message: msg}) {
 			if err != nil {
 				t.Errorf("client.SendStreamingMessage() error = %v", err)
 				return
 			}
-			if _, ok := event.(*legacyA2A.TaskArtifactUpdateEvent); ok {
+			if tau, ok := event.(*legacyA2A.TaskArtifactUpdateEvent); ok {
+				if !remoteStreaming && artifactContainsText(tau, remoteArtifactText) {
+					remoteStreaming = true
+					close(remoteStreamingChan)
+				}
 				continue
 			}
 			statusUpdateEventChan <- event
 		}
 	}()
 
-	// Issue a task cancellation request
+	// Cancel only after the subagent's output reaches the client: before that the
+	// parent doesn't know the subagent task ID, so cancellation can't propagate.
 	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
+	awaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *legacyA2A.Task, 1)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &legacyA2A.TaskIDParams{ID: taskID})
 		if err != nil {
@@ -775,29 +796,16 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	}
 
 	// Check subagent task got cancelled when the parent task was cancelled.
-	// Reads from channel twice because cleanup gets called both for cancelation and execution.
-	timeout := time.After(5 * time.Second)
-	for range 2 {
-		select {
-		case <-remoteCleanupCalledChan:
-		case <-timeout:
-			t.Fatalf("remote cleanup was not called")
-		}
-	}
+	// Subagent cleanup fires twice: once for cancelation, once for execution.
+	// A generous per-wait deadline avoids flaking under CPU contention.
+	awaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
 	var remoteTaskID legacyA2A.TaskID
 	select {
 	case remoteTaskID = <-remoteTaskIDChan:
 	case <-time.After(1 * time.Second):
 		t.Fatal("server B was never reached; remoteTaskIDChan is empty")
 	}
-
-	for range 2 {
-		select {
-		case <-executorCleanupCalledChan:
-		case <-timeout:
-			t.Fatalf("executor cleanup was not called")
-		}
-	}
+	awaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
 
 	remoteClient := newLegacyA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &legacyA2A.TaskQueryParams{ID: remoteTaskID})
@@ -807,4 +815,36 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	if remoteTask.Status.State != legacyA2A.TaskStateCanceled {
 		t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, legacyA2A.TaskStateCanceled)
 	}
+
+	// Join the cancel RPC so it can't log on t after the test returns.
+	awaitN(t, cancelResultChan, 1, "cancel task")
+}
+
+// awaitN receives n values from ch or fails the test after a generous, contention-
+// tolerant deadline. A closed channel counts as a receive, so it also joins a
+// goroutine that closed ch without sending.
+func awaitN[T any](t *testing.T, ch <-chan T, n int, what string) {
+	t.Helper()
+	const deadline = 30 * time.Second
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	for i := range n {
+		select {
+		case <-ch:
+		case <-timer.C:
+			t.Fatalf("%s: got %d of %d within %v", what, i, n, deadline)
+		}
+	}
+}
+
+func artifactContainsText(tau *legacyA2A.TaskArtifactUpdateEvent, substr string) bool {
+	if tau.Artifact == nil {
+		return false
+	}
+	for _, p := range tau.Artifact.Parts {
+		if tp, ok := p.(legacyA2A.TextPart); ok && strings.Contains(tp.Text, substr) {
+			return true
+		}
+	}
+	return false
 }
