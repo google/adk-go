@@ -81,10 +81,10 @@ func TestTelemetrySmoke(t *testing.T) {
 	record.SetBody(log.StringValue(logBody))
 	logger.Emit(ctx, record)
 
-	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
-	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.LoggerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush logs: %v", err)
 	}
 
@@ -154,7 +154,7 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName)
 	span.End()
 
-	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 
@@ -204,7 +204,7 @@ func TestTelemetryCustomLoggerProvider(t *testing.T) {
 	record.SetBody(log.StringValue(logBody))
 	logger.Emit(ctx, record)
 
-	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.LoggerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush logs: %v", err)
 	}
 
