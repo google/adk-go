@@ -306,8 +306,9 @@ type Config struct {
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
 	//
-	// NOTE: when this is set, agent can only reply and cannot use any tools,
-	// such as function tools, RAGs, agent transfer, etc.
+	// When set, structured outputs are enforced. Tools can still be used: the
+	// framework may route structured replies via the set_model_response tool
+	// workaround (see internal/llminternal/outputschema_processor.go).
 	OutputSchema *genai.Schema
 
 	// Callbacks are executed in the order they are provided.
