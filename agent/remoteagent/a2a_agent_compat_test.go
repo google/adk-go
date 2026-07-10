@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -768,7 +769,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
 	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
-	awaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
+	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *legacyA2A.Task, 1)
 	wg.Add(1)
 	go func() {
@@ -798,14 +799,14 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	// Check subagent task got cancelled when the parent task was cancelled.
 	// Subagent cleanup fires twice: once for cancelation, once for execution.
 	// A generous per-wait deadline avoids flaking under CPU contention.
-	awaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
+	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
 	var remoteTaskID legacyA2A.TaskID
 	select {
 	case remoteTaskID = <-remoteTaskIDChan:
 	case <-time.After(1 * time.Second):
 		t.Fatal("server B was never reached; remoteTaskIDChan is empty")
 	}
-	awaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
+	testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
 
 	remoteClient := newLegacyA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &legacyA2A.TaskQueryParams{ID: remoteTaskID})
@@ -817,24 +818,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	}
 
 	// Join the cancel RPC so it can't log on t after the test returns.
-	awaitN(t, cancelResultChan, 1, "cancel task")
-}
-
-// awaitN receives n values from ch or fails the test after a generous, contention-
-// tolerant deadline. A closed channel counts as a receive, so it also joins a
-// goroutine that closed ch without sending.
-func awaitN[T any](t *testing.T, ch <-chan T, n int, what string) {
-	t.Helper()
-	const deadline = 30 * time.Second
-	timer := time.NewTimer(deadline)
-	defer timer.Stop()
-	for i := range n {
-		select {
-		case <-ch:
-		case <-timer.C:
-			t.Fatalf("%s: got %d of %d within %v", what, i, n, deadline)
-		}
-	}
+	testutil.AwaitN(t, cancelResultChan, 1, "cancel task")
 }
 
 func artifactContainsText(tau *legacyA2A.TaskArtifactUpdateEvent, substr string) bool {
