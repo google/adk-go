@@ -14,7 +14,7 @@
 
 // Package adka2a allows exposing ADK agents via A2A.
 //
-// Deprecated: Use google.golang.org/adk/server/adka2a/v2 instead.
+// Deprecated: Use google.golang.org/adk/v2/server/adka2a/v2 instead.
 package adka2a
 
 import (
@@ -32,11 +32,11 @@ import (
 	a2asrvv2 "github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	v2 "google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	v2 "google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 // BeforeExecuteCallback is the callback which will be called before an execution is started.
@@ -130,7 +130,10 @@ type ExecutorConfig struct {
 	A2AExecutionCleanupCallback A2AExecutionCleanupCallback
 }
 
-var _ a2asrv.AgentExecutor = (*Executor)(nil)
+var (
+	_ a2asrv.AgentExecutor         = (*Executor)(nil)
+	_ a2asrv.AgentExecutionCleaner = (*Executor)(nil)
+)
 
 // Executor is the legacy AgentExecutor implementation which delegates to [v2.Executor].
 type Executor struct {
@@ -253,6 +256,11 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
+	ctx, callCtx := a2asrvv2.NewCallContext(ctx, execCtx.ServiceParams)
+	if execCtx.User.Authenticated {
+		callCtx.User = a2asrvv2.NewAuthenticatedUser(execCtx.User.Name, execCtx.User.Attributes)
+	}
+
 	for event, err := range e.impl.Execute(ctx, execCtx) {
 		if err != nil {
 			return err
@@ -289,6 +297,28 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 	}
 
 	return nil
+}
+
+func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+	execCtx, err := toExecutorContext(ctx, reqCtx)
+	if err != nil {
+		log.Warn(ctx, "failed to convert request context to executor context", "error", err)
+		return
+	}
+
+	v2Event, err := a2av0.ToV1Event(result)
+	if err != nil {
+		log.Warn(ctx, "failed to convert result to v2 event", "error", err)
+		return
+	}
+
+	v2Result, ok := v2Event.(a2av2.SendMessageResult)
+	if !ok {
+		log.Warn(ctx, "converted event is not SendMessageResult", "type", fmt.Sprintf("%T", v2Event))
+		return
+	}
+
+	e.impl.Cleanup(ctx, execCtx, v2Result, cause)
 }
 
 // ExecutorContext provides read-only information about the context of an A2A agent execution.
@@ -339,7 +369,7 @@ func toRequestContext(ctx *a2asrvv2.ExecutorContext) *a2asrv.RequestContext {
 }
 
 func toExecutorContext(ctx context.Context, reqCtx *a2asrv.RequestContext) (*a2asrvv2.ExecutorContext, error) {
-	var user *a2asrvv2.User
+	user := &a2asrvv2.User{Authenticated: false}
 	reqMeta := make(map[string][]string)
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 		user = &a2asrvv2.User{Name: callCtx.User.Name(), Authenticated: callCtx.User.Authenticated()}

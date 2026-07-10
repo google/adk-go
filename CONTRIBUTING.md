@@ -3,6 +3,7 @@
 We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
+-   [Branches](#branches)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
     -   [Review our community guidelines](#review-our-community-guidelines)
@@ -16,6 +17,31 @@ We'd love to accept your patches and contributions to this project.
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
+
+## Branches
+
+ADK Go uses two long-lived branches:
+
+-   **`main`** — the actively developed 2.x line. This is the default branch and
+    the base for new pull requests.
+-   **`v1`** — the maintenance branch for the 1.x line. Target this branch only
+    for fixes that need to ship to 1.x.
+
+The `v1` branch is a snapshot of the 1.x line, branched from `main` before the
+2.0 work landed. `main` then continued forward as the 2.x line (the 2.0 release
+was merged into it), so its history is unbroken — old clones fast-forward
+cleanly. There is no need to re-sync or rename anything locally:
+
+```bash
+git switch main
+git pull            # fast-forwards onto the 2.x line
+```
+
+To work on a 1.x fix, base your branch on `v1`:
+
+```bash
+git switch -c my-fix origin/v1
+```
 
 ## Before you begin
 

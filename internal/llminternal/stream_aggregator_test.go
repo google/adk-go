@@ -21,14 +21,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func ptr[T any](v T) *T {
@@ -629,7 +629,7 @@ type GetWeatherArgs struct {
 	Location string `json:"location"`
 }
 
-func getWeather(ctx tool.Context, args GetWeatherArgs) (map[string]any, error) {
+func getWeather(ctx agent.Context, args GetWeatherArgs) (map[string]any, error) {
 	return map[string]any{
 		"temperature": 22,
 		"condition":   "sunny",
@@ -945,7 +945,7 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 		CallID string `json:"call_id"`
 	}
 
-	trackExecution := func(ctx tool.Context, args TrackExecutionArgs) (string, error) {
+	trackExecution := func(ctx agent.Context, args TrackExecutionArgs) (string, error) {
 		executionLog = append(executionLog, args.CallID)
 		return "Executed: " + args.CallID, nil
 	}
@@ -998,6 +998,109 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 	}
 	if functionResponseEvents != 1 {
 		t.Errorf("Expected 1 function response event, got %d", functionResponseEvents)
+	}
+}
+
+func TestMetadataVertexAISSEStream(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	emptyTextChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: genai.NewContentFromText("", "model")},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// Simulate the leading metadata-only SSE chunk that Vertex AI emits for
+	// gemini-3-flash-preview + googleSearch grounding: no Candidates at all.
+	metadataChunk := &genai.GenerateContentResponse{
+		// Candidates is intentionally nil / empty.
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// The real content arrives in the next chunk.
+	contentChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Here are some movie recommendations."}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	stream := []*genai.GenerateContentResponse{emptyTextChunk, metadataChunk, metadataChunk, emptyTextChunk, metadataChunk, metadataChunk, contentChunk}
+
+	for _, chunk := range stream {
+		for resp, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+			_ = resp
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+
+	if len(finalResponse.Content.Parts) == 0 {
+		t.Fatal("expected content parts in the final response, got none")
+	}
+
+	if finalResponse.Content.Parts[0].Text != "Here are some movie recommendations." {
+		t.Errorf("unexpected text in final response: %q", finalResponse.Content.Parts[0].Text)
+	}
+}
+
+func TestMetadataOnlyChunkDoesNotAbortStream(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Simulate the leading metadata-only SSE chunk that Vertex AI emits for
+	// gemini-3-flash-preview + googleSearch grounding: no Candidates at all.
+	metadataChunk := &genai.GenerateContentResponse{
+		// Candidates is intentionally nil / empty.
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{},
+	}
+
+	// The real content arrives in the next chunk.
+	contentChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Here are some movie recommendations."}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{metadataChunk, contentChunk} {
+		for resp, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+			_ = resp
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+
+	if len(finalResponse.Content.Parts) == 0 {
+		t.Fatal("expected content parts in the final response, got none")
+	}
+
+	if finalResponse.Content.Parts[0].Text != "Here are some movie recommendations." {
+		t.Errorf("unexpected text in final response: %q", finalResponse.Content.Parts[0].Text)
 	}
 }
 

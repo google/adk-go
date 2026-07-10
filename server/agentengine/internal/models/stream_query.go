@@ -17,7 +17,7 @@ package models
 import (
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // StreamQueryRequest is a struct representing JSON-encoded payload to async_stream_query method with dedicated Input with full genai.Content.

@@ -25,12 +25,12 @@ import (
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
@@ -79,7 +79,11 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 		return nil, err
 	}
 
-	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
+	var opts []runner.RunOption
+	if runAgentRequest.StateDelta != nil {
+		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
+	}
+	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg, opts...)
 
 	var events []*session.Event
 	for event, err := range resp {
@@ -230,11 +234,8 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}, nil
 }
 
-func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, err error) {
+func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	var runAgentRequest models.RunAgentRequest
-	defer func() {
-		err = req.Body.Close()
-	}()
 	d := json.NewDecoder(req.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&runAgentRequest); err != nil {

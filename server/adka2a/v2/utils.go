@@ -17,9 +17,9 @@ package adka2a
 import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
-	"google.golang.org/adk/agent"
-	iagent "google.golang.org/adk/internal/agent"
-	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/agent"
+	iagent "google.golang.org/adk/v2/internal/agent"
+	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 )
 
 // WithoutPartialArtifacts returns a slice of artifacts without partial artifacts.

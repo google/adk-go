@@ -24,13 +24,13 @@ import (
 	"github.com/google/safehtml/template"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // From src/google/adk/flows/llm_flows/auto_flow.py
@@ -65,6 +65,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
+// AgentTransferRequestProcessor processes agent transfer requests.
 func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: support agent types other than LLMAgent, that have parent/subagents?
@@ -82,13 +83,12 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool := &TransferToAgentTool{}
-		si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
+		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		utils.AppendInstructions(req, si)
+		utils.AppendInstructions(req, transferToAgentTool.instructions)
 		err = appendTools(req, transferToAgentTool)
 		if err != nil {
 			yield(nil, err)
@@ -96,7 +96,25 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 	}
 }
 
-type TransferToAgentTool struct{}
+const transferAgentName = "transfer_to_agent"
+
+// TransferToAgentTool is a tool that handles transferring control to another agent.
+type TransferToAgentTool struct {
+	instructions    string
+	supportedAgents []agent.Agent
+}
+
+// NewTransferToAgentTool creates a new TransferToAgentTool.
+func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
+	if err != nil {
+		return nil, err
+	}
+	return &TransferToAgentTool{
+		instructions:    si,
+		supportedAgents: targets,
+	}, nil
+}
 
 // Description implements tool.Tool.
 func (t *TransferToAgentTool) Description() string {
@@ -106,7 +124,7 @@ This tool hands off control to another agent when it's more suitable to answer t
 
 // Name implements tool.Tool.
 func (t *TransferToAgentTool) Name() string {
-	return "transfer_to_agent"
+	return transferAgentName
 }
 
 // IsLongRunning implements tool.Tool.
@@ -119,11 +137,12 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: "object",
+			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"agent_name": {
-					Type:        "string",
+					Type:        genai.TypeString,
 					Description: "the agent name to transfer to",
+					Enum:        t.enums(),
 				},
 			},
 			Required: []string{"agent_name"},
@@ -131,13 +150,21 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
+func (t *TransferToAgentTool) enums() []string {
+	var agentNames []string
+	for _, a := range t.supportedAgents {
+		agentNames = append(agentNames, a.Name())
+	}
+	return agentNames
+}
+
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
 // Run implements types.Tool.
-func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}
@@ -155,10 +182,16 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, e
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)
 
-func transferTargets(agent, parent agent.Agent) []agent.Agent {
-	targets := slices.Clone(agent.SubAgents())
+func transferTargets(curAgent, parent agent.Agent) []agent.Agent {
+	var targets []agent.Agent
+	for _, sub := range curAgent.SubAgents() {
+		if isUntransferableMode(sub) {
+			continue
+		}
+		targets = append(targets, sub)
+	}
 
-	llmAgent := asLLMAgent(agent)
+	llmAgent := asLLMAgent(curAgent)
 	llmParent := asLLMAgent(parent)
 
 	if llmParent == nil {
@@ -174,13 +207,32 @@ func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	if !llmAgent.internal().DisallowTransferToPeers {
 		if shouldUseAutoFlow(parent) {
 			for _, peer := range parent.SubAgents() {
-				if peer.Name() != agent.Name() {
-					targets = append(targets, peer)
+				if peer.Name() == curAgent.Name() {
+					continue
 				}
+				if isUntransferableMode(peer) {
+					continue
+				}
+				targets = append(targets, peer)
 			}
 		}
 	}
 	return targets
+}
+
+// isUntransferableMode skips the agents which have different delegation
+// mechanism (e.g. task & single_turn agents are handled by llmagent
+// wrapper code).
+func isUntransferableMode(a agent.Agent) bool {
+	llmA := asLLMAgent(a)
+	if llmA == nil {
+		return false
+	}
+	switch llmA.internal().Mode {
+	case ModeTask, ModeSingleTurn:
+		return true
+	}
+	return false
 }
 
 func asLLMAgent(agent agent.Agent) Agent {
@@ -201,7 +253,7 @@ func shouldUseAutoFlow(agent agent.Agent) bool {
 	return len(agent.SubAgents()) != 0 || !a.internal().DisallowTransferToParent || !a.internal().DisallowTransferToPeers
 }
 
-// AppendTools appends the tools to the request.
+// appendTools appends the tools to the request.
 // Appending duplicate tools or nameless tools is an error.
 func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Tools == nil {
@@ -254,8 +306,17 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
-	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
+func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
+	cur := asLLMAgent(curAgent)
+	// Suppress transfer instructions for task / single_turn agents:
+	// they reach their callees via FC delegation (TaskAgentTool /
+	// SingleTurnTool), not via transfer.
+	switch cur.internal().Mode {
+	case ModeTask, ModeSingleTurn:
+		return "", nil
+	}
+
+	if cur.internal().DisallowTransferToParent {
 		parent = nil
 	}
 
@@ -270,7 +331,7 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 		AgentName:        curAgent.Name(),
 		Parent:           parent,
 		Targets:          targets,
-		ToolName:         transferTool.Name(),
+		ToolName:         transferAgentName,
 		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err

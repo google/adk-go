@@ -21,8 +21,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/session"
 )
 
 var (
@@ -37,6 +37,7 @@ var (
 	metadataUsageKey           = ToA2AMetaKey("usage_metadata")
 	metadataCustomMetaKey      = ToA2AMetaKey("custom_metadata")
 	metadataPartialKey         = ToA2AMetaKey("partial")
+	metadataIsErrMessageKey    = ToA2AMetaKey("is_error_message")
 )
 
 // ToA2AMetaKey adds a prefix used to differentiate ADK-related values stored in Metadata an A2A event.
