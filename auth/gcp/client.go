@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +45,15 @@ const (
 // connectorResourceRE matches an IAM Connector resource name; anything else is
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
+
+// Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
+var (
+	// ErrConsentRejected means the end user rejected the consent request.
+	ErrConsentRejected = errors.New("gcp: user consent rejected")
+	// ErrPollTimeout means polling exceeded the poll timeout while the credential
+	// was still pending.
+	ErrPollTimeout = errors.New("gcp: timed out waiting for credentials")
+)
 
 // Client retrieves end-user credentials from the Agent Identity / IAM Connector
 // credential services and maps them to [auth.Credential].
@@ -142,11 +152,11 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (*auth.Cre
 		case statusConsentRequired:
 			return nil, &auth.ConsentRequiredError{AuthURI: res.consentURI, Nonce: res.consentNonce}
 		case statusRejected:
-			return nil, fmt.Errorf("gcp: user consent rejected for %q", req.Resource)
+			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
 		case statusPending:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("gcp: timed out waiting for credentials for %q", req.Resource)
+				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
 			}
 			wait := min(backoff, remaining)
 			select {
@@ -190,8 +200,9 @@ func mapCredential(header, token string) (*auth.Credential, error) {
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(hint)), "bearer") {
 		return &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer", Token: token}}, nil
 	}
-	// Non-bearer header: place the token in the named header. (adk-python also
-	// mirrors it into X-GOOG-API-KEY; deferred until a case needs it.)
+	// Non-bearer header -> header-based API key.
+	// TODO: for full adk-python parity also mirror the token into X-GOOG-API-KEY;
+	// needs an AdditionalHeaders field on auth.APIKeyCredential (additive, non-breaking).
 	return &auth.Credential{APIKey: &auth.APIKeyCredential{Name: name, Value: token}}, nil
 }
 

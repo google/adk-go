@@ -34,41 +34,11 @@ const (
 	connectorResource    = "projects/p/locations/l/connectors/co"
 )
 
-// newTestClient points both service endpoints at srv and uses a tiny backoff so
-// polling tests are fast.
-func newTestClient(t *testing.T, srv *httptest.Server) *Client {
-	t.Helper()
-	c, err := NewClient(context.Background(),
-		WithHTTPClient(srv.Client()),
-		WithAgentIdentityEndpoint(srv.URL),
-		WithConnectorEndpoint(srv.URL),
-		WithPollTimeout(2*time.Second),
-	)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-	c.initialBackoff = time.Millisecond
-	return c
-}
-
-// sequenceServer replies with bodies in order, repeating the last one.
-func sequenceServer(bodies ...string) (*httptest.Server, *int32) {
-	var n int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := int(atomic.AddInt32(&n, 1)) - 1
-		if i >= len(bodies) {
-			i = len(bodies) - 1
-		}
-		_, _ = io.WriteString(w, bodies[i])
-	}))
-	return srv, &n
-}
-
 func TestRetrieveAgentIdentityBearer(t *testing.T) {
 	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
 	defer srv.Close()
 
-	cred, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
@@ -82,7 +52,7 @@ func TestRetrieveAgentIdentityCustomHeader(t *testing.T) {
 	srv, _ := sequenceServer(`{"success":{"token":"KEY","header":"X-Goog-Api-Key"}}`)
 	defer srv.Close()
 
-	cred, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
@@ -96,7 +66,7 @@ func TestRetrieveAgentIdentityConsentRequired(t *testing.T) {
 	srv, _ := sequenceServer(`{"uriConsentRequired":{"authorizationUri":"https://consent","consentNonce":"n"}}`)
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
 	var consent *auth.ConsentRequiredError
 	if !errors.As(err, &consent) {
@@ -111,14 +81,14 @@ func TestRetrieveAgentIdentityConsentRejected(t *testing.T) {
 	srv, _ := sequenceServer(`{"consentRejected":{}}`)
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
-	if err == nil {
-		t.Fatal("RetrieveCredential() = nil error, want rejection error")
+	if !errors.Is(err, ErrConsentRejected) {
+		t.Fatalf("error = %v, want ErrConsentRejected", err)
 	}
 	var consent *auth.ConsentRequiredError
 	if errors.As(err, &consent) {
-		t.Fatalf("error = %v, want a plain error (not ConsentRequiredError) for rejection", err)
+		t.Fatalf("error = %v, want a plain rejection (not ConsentRequiredError)", err)
 	}
 }
 
@@ -129,7 +99,7 @@ func TestRetrieveAgentIdentityPollsPending(t *testing.T) {
 	)
 	defer srv.Close()
 
-	cred, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
@@ -146,7 +116,7 @@ func TestRetrieveConnectorBearer(t *testing.T) {
 	srv, _ := sequenceServer(`{"done":true,"response":{"@type":"x","token":"tok","header":"Authorization: Bearer"}}`)
 	defer srv.Close()
 
-	cred, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: connectorResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
@@ -163,7 +133,7 @@ func TestRetrieveConnectorPollsConsentPending(t *testing.T) {
 	)
 	defer srv.Close()
 
-	cred, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: connectorResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
@@ -180,7 +150,7 @@ func TestRetrieveConnectorConsentRequired(t *testing.T) {
 	srv, _ := sequenceServer(`{"metadata":{"uriConsentRequired":{"authorizationUri":"https://c","consentNonce":"n"}}}`)
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: connectorResource, UserID: "u"})
 	var consent *auth.ConsentRequiredError
 	if !errors.As(err, &consent) {
@@ -192,7 +162,7 @@ func TestRetrieveConnectorOperationError(t *testing.T) {
 	srv, _ := sequenceServer(`{"error":{"message":"boom"}}`)
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: connectorResource, UserID: "u"})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("error = %v, want it to contain %q", err, "boom")
@@ -222,7 +192,7 @@ func TestRetrieveRoutesByResource(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			if _, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 				Request{Resource: tc.resource, UserID: "user-1"}); err != nil {
 				t.Fatalf("RetrieveCredential() error = %v", err)
 			}
@@ -245,7 +215,7 @@ func TestRetrieveHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).RetrieveCredential(context.Background(),
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("error = %v, want it to mention status 500", err)
@@ -254,10 +224,10 @@ func TestRetrieveHTTPError(t *testing.T) {
 
 func TestRetrieveValidatesRequest(t *testing.T) {
 	c := &Client{httpClient: http.DefaultClient}
-	if _, err := c.RetrieveCredential(context.Background(), Request{UserID: "u"}); err == nil {
+	if _, err := c.RetrieveCredential(t.Context(), Request{UserID: "u"}); err == nil {
 		t.Error("missing Resource: got nil error, want error")
 	}
-	if _, err := c.RetrieveCredential(context.Background(), Request{Resource: authProviderResource}); err == nil {
+	if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource}); err == nil {
 		t.Error("missing UserID: got nil error, want error")
 	}
 }
@@ -301,4 +271,52 @@ func TestMapCredential(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetrieveContextCanceledWhilePending verifies that canceling the context
+// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
+func TestRetrieveContextCanceledWhilePending(t *testing.T) {
+	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	c.initialBackoff = 50 * time.Millisecond // park in the poll wait, then cancel
+
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(10*time.Millisecond, cancel)
+
+	_, err := c.RetrieveCredential(ctx, Request{Resource: authProviderResource, UserID: "u"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RetrieveCredential() error = %v, want context.Canceled", err)
+	}
+}
+
+// newTestClient points both service endpoints at srv and uses a tiny backoff so
+// polling tests are fast.
+func newTestClient(t *testing.T, srv *httptest.Server) *Client {
+	t.Helper()
+	c, err := NewClient(t.Context(),
+		WithHTTPClient(srv.Client()),
+		WithAgentIdentityEndpoint(srv.URL),
+		WithConnectorEndpoint(srv.URL),
+		WithPollTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.initialBackoff = time.Millisecond
+	return c
+}
+
+// sequenceServer replies with bodies in order, repeating the last one.
+func sequenceServer(bodies ...string) (*httptest.Server, *int32) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := int(atomic.AddInt32(&n, 1)) - 1
+		if i >= len(bodies) {
+			i = len(bodies) - 1
+		}
+		_, _ = io.WriteString(w, bodies[i])
+	}))
+	return srv, &n
 }

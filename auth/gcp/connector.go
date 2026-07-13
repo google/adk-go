@@ -40,7 +40,7 @@ type connectorOperation struct {
 	} `json:"response"`
 	Metadata *struct {
 		ConsentPending     *struct{}      `json:"consentPending"`
-		UriConsentRequired *consentDetail `json:"uriConsentRequired"`
+		URIConsentRequired *consentDetail `json:"uriConsentRequired"`
 		ConsentRejected    *struct{}      `json:"consentRejected"`
 	} `json:"metadata"`
 	Error *struct {
@@ -67,11 +67,11 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (retrieveRe
 	}
 	if md := op.Metadata; md != nil {
 		switch {
-		case md.UriConsentRequired != nil:
+		case md.URIConsentRequired != nil:
 			return retrieveResult{
 				status:       statusConsentRequired,
-				consentURI:   md.UriConsentRequired.AuthorizationURI,
-				consentNonce: md.UriConsentRequired.ConsentNonce,
+				consentURI:   md.URIConsentRequired.AuthorizationURI,
+				consentNonce: md.URIConsentRequired.ConsentNonce,
 			}, nil
 		case md.ConsentRejected != nil:
 			return retrieveResult{status: statusRejected}, nil

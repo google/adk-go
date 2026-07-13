@@ -34,7 +34,7 @@ type agentIdentityResponse struct {
 		Header string `json:"header"`
 	} `json:"success"`
 	Pending            *struct{}      `json:"pending"`
-	UriConsentRequired *consentDetail `json:"uriConsentRequired"`
+	URIConsentRequired *consentDetail `json:"uriConsentRequired"`
 	ConsentRejected    *struct{}      `json:"consentRejected"`
 }
 
@@ -58,11 +58,11 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (retrie
 	switch {
 	case out.Success != nil:
 		return retrieveResult{status: statusOK, token: out.Success.Token, header: out.Success.Header}, nil
-	case out.UriConsentRequired != nil:
+	case out.URIConsentRequired != nil:
 		return retrieveResult{
 			status:       statusConsentRequired,
-			consentURI:   out.UriConsentRequired.AuthorizationURI,
-			consentNonce: out.UriConsentRequired.ConsentNonce,
+			consentURI:   out.URIConsentRequired.AuthorizationURI,
+			consentNonce: out.URIConsentRequired.ConsentNonce,
 		}, nil
 	case out.ConsentRejected != nil:
 		return retrieveResult{status: statusRejected}, nil
