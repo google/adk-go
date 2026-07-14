@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -257,4 +258,22 @@ func CollectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error)
 		}
 	}
 	return texts, nil
+}
+
+// AwaitN receives n values from ch, or fails the test via t.Fatalf if they do
+// not all arrive within a generous, contention-tolerant deadline. A closed
+// channel counts as a receive, so AwaitN also joins a goroutine that closed ch
+// without sending.
+func AwaitN[T any](t *testing.T, ch <-chan T, n int, what string) {
+	t.Helper()
+	const deadline = 30 * time.Second
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	for i := range n {
+		select {
+		case <-ch:
+		case <-timer.C:
+			t.Fatalf("%s: got %d of %d within %v", what, i, n, deadline)
+		}
+	}
 }
