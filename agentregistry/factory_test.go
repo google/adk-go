@@ -136,31 +136,33 @@ func TestClientWithHeaders_AppliesAndDoesNotMutateBase(t *testing.T) {
 
 func TestRemoteAgentOptions(t *testing.T) {
 	client := &http.Client{}
-	headers := map[string]string{"X": "y"}
 	ec := applyRemoteAgentOptions([]RemoteAgentOption{
 		WithA2AHTTPClient(client),
-		WithA2AHeaders(headers),
+		WithA2AHeaders(map[string]string{"X": "y"}),
+		WithA2AHeaders(map[string]string{"Z": "w"}),
 	})
 	if ec.httpClient != client {
 		t.Errorf("httpClient = %p, want %p", ec.httpClient, client)
 	}
-	if ec.headers["X"] != "y" {
-		t.Errorf(`headers["X"] = %q, want "y"`, ec.headers["X"])
+	// Repeated WithA2AHeaders calls accumulate rather than replacing the set.
+	if ec.headers["X"] != "y" || ec.headers["Z"] != "w" {
+		t.Errorf("headers = %v, want X=y and Z=w", ec.headers)
 	}
 }
 
 func TestMCPToolsetOptions(t *testing.T) {
 	client := &http.Client{}
-	headers := map[string]string{"X": "y"}
 	ec := applyMCPToolsetOptions([]MCPToolsetOption{
 		WithMCPHTTPClient(client),
-		WithMCPHeaders(headers),
+		WithMCPHeaders(map[string]string{"X": "y"}),
+		WithMCPHeaders(map[string]string{"Z": "w"}),
 	})
 	if ec.httpClient != client {
 		t.Errorf("httpClient = %p, want %p", ec.httpClient, client)
 	}
-	if ec.headers["X"] != "y" {
-		t.Errorf(`headers["X"] = %q, want "y"`, ec.headers["X"])
+	// Repeated WithMCPHeaders calls accumulate rather than replacing the set.
+	if ec.headers["X"] != "y" || ec.headers["Z"] != "w" {
+		t.Errorf("headers = %v, want X=y and Z=w", ec.headers)
 	}
 }
 
@@ -177,15 +179,15 @@ func TestAgentCard_EmbeddedFastPath(t *testing.T) {
 	}
 	info := &Agent{Card: &Card{Type: "A2A_AGENT_CARD", Content: content}}
 
-	card, name, desc, err := agentCard(info, "projects/p/locations/l/agents/a")
+	card, name, err := agentCard(info, "projects/p/locations/l/agents/a")
 	if err != nil {
 		t.Fatalf("agentCard() error = %v", err)
 	}
 	if name != "My_Agent" {
 		t.Errorf("name = %q, want My_Agent (cleaned)", name)
 	}
-	if desc != "embedded desc" {
-		t.Errorf("description = %q, want embedded desc", desc)
+	if card.Description != "embedded desc" {
+		t.Errorf("description = %q, want embedded desc", card.Description)
 	}
 	// The embedded card itself is used verbatim (its name is not rewritten).
 	if card.Name != "My Agent" || card.Version != "9" {
@@ -202,8 +204,24 @@ func TestAgentCard_EmbeddedNoInterfaces(t *testing.T) {
 	}
 	info := &Agent{Card: &Card{Type: "A2A_AGENT_CARD", Content: content}}
 
-	if _, _, _, err := agentCard(info, "projects/p/locations/l/agents/a"); err == nil {
+	if _, _, err := agentCard(info, "projects/p/locations/l/agents/a"); err == nil {
 		t.Error("agentCard() error = nil, want an error for an embedded card with no supported interfaces")
+	}
+}
+
+func TestAgentCard_EmbeddedEmptyName(t *testing.T) {
+	// An embedded card must carry a usable name; the embedded path does not fall
+	// back to the resource name (parity with adk-python), so an empty name fails.
+	content, err := json.Marshal(a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("https://a.example", a2a.TransportProtocolJSONRPC)},
+	})
+	if err != nil {
+		t.Fatalf("marshal embedded card: %v", err)
+	}
+	info := &Agent{Card: &Card{Type: "A2A_AGENT_CARD", Content: content}}
+
+	if _, _, err := agentCard(info, "projects/p/locations/l/agents/a"); err == nil {
+		t.Error("agentCard() error = nil, want an error for an embedded card with an empty name")
 	}
 }
 
@@ -222,15 +240,15 @@ func TestAgentCard_Synthesized(t *testing.T) {
 		Skills: []Skill{{ID: "s1", Name: "Skill One", Tags: []string{"t"}}},
 	}
 
-	card, name, desc, err := agentCard(info, "projects/p/locations/l/agents/cool")
+	card, name, err := agentCard(info, "projects/p/locations/l/agents/cool")
 	if err != nil {
 		t.Fatalf("agentCard() error = %v", err)
 	}
 	if name != "Cool_Agent" {
 		t.Errorf("name = %q, want Cool_Agent", name)
 	}
-	if desc != "does cool things" {
-		t.Errorf("description = %q, want does cool things", desc)
+	if card.Description != "does cool things" {
+		t.Errorf("description = %q, want does cool things", card.Description)
 	}
 	if card.Name != "Cool_Agent" || card.Version != "2.0" {
 		t.Errorf("card name/version = %q/%q, want Cool_Agent/2.0", card.Name, card.Version)
@@ -262,7 +280,7 @@ func TestAgentCard_SynthesizedDefaultsAndNameFallback(t *testing.T) {
 			Interfaces: []Interface{{URL: "https://a.example", ProtocolBinding: "SOMETHING_ELSE"}},
 		}},
 	}
-	card, name, _, err := agentCard(info, "projects/p/locations/l/agents/fallback-id")
+	card, name, err := agentCard(info, "projects/p/locations/l/agents/fallback-id")
 	if err != nil {
 		t.Fatalf("agentCard() error = %v", err)
 	}
@@ -280,8 +298,23 @@ func TestAgentCard_SynthesizedDefaultsAndNameFallback(t *testing.T) {
 
 func TestAgentCard_NoConnectionURI(t *testing.T) {
 	info := &Agent{DisplayName: "no interfaces"}
-	if _, _, _, err := agentCard(info, "projects/p/locations/l/agents/x"); err == nil {
+	if _, _, err := agentCard(info, "projects/p/locations/l/agents/x"); err == nil {
 		t.Error("agentCard() error = nil, want an error when no A2A connection URI is present")
+	}
+}
+
+func TestAgentCard_EmptyNameError(t *testing.T) {
+	// No display name and an empty resource name leave nothing to derive a
+	// non-empty agent name from, so agentCard must fail rather than build an
+	// agent with an empty (invalid) name.
+	info := &Agent{
+		Protocols: []Protocol{{
+			Type:       "A2A_AGENT",
+			Interfaces: []Interface{{URL: "https://a.example", ProtocolBinding: "JSONRPC"}},
+		}},
+	}
+	if _, _, err := agentCard(info, ""); err == nil {
+		t.Error("agentCard() error = nil, want an error when no non-empty name can be derived")
 	}
 }
 

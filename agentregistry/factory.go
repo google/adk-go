@@ -54,6 +54,18 @@ func applyMCPToolsetOptions(opts []MCPToolsetOption) egressConfig {
 	return ec
 }
 
+func addHeaders(e *egressConfig, h map[string]string) {
+	if len(h) == 0 {
+		return
+	}
+	if e.headers == nil {
+		e.headers = make(map[string]string, len(h))
+	}
+	for k, v := range h {
+		e.headers[k] = v
+	}
+}
+
 // RemoteAgentOption customizes [Client.RemoteAgent].
 type RemoteAgentOption func(*egressConfig)
 
@@ -70,9 +82,9 @@ func WithA2AHTTPClient(c *http.Client) RemoteAgentOption {
 }
 
 // WithA2AHeaders adds static headers to every request sent to the remote A2A
-// agent.
+// agent. Repeated calls accumulate; a later value wins on a key conflict.
 func WithA2AHeaders(h map[string]string) RemoteAgentOption {
-	return func(e *egressConfig) { e.headers = h }
+	return func(e *egressConfig) { addHeaders(e, h) }
 }
 
 // WithMCPHTTPClient sets the HTTP client used to reach the MCP server. It
@@ -86,8 +98,9 @@ func WithMCPHTTPClient(c *http.Client) MCPToolsetOption {
 }
 
 // WithMCPHeaders adds static headers to every request sent to the MCP server.
+// Repeated calls accumulate; a later value wins on a key conflict.
 func WithMCPHeaders(h map[string]string) MCPToolsetOption {
-	return func(e *egressConfig) { e.headers = h }
+	return func(e *egressConfig) { addHeaders(e, h) }
 }
 
 // egressClient selects the HTTP client used to reach an endpoint at rawURL.
@@ -167,7 +180,7 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 		return nil, err
 	}
 
-	card, agentName, description, err := agentCard(info, name)
+	card, agentName, err := agentCard(info, name)
 	if err != nil {
 		return nil, err
 	}
@@ -179,10 +192,15 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 
 	return remoteagent.NewA2A(remoteagent.A2AConfig{
 		Name:           agentName,
-		Description:    description,
+		Description:    card.Description,
 		AgentCard:      card,
 		ClientProvider: remoteagent.NewA2AClientProvider(a2aClientFactory(card, egress)),
 	})
+}
+
+type transportKey struct {
+	binding a2a.TransportProtocol
+	version a2a.ProtocolVersion
 }
 
 // a2aClientFactory builds an A2A client factory for the given card and HTTP
@@ -197,7 +215,7 @@ func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.F
 		a2aclient.WithJSONRPCTransport(httpClient),
 		a2aclient.WithRESTTransport(httpClient),
 	}
-	seen := make(map[string]bool)
+	seen := make(map[transportKey]bool)
 	for _, iface := range card.SupportedInterfaces {
 		// The current-version transports above already cover a2a.Version.
 		if iface == nil || iface.ProtocolVersion == "" || iface.ProtocolVersion == a2a.Version {
@@ -212,7 +230,7 @@ func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.F
 		default:
 			continue
 		}
-		key := string(iface.ProtocolBinding) + "@" + string(iface.ProtocolVersion)
+		key := transportKey{iface.ProtocolBinding, iface.ProtocolVersion}
 		if seen[key] {
 			continue
 		}
@@ -238,30 +256,30 @@ func jsonrpcTransportFactory(httpClient *http.Client) a2aclient.TransportFactory
 	})
 }
 
-// agentCard resolves an [a2a.AgentCard] plus the cleaned agent name and
-// description for a registered agent, using the embedded card when available and
-// otherwise synthesizing one. resourceName is used as a fallback name.
-func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, description string, err error) {
+// agentCard resolves an [a2a.AgentCard] plus the cleaned agent name for a
+// registered agent, using the embedded card when available and otherwise
+// synthesizing one. resourceName is used as a fallback name.
+func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name string, err error) {
 	if info.Card != nil && info.Card.Type == cardTypeA2AAgentCard && len(info.Card.Content) > 0 {
 		var embedded a2a.AgentCard
 		if err := json.Unmarshal(info.Card.Content, &embedded); err != nil {
-			return nil, "", "", fmt.Errorf("agentregistry: decoding embedded agent card for %q: %w", resourceName, err)
+			return nil, "", fmt.Errorf("agentregistry: decoding embedded agent card for %q: %w", resourceName, err)
 		}
 		// Fail fast: an interface-less card would otherwise only error at the
 		// first invocation, deep in the a2a client, without the resource name.
 		if len(embedded.SupportedInterfaces) == 0 {
-			return nil, "", "", fmt.Errorf("agentregistry: embedded agent card for %q has no supported interfaces", resourceName)
+			return nil, "", fmt.Errorf("agentregistry: embedded agent card for %q has no supported interfaces", resourceName)
 		}
 		agentName := cleanName(embedded.Name)
 		if agentName == "" {
-			agentName = cleanName(resourceName)
+			return nil, "", fmt.Errorf("agentregistry: embedded agent card for %q has an empty name", resourceName)
 		}
-		return &embedded, agentName, embedded.Description, nil
+		return &embedded, agentName, nil
 	}
 
 	url, version, transport, ok := connectionURI(info.Protocols, nil, protocolTypeA2AAgent, "")
 	if !ok {
-		return nil, "", "", fmt.Errorf("agentregistry: A2A connection URI not found for agent %q", resourceName)
+		return nil, "", fmt.Errorf("agentregistry: A2A connection URI not found for agent %q", resourceName)
 	}
 
 	displayName := info.DisplayName
@@ -269,6 +287,9 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, des
 		displayName = resourceName
 	}
 	agentName := cleanName(displayName)
+	if agentName == "" {
+		return nil, "", fmt.Errorf("agentregistry: cannot derive a non-empty agent name for %q", resourceName)
+	}
 
 	// Default to HTTP+JSON for an unrecognized binding (as adk-python does).
 	if transport == "" {
@@ -289,11 +310,10 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name, des
 			ProtocolVersion: a2a.ProtocolVersion(protocolVersion),
 		}},
 		Skills:             toA2ASkills(info.Skills),
-		Capabilities:       a2a.AgentCapabilities{Streaming: false},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
 	}
-	return card, agentName, info.Description, nil
+	return card, agentName, nil
 }
 
 func toA2ASkills(skills []Skill) []a2a.AgentSkill {
