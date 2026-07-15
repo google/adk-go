@@ -45,7 +45,7 @@ func TestNewEventDefaults(t *testing.T) {
 
 func TestNewEventUsesProviders(t *testing.T) {
 	fixedTime := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixedTime })
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
 	ctx = platform.WithUUIDProvider(ctx, func() string { return "fixed-event-id" })
 
 	ev := session.NewEvent(ctx, "inv-1")
@@ -67,7 +67,7 @@ func TestNewEventUsesProviders(t *testing.T) {
 func TestNewEventDeterministicReplay(t *testing.T) {
 	newCtx := func() context.Context {
 		var ids int
-		ctx := platform.WithUUIDProvider(context.Background(), func() string {
+		ctx := platform.WithUUIDProvider(t.Context(), func() string {
 			ids++
 			return "event-" + string(rune('0'+ids))
 		})

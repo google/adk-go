@@ -24,8 +24,8 @@ import (
 )
 
 func TestNewUUIDDefaultIsRandomAndValid(t *testing.T) {
-	first := platform.NewUUID(context.Background())
-	second := platform.NewUUID(context.Background())
+	first := platform.NewUUID(t.Context())
+	second := platform.NewUUID(t.Context())
 
 	if _, err := uuid.Parse(first); err != nil {
 		t.Errorf("NewUUID() = %q, not a valid UUID: %v", first, err)
@@ -46,7 +46,7 @@ func TestNewUUIDNilContext(t *testing.T) {
 
 func TestWithUUIDProviderOverridesNewUUID(t *testing.T) {
 	var n int
-	ctx := platform.WithUUIDProvider(context.Background(), func() string {
+	ctx := platform.WithUUIDProvider(t.Context(), func() string {
 		n++
 		return "id-" + string(rune('0'+n))
 	})
@@ -60,7 +60,7 @@ func TestWithUUIDProviderOverridesNewUUID(t *testing.T) {
 }
 
 func TestWithUUIDProviderDerivedContext(t *testing.T) {
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "fixed" })
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return "fixed" })
 	// TODO(kdroste): refactor underlying context
 	derived, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -71,7 +71,7 @@ func TestWithUUIDProviderDerivedContext(t *testing.T) {
 }
 
 func TestWithUUIDProviderNilFallsBack(t *testing.T) {
-	ctx := platform.WithUUIDProvider(context.Background(), nil)
+	ctx := platform.WithUUIDProvider(t.Context(), nil)
 
 	got := platform.NewUUID(ctx)
 	if _, err := uuid.Parse(got); err != nil {
@@ -80,7 +80,7 @@ func TestWithUUIDProviderNilFallsBack(t *testing.T) {
 }
 
 func TestWithUUIDProviderNestedOverride(t *testing.T) {
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "outer" })
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return "outer" })
 	ctx = platform.WithUUIDProvider(ctx, func() string { return "inner" })
 
 	if got := platform.NewUUID(ctx); got != "inner" {
