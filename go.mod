@@ -36,26 +36,12 @@ require (
 	rsc.io/ordered v1.1.1
 )
 
-require (
-	cloud.google.com/go/bigquery v1.74.0
-	github.com/apache/arrow-go/v18 v18.5.2
-	github.com/hashicorp/golang-lru/v2 v2.0.7
-)
+require github.com/hashicorp/golang-lru/v2 v2.0.7
 
 require (
-	github.com/apache/arrow/go/v15 v15.0.2 // indirect
-	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/klauspost/compress v1.18.4 // indirect
-	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/pierrec/lz4/v4 v4.1.25 // indirect
-	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260409153401-be6f6cb8b1fa // indirect
-	golang.org/x/tools v0.44.0 // indirect
-	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
 
 require github.com/a2aproject/a2a-go/v2 v2.3.1
@@ -113,7 +99,7 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260427160629-7cedc36a6bc4 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect
 	modernc.org/libc v1.67.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

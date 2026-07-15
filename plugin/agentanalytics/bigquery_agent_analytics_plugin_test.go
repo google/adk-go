@@ -33,10 +33,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	baseplugin "google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	baseplugin "google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 )
 
 type mockTransport struct {
@@ -114,7 +114,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_Enabled(t *testing.T) {
 }
 
 type mockInvocationContext struct {
-	agent.InvocationContext
+	agent.Context
 	ctx          context.Context
 	agentName    string
 	sessionID    string

@@ -25,11 +25,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	baseplugin "google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	baseplugin "google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // NewBigQueryAgentAnalyticsPlugin creates a newly configured analytics plugin with default config.
@@ -236,16 +236,16 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			return ev, nil
 		},
 
-		BeforeAgentCallback: func(ctx agent.CallbackContext) (*genai.Content, error) {
+		BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
 			logEvent(ctx, "AGENT_START", nil, nil)
 			return nil, nil
 		},
-		AfterAgentCallback: func(ctx agent.CallbackContext) (*genai.Content, error) {
+		AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
 			logEvent(ctx, "AGENT_END", nil, nil)
 			return nil, nil
 		},
 
-		BeforeModelCallback: func(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+		BeforeModelCallback: func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 			attrs := map[string]any{"model": "unknown"}
 			if req.Model != "" {
 				attrs["model"] = req.Model
@@ -253,7 +253,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			logEvent(ctx, "MODEL_REQUEST", req, attrs)
 			return nil, nil
 		},
-		AfterModelCallback: func(ctx agent.CallbackContext, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
+		AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
 			attrs := map[string]any{}
 			if res != nil && res.UsageMetadata != nil {
 				attrs["usage_metadata"] = res.UsageMetadata
@@ -261,23 +261,23 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			logEvent(ctx, "MODEL_RESPONSE", res, attrs)
 			return nil, nil
 		},
-		OnModelErrorCallback: func(ctx agent.CallbackContext, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
+		OnModelErrorCallback: func(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
 			attrs := map[string]any{"error_message": err.Error()}
 			logEvent(ctx, "MODEL_ERROR", nil, attrs)
 			return nil, nil
 		},
 
-		BeforeToolCallback: func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+		BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 			attrs := map[string]any{"tool_name": t.Name()}
 			logEvent(ctx, "TOOL_START", args, attrs)
 			return nil, nil
 		},
-		AfterToolCallback: func(ctx tool.Context, t tool.Tool, args, res map[string]any, err error) (map[string]any, error) {
+		AfterToolCallback: func(ctx agent.Context, t tool.Tool, args, res map[string]any, err error) (map[string]any, error) {
 			attrs := map[string]any{"tool_name": t.Name()}
 			logEvent(ctx, "TOOL_END", res, attrs)
 			return nil, nil
 		},
-		OnToolErrorCallback: func(ctx tool.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+		OnToolErrorCallback: func(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 			attrs := map[string]any{
 				"tool_name":     t.Name(),
 				"error_message": err.Error(),
