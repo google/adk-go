@@ -16,12 +16,9 @@ package agentregistry
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"net/url"
-	"regexp"
 	"slices"
-	"strings"
 )
 
 // This file holds the [Client] discovery methods for the registry's resources:
@@ -100,41 +97,6 @@ func (c *Client) AllEndpoints(ctx context.Context, opts ...ListOption) iter.Seq2
 		}
 		return page.Endpoints, page.NextPageToken, nil
 	})
-}
-
-// GetModelName resolves an endpoint into a model resource name (e.g.
-// "projects/<p>/locations/<l>/publishers/google/models/<model>"). endpointName
-// is the full endpoint resource name.
-func (c *Client) GetModelName(ctx context.Context, endpointName string) (string, error) {
-	endpoint, err := c.GetEndpoint(ctx, endpointName)
-	if err != nil {
-		return "", err
-	}
-	uri, _, _, ok := connectionURI(nil, endpoint.Interfaces, "", "")
-	if !ok {
-		return "", fmt.Errorf("agentregistry: connection URI not found for endpoint %q", endpointName)
-	}
-	return parseModelName(uri), nil
-}
-
-var (
-	// reModelSuffix strips a trailing ":method" suffix (e.g. ":predict").
-	reModelSuffix = regexp.MustCompile(`:\w+$`)
-	// reProjectsSubstring extracts a "projects/..." resource name embedded in a URL.
-	reProjectsSubstring = regexp.MustCompile(`projects/.+`)
-)
-
-// parseModelName extracts a model resource name from an endpoint URI, mirroring
-// the parsing in adk-python's get_model_name.
-func parseModelName(uri string) string {
-	uri = reModelSuffix.ReplaceAllString(uri, "")
-	if strings.HasPrefix(uri, "projects/") {
-		return uri
-	}
-	if m := reProjectsSubstring.FindString(uri); m != "" {
-		return m
-	}
-	return uri
 }
 
 // getResource performs an authenticated GET against the registry and decodes
