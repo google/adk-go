@@ -463,7 +463,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
 	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
-	awaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
+	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *a2a.Task, 1)
 	wg.Add(1)
 	go func() {
@@ -492,9 +492,9 @@ func TestA2ACleanupPropagation(t *testing.T) {
 
 	// Subagent cleanup fires twice: once for cancelation, once for execution.
 	// A generous per-wait deadline avoids flaking under CPU contention.
-	awaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
+	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
 	remoteTaskID := <-remoteTaskIDChan
-	awaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
+	testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
 
 	remoteClient := newA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
@@ -506,24 +506,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	}
 
 	// Join the cancel RPC so it can't log on t after the test returns.
-	awaitN(t, cancelResultChan, 1, "cancel task")
-}
-
-// awaitN receives n values from ch or fails the test after a generous, contention-
-// tolerant deadline. A closed channel counts as a receive, so it also joins a
-// goroutine that closed ch without sending.
-func awaitN[T any](t *testing.T, ch <-chan T, n int, what string) {
-	t.Helper()
-	const deadline = 30 * time.Second
-	timer := time.NewTimer(deadline)
-	defer timer.Stop()
-	for i := range n {
-		select {
-		case <-ch:
-		case <-timer.C:
-			t.Fatalf("%s: got %d of %d within %v", what, i, n, deadline)
-		}
-	}
+	testutil.AwaitN(t, cancelResultChan, 1, "cancel task")
 }
 
 func artifactContainsText(tau *a2a.TaskArtifactUpdateEvent, substr string) bool {
