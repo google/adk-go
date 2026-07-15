@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/session/session_test"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/sessiontestsuite"
 )
 
 func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
@@ -45,8 +45,8 @@ func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
 }
 
 func Test_inMemoryService(t *testing.T) {
-	opts := session_test.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
-	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return session.InMemoryService()
 	})
 }
@@ -97,6 +97,57 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip guards that
+// AppendEvent persists the workflow event fields (NodeInfo,
+// RequestedInput, Routes, IsolationScope) — workflow resume rehydrates
+// node state from them, and a manual event copy that drops them breaks
+// HITL resume. IsolationScope additionally drives history filtering.
+func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+
+	const wantScope = "adk-task-isolation-scope"
+	event := &session.Event{
+		ID:             "wf_event",
+		Author:         "agent",
+		IsolationScope: wantScope,
+		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
+		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
+		Routes:         []string{"route_a"},
+	}
+	if err := service.AppendEvent(ctx, sess, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if ev.NodeInfo == nil || ev.NodeInfo.Path != "ask_name" {
+		t.Errorf("NodeInfo not persisted: %#v", ev.NodeInfo)
+	}
+	if ev.RequestedInput == nil || ev.RequestedInput.InterruptID != "ask_name" {
+		t.Errorf("RequestedInput not persisted: %#v", ev.RequestedInput)
+	}
+	if len(ev.Routes) != 1 || ev.Routes[0] != "route_a" {
+		t.Errorf("Routes not persisted: %#v", ev.Routes)
+	}
+	if ev.IsolationScope != wantScope {
+		t.Errorf("IsolationScope = %q, want %q", ev.IsolationScope, wantScope)
+	}
+}
+
 func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 	ctx := t.Context()
 	service := session.InMemoryService()
@@ -131,4 +182,55 @@ func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 
 	// If it doesn't hang, the test passes (meaning no deadlock)
 	t.Log("AppendEvent did not deadlock")
+}
+
+func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:k1": "v1",
+				"sk":      "v2",
+			},
+		},
+	}
+
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// Verify that the input event pointer's StateDelta map was not mutated in place.
+	if _, exists := event.Actions.StateDelta["temp:k1"]; !exists {
+		t.Errorf("expected temp:k1 to be preserved on input event after AppendEvent, but it was removed: %v", event.Actions.StateDelta)
+	}
+	if event.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk to remain in input event, got: %v", event.Actions.StateDelta)
+	}
+
+	// Verify that the stored event in the session has temp keys stripped.
+	var storedEvent *session.Event
+	for ev := range createResp.Session.Events().All() {
+		storedEvent = ev
+	}
+	if storedEvent == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if _, exists := storedEvent.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("expected temp:k1 to be stripped from stored event, but it still exists: %v", storedEvent.Actions.StateDelta)
+	}
+	if storedEvent.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
 }

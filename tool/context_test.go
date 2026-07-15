@@ -17,9 +17,9 @@ package tool_test
 import (
 	"testing"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestNewToolContext_Interfaces(t *testing.T) {
@@ -27,10 +27,7 @@ func TestNewToolContext_Interfaces(t *testing.T) {
 	toolCtx := agent.NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
-	}
-	if _, ok := toolCtx.(agent.CallbackContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a CallbackContext", toolCtx)
+		t.Errorf("tool context (%+T) is unexpectedly not a ReadonlyContext", toolCtx)
 	}
 }
 

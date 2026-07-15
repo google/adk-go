@@ -28,8 +28,8 @@ import (
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
-	"google.golang.org/adk/internal/sessionutils"
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/platform"
 )
 
 type stateMap map[string]any
@@ -224,11 +224,12 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	eventCopy := &Event{
-		ID:           event.ID,
-		InvocationID: event.InvocationID,
-		Timestamp:    event.Timestamp,
-		Author:       event.Author,
-		Branch:       event.Branch,
+		ID:             event.ID,
+		InvocationID:   event.InvocationID,
+		Timestamp:      event.Timestamp,
+		Author:         event.Author,
+		Branch:         event.Branch,
+		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
@@ -238,7 +239,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			SkipSummarization:          event.Actions.SkipSummarization,
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
+		Routes:             slices.Clone(event.Routes),
+		RequestedInput:     event.RequestedInput,
 		LLMResponse:        event.LLMResponse,
+		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
 	}
 
 	// update the in-memory session service
@@ -439,10 +444,16 @@ func trimTempDeltaState(event *Event) *Event {
 		}
 	}
 
-	// Replace the old map with the newly filtered one.
-	event.Actions.StateDelta = filteredStateDelta
+	// If no keys were filtered out, return the original event without copying.
+	if len(filteredStateDelta) == len(event.Actions.StateDelta) {
+		return event
+	}
 
-	return event
+	// Create a copy of the event to avoid mutating the original.
+	eventCopy := *event
+	eventCopy.Actions.StateDelta = filteredStateDelta
+
+	return &eventCopy
 }
 
 // updateSessionState updates the session state based on the event state delta.

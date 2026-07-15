@@ -7,10 +7,10 @@ name: Go
 
 on:
   push:
-    branches: [ "main", "v2" ]
+    branches: [ "main", "v1" ]
 
   pull_request:
-    branches: [ "main", "v2" ]
+    branches: [ "main", "v1" ]
 
   workflow_dispatch:
 

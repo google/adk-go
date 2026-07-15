@@ -24,11 +24,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -169,7 +170,7 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 }
 
 func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName := "testApp"
 	userID := "testUser"
 	sessionID := "testSession"
@@ -290,6 +291,74 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	}
 }
 
+// TestRunner_PluginModifiesUserMessage guards that a plugin modifying the
+// user message still yields a full run context.
+func TestRunner_PluginModifiesUserMessage(t *testing.T) {
+	ctx := t.Context()
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	var gotMessage *genai.Content
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Accessors that nil-deref on a callback-only context.
+				_ = ctx.Agent().Name()
+				_ = ctx.Session().ID()
+				gotMessage = ctx.UserContent()
+			}
+		},
+	}))
+
+	modifierPlugin, err := plugin.New(plugin.Config{
+		Name: "message_modifier",
+		OnUserMessageCallback: func(_ agent.InvocationContext, _ *genai.Content) (*genai.Content, error) {
+			return &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{genai.NewPartFromText("modified")},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          testAgent,
+		SessionService: sessionService,
+		PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{modifierPlugin}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("original")}}
+	for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+
+	if gotMessage == nil {
+		t.Fatal("agent did not observe a user message")
+	}
+	if len(gotMessage.Parts) != 1 || gotMessage.Parts[0].Text != "modified" {
+		t.Errorf("agent saw %v, want the plugin-modified message", gotMessage)
+	}
+}
+
 // creates agentTree for tests and returns references to the agents
 func agentTree(t *testing.T) agentTreeStruct {
 	t.Helper()
@@ -324,6 +393,75 @@ func must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// TestBuildRunnerNode_AllAgentKinds verifies buildRunnerNode wraps every
+// agent kind (not just LlmAgent) and names the node after the agent.
+func TestBuildRunnerNode_AllAgentKinds(t *testing.T) {
+	t.Parallel()
+
+	noop := func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {}
+	}
+
+	tests := []struct {
+		name  string
+		agent agent.Agent
+	}{
+		{
+			name:  "llm_agent",
+			agent: must(llmagent.New(llmagent.Config{Name: "llm_agent", Model: &noopModel{}})),
+		},
+		{
+			name:  "custom_agent",
+			agent: must(agent.New(agent.Config{Name: "custom_agent", Run: noop})),
+		},
+		{
+			name: "agent_with_subagents",
+			agent: must(agent.New(agent.Config{
+				Name: "agent_with_subagents",
+				Run:  noop,
+				SubAgents: []agent.Agent{
+					must(agent.New(agent.Config{Name: "child", Run: noop})),
+				},
+			})),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := buildRunnerNode(tc.agent)
+			if err != nil {
+				t.Fatalf("buildRunnerNode(%T) error = %v, want nil", tc.agent, err)
+			}
+			if node == nil {
+				t.Fatalf("buildRunnerNode(%T) returned nil node", tc.agent)
+			}
+			if got, want := node.Name(), tc.agent.Name(); got != want {
+				t.Errorf("node.Name() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestBuildRunnerNode_NilAgent verifies buildRunnerNode rejects a nil
+// agent instead of panicking later in the node runtime.
+func TestBuildRunnerNode_NilAgent(t *testing.T) {
+	t.Parallel()
+
+	if _, err := buildRunnerNode(nil); err == nil {
+		t.Error("buildRunnerNode(nil) error = nil, want non-nil")
+	}
+}
+
+// noopModel is a minimal model.LLM used to construct LlmAgents in tests
+// that never call the model.
+type noopModel struct{}
+
+func (noopModel) Name() string { return "noop" }
+
+func (noopModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {}
+}
+
 func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID string, events []*session.Event) session.Session {
 	t.Helper()
 
@@ -345,6 +483,59 @@ func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID
 	}
 
 	return resp.Session
+}
+
+// TestNewInMemory verifies the convenience constructor wires all three
+// in-memory services, enables session auto-creation, and runs end to end
+// without any manual service or session setup.
+func TestNewInMemory(t *testing.T) {
+	t.Parallel()
+
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+
+	r, err := NewInMemory(appName, testAgent)
+	if err != nil {
+		t.Fatalf("NewInMemory() error = %v", err)
+	}
+
+	if r.sessionService == nil {
+		t.Error("NewInMemory() sessionService = nil, want in-memory service")
+	}
+	if r.artifactService == nil {
+		t.Error("NewInMemory() artifactService = nil, want in-memory service")
+	}
+	if r.memoryService == nil {
+		t.Error("NewInMemory() memoryService = nil, want in-memory service")
+	}
+	if !r.autoCreateSession {
+		t.Error("NewInMemory() autoCreateSession = false, want true")
+	}
+
+	// A run must succeed without pre-creating the session (auto-create on).
+	ctx := t.Context()
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() error = %v", err)
+		}
+	}
+
+	if _, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Errorf("expected auto-created session to exist, got error: %v", err)
+	}
 }
 
 func TestRunner_AutoCreateSession(t *testing.T) {
