@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestClientList(t *testing.T) {
@@ -224,6 +226,87 @@ func TestClientGet(t *testing.T) {
 			}
 			if typeField != tc.wantTypeField {
 				t.Errorf("type-specific field = %q, want %q", typeField, tc.wantTypeField)
+			}
+		})
+	}
+}
+
+// TestGetMCPServerDecodesFullResource guards the "output only" MCPServer
+// metadata (tools[], annotations, timestamps, attributes) that the leaner
+// list/get tests don't exercise, so it can't be silently dropped again.
+func TestGetMCPServerDecodesFullResource(t *testing.T) {
+	tests := []struct {
+		name     string
+		respBody string
+		want     *MCPServer
+	}{
+		{
+			name: "tools annotations timestamps and attributes",
+			respBody: `{
+				"name": "projects/p/locations/l/mcpServers/data",
+				"mcpServerId": "data-mcp",
+				"displayName": "Data",
+				"tools": [
+					{
+						"name": "query",
+						"description": "run a query",
+						"annotations": {
+							"title": "Query",
+							"readOnlyHint": true,
+							"destructiveHint": false,
+							"idempotentHint": true,
+							"openWorldHint": true
+						}
+					},
+					{"name": "wipe", "description": "delete everything"}
+				],
+				"createTime": "2026-01-02T15:04:05Z",
+				"updateTime": "2026-01-03T15:04:05Z",
+				"attributes": {"agentregistry.googleapis.com/system/RuntimeReference": {"uri": "//gke/dep"}}
+			}`,
+			want: &MCPServer{
+				Name:        "projects/p/locations/l/mcpServers/data",
+				MCPServerID: "data-mcp",
+				DisplayName: "Data",
+				Tools: []Tool{
+					{
+						Name:        "query",
+						Description: "run a query",
+						Annotations: &Annotations{
+							Title:          "Query",
+							ReadOnlyHint:   true,
+							IdempotentHint: true,
+							OpenWorldHint:  true,
+						},
+					},
+					{Name: "wipe", Description: "delete everything"},
+				},
+				CreateTime: "2026-01-02T15:04:05Z",
+				UpdateTime: "2026-01-03T15:04:05Z",
+				Attributes: map[string]any{
+					"agentregistry.googleapis.com/system/RuntimeReference": map[string]any{"uri": "//gke/dep"},
+				},
+			},
+		},
+		{
+			name:     "no tools reported leaves Tools nil",
+			respBody: `{"displayName":"Data","mcpServerId":"data-mcp"}`,
+			want:     &MCPServer{DisplayName: "Data", MCPServerID: "data-mcp"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.respBody))
+			}))
+			defer srv.Close()
+
+			got, err := newTestClient(srv).GetMCPServer(t.Context(), "projects/p/locations/l/mcpServers/data")
+			if err != nil {
+				t.Fatalf("GetMCPServer() error = %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("GetMCPServer() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
