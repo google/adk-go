@@ -15,9 +15,11 @@
 package agentregistry
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,6 +56,8 @@ func applyMCPToolsetOptions(opts []MCPToolsetOption) egressConfig {
 	return ec
 }
 
+// addHeaders merges h into e.headers: it adds new keys and overwrites existing
+// ones, and never removes a key.
 func addHeaders(e *egressConfig, h map[string]string) {
 	if len(h) == 0 {
 		return
@@ -61,9 +65,7 @@ func addHeaders(e *egressConfig, h map[string]string) {
 	if e.headers == nil {
 		e.headers = make(map[string]string, len(h))
 	}
-	for k, v := range h {
-		e.headers[k] = v
-	}
+	maps.Copy(e.headers, h)
 }
 
 // RemoteAgentOption customizes [Client.RemoteAgent].
@@ -81,8 +83,8 @@ func WithA2AHTTPClient(c *http.Client) RemoteAgentOption {
 	return func(e *egressConfig) { e.httpClient = c }
 }
 
-// WithA2AHeaders adds static headers to every request sent to the remote A2A
-// agent. Repeated calls accumulate; a later value wins on a key conflict.
+// WithA2AHeaders adds or overwrites static headers on every request sent to the
+// remote A2A agent. Repeated calls accumulate; a later value wins on a key conflict.
 func WithA2AHeaders(h map[string]string) RemoteAgentOption {
 	return func(e *egressConfig) { addHeaders(e, h) }
 }
@@ -97,21 +99,20 @@ func WithMCPHTTPClient(c *http.Client) MCPToolsetOption {
 	return func(e *egressConfig) { e.httpClient = c }
 }
 
-// WithMCPHeaders adds static headers to every request sent to the MCP server.
-// Repeated calls accumulate; a later value wins on a key conflict.
+// WithMCPHeaders adds or overwrites static headers on every request sent to the
+// MCP server. Repeated calls accumulate; a later value wins on a key conflict.
 func WithMCPHeaders(h map[string]string) MCPToolsetOption {
 	return func(e *egressConfig) { addHeaders(e, h) }
 }
 
-// egressClient selects the HTTP client used to reach an endpoint at rawURL.
-// Precedence: an explicit override, then (only when autoADC is set and the
-// endpoint is a Google API) the registry's authenticated client, then a default
-// client. Static headers, if any, are layered on via a cloned client so shared
-// clients are never mutated.
-func (c *Client) egressClient(rawURL string, ec egressConfig, autoADC bool) *http.Client {
+// egressClient selects the HTTP client used to reach an MCP endpoint at rawURL.
+// Precedence: an explicit override, then (for a Google API endpoint) the
+// registry's authenticated client, then a default client. Static headers, if
+// any, are layered on via a cloned client so shared clients are never mutated.
+func (c *Client) egressClient(rawURL string, ec egressConfig) *http.Client {
 	base := ec.httpClient
 	if base == nil {
-		if autoADC && isGoogleAPI(rawURL) {
+		if isGoogleAPI(rawURL) {
 			base = c.httpClient
 		} else {
 			base = http.DefaultClient
@@ -131,9 +132,9 @@ func isGoogleAPI(rawURL string) bool {
 	return host == "googleapis.com" || strings.HasSuffix(host, ".googleapis.com")
 }
 
-// clientWithHeaders returns a client that adds the given static headers to every
-// request. If there are no headers, base is returned unchanged. Otherwise base
-// is shallow-copied so the caller's client is not mutated.
+// clientWithHeaders returns a client that adds or overwrites the given static
+// headers on every request. If there are no headers, base is returned unchanged.
+// Otherwise base is shallow-copied so the caller's client is not mutated.
 func clientWithHeaders(base *http.Client, headers map[string]string) *http.Client {
 	if len(headers) == 0 {
 		return base
@@ -148,6 +149,8 @@ type headerRoundTripper struct {
 	base    http.RoundTripper
 	headers map[string]string
 }
+
+var _ http.RoundTripper = (*headerRoundTripper)(nil)
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rt := h.base
@@ -186,9 +189,9 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 	}
 
 	ec := applyRemoteAgentOptions(opts)
-	// A2A egress is not auto-authenticated (parity with adk-python), so the
-	// endpoint URL is irrelevant to client selection here.
-	egress := c.egressClient("", ec, false)
+	// A2A egress is not auto-authenticated (parity with adk-python): use the
+	// caller's client or the default, never the registry's ADC client.
+	egress := clientWithHeaders(cmp.Or(ec.httpClient, http.DefaultClient), ec.headers)
 
 	return remoteagent.NewA2A(remoteagent.A2AConfig{
 		Name:           agentName,
@@ -352,7 +355,7 @@ func (c *Client) MCPToolset(ctx context.Context, name string, opts ...MCPToolset
 	}
 
 	ec := applyMCPToolsetOptions(opts)
-	egress := c.egressClient(uri, ec, true)
+	egress := c.egressClient(uri, ec)
 
 	return mcptoolset.New(mcptoolset.Config{
 		Transport: &mcp.StreamableClientTransport{

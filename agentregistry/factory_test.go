@@ -51,41 +51,31 @@ func TestEgressClient(t *testing.T) {
 	c := &Client{httpClient: registryClient}
 
 	tests := []struct {
-		name    string
-		url     string
-		ec      egressConfig
-		autoADC bool
-		want    *http.Client
+		name string
+		url  string
+		ec   egressConfig
+		want *http.Client
 	}{
 		{
-			name:    "explicit override wins",
-			url:     "https://x.googleapis.com",
-			ec:      egressConfig{httpClient: override},
-			autoADC: true,
-			want:    override,
+			name: "explicit override wins",
+			url:  "https://x.googleapis.com",
+			ec:   egressConfig{httpClient: override},
+			want: override,
 		},
 		{
-			name:    "google api with autoADC reuses registry client",
-			url:     "https://x.googleapis.com/mcp",
-			autoADC: true,
-			want:    registryClient,
+			name: "google api reuses registry client",
+			url:  "https://x.googleapis.com/mcp",
+			want: registryClient,
 		},
 		{
-			name:    "google api without autoADC uses default",
-			url:     "https://x.googleapis.com/mcp",
-			autoADC: false,
-			want:    http.DefaultClient,
-		},
-		{
-			name:    "non-google uses default",
-			url:     "https://third-party.example/mcp",
-			autoADC: true,
-			want:    http.DefaultClient,
+			name: "non-google uses default",
+			url:  "https://third-party.example/mcp",
+			want: http.DefaultClient,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := c.egressClient(tc.url, tc.ec, tc.autoADC); got != tc.want {
+			if got := c.egressClient(tc.url, tc.ec); got != tc.want {
 				t.Errorf("egressClient() = %p, want %p", got, tc.want)
 			}
 		})
@@ -95,7 +85,7 @@ func TestEgressClient(t *testing.T) {
 func TestEgressClient_HeadersProduceDistinctClient(t *testing.T) {
 	registryClient := &http.Client{}
 	c := &Client{httpClient: registryClient}
-	got := c.egressClient("https://x.googleapis.com", egressConfig{headers: map[string]string{"X": "y"}}, true)
+	got := c.egressClient("https://x.googleapis.com", egressConfig{headers: map[string]string{"X": "y"}})
 	if got == registryClient {
 		t.Error("egressClient() with headers returned the shared registry client; want a distinct clone")
 	}
