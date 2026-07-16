@@ -111,6 +111,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	testCases := []struct {
 		name            string
 		includeContents llmagent.IncludeContents
+		mode            llmagent.Mode // zero value == unset
 		events          []*session.Event
 		want            []*genai.Content
 	}{
@@ -145,6 +146,40 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 		{
 			name:            "helloAndGoodBye",
 			includeContents: "none",
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// single_turn implies "none" when IncludeContents is unset:
+			// the rule the contents processor derives from Mode at read
+			// time, replacing the run-time write removed in issue #1137.
+			name:            "helloAndGoodBye",
+			includeContents: "",
+			mode:            llmagent.ModeSingleTurn,
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// An explicit "default" on a single_turn agent is honored
+			// (full history), matching adk-python which only forces
+			// 'none' when include_contents was not set explicitly.
+			name:            "helloAndGoodBye",
+			includeContents: "default",
+			mode:            llmagent.ModeSingleTurn,
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("hello", "user"),
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			name:            "helloAndGoodBye",
+			includeContents: "none",
+			mode:            llmagent.ModeSingleTurn,
 			events:          helloAndGoodBye,
 			want: []*genai.Content{
 				genai.NewContentFromText("good bye", "user"),
@@ -218,11 +253,12 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name+"/include_contents="+string(tc.includeContents), func(t *testing.T) {
+		t.Run(tc.name+"/include_contents="+string(tc.includeContents)+"/mode="+string(tc.mode), func(t *testing.T) {
 			testAgent := utils.Must(llmagent.New(llmagent.Config{
 				Name:            agentName,
 				Model:           testModel,
 				IncludeContents: tc.includeContents,
+				Mode:            tc.mode,
 			}))
 
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{

@@ -18,6 +18,7 @@ import (
 	"context"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -1159,5 +1161,122 @@ func fcContent(id, name string, args map[string]any) *genai.Content {
 		Parts: []*genai.Part{{
 			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
 		}},
+	}
+}
+
+// =============================================================================
+// Parallel single_turn dispatch (issue #1137)
+// =============================================================================
+
+// concurrentScriptedLLM is a scriptedLLM variant whose call counter is
+// mutex-guarded: parallel fan-out dispatches the sub-agent's model from
+// several goroutines at once. The last turn repeats once the script is
+// exhausted.
+type concurrentScriptedLLM struct {
+	mu      sync.Mutex
+	turns   []*model.LLMResponse
+	callIdx int
+}
+
+func (s *concurrentScriptedLLM) Name() string { return "concurrent-scripted-mock" }
+
+func (s *concurrentScriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	s.mu.Lock()
+	idx := min(s.callIdx, len(s.turns)-1)
+	s.callIdx++
+	turn := s.turns[idx]
+	s.mu.Unlock()
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(turn, nil)
+	}
+}
+
+var _ model.LLM = (*concurrentScriptedLLM)(nil)
+
+// TestParallelSingleTurnDispatch_SharedStateNotWritten is the
+// regression test for issue #1137: a chat coordinator dispatches the
+// same single_turn sub-agent twice via parallel function calls in one
+// model turn. Each dispatch used to write the shared agent state
+// (IncludeContents), a data race between the two dispatch goroutines.
+//
+// The IncludeContents assertion fails deterministically even without
+// -race: it pins the invariant that shared state is never written at
+// run time, not merely the absence of a race report.
+func TestParallelSingleTurnDispatch_SharedStateNotWritten(t *testing.T) {
+	t.Parallel()
+
+	const workerName = "worker"
+	worker, err := llmagent.New(llmagent.Config{
+		Name:        workerName,
+		Description: "Handles one delegated task.",
+		Model: &concurrentScriptedLLM{turns: []*model.LLMResponse{{
+			Content: genai.NewContentFromText("task done", genai.RoleModel),
+		}}},
+		Mode: llmagent.ModeSingleTurn,
+		// IncludeContents deliberately left unset ("").
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	coordLLM := &concurrentScriptedLLM{turns: []*model.LLMResponse{
+		{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call-a", Name: workerName, Args: map[string]any{"request": "do task A"}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call-b", Name: workerName, Args: map[string]any{"request": "do task B"}}},
+		}}},
+		{Content: genai.NewContentFromText("all done", genai.RoleModel)},
+	}}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Model:     coordLLM,
+		SubAgents: []agent.Agent{worker},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	svc := session.InMemoryService()
+	if _, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	}); err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	r, err := runner.New(runner.Config{Agent: coord, SessionService: svc, AppName: "app"})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	gotFRs := map[string]bool{}
+	for ev, err := range r.Run(t.Context(), "u", "s",
+		genai.NewContentFromText("fan out", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run: %v", err)
+		}
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p != nil && p.FunctionResponse != nil {
+				gotFRs[p.FunctionResponse.ID] = true
+			}
+		}
+	}
+
+	// 1. Both dispatches produced a result — fan-out actually happened.
+	for _, id := range []string{"call-a", "call-b"} {
+		if !gotFRs[id] {
+			t.Errorf("expected a FunctionResponse for %s; got FRs for %v", id, gotFRs)
+		}
+	}
+
+	// 2. The shared agent state was never written at run time: the
+	// worker's IncludeContents is still its configured value (unset)
+	// and its Mode is still the configured single_turn.
+	workerState := llminternal.Reveal(worker.(llminternal.Agent))
+	if got := workerState.IncludeContents; got != "" {
+		t.Errorf("worker IncludeContents = %q after run, want unchanged %q (shared state written at run time, issue #1137)", got, "")
+	}
+	if got := workerState.Mode; got != llminternal.ModeSingleTurn {
+		t.Errorf("worker Mode = %q after run, want unchanged %q (shared state written at run time, issue #1137)", got, llminternal.ModeSingleTurn)
 	}
 }

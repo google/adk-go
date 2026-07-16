@@ -15,7 +15,9 @@
 // Package workflowinternal provides utilities for running an LlmAgent as
 // a workflow node. Per-mode behaviour:
 //
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
+//   - single_turn: IncludeContents defaults to none unless set
+//     explicitly (derived from Mode in the contents processor, never
+//     written at run time); the wrapper seeds the
 //     agent with a single user-content event derived from nodeInput,
 //     drives one Agent.Run, post-processes the model reply into the
 //     terminal Output, then returns.
@@ -82,9 +84,11 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			return
 		}
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
+		// Note: single_turn implies IncludeContents "none" unless set
+		// explicitly; the contents processor derives that from Mode at
+		// read time. State is shared across concurrent dispatches of one
+		// agent, so nothing may write it here (issue #1137).
+
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
