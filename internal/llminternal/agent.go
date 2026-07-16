@@ -15,8 +15,6 @@
 package llminternal
 
 import (
-	"sync"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -62,35 +60,24 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
-
-	// modeMu protects Mode reads/writes so ResolveMode and CurrentMode are
-	// race-free when a shared agent is dispatched concurrently.
-	modeMu sync.Mutex
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
 
-// ResolveMode returns the agent's mode, defaulting ModeUnset to
-// defaultIfUnset on first resolution. Safe for concurrent callers sharing
-// this State. First caller wins if Mode is still unset (callers should
-// pass the default appropriate for their path).
-func (s *State) ResolveMode(defaultIfUnset Mode) Mode {
-	s.modeMu.Lock()
-	defer s.modeMu.Unlock()
-	if s.Mode == ModeUnset {
-		s.Mode = defaultIfUnset
+// EffectiveIncludeContents returns the include-contents policy for building
+// LLM request history. single_turn defaults to "none" only when the field was
+// left unset (""), so an explicit IncludeContents value is preserved. This is
+// derived at read time so concurrent dispatches never mutate shared State.
+func (s *State) EffectiveIncludeContents() string {
+	if s.IncludeContents != "" {
+		return s.IncludeContents
 	}
-	return s.Mode
-}
-
-// CurrentMode returns Mode without applying a default. Safe for concurrent
-// readers alongside ResolveMode.
-func (s *State) CurrentMode() Mode {
-	s.modeMu.Lock()
-	defer s.modeMu.Unlock()
-	return s.Mode
+	if s.Mode == ModeSingleTurn {
+		return "none"
+	}
+	return "default"
 }
 
 func Reveal(a Agent) *State { return a.internal() }

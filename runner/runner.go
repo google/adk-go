@@ -109,6 +109,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
+	// Root LlmAgents default to chat at construction time so Run never
+	// mutates shared Mode on the hot path (parallel single_turn fan-out).
+	if llmA, ok := cfg.Agent.(llminternal.Agent); ok {
+		if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
+			state.Mode = llminternal.ModeChat
+		}
+	}
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -207,7 +215,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.ResolveMode(llminternal.ModeChat) != llminternal.ModeChat {
+			if llmInternalState.Mode != llminternal.ModeChat {
 				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
 				return
 			}
@@ -217,7 +225,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					if !isLlmAgent(subAgent) {
 						continue
 					}
-					if llminternal.Reveal(subAgent.(llminternal.Agent)).CurrentMode() == llminternal.ModeTask {
+					if llminternal.Reveal(subAgent.(llminternal.Agent)).Mode == llminternal.ModeTask {
 						return true
 					}
 				}

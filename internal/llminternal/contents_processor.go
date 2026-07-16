@@ -44,11 +44,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		}
 		state := llmAgent.internal()
 		fn := buildContentsDefault // "" or "default".
-		// single_turn agents always use current-turn context only. Derive
-		// this from Mode at read time so RunLLMAgentAsNode does not need to
-		// mutate shared IncludeContents under parallel fan-out.
-		mode := state.CurrentMode()
-		if state.IncludeContents == "none" || mode == ModeSingleTurn {
+		// Derive include policy at read time: never write shared State on the
+		// hot path (parallel single_turn fan-out, issue #1137).
+		if state.EffectiveIncludeContents() == "none" {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		var events []*session.Event
@@ -57,7 +55,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		isSingleTurn := mode == ModeSingleTurn
+		isSingleTurn := state.Mode == ModeSingleTurn
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)

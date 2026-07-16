@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -171,9 +172,18 @@ func TestRunLLMAgentAsNode_ParallelSingleTurnDispatch_NoRace(t *testing.T) {
 		Description: "Handles delegated work.",
 		Model:       staticTextLLM("task done"),
 		Mode:        llmagent.ModeSingleTurn,
+		// Leave IncludeContents unset: effective policy is derived as "none"
+		// at read time and must not be written onto shared State.
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+	workerState := llminternal.Reveal(worker.(llminternal.Agent))
+	if got := workerState.IncludeContents; got != "" {
+		t.Fatalf("worker IncludeContents before run = %q, want unset", got)
+	}
+	if got := workerState.EffectiveIncludeContents(); got != "none" {
+		t.Fatalf("EffectiveIncludeContents() = %q, want none", got)
 	}
 
 	coordLLM := &scriptedLLM{
@@ -212,6 +222,15 @@ func TestRunLLMAgentAsNode_ParallelSingleTurnDispatch_NoRace(t *testing.T) {
 	}
 	if workerEvents == 0 {
 		t.Fatalf("expected events from %q, got none", workerName)
+	}
+
+	// Invariant: parallel fan-out must not mutate shared IncludeContents
+	// (the race that prompted #1137 wrote IncludeContents="none" here).
+	if got := workerState.IncludeContents; got != "" {
+		t.Fatalf("worker IncludeContents after parallel run = %q, want still unset", got)
+	}
+	if got := workerState.Mode; got != llmagent.ModeSingleTurn {
+		t.Fatalf("worker Mode after parallel run = %q, want single_turn", got)
 	}
 }
 
