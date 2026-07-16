@@ -126,7 +126,7 @@ type Request struct {
 // RetrieveCredential retrieves a credential for req, polling while the service
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (*auth.Credential, error) {
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
 	if req.Resource == "" {
 		return nil, fmt.Errorf("gcp: RetrieveCredential requires a Resource")
 	}
@@ -190,7 +190,7 @@ type retrieveResult struct {
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential; any other header
 // name becomes a header-based API key.
-func mapCredential(header, token string) (*auth.Credential, error) {
+func mapCredential(header, token string) (auth.Credential, error) {
 	if header == "" || token == "" {
 		return nil, fmt.Errorf("gcp: credentials service returned an empty header or token")
 	}
@@ -198,12 +198,12 @@ func mapCredential(header, token string) (*auth.Credential, error) {
 	name = strings.TrimSpace(name)
 	if strings.EqualFold(name, "authorization") &&
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(hint)), "bearer") {
-		return &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer", Token: token}}, nil
+		return auth.BearerCredential{Token: token}, nil
 	}
 	// Non-bearer header -> header-based API key.
-	// TODO: for full adk-python parity also mirror the token into X-GOOG-API-KEY;
-	// needs an AdditionalHeaders field on auth.APIKeyCredential (additive, non-breaking).
-	return &auth.Credential{APIKey: &auth.APIKeyCredential{Name: name, Value: token}}, nil
+	// TODO: for full adk-python parity also mirror the token into X-GOOG-API-KEY
+	// (via auth.WithHeaders) as a follow-up.
+	return auth.APIKeyCredential{Name: name, Value: token}, nil
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.

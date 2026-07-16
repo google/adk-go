@@ -39,7 +39,6 @@ type connectorOperation struct {
 		Header string `json:"header"`
 	} `json:"response"`
 	Metadata *struct {
-		ConsentPending     *struct{}      `json:"consentPending"`
 		URIConsentRequired *consentDetail `json:"uriConsentRequired"`
 		ConsentRejected    *struct{}      `json:"consentRejected"`
 	} `json:"metadata"`
@@ -62,7 +61,12 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (retrieveRe
 	if op.Error != nil {
 		return retrieveResult{}, fmt.Errorf("gcp: connector operation failed: %s", op.Error.Message)
 	}
-	if op.Done && op.Response != nil {
+	if op.Done {
+		// A terminal operation must carry a credential; treat an empty result as
+		// an error rather than polling to the timeout.
+		if op.Response == nil {
+			return retrieveResult{}, fmt.Errorf("gcp: connector operation done but returned no credential for %q", req.Resource)
+		}
 		return retrieveResult{status: statusOK, token: op.Response.Token, header: op.Response.Header}, nil
 	}
 	if md := op.Metadata; md != nil {

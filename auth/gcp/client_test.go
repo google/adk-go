@@ -43,9 +43,7 @@ func TestRetrieveAgentIdentityBearer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if cred.HTTP == nil || cred.HTTP.Scheme != "bearer" || cred.HTTP.Token != "tok" {
-		t.Fatalf("credential = %+v, want bearer token %q", cred, "tok")
-	}
+	wantBearer(t, cred, "tok")
 }
 
 func TestRetrieveAgentIdentityCustomHeader(t *testing.T) {
@@ -57,9 +55,7 @@ func TestRetrieveAgentIdentityCustomHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if cred.APIKey == nil || cred.APIKey.Name != "X-Goog-Api-Key" || cred.APIKey.Value != "KEY" {
-		t.Fatalf("credential = %+v, want API key header", cred)
-	}
+	wantAPIKey(t, cred, "X-Goog-Api-Key", "KEY")
 }
 
 func TestRetrieveAgentIdentityConsentRequired(t *testing.T) {
@@ -104,9 +100,7 @@ func TestRetrieveAgentIdentityPollsPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if cred.HTTP == nil || cred.HTTP.Token != "tok" {
-		t.Fatalf("credential = %+v, want bearer token", cred)
-	}
+	wantBearer(t, cred, "tok")
 	if got := atomic.LoadInt32(calls); got != 2 {
 		t.Errorf("service calls = %d, want 2 (pending then success)", got)
 	}
@@ -121,9 +115,7 @@ func TestRetrieveConnectorBearer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if cred.HTTP == nil || cred.HTTP.Token != "tok" {
-		t.Fatalf("credential = %+v, want bearer token", cred)
-	}
+	wantBearer(t, cred, "tok")
 }
 
 func TestRetrieveConnectorPollsConsentPending(t *testing.T) {
@@ -138,9 +130,7 @@ func TestRetrieveConnectorPollsConsentPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if cred.HTTP == nil || cred.HTTP.Token != "tok" {
-		t.Fatalf("credential = %+v, want bearer token", cred)
-	}
+	wantBearer(t, cred, "tok")
 	if got := atomic.LoadInt32(calls); got != 2 {
 		t.Errorf("service calls = %d, want 2 (pending then success)", got)
 	}
@@ -261,13 +251,9 @@ func TestMapCredential(t *testing.T) {
 			}
 			switch {
 			case tc.wantBearer != "":
-				if cred.HTTP == nil || cred.HTTP.Token != tc.wantBearer {
-					t.Errorf("credential = %+v, want bearer %q", cred, tc.wantBearer)
-				}
+				wantBearer(t, cred, tc.wantBearer)
 			default:
-				if cred.APIKey == nil || cred.APIKey.Name != tc.wantAPIKey[0] || cred.APIKey.Value != tc.wantAPIKey[1] {
-					t.Errorf("credential = %+v, want API key %v", cred, tc.wantAPIKey)
-				}
+				wantAPIKey(t, cred, tc.wantAPIKey[0], tc.wantAPIKey[1])
 			}
 		})
 	}
@@ -288,6 +274,39 @@ func TestRetrieveContextCanceledWhilePending(t *testing.T) {
 	_, err := c.RetrieveCredential(ctx, Request{Resource: authProviderResource, UserID: "u"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RetrieveCredential() error = %v, want context.Canceled", err)
+	}
+}
+
+// TestRetrievePollTimeout verifies that a service stuck in the non-interactive
+// pending state past the poll timeout surfaces ErrPollTimeout (no hang).
+func TestRetrievePollTimeout(t *testing.T) {
+	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	c.pollTimeout = 30 * time.Millisecond
+
+	_, err := c.RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	if !errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("RetrieveCredential() error = %v, want ErrPollTimeout", err)
+	}
+}
+
+// TestRetrieveConnectorDoneWithoutResponse verifies that a terminal (done)
+// connector operation carrying no credential fails fast with an error, rather
+// than being treated as pending and polled until the timeout.
+func TestRetrieveConnectorDoneWithoutResponse(t *testing.T) {
+	srv, _ := sequenceServer(`{"done":true}`)
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+	if err == nil || !strings.Contains(err.Error(), "no credential") {
+		t.Fatalf("error = %v, want it to mention %q", err, "no credential")
+	}
+	if errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("error = %v, want a done-without-credential error, not a poll timeout", err)
 	}
 }
 
@@ -319,4 +338,28 @@ func sequenceServer(bodies ...string) (*httptest.Server, *int32) {
 		_, _ = io.WriteString(w, bodies[i])
 	}))
 	return srv, &n
+}
+
+// wantBearer fails t unless cred is an auth.BearerCredential carrying token.
+func wantBearer(t *testing.T, cred auth.Credential, token string) {
+	t.Helper()
+	b, ok := cred.(auth.BearerCredential)
+	if !ok {
+		t.Fatalf("credential = %#v, want auth.BearerCredential", cred)
+	}
+	if b.Token != token {
+		t.Fatalf("bearer token = %q, want %q", b.Token, token)
+	}
+}
+
+// wantAPIKey fails t unless cred is an auth.APIKeyCredential with name and value.
+func wantAPIKey(t *testing.T, cred auth.Credential, name, value string) {
+	t.Helper()
+	k, ok := cred.(auth.APIKeyCredential)
+	if !ok {
+		t.Fatalf("credential = %#v, want auth.APIKeyCredential", cred)
+	}
+	if k.Name != name || k.Value != value {
+		t.Fatalf("api key = {name:%q value:%q}, want {name:%q value:%q}", k.Name, k.Value, name, value)
+	}
 }
