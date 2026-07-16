@@ -63,23 +63,33 @@ type State struct {
 
 	OutputKey string
 
-	// modeInit serializes ModeUnset -> default resolution so parallel
-	// dispatches of a shared agent do not race on Mode.
-	modeInit sync.Once
+	// modeMu protects Mode reads/writes so ResolveMode and CurrentMode are
+	// race-free when a shared agent is dispatched concurrently.
+	modeMu sync.Mutex
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
 
-// ResolveMode returns the agent's mode, defaulting ModeUnset exactly once
-// to defaultIfUnset. Safe for concurrent callers sharing this State.
+// ResolveMode returns the agent's mode, defaulting ModeUnset to
+// defaultIfUnset on first resolution. Safe for concurrent callers sharing
+// this State. First caller wins if Mode is still unset (callers should
+// pass the default appropriate for their path).
 func (s *State) ResolveMode(defaultIfUnset Mode) Mode {
-	s.modeInit.Do(func() {
-		if s.Mode == ModeUnset {
-			s.Mode = defaultIfUnset
-		}
-	})
+	s.modeMu.Lock()
+	defer s.modeMu.Unlock()
+	if s.Mode == ModeUnset {
+		s.Mode = defaultIfUnset
+	}
+	return s.Mode
+}
+
+// CurrentMode returns Mode without applying a default. Safe for concurrent
+// readers alongside ResolveMode.
+func (s *State) CurrentMode() Mode {
+	s.modeMu.Lock()
+	defer s.modeMu.Unlock()
 	return s.Mode
 }
 

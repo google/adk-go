@@ -102,7 +102,7 @@ func needOutputSchemaProcessor(state *State) bool {
 	// Task-mode agents already have a structured-output mechanism:
 	// the auto-injected finish_task tool whose declaration mirrors
 	// the agent's OutputSchema.
-	if state.Mode == ModeTask {
+	if state.CurrentMode() == ModeTask {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0

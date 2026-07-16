@@ -217,8 +217,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					if !isLlmAgent(subAgent) {
 						continue
 					}
-					llmInternalSubAgent := llminternal.Reveal(subAgent.(llminternal.Agent))
-					if llmInternalSubAgent.Mode == llminternal.ModeTask {
+					if llminternal.Reveal(subAgent.(llminternal.Agent)).CurrentMode() == llminternal.ModeTask {
 						return true
 					}
 				}

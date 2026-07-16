@@ -149,7 +149,8 @@ func installTaskTools(a *llmAgent) error {
 			continue
 		}
 		subState := llminternal.Reveal(subInternal)
-		if subState.ResolveMode(llminternal.ModeChat) == llminternal.ModeSingleTurn {
+		switch subState.ResolveMode(llminternal.ModeChat) {
+		case llminternal.ModeSingleTurn:
 			t, err := workflowinternal.NewSingleTurnTool(sub)
 			if err != nil {
 				return fmt.Errorf(
@@ -158,7 +159,7 @@ func installTaskTools(a *llmAgent) error {
 				)
 			}
 			state.Tools = append(state.Tools, t)
-		} else if subState.Mode == llminternal.ModeTask {
+		case llminternal.ModeTask:
 			t, err := workflowinternal.NewTaskAgentTool(sub)
 			if err != nil {
 				return fmt.Errorf(

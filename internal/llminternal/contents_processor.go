@@ -47,7 +47,8 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// single_turn agents always use current-turn context only. Derive
 		// this from Mode at read time so RunLLMAgentAsNode does not need to
 		// mutate shared IncludeContents under parallel fan-out.
-		if state.IncludeContents == "none" || state.Mode == ModeSingleTurn {
+		mode := state.CurrentMode()
+		if state.IncludeContents == "none" || mode == ModeSingleTurn {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		var events []*session.Event
@@ -56,7 +57,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		isSingleTurn := state.Mode == ModeSingleTurn
+		isSingleTurn := mode == ModeSingleTurn
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)
