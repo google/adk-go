@@ -15,10 +15,10 @@
 // Package workflowinternal provides utilities for running an LlmAgent as
 // a workflow node. Per-mode behaviour:
 //
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
-//     agent with a single user-content event derived from nodeInput,
-//     drives one Agent.Run, post-processes the model reply into the
-//     terminal Output, then returns.
+//   - single_turn: current-turn contents only (derived from Mode in the
+//     contents processor), seeds the agent with a single user-content
+//     event derived from nodeInput, drives one Agent.Run, post-processes
+//     the model reply into the terminal Output, then returns.
 //   - task: the wrapper drives Agent.Run and watches for the
 //     finish_task FunctionCall; once the matching FinishTaskTool
 //     FunctionResponse signals success, the wrapper promotes the FC
@@ -70,21 +70,18 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			return
 		}
 		state := llminternal.Reveal(llmA)
-
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-		switch state.Mode {
+		// Resolve ModeUnset once without racing parallel node dispatches.
+		// single_turn IncludeContents=none is derived at read time in the
+		// contents processor (do not mutate shared State here).
+		mode := state.ResolveMode(llminternal.ModeSingleTurn)
+		switch mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q only supports task, single_turn, and chat mode, got %q",
-				a.Name(), state.Mode))
+				a.Name(), mode))
 			return
 		}
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
@@ -96,7 +93,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     carry one,
 		//   - relies on the embedded InvocationContext for everything
 		//     else (memory, run config, etc.).
-		switch state.Mode {
+		switch mode {
 		case llminternal.ModeChat:
 			runChat(a, ctx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
@@ -119,7 +116,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
-			if state.Mode == llminternal.ModeSingleTurn {
+			if mode == llminternal.ModeSingleTurn {
 				runSingleTurn(a, ic, yield)
 			} else {
 				runTask(a, ic, yield)

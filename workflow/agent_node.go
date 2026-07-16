@@ -51,10 +51,7 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}
 
 	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
+		llminternal.Reveal(llmA).ResolveMode(llminternal.ModeSingleTurn)
 	}
 
 	// The wrapped agent's Run already emits an invoke_agent span, so

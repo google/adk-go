@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -60,10 +62,25 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	// modeInit serializes ModeUnset -> default resolution so parallel
+	// dispatches of a shared agent do not race on Mode.
+	modeInit sync.Once
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
+
+// ResolveMode returns the agent's mode, defaulting ModeUnset exactly once
+// to defaultIfUnset. Safe for concurrent callers sharing this State.
+func (s *State) ResolveMode(defaultIfUnset Mode) Mode {
+	s.modeInit.Do(func() {
+		if s.Mode == ModeUnset {
+			s.Mode = defaultIfUnset
+		}
+	})
+	return s.Mode
+}
 
 func Reveal(a Agent) *State { return a.internal() }

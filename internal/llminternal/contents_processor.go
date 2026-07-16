@@ -44,8 +44,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		}
 		state := llmAgent.internal()
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
-			// Include current turn context only (no conversation history)
+		// single_turn agents always use current-turn context only. Derive
+		// this from Mode at read time so RunLLMAgentAsNode does not need to
+		// mutate shared IncludeContents under parallel fan-out.
+		if state.IncludeContents == "none" || state.Mode == ModeSingleTurn {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		var events []*session.Event
