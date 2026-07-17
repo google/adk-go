@@ -45,48 +45,44 @@ type connectorOperation struct {
 	} `json:"error"`
 }
 
-// result collapses the Operation-wrapped response into a retrieveResult.
-func (o connectorOperation) result(resource string) (retrieveResult, error) {
+// result collapses the Operation-wrapped response into an outcome.
+func (o connectorOperation) result(resource string) (outcome, error) {
 	if o.Error != nil {
-		return retrieveResult{}, fmt.Errorf("gcp: connector operation failed: %s", o.Error.Message)
+		return nil, fmt.Errorf("gcp: connector operation failed: %s", o.Error.Message)
 	}
 	if o.Done {
 		// A terminal operation must carry a credential; treat an empty result as
 		// an error rather than polling to the timeout.
 		if o.Response == nil {
-			return retrieveResult{}, fmt.Errorf("gcp: connector operation done but returned no credential for %q", resource)
+			return nil, fmt.Errorf("gcp: connector operation done but returned no credential for %q", resource)
 		}
-		return retrieveResult{status: statusOK, token: o.Response.Token, header: o.Response.Header}, nil
+		return credOutcome{header: o.Response.Header, token: o.Response.Token}, nil
 	}
 	if md := o.Metadata; md != nil {
 		switch {
 		case md.URIConsentRequired != nil:
-			return retrieveResult{
-				status:       statusConsentRequired,
-				consentURI:   md.URIConsentRequired.AuthorizationURI,
-				consentNonce: md.URIConsentRequired.ConsentNonce,
-			}, nil
+			return consentOutcome{authURI: md.URIConsentRequired.AuthorizationURI, nonce: md.URIConsentRequired.ConsentNonce}, nil
 		case md.ConsentRejected != nil:
-			return retrieveResult{status: statusRejected}, nil
+			return rejectedOutcome{}, nil
 		case md.ConsentPending != nil:
-			return retrieveResult{status: statusPending}, nil
+			return pendingOutcome{}, nil
 		}
 	}
 	// The metadata status oneof is consent_pending, uri_consent_required, or
 	// consent_rejected; treat an absent/unknown status as pending and keep
 	// polling (consent_pending means "no action required, just retry").
-	return retrieveResult{status: statusPending}, nil
+	return pendingOutcome{}, nil
 }
 
 // retrieveConnector calls the IAM Connector service and normalizes its
 // Operation-wrapped response.
-func (c *Client) retrieveConnector(ctx context.Context, req Request) (retrieveResult, error) {
+func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1alpha/%s/credentials:retrieve", c.connectorURL, req.Resource)
 	body := connectorRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var op connectorOperation
 	if err := c.doPost(ctx, url, body, &op); err != nil {
-		return retrieveResult{}, err
+		return nil, err
 	}
 	return op.result(req.Resource)
 }

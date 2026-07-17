@@ -41,36 +41,32 @@ type consentDetail struct {
 	ConsentNonce     string `json:"consentNonce"`
 }
 
-// result collapses the response's "result" oneof into a retrieveResult, erroring
-// if the service returned no recognized arm.
-func (r agentIdentityResponse) result(resource string) (retrieveResult, error) {
+// result collapses the response's "result" oneof into an outcome, erroring if
+// the service returned no recognized arm.
+func (r agentIdentityResponse) result(resource string) (outcome, error) {
 	switch {
 	case r.Success != nil:
-		return retrieveResult{status: statusOK, token: r.Success.Token, header: r.Success.Header}, nil
+		return credOutcome{header: r.Success.Header, token: r.Success.Token}, nil
 	case r.URIConsentRequired != nil:
-		return retrieveResult{
-			status:       statusConsentRequired,
-			consentURI:   r.URIConsentRequired.AuthorizationURI,
-			consentNonce: r.URIConsentRequired.ConsentNonce,
-		}, nil
+		return consentOutcome{authURI: r.URIConsentRequired.AuthorizationURI, nonce: r.URIConsentRequired.ConsentNonce}, nil
 	case r.ConsentRejected != nil:
-		return retrieveResult{status: statusRejected}, nil
+		return rejectedOutcome{}, nil
 	case r.Pending != nil:
-		return retrieveResult{status: statusPending}, nil
+		return pendingOutcome{}, nil
 	default:
-		return retrieveResult{}, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
+		return nil, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
 	}
 }
 
 // retrieveAgentIdentity calls the Agent Identity service, whose response is
 // returned synchronously (no long-running-operation wrapper).
-func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (retrieveResult, error) {
+func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1/%s/credentials:retrieve", c.agentIdentityURL, req.Resource)
 	body := agentIdentityRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var out agentIdentityResponse
 	if err := c.doPost(ctx, url, body, &out); err != nil {
-		return retrieveResult{}, err
+		return nil, err
 	}
 	return out.result(req.Resource)
 }

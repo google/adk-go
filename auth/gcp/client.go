@@ -146,14 +146,14 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		if err != nil {
 			return nil, err
 		}
-		switch res.status {
-		case statusOK:
-			return mapCredential(res.header, res.token)
-		case statusConsentRequired:
-			return nil, &auth.ConsentRequiredError{AuthURI: res.consentURI, Nonce: res.consentNonce}
-		case statusRejected:
+		switch o := res.(type) {
+		case credOutcome:
+			return mapCredential(o.header, o.token)
+		case consentOutcome:
+			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
+		case rejectedOutcome:
 			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
-		case statusPending:
+		case pendingOutcome:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
@@ -165,27 +165,35 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 			case <-time.After(wait):
 			}
 			backoff = min(backoff*2, maxBackoff)
+		default:
+			return nil, fmt.Errorf("gcp: unexpected retrieval outcome %T", res)
 		}
 	}
 }
 
-// retrieveStatus is the normalized outcome of a single retrieval call.
-type retrieveStatus int
+// outcome is the normalized result of one retrieval attempt from either service:
+// exactly one concrete type is returned, so RetrieveCredential type-switches on
+// it (a closed sum type over the services' result oneof).
+type outcome interface{ isOutcome() }
 
-const (
-	statusOK retrieveStatus = iota
-	statusPending
-	statusConsentRequired
-	statusRejected
+type (
+	// credOutcome carries a successfully retrieved {header, token} credential.
+	credOutcome struct{ header, token string }
+	// pendingOutcome means retrieval is still pending; poll again.
+	pendingOutcome struct{}
+	// consentOutcome means interactive consent is required at authURI.
+	consentOutcome struct {
+		authURI string
+		nonce   string
+	}
+	// rejectedOutcome means the end user rejected consent.
+	rejectedOutcome struct{}
 )
 
-type retrieveResult struct {
-	status       retrieveStatus
-	token        string
-	header       string
-	consentURI   string
-	consentNonce string
-}
+func (credOutcome) isOutcome()     {}
+func (pendingOutcome) isOutcome()  {}
+func (consentOutcome) isOutcome()  {}
+func (rejectedOutcome) isOutcome() {}
 
 // credentialPayload is the {header, token} success shape returned by both
 // services (nested under "success" for Agent Identity, under the operation
