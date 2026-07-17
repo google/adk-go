@@ -146,9 +146,7 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.StructuredContent != nil {
-		return map[string]any{
-			"output": res.StructuredContent,
-		}, nil
+		return functionResponse(res, res.StructuredContent), nil
 	}
 
 	textResponse := strings.Builder{}
@@ -179,9 +177,22 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("tool %q returned only non-text content, which is not yet supported", t.name)
 	}
 
-	return map[string]any{
-		"output": textResponse.String(),
-	}, nil
+	return functionResponse(res, textResponse.String()), nil
+}
+
+// functionResponse builds the function response map for a tool result.
+// The result's _meta field is preserved under the "_meta" key, mirroring the
+// raw MCP serialization, so that metadata attached by the server (e.g. auth
+// challenges from MCP gateways) reaches callbacks and the embedding
+// application instead of being silently dropped.
+func functionResponse(res *mcp.CallToolResult, output any) map[string]any {
+	response := map[string]any{
+		"output": output,
+	}
+	if len(res.Meta) > 0 {
+		response["_meta"] = map[string]any(res.Meta)
+	}
+	return response
 }
 
 var (
