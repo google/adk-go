@@ -29,19 +29,37 @@ type agentIdentityRequest struct {
 
 // agentIdentityResponse mirrors the RetrieveCredentialsResponse "result" oneof.
 type agentIdentityResponse struct {
-	Success *struct {
-		Token  string `json:"token"`
-		Header string `json:"header"`
-	} `json:"success"`
-	Pending            *struct{}      `json:"pending"`
-	URIConsentRequired *consentDetail `json:"uriConsentRequired"`
-	ConsentRejected    *struct{}      `json:"consentRejected"`
+	Success            *credentialPayload `json:"success"`
+	Pending            *struct{}          `json:"pending"`
+	URIConsentRequired *consentDetail     `json:"uriConsentRequired"`
+	ConsentRejected    *struct{}          `json:"consentRejected"`
 }
 
 // consentDetail is the shared uri-consent payload across both services.
 type consentDetail struct {
 	AuthorizationURI string `json:"authorizationUri"`
 	ConsentNonce     string `json:"consentNonce"`
+}
+
+// result collapses the response's "result" oneof into a retrieveResult, erroring
+// if the service returned no recognized arm.
+func (r agentIdentityResponse) result(resource string) (retrieveResult, error) {
+	switch {
+	case r.Success != nil:
+		return retrieveResult{status: statusOK, token: r.Success.Token, header: r.Success.Header}, nil
+	case r.URIConsentRequired != nil:
+		return retrieveResult{
+			status:       statusConsentRequired,
+			consentURI:   r.URIConsentRequired.AuthorizationURI,
+			consentNonce: r.URIConsentRequired.ConsentNonce,
+		}, nil
+	case r.ConsentRejected != nil:
+		return retrieveResult{status: statusRejected}, nil
+	case r.Pending != nil:
+		return retrieveResult{status: statusPending}, nil
+	default:
+		return retrieveResult{}, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
+	}
 }
 
 // retrieveAgentIdentity calls the Agent Identity service, whose response is
@@ -54,21 +72,5 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (retrie
 	if err := c.doPost(ctx, url, body, &out); err != nil {
 		return retrieveResult{}, err
 	}
-
-	switch {
-	case out.Success != nil:
-		return retrieveResult{status: statusOK, token: out.Success.Token, header: out.Success.Header}, nil
-	case out.URIConsentRequired != nil:
-		return retrieveResult{
-			status:       statusConsentRequired,
-			consentURI:   out.URIConsentRequired.AuthorizationURI,
-			consentNonce: out.URIConsentRequired.ConsentNonce,
-		}, nil
-	case out.ConsentRejected != nil:
-		return retrieveResult{status: statusRejected}, nil
-	case out.Pending != nil:
-		return retrieveResult{status: statusPending}, nil
-	default:
-		return retrieveResult{}, fmt.Errorf("gcp: agent identity returned an empty result for %q", req.Resource)
-	}
+	return out.result(req.Resource)
 }

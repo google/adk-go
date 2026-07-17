@@ -187,6 +187,14 @@ type retrieveResult struct {
 	consentNonce string
 }
 
+// credentialPayload is the {header, token} success shape returned by both
+// services (nested under "success" for Agent Identity, under the operation
+// "response" for the IAM Connector).
+type credentialPayload struct {
+	Token  string `json:"token"`
+	Header string `json:"header"`
+}
+
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential; any other header
 // name becomes a header-based API key.
