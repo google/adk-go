@@ -148,6 +148,17 @@ func TestRetrieveConnectorConsentRequired(t *testing.T) {
 	}
 }
 
+func TestRetrieveConnectorConsentRejected(t *testing.T) {
+	srv, _ := sequenceServer(`{"metadata":{"consentRejected":{}}}`)
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+	if !errors.Is(err, ErrConsentRejected) {
+		t.Fatalf("error = %v, want ErrConsentRejected", err)
+	}
+}
+
 func TestRetrieveConnectorOperationError(t *testing.T) {
 	srv, _ := sequenceServer(`{"error":{"message":"boom"}}`)
 	defer srv.Close()
@@ -352,14 +363,18 @@ func wantBearer(t *testing.T, cred auth.Credential, token string) {
 	}
 }
 
-// wantAPIKey fails t unless cred is an auth.APIKeyCredential with name and value.
+// wantAPIKey fails t unless applying cred sets the named header and the
+// X-Goog-Api-Key mirror (adk-python parity) to value.
 func wantAPIKey(t *testing.T, cred auth.Credential, name, value string) {
 	t.Helper()
-	k, ok := cred.(auth.APIKeyCredential)
-	if !ok {
-		t.Fatalf("credential = %#v, want auth.APIKeyCredential", cred)
+	h := http.Header{}
+	if err := cred.Apply(h); err != nil {
+		t.Fatalf("cred.Apply() error = %v", err)
 	}
-	if k.Name != name || k.Value != value {
-		t.Fatalf("api key = {name:%q value:%q}, want {name:%q value:%q}", k.Name, k.Value, name, value)
+	if got := h.Get(name); got != value {
+		t.Errorf("header %q = %q, want %q", name, got, value)
+	}
+	if got := h.Get("X-Goog-Api-Key"); got != value {
+		t.Errorf("X-Goog-Api-Key = %q, want %q (adk-python parity)", got, value)
 	}
 }

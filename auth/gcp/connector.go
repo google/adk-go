@@ -39,6 +39,7 @@ type connectorOperation struct {
 		Header string `json:"header"`
 	} `json:"response"`
 	Metadata *struct {
+		ConsentPending     *struct{}      `json:"consentPending"`
 		URIConsentRequired *consentDetail `json:"uriConsentRequired"`
 		ConsentRejected    *struct{}      `json:"consentRejected"`
 	} `json:"metadata"`
@@ -79,8 +80,12 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (retrieveRe
 			}, nil
 		case md.ConsentRejected != nil:
 			return retrieveResult{status: statusRejected}, nil
+		case md.ConsentPending != nil:
+			return retrieveResult{status: statusPending}, nil
 		}
 	}
-	// No terminal result and no consent requirement: keep polling.
+	// The metadata status oneof is consent_pending, uri_consent_required, or
+	// consent_rejected; treat an absent/unknown status as pending and keep
+	// polling (consent_pending means "no action required, just retry").
 	return retrieveResult{status: statusPending}, nil
 }

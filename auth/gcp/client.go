@@ -200,10 +200,11 @@ func mapCredential(header, token string) (auth.Credential, error) {
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(hint)), "bearer") {
 		return auth.BearerCredential{Token: token}, nil
 	}
-	// Non-bearer header -> header-based API key.
-	// TODO: for full adk-python parity also mirror the token into X-GOOG-API-KEY
-	// (via auth.WithHeaders) as a follow-up.
-	return auth.APIKeyCredential{Name: name, Value: token}, nil
+	// Non-bearer header -> header-based API key. adk-python also mirrors the
+	// token into X-Goog-Api-Key for custom headers (alongside the service's own
+	// header), so match that behavior.
+	key := auth.APIKeyCredential{Name: name, Value: token}
+	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.
