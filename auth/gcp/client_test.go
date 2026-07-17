@@ -316,12 +316,12 @@ func TestRetrievePollTimeout(t *testing.T) {
 // polling tests are fast.
 func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
-	c, err := NewClient(t.Context(),
-		WithHTTPClient(srv.Client()),
-		WithAgentIdentityEndpoint(srv.URL),
-		WithConnectorEndpoint(srv.URL),
-		WithPollTimeout(2*time.Second),
-	)
+	c, err := NewClient(t.Context(), &Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+		ConnectorEndpoint:     srv.URL,
+		PollTimeout:           2 * time.Second,
+	})
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}

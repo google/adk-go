@@ -65,38 +65,42 @@ type Client struct {
 	initialBackoff   time.Duration
 }
 
-// Option configures a [Client].
-type Option func(*Client)
-
-// WithHTTPClient sets the HTTP client used to call the credential services.
-// When unset, [NewClient] builds one from Application Default Credentials.
-func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.httpClient = h } }
-
-// WithAgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
-func WithAgentIdentityEndpoint(url string) Option {
-	return func(c *Client) { c.agentIdentityURL = url }
+// Config configures a [Client]. A nil *Config, or any zero-valued field, uses
+// the corresponding default.
+type Config struct {
+	// HTTPClient calls the credential services. If nil, [NewClient] builds one
+	// from Application Default Credentials (cloud-platform scope).
+	HTTPClient *http.Client
+	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
+	AgentIdentityEndpoint string
+	// ConnectorEndpoint overrides the IAM Connector base URL (scheme+host).
+	ConnectorEndpoint string
+	// PollTimeout bounds the total time spent polling a pending retrieval.
+	PollTimeout time.Duration
 }
 
-// WithConnectorEndpoint overrides the IAM Connector base URL (scheme+host).
-func WithConnectorEndpoint(url string) Option {
-	return func(c *Client) { c.connectorURL = url }
-}
-
-// WithPollTimeout bounds the total time spent polling a pending retrieval.
-func WithPollTimeout(d time.Duration) Option { return func(c *Client) { c.pollTimeout = d } }
-
-// NewClient builds a Client. Unless [WithHTTPClient] is supplied, it discovers
-// Application Default Credentials (cloud-platform scope) to authenticate calls
-// to the credential services.
-func NewClient(ctx context.Context, opts ...Option) (*Client, error) {
+// NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
+// defaults. Unless cfg.HTTPClient is set, it discovers Application Default
+// Credentials (cloud-platform scope) to authenticate calls to the services.
+func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
+	if cfg == nil {
+		cfg = &Config{}
+	}
 	c := &Client{
+		httpClient:       cfg.HTTPClient,
 		agentIdentityURL: defaultAgentIdentityURL,
 		connectorURL:     defaultConnectorURL,
 		pollTimeout:      defaultPollTimeout,
 		initialBackoff:   defaultInitialBackoff,
 	}
-	for _, opt := range opts {
-		opt(c)
+	if cfg.AgentIdentityEndpoint != "" {
+		c.agentIdentityURL = cfg.AgentIdentityEndpoint
+	}
+	if cfg.ConnectorEndpoint != "" {
+		c.connectorURL = cfg.ConnectorEndpoint
+	}
+	if cfg.PollTimeout != 0 {
+		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
 		creds, err := google.FindDefaultCredentials(ctx, cloudPlatformScope)
