@@ -171,9 +171,8 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 	}
 }
 
-// outcome is the normalized result of one retrieval attempt from either service:
-// exactly one concrete type is returned, so RetrieveCredential type-switches on
-// it (a closed sum type over the services' result oneof).
+// outcome is the normalized result of one retrieval attempt — a closed sum type
+// (one arm per state) that RetrieveCredential type-switches on.
 type outcome interface{ isOutcome() }
 
 type (
@@ -195,9 +194,8 @@ func (pendingOutcome) isOutcome()  {}
 func (consentOutcome) isOutcome()  {}
 func (rejectedOutcome) isOutcome() {}
 
-// credentialPayload is the {header, token} success shape returned by both
-// services (nested under "success" for Agent Identity, under the operation
-// "response" for the IAM Connector).
+// credentialPayload is the {header, token} success shape shared by both services
+// (under "success" for Agent Identity, "response" for the IAM Connector operation).
 type credentialPayload struct {
 	Token  string `json:"token"`
 	Header string `json:"header"`

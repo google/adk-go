@@ -68,9 +68,8 @@ func (o connectorOperation) result(resource string) (outcome, error) {
 			return pendingOutcome{}, nil
 		}
 	}
-	// The metadata status oneof is consent_pending, uri_consent_required, or
-	// consent_rejected; treat an absent/unknown status as pending and keep
-	// polling (consent_pending means "no action required, just retry").
+	// Absent/unknown status → pending: consent_pending means "just retry", and a
+	// non-terminal operation should keep being polled.
 	return pendingOutcome{}, nil
 }
 

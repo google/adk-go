@@ -35,9 +35,8 @@ const (
 )
 
 // TestRetrieveCredential drives RetrieveCredential end to end for both services
-// via a fake server that replays the given response bodies in order. Each case
-// sets exactly one expectation (a credential, a consent error, an errors.Is
-// target, or an error substring).
+// via a fake server that replays response bodies in order; each case asserts one
+// expected outcome.
 func TestRetrieveCredential(t *testing.T) {
 	tests := []struct {
 		name        string
