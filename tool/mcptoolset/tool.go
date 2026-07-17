@@ -160,16 +160,10 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.StructuredContent != nil {
-		return map[string]any{
-			"output": res.StructuredContent,
-		}, nil
+		return functionResponse(res, res.StructuredContent), nil
 	}
 
-	content := formatMCPContent(res.Content)
-
-	return map[string]any{
-		"output": content,
-	}, nil
+	return functionResponse(res, formatMCPContent(res.Content)), nil
 }
 
 type formattedMCPContent struct {
@@ -407,6 +401,21 @@ func isTextMediaType(mediaType string) bool {
 	default:
 		return false
 	}
+}
+
+// functionResponse builds the function response map for a tool result.
+// The result's _meta field is preserved under the "_meta" key, mirroring the
+// raw MCP serialization, so that metadata attached by the server (e.g. auth
+// challenges from MCP gateways) reaches callbacks and the embedding
+// application instead of being silently dropped.
+func functionResponse(res *mcp.CallToolResult, output any) map[string]any {
+	response := map[string]any{
+		"output": output,
+	}
+	if len(res.Meta) > 0 {
+		response["_meta"] = map[string]any(res.Meta)
+	}
+	return response
 }
 
 var (

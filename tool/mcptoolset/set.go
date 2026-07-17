@@ -16,6 +16,7 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,11 +85,32 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	mcpClient := cfg.Client
+	if cfg.ElicitationHandler != nil || cfg.ElicitationCompleteHandler != nil {
+		if cfg.Client != nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationHandler and ElicitationCompleteHandler cannot be combined with a custom Client; set them in the client's mcp.ClientOptions instead")
+		}
+		mcpClient = newDefaultClient(&mcp.ClientOptions{
+			ElicitationHandler:         cfg.ElicitationHandler,
+			ElicitationCompleteHandler: cfg.ElicitationCompleteHandler,
+			// The capability inferred from ElicitationHandler alone covers only
+			// form mode; URL mode must be declared explicitly. RootsV2 preserves
+			// the default roots capability, which setting Capabilities would
+			// otherwise disable.
+			Capabilities: &mcp.ClientCapabilities{
+				Elicitation: &mcp.ElicitationCapabilities{
+					Form: &mcp.FormElicitationCapabilities{},
+					URL:  &mcp.URLElicitationCapabilities{},
+				},
+				RootsV2: &mcp.RootCapabilities{ListChanged: true},
+			},
+		})
+	}
 	var client sessionClient
 	if cfg.Auth != nil {
-		client = newCredentialSessions(cfg.Client, transport, cfg.Auth)
+		client = newCredentialSessions(mcpClient, transport, cfg.Auth)
 	} else {
-		client = newConnectionRefresher(cfg.Client, transport)
+		client = newConnectionRefresher(mcpClient, transport)
 	}
 	return &set{
 		mcpClient:                   client,
@@ -220,6 +242,21 @@ type Config struct {
 	// before execution. If set to true, the ADK framework will automatically initiate
 	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
 	RequireConfirmation bool
+
+	// ElicitationHandler handles elicitation/create requests from the MCP
+	// server, including URL-mode elicitations that servers use for
+	// out-of-band interactions such as auth challenges. Setting it makes the
+	// client advertise the elicitation capability.
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
+
+	// ElicitationCompleteHandler handles notifications/elicitation/complete
+	// notifications, which servers send when an out-of-band (URL-mode)
+	// elicitation has been completed.
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationCompleteHandler func(context.Context, *mcp.ElicitationCompleteNotificationRequest)
 
 	// RequireConfirmationProvider allows for dynamic determination of whether
 	// user confirmation is needed. This field is a function called at runtime to decide if
