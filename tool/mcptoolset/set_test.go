@@ -16,6 +16,7 @@ package mcptoolset_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -794,5 +795,171 @@ func TestNewToolSet_RequireConfirmationProvider_Validation(t *testing.T) {
 				t.Error("expected valid toolset, got nil")
 			}
 		})
+	}
+}
+
+func TestCallToolMetaPassthrough(t *testing.T) {
+	challengeMeta := map[string]any{
+		"example.com/auth": map[string]any{"url": "https://idp.example.com/login"},
+	}
+
+	tests := []struct {
+		name    string
+		handler mcp.ToolHandler
+		want    map[string]any
+	}{
+		{
+			name: "text result with meta",
+			handler: func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{
+					Meta:    mcp.Meta(challengeMeta),
+					Content: []mcp.Content{&mcp.TextContent{Text: "login required"}},
+				}, nil
+			},
+			want: map[string]any{
+				"output": "login required",
+				"_meta":  challengeMeta,
+			},
+		},
+		{
+			name: "structured result with meta",
+			handler: func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{
+					Meta:              mcp.Meta(challengeMeta),
+					Content:           []mcp.Content{&mcp.TextContent{Text: "login required"}},
+					StructuredContent: map[string]any{"status": "unauthenticated"},
+				}, nil
+			},
+			want: map[string]any{
+				"output": map[string]any{"status": "unauthenticated"},
+				"_meta":  challengeMeta,
+			},
+		},
+		{
+			name: "text result without meta",
+			handler: func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "all good"}},
+				}, nil
+			},
+			want: map[string]any{
+				"output": "all good",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+			server.AddTool(&mcp.Tool{
+				Name:        "gateway_tool",
+				Description: "returns a result with metadata",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}, tc.handler)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+			if err != nil {
+				t.Fatalf("Tools call failed: %v", err)
+			}
+			toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+
+			fnTool := tools[0].(toolinternal.FunctionTool)
+			result, err := fnTool.Run(toolCtx, map[string]any{})
+			if err != nil {
+				t.Fatalf("Tool call failed: %v", err)
+			}
+
+			if diff := cmp.Diff(tc.want, result); diff != "" {
+				t.Errorf("Tool result mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestElicitationHandler(t *testing.T) {
+	const loginURL = "https://idp.example.com/login"
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	server.AddTool(&mcp.Tool{
+		Name:        "gateway_tool",
+		Description: "elicits a login before responding",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := req.Session.Elicit(ctx, &mcp.ElicitParams{
+			Mode:          "url",
+			Message:       "please log in",
+			URL:           loginURL,
+			ElicitationID: "elicitation-1",
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "elicitation " + res.Action + "ed"}},
+		}, nil
+	})
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotURL string
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			gotURL = req.Params.URL
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools call failed: %v", err)
+	}
+	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+
+	fnTool := tools[0].(toolinternal.FunctionTool)
+	result, err := fnTool.Run(toolCtx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Tool call failed: %v", err)
+	}
+
+	if gotURL != loginURL {
+		t.Errorf("Elicitation handler got URL %q, want %q", gotURL, loginURL)
+	}
+	want := map[string]any{"output": "elicitation accepted"}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Tool result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewRejectsElicitationHandlerWithCustomClient(t *testing.T) {
+	clientTransport, _ := mcp.NewInMemoryTransports()
+
+	_, err := mcptoolset.New(mcptoolset.Config{
+		Client:    mcp.NewClient(&mcp.Implementation{Name: "custom", Version: "v1.0.0"}, nil),
+		Transport: clientTransport,
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when combining ElicitationHandler with a custom Client, got nil")
 	}
 }
