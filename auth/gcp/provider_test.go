@@ -17,9 +17,11 @@ package gcp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -147,6 +149,75 @@ func TestProviderSkipsCacheWithoutExpiry(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("service calls = %d, want 2 (unknown expiry must not be cached)", got)
+	}
+}
+
+func TestProviderRefreshForcesNewToken(t *testing.T) {
+	var mu sync.Mutex
+	var lastForceRefreshToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		lastForceRefreshToken = body.ForceRefreshToken
+		mu.Unlock()
+		tok := "tok1"
+		if body.ForceRefreshToken != "" {
+			tok = "tok2" // a forced refresh mints a new token
+		}
+		// Include an expiry so the credential is cached; Refresh reads the prior
+		// (cached) token from the store to send as forceRefreshToken.
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"}, &gcp.ProviderConfig{Client: client})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp, ok := p.(auth.RefreshingProvider)
+	if !ok {
+		t.Fatal("gcp provider does not implement auth.RefreshingProvider")
+	}
+
+	ctx := adkContext(t, "user-1")
+
+	// Prime the cache with the initial token.
+	if cred, err := p.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok1" {
+		t.Fatalf("initial credential = %+v, want tok1", cred)
+	}
+
+	// Refresh sends the prior token and returns a new one.
+	cred, err := rp.Refresh(ctx)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	mu.Lock()
+	got := lastForceRefreshToken
+	mu.Unlock()
+	if got != "tok1" {
+		t.Errorf("forceRefreshToken = %q, want %q (the prior token)", got, "tok1")
+	}
+	if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+		t.Errorf("refreshed credential = %+v, want tok2", cred)
+	}
+
+	// The refreshed credential replaces the cached one.
+	if cred, err := p.Credential(ctx); err != nil {
+		t.Fatalf("Credential() after refresh error = %v", err)
+	} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+		t.Errorf("cached credential after refresh = %+v, want tok2", cred)
 	}
 }
 

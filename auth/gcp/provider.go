@@ -83,35 +83,71 @@ type provider struct {
 	client *Client
 }
 
-var _ auth.CredentialProvider = (*provider)(nil)
+var (
+	_ auth.CredentialProvider = (*provider)(nil)
+	_ auth.RefreshingProvider = (*provider)(nil)
+)
 
 // Credential implements [auth.CredentialProvider].
 func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
-	rc, err := agent.RequireContext(ctx)
+	key, err := p.resolveKey(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("gcp: %w", err)
+		return nil, err
 	}
-	userID := rc.UserID()
-	if userID == "" {
-		return nil, errors.New("gcp: ADK context has no user id")
-	}
-
-	key := auth.CredentialKey{AppName: rc.AppName(), UserID: userID, Key: p.scheme.Name}
 	// A store read error is non-fatal: fall through and fetch a fresh credential.
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok {
 		return cred, nil
 	}
+	return p.fetch(ctx, key, p.request(key, "", false))
+}
 
+// Refresh implements [auth.RefreshingProvider]: it discards the cached
+// credential and forces the service to mint a new one, passing the prior
+// (rejected) token where the service needs it.
+func (p *provider) Refresh(ctx context.Context) (auth.Credential, error) {
+	key, err := p.resolveKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var prior string
+	if cred, ok, _ := p.store.Get(ctx, key); ok {
+		prior = credentialToken(cred)
+	}
+	return p.fetch(ctx, key, p.request(key, prior, true))
+}
+
+// resolveKey builds the store key from the acting user's identity.
+func (p *provider) resolveKey(ctx context.Context) (auth.CredentialKey, error) {
+	rc, err := agent.RequireContext(ctx)
+	if err != nil {
+		return auth.CredentialKey{}, fmt.Errorf("gcp: %w", err)
+	}
+	userID := rc.UserID()
+	if userID == "" {
+		return auth.CredentialKey{}, errors.New("gcp: ADK context has no user id")
+	}
+	return auth.CredentialKey{AppName: rc.AppName(), UserID: userID, Key: p.scheme.Name}, nil
+}
+
+func (p *provider) request(key auth.CredentialKey, priorToken string, forceRefresh bool) Request {
+	return Request{
+		Resource:     p.scheme.Name,
+		UserID:       key.UserID,
+		Scopes:       p.scheme.Scopes,
+		ContinueURI:  p.scheme.ContinueURI,
+		ForceRefresh: forceRefresh,
+		PriorToken:   priorToken,
+	}
+}
+
+// fetch retrieves a credential and (best-effort) caches it; a store write
+// failure must not fail auth.
+func (p *provider) fetch(ctx context.Context, key auth.CredentialKey, req Request) (auth.Credential, error) {
 	client, err := p.resolveClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	cred, expiresAt, err := client.retrieve(ctx, Request{
-		Resource:    p.scheme.Name,
-		UserID:      userID,
-		Scopes:      p.scheme.Scopes,
-		ContinueURI: p.scheme.ContinueURI,
-	})
+	cred, expiresAt, err := client.retrieve(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +159,20 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		_ = p.store.Set(ctx, key, cred, expiresAt)
 	}
 	return cred, nil
+}
+
+// credentialToken returns the bearer/API-key token carried by a resolved GCP
+// credential, used as the prior token on refresh. A custom-header credential
+// (wrapped for extra headers) yields "", so the refresh proceeds without the
+// prior-token hint; GCP issues bearer tokens on this path in practice.
+func credentialToken(c auth.Credential) string {
+	switch v := c.(type) {
+	case auth.BearerCredential:
+		return v.Token
+	case auth.APIKeyCredential:
+		return v.Value
+	}
+	return ""
 }
 
 // resolveClient returns the configured client, creating a default one (backed by
