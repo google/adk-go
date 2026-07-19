@@ -19,15 +19,6 @@ import (
 	"fmt"
 )
 
-// connectorRequest is the JSON body for RetrieveCredentials (the connector is
-// bound to the URL path, not the body).
-type connectorRequest struct {
-	UserID       string   `json:"userId,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
-	ContinueURI  string   `json:"continueUri,omitempty"`
-	ForceRefresh bool     `json:"forceRefresh,omitempty"`
-}
-
 // connectorOperation is the google.longrunning.Operation wrapper the IAM
 // Connector service returns. The service does not implement true LROs, so the
 // terminal result is read inline from response/metadata. The Any-typed
@@ -41,6 +32,7 @@ type connectorOperation struct {
 		ConsentRejected    *struct{}      `json:"consentRejected"`
 	} `json:"metadata"`
 	Error *struct {
+		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -48,7 +40,10 @@ type connectorOperation struct {
 // result collapses the Operation-wrapped response into an outcome.
 func (o connectorOperation) result(resource string) (outcome, error) {
 	if o.Error != nil {
-		return nil, fmt.Errorf("gcp: connector operation failed: %s", o.Error.Message)
+		if o.Error.Message != "" {
+			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %s", o.Error.Code, o.Error.Message)
+		}
+		return nil, fmt.Errorf("gcp: connector operation failed (code %d)", o.Error.Code)
 	}
 	if o.Done {
 		// A terminal operation must carry a credential; treat an empty result as
@@ -77,7 +72,7 @@ func (o connectorOperation) result(resource string) (outcome, error) {
 // Operation-wrapped response.
 func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1alpha/%s/credentials:retrieve", c.connectorURL, req.Resource)
-	body := connectorRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
+	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var op connectorOperation
 	if err := c.doPost(ctx, url, body, &op); err != nil {

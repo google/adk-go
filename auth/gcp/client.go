@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -37,7 +38,9 @@ const (
 	defaultAgentIdentityURL = "https://agentidentitycredentials.googleapis.com"
 	defaultConnectorURL     = "https://iamconnectorcredentials.googleapis.com"
 
-	defaultPollTimeout    = 10 * time.Second
+	defaultPollTimeout = 10 * time.Second
+	// The credentials service documents an exponential polling backoff
+	// (0.5, 1, 2, 4, 8s); these constants track it.
 	defaultInitialBackoff = 500 * time.Millisecond
 	maxBackoff            = 8 * time.Second
 )
@@ -45,6 +48,12 @@ const (
 // connectorResourceRE matches an IAM Connector resource name; anything else is
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
+
+// resourceNameRE bounds a resource name to the characters GCP resource names
+// use, so it can't inject extra path segments, a query, or a fragment into the
+// request URL it is interpolated into. A separate ".." check blocks path
+// traversal (dots are allowed so domain-style ids still pass).
+var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
 
 // Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
 var (
@@ -75,7 +84,9 @@ type Config struct {
 	AgentIdentityEndpoint string
 	// ConnectorEndpoint overrides the IAM Connector base URL (scheme+host).
 	ConnectorEndpoint string
-	// PollTimeout bounds the total time spent polling a pending retrieval.
+	// PollTimeout bounds the wall-clock time spent retrying a pending retrieval.
+	// It caps the retry loop, not an individual request; bound a single stalled
+	// request via ctx (or an HTTPClient with its own Timeout).
 	PollTimeout time.Duration
 }
 
@@ -94,10 +105,10 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		initialBackoff:   defaultInitialBackoff,
 	}
 	if cfg.AgentIdentityEndpoint != "" {
-		c.agentIdentityURL = cfg.AgentIdentityEndpoint
+		c.agentIdentityURL = strings.TrimRight(cfg.AgentIdentityEndpoint, "/")
 	}
 	if cfg.ConnectorEndpoint != "" {
-		c.connectorURL = cfg.ConnectorEndpoint
+		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
 	}
 	if cfg.PollTimeout != 0 {
 		c.pollTimeout = cfg.PollTimeout
@@ -132,10 +143,13 @@ type Request struct {
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
 	if req.Resource == "" {
-		return nil, fmt.Errorf("gcp: RetrieveCredential requires a Resource")
+		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
 	if req.UserID == "" {
-		return nil, fmt.Errorf("gcp: RetrieveCredential requires a UserID")
+		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
+	}
+	if !resourceNameRE.MatchString(req.Resource) || strings.Contains(req.Resource, "..") {
+		return nil, fmt.Errorf("gcp: RetrieveCredential resource %q has invalid characters", req.Resource)
 	}
 
 	retrieve := c.retrieveAgentIdentity
@@ -205,23 +219,29 @@ type credentialPayload struct {
 	Header string `json:"header"`
 }
 
+// retrieveRequest is the JSON body for both services' credentials:retrieve RPC
+// (the auth provider / connector is bound to the URL path, not the body).
+type retrieveRequest struct {
+	UserID      string   `json:"userId,omitempty"`
+	Scopes      []string `json:"scopes,omitempty"`
+	ContinueURI string   `json:"continueUri,omitempty"`
+}
+
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential; any other header
 // name becomes a header-based API key.
 func mapCredential(header, token string) (auth.Credential, error) {
 	if header == "" || token == "" {
-		return nil, fmt.Errorf("gcp: credentials service returned an empty header or token")
+		return nil, errors.New("gcp: credentials service returned an empty header or token")
 	}
-	name, hint, _ := strings.Cut(header, ":")
-	name = strings.TrimSpace(name)
-	if strings.EqualFold(name, "authorization") &&
-		strings.HasPrefix(strings.ToLower(strings.TrimSpace(hint)), "bearer") {
+	name, scheme, _ := strings.Cut(header, ":")
+	if strings.EqualFold(strings.TrimSpace(name), "authorization") &&
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(scheme)), "bearer") {
 		return auth.BearerCredential{Token: token}, nil
 	}
-	// Non-bearer header -> header-based API key. adk-python also mirrors the
-	// token into X-Goog-Api-Key for custom headers (alongside the service's own
-	// header), so match that behavior.
-	key := auth.APIKeyCredential{Name: name, Value: token}
+	// Non-bearer header -> header-based API key. Matches adk-python: key by the
+	// full returned header, and mirror the token into X-Goog-Api-Key too.
+	key := auth.APIKeyCredential{Name: header, Value: token}
 	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
 }
 
@@ -236,6 +256,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 		return fmt.Errorf("gcp: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -243,15 +264,37 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Read one byte past the cap so an oversized body is caught explicitly rather
+	// than fed to json.Unmarshal as silently truncated (and thus garbled) JSON.
+	const maxBody = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return fmt.Errorf("gcp: read response: %w", err)
 	}
+	if len(data) > maxBody {
+		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gcp: credentials service returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return fmt.Errorf("gcp: credentials service returned status %d: %s", resp.StatusCode, truncateForError(strings.TrimSpace(string(data))))
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("gcp: decode response: %w", err)
 	}
 	return nil
+}
+
+// truncateForError caps an error body so a large (e.g. HTML gateway) response
+// doesn't bloat the returned error.
+func truncateForError(s string) string {
+	const max = 1024
+	if len(s) <= max {
+		return s
+	}
+	// Back up to a rune boundary so a multi-byte rune straddling the cap isn't
+	// sliced into a mangled partial rune.
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

@@ -230,6 +230,9 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 	}{
 		{name: "missing resource", req: Request{UserID: "u"}},
 		{name: "missing user id", req: Request{Resource: authProviderResource}},
+		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}},
+		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
+		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
 	}
 	c := &Client{httpClient: http.DefaultClient}
 	for _, tc := range tests {
@@ -239,6 +242,44 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewClient(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		// Supply HTTPClient so the constructor skips the ADC lookup (offline test).
+		c, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if c.agentIdentityURL != defaultAgentIdentityURL {
+			t.Errorf("agentIdentityURL = %q, want %q", c.agentIdentityURL, defaultAgentIdentityURL)
+		}
+		if c.connectorURL != defaultConnectorURL {
+			t.Errorf("connectorURL = %q, want %q", c.connectorURL, defaultConnectorURL)
+		}
+		if c.pollTimeout != defaultPollTimeout {
+			t.Errorf("pollTimeout = %v, want %v", c.pollTimeout, defaultPollTimeout)
+		}
+		if c.initialBackoff != defaultInitialBackoff {
+			t.Errorf("initialBackoff = %v, want %v", c.initialBackoff, defaultInitialBackoff)
+		}
+	})
+	t.Run("trims endpoint trailing slash", func(t *testing.T) {
+		c, err := NewClient(t.Context(), &Config{
+			HTTPClient:            http.DefaultClient,
+			AgentIdentityEndpoint: "https://ai.example.com/",
+			ConnectorEndpoint:     "https://conn.example.com/",
+		})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if c.agentIdentityURL != "https://ai.example.com" {
+			t.Errorf("agentIdentityURL = %q, want trailing slash trimmed", c.agentIdentityURL)
+		}
+		if c.connectorURL != "https://conn.example.com" {
+			t.Errorf("connectorURL = %q, want trailing slash trimmed", c.connectorURL)
+		}
+	})
 }
 
 func TestMapCredential(t *testing.T) {
