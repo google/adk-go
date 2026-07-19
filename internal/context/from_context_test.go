@@ -16,7 +16,6 @@ package context_test
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -26,16 +25,17 @@ import (
 
 type wrapKey struct{}
 
-// TestFromContextRecoversIdentity verifies that agent.FromContext recovers the
-// ADK identity from a context that has been wrapped by non-ADK intermediaries
-// (as jsonrpc2 / net/http do), across the base invocation context, a promoted
-// common context, and a tool context.
-func TestFromContextRecoversIdentity(t *testing.T) {
+// TestIdentityFromContextRecoversIdentity verifies that agent.IdentityFromContext
+// recovers the ADK identity from a context that has been wrapped by non-ADK
+// intermediaries (as jsonrpc2 / net/http do), across the base invocation context,
+// a promoted common context, and a tool context.
+func TestIdentityFromContextRecoversIdentity(t *testing.T) {
 	svc := session.InMemoryService()
 	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app-1", UserID: "user-42"})
 	if err != nil {
 		t.Fatalf("session Create() error = %v", err)
 	}
+	sessionID := resp.Session.ID()
 	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
 
 	cases := []struct {
@@ -54,68 +54,42 @@ func TestFromContextRecoversIdentity(t *testing.T) {
 			wrapped, cancel := context.WithCancel(wrapped)
 			defer cancel()
 
-			if _, ok := wrapped.(agent.ReadonlyContext); ok {
-				t.Fatal("wrapped context unexpectedly type-asserts to ReadonlyContext")
-			}
-
-			rc, ok := agent.FromContext(wrapped)
+			id, ok := agent.IdentityFromContext(wrapped)
 			if !ok {
-				t.Fatal("FromContext() ok = false, want true")
+				t.Fatal("IdentityFromContext() ok = false, want true")
 			}
-			if got := rc.UserID(); got != "user-42" {
-				t.Errorf("UserID() = %q, want %q", got, "user-42")
-			}
-			if got := rc.AppName(); got != "app-1" {
-				t.Errorf("AppName() = %q, want %q", got, "app-1")
-			}
-			// The recovered context must stay read-only: it must not widen back
-			// to a mutable Context/InvocationContext via a type assertion.
-			if _, ok := rc.(agent.Context); ok {
-				t.Error("recovered context widened to agent.Context, want read-only only")
-			}
-			if _, ok := rc.(agent.InvocationContext); ok {
-				t.Error("recovered context widened to agent.InvocationContext, want read-only only")
+			want := agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: sessionID}
+			if id != want {
+				t.Errorf("IdentityFromContext() = %+v, want %+v", id, want)
 			}
 		})
 	}
 }
 
-func TestFromContextAbsent(t *testing.T) {
-	if _, ok := agent.FromContext(t.Context()); ok {
-		t.Error("FromContext() ok = true for a plain context, want false")
+func TestIdentityFromContextAbsent(t *testing.T) {
+	if _, ok := agent.IdentityFromContext(t.Context()); ok {
+		t.Error("IdentityFromContext() ok = true for a plain context, want false")
 	}
 }
 
-// TestFromContextNoReflectionWiden pins that the recovered read-only view does
-// not expose the underlying mutable context through any exported struct field,
-// i.e. it cannot be widened back to an agent.InvocationContext by ordinary
-// reflection (reflect.Value.Interface panics on unexported fields).
-func TestFromContextNoReflectionWiden(t *testing.T) {
-	svc := session.InMemoryService()
-	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
-	if err != nil {
-		t.Fatalf("session Create() error = %v", err)
+// TestIdentityFromContextNoSession pins that an ADK context with no session
+// yields (zero, false) instead of panicking — Value is a context.Context method
+// and must never panic — across both the invocation and promoted common context
+// Value paths.
+func TestIdentityFromContextNoSession(t *testing.T) {
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}) // Session nil
+	cases := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"invocation context", ic},
+		{"promoted common context", agent.Promote(ic)},
 	}
-	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
-	rc, ok := agent.FromContext(agent.Promote(ic))
-	if !ok {
-		t.Fatal("FromContext() ok = false, want true")
-	}
-
-	v := reflect.ValueOf(rc)
-	if v.Kind() == reflect.Pointer {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return
-	}
-	for i := range v.NumField() {
-		f := v.Field(i)
-		if !f.CanInterface() {
-			continue // unexported: reflection cannot extract it
-		}
-		if _, ok := f.Interface().(agent.InvocationContext); ok {
-			t.Errorf("field %q exposes a widenable agent.InvocationContext", v.Type().Field(i).Name)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if id, ok := agent.IdentityFromContext(tc.ctx); ok {
+				t.Errorf("IdentityFromContext() = %+v, ok = true; want zero, false", id)
+			}
+		})
 	}
 }

@@ -122,12 +122,17 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	return &newCtx
 }
 
-// Value implements context.Context. It returns a read-only view of this context
-// for the ADK self key (so agent.FromContext can recover it); every other key
-// delegates to the embedded context, preserving existing behavior.
+// Value implements context.Context. It returns this invocation's [agent.Identity]
+// for the ADK self key (so agent.IdentityFromContext can recover it); every other
+// key, and a context with no session, delegates to the embedded context —
+// preserving existing behavior and never panicking.
 func (c *InvocationContext) Value(key any) any {
-	if key == adkcontext.SelfKey {
-		return NewReadonlyContext(c)
+	if key == adkcontext.IdentityKey && c.params.Session != nil {
+		return agent.Identity{
+			UserID:    c.params.Session.UserID(),
+			AppName:   c.params.Session.AppName(),
+			SessionID: c.params.Session.ID(),
+		}
 	}
 	return c.Context.Value(key)
 }

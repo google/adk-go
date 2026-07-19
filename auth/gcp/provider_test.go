@@ -63,7 +63,7 @@ func TestProviderCredential(t *testing.T) {
 		t.Fatalf("credential = %+v, want bearer token %q", cred, "tok")
 	}
 	if gotUserID != "user-1" {
-		t.Errorf("service saw userId = %q, want %q (identity from agent.FromContext)", gotUserID, "user-1")
+		t.Errorf("service saw userId = %q, want %q (identity from agent.IdentityFromContext)", gotUserID, "user-1")
 	}
 }
 
@@ -87,7 +87,7 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 	}
 }
 
-// adkContext returns an ADK invocation context (recoverable via agent.FromContext)
+// adkContext returns an ADK invocation context (recoverable via agent.IdentityFromContext)
 // for the given user.
 func adkContext(t *testing.T, userID string) context.Context {
 	t.Helper()

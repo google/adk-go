@@ -13,13 +13,14 @@
 // limitations under the License.
 
 // Package adkcontext holds the private context key under which an ADK context
-// registers a read-only view of itself, so it can be recovered from a derived
-// context.Context via agent.FromContext. It is a tiny leaf package shared by the
-// agent and internal/context packages to avoid an import cycle.
+// registers its invocation identity, so it can be recovered from a derived
+// context.Context via agent.IdentityFromContext. It is a tiny leaf package shared
+// by the agent and internal/context packages to avoid an import cycle.
 package adkcontext
 
 type ctxKey int
 
-// SelfKey is the context value key for the live agent.ReadonlyContext view of an
-// ADK context. Its unexported type prevents other packages from forging it.
-const SelfKey ctxKey = 0
+// IdentityKey is the context value key for the agent.Identity of an ADK context.
+// It lives in an internal package with an unexported type, so no code outside
+// the module can name or forge it.
+const IdentityKey ctxKey = 0
