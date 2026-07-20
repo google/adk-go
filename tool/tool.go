@@ -34,6 +34,12 @@ var ErrConfirmationRequired = errors.New("requires confirmation, please approve 
 // ErrConfirmationRejected indicated that the tool call confirmation rejected.
 var ErrConfirmationRejected = errors.New("call is rejected")
 
+// ErrCredentialRequired indicates that the tool needs interactive (3-legged)
+// OAuth consent before it can proceed. It is the credential analog of
+// ErrConfirmationRequired: the tool has called agent.Context.RequestCredential,
+// and the run pauses until the user completes consent.
+var ErrCredentialRequired = errors.New("requires interactive credential consent")
+
 // Tool defines the interface for a callable tool.
 type Tool interface {
 	// Name returns the name of the tool.

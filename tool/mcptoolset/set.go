@@ -58,6 +58,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		auth:                        cfg.Auth,
 	}, nil
 }
 
@@ -111,6 +112,12 @@ type Config struct {
 	// HTTP transport: set Endpoint, or pass a *mcp.StreamableClientTransport.
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
+	//
+	// Interactive 3-legged consent (a provider returning auth.ConsentRequiredError)
+	// is driven only during tool execution, which can pause the run for consent.
+	// Tool listing (Tools) runs before any tool call and cannot pause, so a server
+	// that authenticates listing must use a non-interactive or already-consented
+	// (cached) credential; otherwise listing fails.
 	Auth auth.CredentialProvider
 
 	// Deprecated: use tool.FilterToolset instead.
@@ -142,6 +149,7 @@ type set struct {
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
+	auth                        auth.CredentialProvider
 }
 
 func (*set) Name() string {
@@ -165,7 +173,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.auth)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

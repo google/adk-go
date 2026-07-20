@@ -23,13 +23,15 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, authProvider auth.CredentialProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -40,6 +42,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		mcpClient:                   client,
 		requireConfirmation:         requireConfirmation,
 		requireConfirmationProvider: requireConfirmationProvider,
+		auth:                        authProvider,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -66,6 +69,12 @@ type mcpTool struct {
 	requireConfirmation bool
 
 	requireConfirmationProvider tool.ConfirmationProvider
+
+	// auth, when set, resolves the per-request credential. It mirrors the
+	// provider wired into the transport's RoundTripper and is used here for a
+	// pre-flight probe that can initiate interactive consent (which the
+	// RoundTripper cannot: it has no function call id).
+	auth auth.CredentialProvider
 }
 
 // Name implements the tool.Tool.
@@ -114,6 +123,37 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 			}
 			ctx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRequired)
+		}
+	}
+
+	// Interactive auth pre-flight: the transport's RoundTripper applies the
+	// credential per request but cannot start a consent flow (it has no function
+	// call id, and the MCP SDK drops the underlying error chain). So probe the
+	// provider here; if it needs interactive consent, request it and pause. On
+	// success the provider caches the credential, so the RoundTripper reuses it
+	// on the actual call below.
+	if t.auth != nil {
+		if _, err := t.auth.Credential(ctx); err != nil {
+			var consent *auth.ConsentRequiredError
+			if !errors.As(err, &consent) {
+				// A non-consent resolution failure means the RoundTripper would fail
+				// the same way on the call below, but the MCP SDK mangles that error
+				// chain — so surface the real cause now instead of a wasted call.
+				return nil, fmt.Errorf("mcp tool %q: resolve credential: %w", t.Name(), err)
+			}
+			if ctx.AuthResponse() != nil {
+				// Resumed after consent but the credential is still unavailable:
+				// fail rather than request consent again (which would loop).
+				return nil, fmt.Errorf("mcp tool %q: consent completed but credential unavailable: %w", t.Name(), err)
+			}
+			if rerr := ctx.RequestCredential(authconsent.Request{
+				AuthURI: consent.AuthURI,
+				Nonce:   consent.Nonce,
+				Key:     consent.Key,
+			}); rerr != nil {
+				return nil, fmt.Errorf("mcp tool %q: request credential: %w", t.Name(), rerr)
+			}
+			return nil, fmt.Errorf("mcp tool %q: %w", t.Name(), tool.ErrCredentialRequired)
 		}
 	}
 
