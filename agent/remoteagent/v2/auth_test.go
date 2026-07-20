@@ -94,36 +94,73 @@ func TestNewA2AAuthWithClientProviderIsError(t *testing.T) {
 }
 
 func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
+	// The interceptor only attaches auth when the card declares a matching
+	// security requirement, so the card must carry one.
+	hdr := runA2AAuth(t, func(url string) *a2a.AgentCard {
+		return &a2a.AgentCard{
+			Name:                "a2a",
+			SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)},
+			Capabilities:        a2a.AgentCapabilities{Streaming: true},
+			SecuritySchemes: a2a.NamedSecuritySchemes{
+				"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
+			},
+			SecurityRequirements: a2a.SecurityRequirementsOptions{
+				{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}},
+			},
+		}
+	}, auth.StaticToken("secret-token"))
+
+	if got := hdr.Get("Authorization"); got != "Bearer secret-token" {
+		t.Errorf("server saw Authorization = %q, want %q", got, "Bearer secret-token")
+	}
+}
+
+func TestRemoteAgent_AuthAttachesAPIKeyHeader(t *testing.T) {
+	// For an API-key scheme the interceptor sets the header named by the scheme
+	// (here X-Api-Key) to the resolved credential value.
+	hdr := runA2AAuth(t, func(url string) *a2a.AgentCard {
+		return &a2a.AgentCard{
+			Name:                "a2a",
+			SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)},
+			Capabilities:        a2a.AgentCapabilities{Streaming: true},
+			SecuritySchemes: a2a.NamedSecuritySchemes{
+				"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
+			},
+			SecurityRequirements: a2a.SecurityRequirementsOptions{
+				{a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{}},
+			},
+		}
+	}, auth.APIKey("X-Api-Key", "secret-key"))
+
+	if got := hdr.Get("X-Api-Key"); got != "secret-key" {
+		t.Errorf("server saw X-Api-Key = %q, want %q", got, "secret-key")
+	}
+}
+
+// runA2AAuth starts a local A2A server that records the headers of the request
+// it receives, builds a remote agent for cardFor(serverURL) with the given Auth
+// provider, runs one turn, and returns those headers. It lets the auth tests
+// assert, fully offline, that A2AConfig.Auth attaches the credential per the
+// card's declared security scheme.
+func runA2AAuth(t *testing.T, cardFor func(url string) *a2a.AgentCard, provider auth.CredentialProvider) http.Header {
+	t.Helper()
+
 	executor := newA2AEventReplay(t, []a2a.Event{
 		a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")),
 	})
 	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
 
 	var mu sync.Mutex
-	var gotAuth string
+	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
+		got = r.Header.Clone()
 		mu.Unlock()
 		inner.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
 
-	// The interceptor only attaches auth when the card declares a matching
-	// security requirement, so the card must carry one.
-	card := &a2a.AgentCard{
-		Name:                "a2a",
-		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL, a2a.TransportProtocolJSONRPC)},
-		Capabilities:        a2a.AgentCapabilities{Streaming: true},
-		SecuritySchemes: a2a.NamedSecuritySchemes{
-			"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-		},
-		SecurityRequirements: a2a.SecurityRequirementsOptions{
-			{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}},
-		},
-	}
-
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("secret-token")})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: cardFor(srv.URL), Auth: provider})
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
@@ -135,7 +172,5 @@ func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if gotAuth != "Bearer secret-token" {
-		t.Errorf("server saw Authorization = %q, want %q", gotAuth, "Bearer secret-token")
-	}
+	return got
 }
