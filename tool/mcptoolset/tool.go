@@ -172,8 +172,10 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 // functionResponse builds the function response map for a tool result.
 // The result's _meta field is preserved under the "_meta" key, mirroring the
 // raw MCP serialization, so that metadata attached by the server (e.g. auth
-// challenges from MCP gateways) reaches callbacks and the embedding
-// application instead of being silently dropped.
+// challenges from MCP gateways) is not silently dropped. This map is the
+// function response returned to the model, so _meta reaches the LLM and is
+// persisted to session and traces, in addition to being available to
+// callbacks and the embedding application.
 func functionResponse(res *mcp.CallToolResult, output any) map[string]any {
 	response := map[string]any{
 		"output": output,

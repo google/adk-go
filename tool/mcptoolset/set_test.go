@@ -963,3 +963,16 @@ func TestNewRejectsElicitationHandlerWithCustomClient(t *testing.T) {
 		t.Fatal("expected error when combining ElicitationHandler with a custom Client, got nil")
 	}
 }
+
+func TestNewRejectsElicitationCompleteHandlerWithoutElicitationHandler(t *testing.T) {
+	clientTransport, _ := mcp.NewInMemoryTransports()
+
+	_, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+		ElicitationCompleteHandler: func(context.Context, *mcp.ElicitationCompleteNotificationRequest) {
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when setting ElicitationCompleteHandler without ElicitationHandler, got nil")
+	}
+}
