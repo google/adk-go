@@ -59,6 +59,9 @@ func New(cfg Config) (tool.Toolset, error) {
 		if cfg.Client != nil {
 			return nil, fmt.Errorf("mcptoolset: ElicitationHandler and ElicitationCompleteHandler cannot be combined with a custom Client; set them in the client's mcp.ClientOptions instead")
 		}
+		if cfg.ElicitationHandler == nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationCompleteHandler requires ElicitationHandler to be set; the client cannot service an elicitation without it")
+		}
 		clientOptions = &mcp.ClientOptions{
 			ElicitationHandler:         cfg.ElicitationHandler,
 			ElicitationCompleteHandler: cfg.ElicitationCompleteHandler,
@@ -160,7 +163,9 @@ type Config struct {
 
 	// ElicitationCompleteHandler handles notifications/elicitation/complete
 	// notifications, which servers send when an out-of-band (URL-mode)
-	// elicitation has been completed.
+	// elicitation has been completed. It requires ElicitationHandler to also
+	// be set, since a completion notification cannot arrive unless an
+	// elicitation was created first.
 	// It can only be set when Client is nil; for a custom Client, set the
 	// handler in the client's mcp.ClientOptions instead.
 	ElicitationCompleteHandler func(context.Context, *mcp.ElicitationCompleteNotificationRequest)
