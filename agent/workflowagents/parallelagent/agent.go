@@ -110,7 +110,16 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}()
 
 	return func(yield func(*session.Event, error) bool) {
-		defer close(doneChan)
+		// Await sub-agent goroutines (incl. their deferred teardown, e.g. a remote
+		// agent's cancel RPC) before returning, even on early stop: the funnel closes
+		// resultsChan only after errGroup.Wait(), so draining it blocks until every
+		// sub-agent has returned. Otherwise teardown can outlive the run and touch a
+		// context whose lifetime already ended.
+		defer func() {
+			close(doneChan)
+			for range resultsChan {
+			}
+		}()
 
 		for res := range resultsChan {
 			shouldContinue := yield(res.event, res.err)

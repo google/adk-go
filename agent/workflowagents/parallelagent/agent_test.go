@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,6 +234,76 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 				},
 			}, nil)
 		}
+	}
+}
+
+// TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop verifies that when the
+// consumer stops early, the iterator does not return until every sub-agent
+// goroutine (and its deferred teardown, e.g. a remote agent's cancel RPC) has
+// finished. Otherwise teardown can outlive the run and touch an already-ended
+// context.
+func TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	const numSubAgents = 3
+	var teardownDone atomic.Int32
+
+	var subAgents []agent.Agent
+	for i := 1; i <= numSubAgents; i++ {
+		subAgents = append(subAgents, must(agent.New(agent.Config{
+			Name: fmt.Sprintf("sub%d", i),
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					// Stands in for a sub-agent's deferred teardown that must complete
+					// before the run returns.
+					defer func() {
+						time.Sleep(50 * time.Millisecond)
+						teardownDone.Add(1)
+					}()
+					for {
+						if !yield(&session.Event{
+							LLMResponse: model.LLMResponse{
+								Content: genai.NewContentFromText(fmt.Sprintf("hello %d", i), genai.RoleModel),
+							},
+						}, nil) {
+							return
+						}
+					}
+				}
+			},
+		})))
+	}
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "test_agent",
+			SubAgents: subAgents,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentRunner, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             parallelAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range agentRunner.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		break // stop after the first event
+	}
+
+	// No sleep: the fix must have joined all sub-agents before Run returned.
+	if got := teardownDone.Load(); got != numSubAgents {
+		t.Errorf("sub-agent teardown outlived the parallel agent run: %d/%d completed", got, numSubAgents)
 	}
 }
 
