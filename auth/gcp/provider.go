@@ -59,6 +59,11 @@ type ProviderConfig struct {
 	// synchronously, so the cost and any failure move to startup, where they can
 	// at least be reported.
 	Client *Client
+	// Store caches resolved credentials across requests (keyed by app, user, and
+	// resource). When nil, an in-memory store is used. Caching matters here
+	// because each miss is a network round-trip (and up to a ~10s pending poll)
+	// to the credential service.
+	Store auth.CredentialStore
 }
 
 // ErrClientUnavailable means the default Application Default Credentials client
@@ -145,9 +150,14 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 	if cfg.Client != nil && cfg.Client.httpClient == nil {
 		return nil, errors.New("gcp: ProviderConfig.Client must come from NewClient")
 	}
+	store := cfg.Store
+	if store == nil {
+		store = auth.NewInMemoryCredentialStore()
+	}
 	p := &provider{
 		scheme:      cfg.Scheme,
 		client:      cfg.Client,
+		store:       store,
 		newClient:   func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
 		initTimeout: defaultInitTimeout,
 	}
@@ -164,6 +174,7 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 
 type provider struct {
 	scheme ProviderScheme
+	store  auth.CredentialStore
 	// initCtx roots the lazily built default client, which is why NewProvider
 	// asks for a process-scoped context. Nil when a Client was supplied.
 	initCtx context.Context
@@ -214,6 +225,12 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
 	}
 
+	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: p.scheme.Name}
+	// A store read error is non-fatal: fall through and fetch a fresh credential.
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok {
+		return cred, nil
+	}
+
 	client, err := p.resolveClient(ctx)
 	if err != nil {
 		// Deliberately not qualified by resource: a client-init failure is about
@@ -224,7 +241,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		// provider to do it for them.
 		return nil, err
 	}
-	cred, err := client.RetrieveCredential(ctx, Request{
+	r, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      id.UserID,
 		Scopes:      p.scheme.Scopes,
@@ -233,7 +250,14 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cred, nil
+	// Cache only when the service reported an expiry: a zero time means "never
+	// expires" to the store, and the GCP services omit it only when the lifetime
+	// is unknown — caching that would risk serving a stale credential forever.
+	// Best-effort: a store write failure must not fail auth.
+	if !r.ExpiresAt.IsZero() {
+		_ = p.store.Set(ctx, key, r.Credential, r.ExpiresAt)
+	}
+	return r.Credential, nil
 }
 
 // resolveClient returns the configured client, building a default one (backed by
