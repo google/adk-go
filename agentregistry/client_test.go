@@ -452,7 +452,7 @@ func TestClientAll(t *testing.T) {
 // newTestClient returns a Client whose requester talks to srv, exercising the
 // full method -> getResource -> restRequester -> HTTP path.
 func newTestClient(srv *httptest.Server) *Client {
-	return &Client{requester: newTestRequester(srv)}
+	return &Client{requester: newTestRequester(srv), httpClient: srv.Client()}
 }
 
 // mapNames projects a display-name-like field out of each element.

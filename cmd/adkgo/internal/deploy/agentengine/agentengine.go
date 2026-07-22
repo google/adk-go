@@ -280,9 +280,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
 								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
 							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
-							},
 						},
 						ClassMethods: methods,
 					},
