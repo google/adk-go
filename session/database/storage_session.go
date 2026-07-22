@@ -366,7 +366,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 type storageAppState struct {
 	AppName    string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time `gorm:"precision:6"`
+	UpdateTime time.Time `gorm:"precision:6;autoUpdateTime"`
 }
 
 // TableName explicitly sets the table name for the AppState struct.
@@ -379,7 +379,7 @@ type storageUserState struct {
 	AppName    string `gorm:"primaryKey;"`
 	UserID     string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time `gorm:"precision:6"`
+	UpdateTime time.Time `gorm:"precision:6;autoUpdateTime"`
 }
 
 // TableName explicitly sets the table name for the UserState struct.
