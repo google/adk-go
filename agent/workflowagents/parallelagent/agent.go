@@ -68,8 +68,9 @@ func New(cfg Config) (agent.Agent, error) {
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	curAgent := ctx.Agent()
 
-	// Cancelable so an early consumer stop aborts the sub-agents promptly instead
-	// of blocking until they next yield (see the iterator's deferred cleanup).
+	// Cancelable so an early consumer stop aborts each sub-agent's in-flight Run
+	// promptly. Teardown still runs to completion and the iterator waits for it
+	// (see the deferred cleanup), so a sub-agent that blocks in teardown blocks run.
 	subAgentsCtx, cancelSubAgents := context.WithCancel(ctx)
 
 	var (
@@ -116,9 +117,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 
 	return func(yield func(*session.Event, error) bool) {
 		// Await sub-agent goroutines (incl. their deferred teardown) before
-		// returning, even on early stop: cancel them so they abort promptly, then
-		// drain resultsChan — the funnel closes it only after errGroup.Wait().
-		// Otherwise teardown can outlive the run and touch an already-ended context.
+		// returning, even on early stop: cancel them, then drain resultsChan, which
+		// the funnel closes only after errGroup.Wait(). Otherwise teardown can
+		// outlive the run and touch an already-ended context.
 		defer func() {
 			cancelSubAgents()
 			close(doneChan)
