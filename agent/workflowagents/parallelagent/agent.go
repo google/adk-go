@@ -16,6 +16,7 @@
 package parallelagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
@@ -67,8 +68,12 @@ func New(cfg Config) (agent.Agent, error) {
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	curAgent := ctx.Agent()
 
+	// Cancelable so an early consumer stop aborts the sub-agents promptly instead
+	// of blocking until they next yield (see the iterator's deferred cleanup).
+	subAgentsCtx, cancelSubAgents := context.WithCancel(ctx)
+
 	var (
-		errGroup, errGroupCtx = errgroup.WithContext(ctx)
+		errGroup, errGroupCtx = errgroup.WithContext(subAgentsCtx)
 		doneChan              = make(chan bool)
 		resultsChan           = make(chan result)
 	)
@@ -110,14 +115,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}()
 
 	return func(yield func(*session.Event, error) bool) {
-		// Await sub-agent goroutines (incl. their deferred teardown, e.g. a remote
-		// agent's cancel RPC) before returning, even on early stop: the funnel closes
-		// resultsChan only after errGroup.Wait(), so draining it blocks until every
-		// sub-agent has returned. Otherwise teardown can outlive the run and touch a
-		// context whose lifetime already ended.
+		// Await sub-agent goroutines (incl. their deferred teardown) before
+		// returning, even on early stop: cancel them so they abort promptly, then
+		// drain resultsChan — the funnel closes it only after errGroup.Wait().
+		// Otherwise teardown can outlive the run and touch an already-ended context.
 		defer func() {
+			cancelSubAgents()
 			close(doneChan)
-			for range resultsChan {
+			for range resultsChan { // drain until the funnel closes resultsChan
 			}
 		}()
 
