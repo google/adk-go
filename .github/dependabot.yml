@@ -11,8 +11,8 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
-    reviewers:
-      - "wolo-lab"
-    allow:
-      - dependency-name: "google.golang.org/genai"
     open-pull-requests-limit: 10
+    groups:
+      go-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
