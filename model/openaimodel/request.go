@@ -95,12 +95,26 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if len(textParts) == 0 {
 				return nil
 			}
-			msg, err := newMessage(curRole, textParts)
-			if err != nil {
-				return err
-			}
-			if msg != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+			// Assistant turns must be replayed as output messages whose content
+			// uses "output_text"; the OpenAI Responses API rejects "input_text"
+			// for the assistant role (EasyInputMessageParam can only emit
+			// input_text). Every other role stays an easy input message.
+			if curRole == genai.RoleModel {
+				msg, err := newOutputMessage(textParts)
+				if err != nil {
+					return err
+				}
+				if msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
+				}
+			} else {
+				msg, err := newMessage(curRole, textParts)
+				if err != nil {
+					return err
+				}
+				if msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+				}
 			}
 			textParts = textParts[:0]
 			return nil
@@ -181,6 +195,35 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		Content: responses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
+	}, nil
+}
+
+// newOutputMessage builds an assistant output message whose content uses the
+// "output_text" type, as required when replaying a prior assistant turn to the
+// OpenAI Responses API. The message ID is left unset: OpenAI assigns message
+// IDs on output, and a replayed turn has none to echo back.
+func newOutputMessage(texts []string) (*responses.ResponseOutputMessageParam, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	contentList := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
+	for _, txt := range texts {
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		contentList = append(contentList, responses.ResponseOutputMessageContentUnionParam{
+			OfOutputText: &responses.ResponseOutputTextParam{
+				Text: txt,
+				Type: constant.OutputText("output_text"),
+			},
+		})
+	}
+	if len(contentList) == 0 {
+		return nil, nil
+	}
+	return &responses.ResponseOutputMessageParam{
+		Content: contentList,
+		Status:  responses.ResponseOutputMessageStatusCompleted,
 	}, nil
 }
 
