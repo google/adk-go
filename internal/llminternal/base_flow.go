@@ -386,7 +386,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
-						errChan <- err
+						// Guard the send: on a resumable error the consumer
+						// abandons this errChan and reconnects, so an unguarded
+						// send would block this goroutine forever (leak). cleanup
+						// cancels connCtx on every path, unblocking us here.
+						select {
+						case errChan <- err:
+						case <-connCtx.Done():
+						}
 						return
 					}
 					if resp != nil {
@@ -427,7 +434,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -436,7 +446,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
