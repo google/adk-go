@@ -15,6 +15,7 @@
 package database
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,59 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	if ev.IsolationScope != "task-1" {
 		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
+	}
+}
+
+// TestDatabaseService_AppendEvent_StaleSessionErrorFormatsTimestamps guards
+// against a unit-mismatch regression: the stale-session error rendered both
+// timestamps via time.Unix(0, micros), whose second arg is nanoseconds, so a
+// microsecond value was interpreted 1000x too small and printed as ~1970.
+// The comparison itself was always correct — only the operator-facing message
+// was wrong — so this test asserts on the formatted string, not the rejection.
+func TestDatabaseService_AppendEvent_StaleSessionErrorFormatsTimestamps(t *testing.T) {
+	// Pin Create's clock so the stored UpdateTime is a known, current-year value.
+	createdAt := time.Date(2026, time.July, 17, 15, 38, 42, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A second, independent handle to the same row. Appending through `created`
+	// below advances the stored UpdateTime, leaving `stale` behind.
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stale := got.Session
+
+	// Advance the stored session's UpdateTime via the fresh handle.
+	if err := s.AppendEvent(ctx, created.Session, &session.Event{
+		ID: "e1", Author: "user", Timestamp: createdAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("AppendEvent (fresh handle): %v", err)
+	}
+
+	// Appending through the stale handle must be rejected...
+	err = s.AppendEvent(ctx, stale, &session.Event{
+		ID: "e2", Author: "user", Timestamp: createdAt.Add(2 * time.Second),
+	})
+	if err == nil {
+		t.Fatal("AppendEvent on stale session: got nil error, want stale session error")
+	}
+
+	// ...and the message must render the real wall-clock time, not the epoch.
+	msg := err.Error()
+	if !strings.Contains(msg, "stale session error") {
+		t.Fatalf("error = %q, want a stale session error", msg)
+	}
+	if strings.Contains(msg, "1970") {
+		t.Errorf("stale session error still formats timestamps near the epoch (unit mismatch): %q", msg)
+	}
+	if !strings.Contains(msg, "2026-07-17") {
+		t.Errorf("error = %q, want it to contain the actual update date 2026-07-17", msg)
 	}
 }
 
