@@ -24,10 +24,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/universal"
+	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/session"
 )
 
 // minimalSublauncher is a stub Sublauncher for testing the web launcher.
@@ -56,7 +56,9 @@ func getFreePort(t *testing.T) int {
 		t.Fatalf("net.ListenTCP() error = %v", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("l.Close() error = %v", err)
+	}
 	return port
 }
 
@@ -99,7 +101,9 @@ func TestHTTPMiddleware_AppliedOutermostFirst(t *testing.T) {
 		var resp *http.Response
 		resp, pingErr = http.Get(fmt.Sprintf("http://localhost:%d/ping", port))
 		if pingErr == nil {
-			resp.Body.Close()
+			if err := resp.Body.Close(); err != nil {
+				t.Fatalf("resp.Body.Close() error = %v", err)
+			}
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
