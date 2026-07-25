@@ -917,6 +917,93 @@ func TestConvertForeignEvent(t *testing.T) {
 				Branch: "b",
 			},
 		},
+		{
+			// A thought part (with text) must be excluded so another agent's
+			// private reasoning never leaks into the current agent's context;
+			// the non-thought text is still presented.
+			name: "ThoughtWithTextExcluded",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Text: "secret reasoning", Thought: true},
+							{Text: "the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+		},
+		{
+			// An empty-text thought part previously fell through to the default
+			// branch and was copied verbatim; it must now be dropped too.
+			name: "EmptyTextThoughtExcluded",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Thought: true},
+							{Text: "the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
+		},
+		{
+			// A foreign turn made up entirely of thoughts leaves only the
+			// "For context:" header, so the event is dropped (nil) rather than
+			// emitting a bare header.
+			name: "ThoughtOnlyDropped",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{Text: "only reasoning", Thought: true},
+						},
+					},
+				},
+				Branch: "b",
+			},
+			want: nil,
+		},
 	}
 
 	for _, tc := range testCases {
