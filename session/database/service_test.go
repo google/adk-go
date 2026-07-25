@@ -178,7 +178,9 @@ func emptyServiceFromDB(t *testing.T) *databaseService {
 			t.Errorf("failed to get *sql.DB: %v", err)
 			return
 		}
-		sqlDB.Close()
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("failed to close *sql.DB: %v", err)
+		}
 	})
 	return dbSvc
 }
