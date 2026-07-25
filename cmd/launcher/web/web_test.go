@@ -33,11 +33,11 @@ import (
 // minimalSublauncher is a stub Sublauncher for testing the web launcher.
 type minimalSublauncher struct{}
 
-func (m *minimalSublauncher) Keyword() string                             { return "stub" }
-func (m *minimalSublauncher) Parse(args []string) ([]string, error)       { return args, nil }
-func (m *minimalSublauncher) CommandLineSyntax() string                   { return "" }
-func (m *minimalSublauncher) SimpleDescription() string                   { return "" }
-func (m *minimalSublauncher) UserMessage(_ string, _ func(v ...any))      {}
+func (m *minimalSublauncher) Keyword() string                        { return "stub" }
+func (m *minimalSublauncher) Parse(args []string) ([]string, error)  { return args, nil }
+func (m *minimalSublauncher) CommandLineSyntax() string              { return "" }
+func (m *minimalSublauncher) SimpleDescription() string              { return "" }
+func (m *minimalSublauncher) UserMessage(_ string, _ func(v ...any)) {}
 func (m *minimalSublauncher) SetupSubrouters(router *mux.Router, _ *launcher.Config) error {
 	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
