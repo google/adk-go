@@ -207,10 +207,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
-			}
+			// LlmAgent as root agent must have chat mode. Resolve once so
+			// servers sharing one root agent across concurrent Run calls don't
+			// race on this write (google/adk-go#1137).
+			llmInternalState.ResolveMode(llminternal.ModeChat)
 
 			if llmInternalState.Mode != llminternal.ModeChat {
 				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
