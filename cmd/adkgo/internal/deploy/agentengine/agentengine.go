@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -176,6 +177,54 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
+// defaultBuilderGoVersion is a last-resort builder image tag, used only when the
+// application's go.mod cannot be read and the running toolchain version cannot
+// be determined.
+const defaultBuilderGoVersion = "1.26"
+
+// builderGoVersion returns the Go version tag for the builder image. It prefers
+// the go directive declared in the application's go.mod so the managed build
+// uses a toolchain that satisfies what the app requires, falling back to the
+// version of the toolchain running adkgo, then to defaultBuilderGoVersion.
+func builderGoVersion(sourceDir string) string {
+	dir := sourceDir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if v := goVersionFromModFile(data); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimPrefix(runtime.Version(), "go"); isGoVersion(v) {
+		return v
+	}
+	return defaultBuilderGoVersion
+}
+
+// goVersionFromModFile extracts the value of the top-level `go` directive
+// (e.g. "1.26.5") from go.mod contents, or "" if it is absent or malformed.
+func goVersionFromModFile(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		if v := strings.TrimSpace(rest); isGoVersion(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+// isGoVersion reports whether s looks like a Go version number (starts with a
+// digit), guarding against matching a module path inside a require block.
+func isGoVersion(s string) bool {
+	return s != "" && s[0] >= '0' && s[0] <= '9'
+}
+
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
@@ -183,9 +232,8 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 			p("Writing:", f.build.dockerfileBuildPath)
 
 			var b strings.Builder
-			b.WriteString(`
-FROM golang:1.25 as builder
-WORKDIR /app
+			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
+			b.WriteString(`WORKDIR /app
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
