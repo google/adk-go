@@ -312,6 +312,42 @@ func TestOnModelErrorCallback_AppendsToWriter(t *testing.T) {
 	}
 }
 
+func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
+	run := func(t *testing.T, chunks []*model.LLMResponse) (totalRows int) {
+		p, requestsChan, mCtx := setupTestPlugin(t)
+		cb := p.AfterModelCallback()
+		for _, c := range chunks {
+			if _, err := cb(mCtx, c, nil); err != nil {
+				t.Fatalf("AfterModelCallback error: %v", err)
+			}
+		}
+		p.AfterRunCallback()(mCtx) // logs 1 INVOCATION_END row too, then flushes
+		for {
+			select {
+			case req := <-requestsChan:
+				totalRows += int(req.GetArrowRows().GetRows().GetRowCount())
+			case <-time.After(time.Second):
+				return
+			}
+		}
+	}
+	usage := func(c int32) *genai.GenerateContentResponseUsageMetadata {
+		return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: c}
+	}
+	baseline := run(t, []*model.LLMResponse{
+		{Partial: false, Content: &genai.Content{Parts: []*genai.Part{{Text: "final"}}}, UsageMetadata: usage(15)},
+	})
+	streaming := run(t, []*model.LLMResponse{
+		{Partial: true, UsageMetadata: usage(5)},
+		{Partial: true, UsageMetadata: usage(10)},
+		{Partial: true, UsageMetadata: usage(15)},
+		{Partial: false, UsageMetadata: usage(15)},
+	})
+	if streaming != baseline {
+		t.Errorf("expected streaming turn to log the same number of rows as the baseline turn (%d), got %d", baseline, streaming)
+	}
+}
+
 func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
