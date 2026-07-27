@@ -239,6 +239,9 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 		UserID:    req.UserID,
 		SessionID: req.SessionID,
 	}); err != nil {
+		if isNotFoundError(err) {
+			return nil // A missing session is a no-op.
+		}
 		return err
 	}
 	lro, err := c.rpcClient.DeleteSession(ctx, &aiplatformpb.DeleteSessionRequest{
