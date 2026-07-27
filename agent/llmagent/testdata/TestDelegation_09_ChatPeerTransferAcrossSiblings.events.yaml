@@ -1,0 +1,97 @@
+- author: user
+  role: user
+  parts:
+    - text: I have a question about my invoice.
+- author: root
+  role: model
+  parts:
+    - function_call:
+        name: transfer_to_agent
+        id: du9tm6qr
+        args:
+            agent_name: billing
+  node_info:
+    path: root
+- author: root
+  role: user
+  parts:
+    - function_response:
+        name: transfer_to_agent
+        id: du9tm6qr
+  node_info:
+    path: root
+  actions:
+    transfer_to_agent: billing
+- author: billing
+  role: model
+  parts:
+    - text: I can help you with your invoice. What is your question?
+  node_info:
+    path: root
+- author: user
+  role: user
+  parts:
+    - text: Actually I need help resetting my password.
+- author: billing
+  role: model
+  parts:
+    - function_call:
+        name: transfer_to_agent
+        id: 9rx5b9f5
+        args:
+            agent_name: support
+  node_info:
+    path: billing
+- author: billing
+  role: user
+  parts:
+    - function_response:
+        name: transfer_to_agent
+        id: 9rx5b9f5
+  node_info:
+    path: billing
+  actions:
+    transfer_to_agent: support
+- author: support
+  role: model
+  parts:
+    - text: |-
+        To reset your password, please follow these steps:
+
+        1. Go to the login page.
+        2. Click on the **"Forgot Password"** or **"Reset Password"** link.
+        3. Enter your registered email address and submit the request.
+        4. Check your email inbox (and spam folder) for a password reset link.
+        5. Click the link and follow the prompts to create a new password.
+  node_info:
+    path: billing
+- author: user
+  role: user
+  parts:
+    - text: Actually, back to my invoice — what's the latest charge?
+- author: support
+  role: model
+  parts:
+    - function_call:
+        name: transfer_to_agent
+        id: usm8tod7
+        args:
+            agent_name: billing
+  node_info:
+    path: support
+- author: support
+  role: user
+  parts:
+    - function_response:
+        name: transfer_to_agent
+        id: usm8tod7
+  node_info:
+    path: support
+  actions:
+    transfer_to_agent: billing
+- author: billing
+  role: model
+  parts:
+    - text: To help you with that, could you please provide your account number or the email address associated with your account?
+  node_info:
+    path: support

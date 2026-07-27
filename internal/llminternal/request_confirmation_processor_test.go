@@ -15,7 +15,6 @@
 package llminternal_test
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -24,14 +23,14 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 const (
@@ -51,7 +50,7 @@ func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
 
-func (m *mockTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
 		return map[string]any{"error": string("Tool execution not confirmed")}, nil
 	}
@@ -73,7 +72,7 @@ func newMockLlmAgent() (agent.Agent, []tool.Tool, error) {
 
 func createInvocationContext(t *testing.T, agnt agent.Agent, sess session.Session) agent.InvocationContext {
 	t.Helper()
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Agent:   agnt,
 		Session: sess,
 	})

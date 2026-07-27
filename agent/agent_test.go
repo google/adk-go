@@ -23,8 +23,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestAgentCallbacks(t *testing.T) {
@@ -40,7 +40,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "before agent callback runs, no llm calls",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx CallbackContext) (*genai.Content, error) {
+				func(ctx Context) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -60,12 +60,12 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "no callback effect if callbacks return nil",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx CallbackContext) (*genai.Content, error) {
+				func(ctx Context) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
 			afterAgent: []AfterAgentCallback{
-				func(CallbackContext) (*genai.Content, error) {
+				func(Context) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
@@ -82,7 +82,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "after agent callback create a new event with new content",
 			afterAgent: []AfterAgentCallback{
-				func(CallbackContext) (*genai.Content, error) {
+				func(Context) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -158,7 +158,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 	testAgent, err := New(Config{
 		Name: "test",
 		BeforeAgentCallbacks: []BeforeAgentCallback{
-			func(ctx CallbackContext) (*genai.Content, error) {
+			func(ctx Context) (*genai.Content, error) {
 				return nil, nil
 			},
 		},
@@ -193,7 +193,7 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	testAgent, err := New(Config{
 		Name: "test",
 		AfterAgentCallbacks: []AfterAgentCallback{
-			func(CallbackContext) (*genai.Content, error) {
+			func(Context) (*genai.Content, error) {
 				return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 			},
 		},
