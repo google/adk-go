@@ -344,12 +344,12 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel), Partial: true},
 				// Aggregated partial responses are emitted before a long-running function call
 				{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)},
-				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)},
 				{
 					Content: genai.NewContentFromParts(
 						[]*genai.Part{
 							{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}},
 							{FunctionResponse: &genai.FunctionResponse{Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"}}},
+							{Text: "Waiting for the approval to continue."},
 						},
 						genai.RoleModel,
 					),
