@@ -23,16 +23,15 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/telemetry"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/geminitool"
 )
 
 // Package main demonstrates a workaround for using multiple tool types (e.g.,
@@ -42,7 +41,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -68,7 +67,7 @@ func main() {
 	type Output struct {
 		Poem string `json:"poem"`
 	}
-	handler := func(ctx agent.ToolContext, input Input) (Output, error) {
+	handler := func(ctx agent.Context, input Input) (Output, error) {
 		return Output{
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
 		}, nil
@@ -107,11 +106,13 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
+	// Save message content in OpenTelemetry logs
+	if err := os.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true"); err != nil {
+		log.Fatalf("Failed to set env var: %v", err)
+	}
+
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
-		TelemetryOptions: []telemetry.Option{
-			telemetry.WithGenAICaptureMessageContent(true),
-		},
 	}
 
 	l := full.NewLauncher()

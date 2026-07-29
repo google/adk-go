@@ -24,19 +24,19 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/internal/agent/parentmap"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestAgentTransferRequestProcessor(t *testing.T) {
@@ -427,6 +427,123 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		}))
 		check(t, agent, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
+
+	t.Run("TaskAndSingleTurnSubagentsExcludedAsTargets", func(t *testing.T) {
+		taskSub := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "TaskSub",
+			Model: llm,
+			Mode:  llmagent.ModeTask,
+		}))
+		singleTurnSub := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "SingleTurnSub",
+			Model: llm,
+			Mode:  llmagent.ModeSingleTurn,
+		}))
+		chatSub := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "ChatSub",
+			Model: llm,
+		}))
+		curAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:      "Current",
+			Model:     llm,
+			SubAgents: []agent.Agent{taskSub, singleTurnSub, chatSub},
+		}))
+		check(t, curAgent, curAgent, "",
+			[]string{"ChatSub"},
+			[]string{"TaskSub", "SingleTurnSub", "Current"})
+	})
+
+	t.Run("TaskAndSingleTurnPeersExcludedAsTargets", func(t *testing.T) {
+		curAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "Current",
+			Model: llm,
+		}))
+		taskPeer := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "TaskPeer",
+			Model: llm,
+			Mode:  llmagent.ModeTask,
+		}))
+		singleTurnPeer := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "SingleTurnPeer",
+			Model: llm,
+			Mode:  llmagent.ModeSingleTurn,
+		}))
+		chatPeer := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "ChatPeer",
+			Model: llm,
+		}))
+		root := utils.Must(llmagent.New(llmagent.Config{
+			Name:      "Parent",
+			Model:     llm,
+			SubAgents: []agent.Agent{curAgent, taskPeer, singleTurnPeer, chatPeer},
+		}))
+		check(t, curAgent, root, "Parent",
+			[]string{"ChatPeer"},
+			[]string{"TaskPeer", "SingleTurnPeer", "Current"})
+	})
+}
+
+// TestAgentTransferRequestProcessor_TaskSingleTurnCurrentAgent verifies
+// that LLM doesn't see transfer guidance for task / single_turn agents
+// because they reach their callees via FC delegation (TaskAgentTool /
+// SingleTurnTool), not via transfer.
+func TestAgentTransferRequestProcessor_TaskSingleTurnCurrentAgent(t *testing.T) {
+	llm := &struct{ model.LLM }{}
+
+	for _, tc := range []struct {
+		name string
+		mode llmagent.Mode
+	}{
+		{"task", llmagent.ModeTask},
+		{"single_turn", llmagent.ModeSingleTurn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cur := utils.Must(llmagent.New(llmagent.Config{
+				Name:  "Current",
+				Model: llm,
+				Mode:  tc.mode,
+			}))
+			root := utils.Must(llmagent.New(llmagent.Config{
+				Name:      "Parent",
+				Model:     llm,
+				SubAgents: []agent.Agent{cur},
+			}))
+
+			req := &model.LLMRequest{}
+			parents, err := parentmap.New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := icontext.NewInvocationContext(
+				parentmap.ToContext(t.Context(), parents),
+				icontext.InvocationContextParams{Agent: cur},
+			)
+
+			for ev, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("AgentTransferRequestProcessor failed: %v", err)
+				}
+			}
+
+			// No transfer-prose instructions should be appended.
+			// The processor's only path to instruction text is
+			// instructionsForTransferToAgent, which returns ""
+			// for task/single_turn; AppendInstructions("") is a
+			// no-op, leaving Config.SystemInstruction empty.
+			if req.Config != nil {
+				if got := utils.TextParts(req.Config.SystemInstruction); len(got) > 0 {
+					for _, s := range got {
+						if s != "" {
+							t.Errorf("expected no transfer instructions for mode=%q, got: %q", tc.mode, s)
+						}
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestAgentTransfer_ProcessRequest(t *testing.T) {
@@ -435,7 +552,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 		x int
 	}
 	var req model.LLMRequest
-	handler := func(ctx agent.ToolContext, input Input) (int, error) {
+	handler := func(ctx agent.Context, input Input) (int, error) {
 		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{

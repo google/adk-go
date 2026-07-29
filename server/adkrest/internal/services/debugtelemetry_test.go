@@ -30,7 +30,7 @@ import (
 )
 
 func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	type testCase struct {
 		name             string
@@ -106,7 +106,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				rootSpan.End()
 
 				// Create another trace with a different session ID (should not be returned).
-				_, rootSpan3 := tracer.Start(context.Background(), "root-3", trace.WithAttributes(
+				_, rootSpan3 := tracer.Start(t.Context(), "root-3", trace.WithAttributes(
 					semconv.GenAIConversationID("test-session-id-1"),
 				))
 				rootSpan3.End()
@@ -242,7 +242,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 }
 
 func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	type testCase struct {
 		name           string
