@@ -143,6 +143,45 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		}
 	})
 
+	t.Run(fmt.Sprintf("GetArtifactVersion_%s", testSuffix), func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			fileName string
+			version  int64
+			want     *artifact.ArtifactVersion
+		}{
+			{
+				name:     "latest",
+				fileName: "file1",
+				version:  0,
+				want:     &artifact.ArtifactVersion{Version: 3, MimeType: "text/plain"},
+			},
+			{
+				name:     "specific version",
+				fileName: "file1",
+				version:  1,
+				want:     &artifact.ArtifactVersion{Version: 1, MimeType: "text/plain"},
+			},
+			{
+				name:     "text artifact",
+				fileName: "file3",
+				version:  1,
+				want:     &artifact.ArtifactVersion{Version: 1, MimeType: "text/plain"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+					AppName: appName, UserID: userID, SessionID: sessionID, FileName: tc.fileName,
+					Version: tc.version,
+				})
+				if err != nil {
+					t.Fatalf("GetArtifactVersion(%q, %d) failed: %v", tc.fileName, tc.version, err)
+				}
+				assertArtifactVersion(t, resp.ArtifactVersion, tc.want)
+			})
+		}
+	})
+
 	t.Log("Delete file1 version 3")
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
@@ -201,6 +240,15 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("Versions('file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
+
+	t.Run(fmt.Sprintf("GetArtifactVersionAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("GetArtifactVersion('file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 
@@ -408,4 +456,25 @@ func testArtifactService_Empty(ctx context.Context, t *testing.T, srv artifact.S
 			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
+	t.Run(fmt.Sprintf("GetArtifactVersion_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1",
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("GetArtifactVersion() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
+}
+
+func assertArtifactVersion(t *testing.T, got, want *artifact.ArtifactVersion) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("GetArtifactVersion() returned nil ArtifactVersion")
+	}
+	if got.Version != want.Version {
+		t.Errorf("ArtifactVersion.Version = %d, want %d", got.Version, want.Version)
+	}
+	if got.MimeType != want.MimeType {
+		t.Errorf("ArtifactVersion.MimeType = %q, want %q", got.MimeType, want.MimeType)
+	}
 }
