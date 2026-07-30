@@ -22,18 +22,18 @@ import (
 	"testing"
 	"time"
 
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/util/vertexai"
+
 	"google.golang.org/api/option"
+	"google.golang.org/genai"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
-
-	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
-	"google.golang.org/genai"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
