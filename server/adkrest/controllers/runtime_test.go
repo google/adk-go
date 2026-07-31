@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
@@ -271,5 +272,28 @@ func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
 
 	if _, err := decodeRequestBody(req); err == nil {
 		t.Errorf("decodeRequestBody: expected error for unknown field, got nil")
+	}
+}
+
+// TestNewRuntimeAPIController_BackwardCompatible pins that the constructor
+// still accepts its original argument list. The compaction option was added
+// variadically precisely so existing callers -- including the three
+// examples/bidi programs -- keep compiling.
+func TestNewRuntimeAPIController_BackwardCompatible(t *testing.T) {
+	c := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false)
+	if c == nil {
+		t.Fatal("NewRuntimeAPIController() with no options returned nil")
+	}
+	if c.eventsCompactionConfig != nil {
+		t.Errorf("eventsCompactionConfig = %v, want nil when the option is not supplied", c.eventsCompactionConfig)
+	}
+}
+
+func TestNewRuntimeAPIController_WithEventsCompactionConfig(t *testing.T) {
+	cfg := &compaction.Config{CompactionInterval: 2}
+	c := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false,
+		WithEventsCompactionConfig(cfg))
+	if c.eventsCompactionConfig != cfg {
+		t.Errorf("eventsCompactionConfig = %v, want the config passed to the option", c.eventsCompactionConfig)
 	}
 }

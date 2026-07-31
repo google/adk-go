@@ -76,12 +76,13 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
 	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
-		SessionService:  config.SessionService,
-		MemoryService:   config.MemoryService,
-		AgentLoader:     config.AgentLoader,
-		ArtifactService: config.ArtifactService,
-		SSEWriteTimeout: a.config.sseWriteTimeout,
-		PluginConfig:    config.PluginConfig,
+		SessionService:         config.SessionService,
+		MemoryService:          config.MemoryService,
+		AgentLoader:            config.AgentLoader,
+		ArtifactService:        config.ArtifactService,
+		SSEWriteTimeout:        a.config.sseWriteTimeout,
+		PluginConfig:           config.PluginConfig,
+		EventsCompactionConfig: config.EventsCompactionConfig,
 		DebugConfig: adkrest.DebugTelemetryConfig{
 			TraceCapacity: a.config.traceCapacity,
 		},

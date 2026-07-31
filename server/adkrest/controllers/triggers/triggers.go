@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type RetriableRunner struct {
@@ -42,6 +43,25 @@ type RetriableRunner struct {
 	artifactService artifact.Service
 	pluginConfig    runner.PluginConfig
 	triggerConfig   TriggerConfig
+
+	eventsCompactionConfig *compaction.Config
+}
+
+// ControllerOption configures optional behaviour shared by the trigger
+// controllers.
+//
+// Their constructors take required dependencies positionally; anything optional
+// is supplied here instead, so new capabilities do not keep widening those
+// signatures or break existing callers.
+type ControllerOption func(*RetriableRunner)
+
+// WithEventsCompactionConfig enables context compaction for the runners a
+// trigger controller creates, so older session events are summarized and
+// prompts stay small as a conversation grows. See [compaction.Config].
+func WithEventsCompactionConfig(cfg *compaction.Config) ControllerOption {
+	return func(r *RetriableRunner) {
+		r.eventsCompactionConfig = cfg
+	}
 }
 
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
@@ -68,12 +88,13 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 	}
 
 	runR, err := runner.New(runner.Config{
-		AppName:         appName,
-		Agent:           curAgent,
-		SessionService:  r.sessionService,
-		MemoryService:   r.memoryService,
-		ArtifactService: r.artifactService,
-		PluginConfig:    r.pluginConfig,
+		AppName:                appName,
+		Agent:                  curAgent,
+		SessionService:         r.sessionService,
+		MemoryService:          r.memoryService,
+		ArtifactService:        r.artifactService,
+		PluginConfig:           r.pluginConfig,
+		EventsCompactionConfig: r.eventsCompactionConfig,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner: %v", err)

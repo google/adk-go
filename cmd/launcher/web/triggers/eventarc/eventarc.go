@@ -119,6 +119,7 @@ func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.
 		config.ArtifactService,
 		config.PluginConfig,
 		triggerConfig,
+		triggers.WithEventsCompactionConfig(config.EventsCompactionConfig),
 	)
 
 	subrouter := router

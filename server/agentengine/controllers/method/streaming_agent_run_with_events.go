@@ -230,13 +230,14 @@ func (s *streamingAgentRunWithEventsHandler) run(ctx context.Context, req *model
 	rootAgent := config.AgentLoader.RootAgent()
 
 	r, err := runner.New(runner.Config{
-		AppName:           s.agentEngineID,
-		Agent:             rootAgent,
-		SessionService:    config.SessionService,
-		ArtifactService:   config.ArtifactService,
-		MemoryService:     config.MemoryService,
-		PluginConfig:      config.PluginConfig,
-		AutoCreateSession: true,
+		AppName:                s.agentEngineID,
+		Agent:                  rootAgent,
+		SessionService:         config.SessionService,
+		ArtifactService:        config.ArtifactService,
+		MemoryService:          config.MemoryService,
+		PluginConfig:           config.PluginConfig,
+		EventsCompactionConfig: config.EventsCompactionConfig,
+		AutoCreateSession:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner: %v", err)

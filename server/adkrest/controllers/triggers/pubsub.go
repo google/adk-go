@@ -36,16 +36,20 @@ type PubSubController struct {
 }
 
 // NewPubSubController creates a new PubSubController.
-func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *PubSubController {
+func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) *PubSubController {
+	retriable := &RetriableRunner{
+		sessionService:  sessionService,
+		agentLoader:     agentLoader,
+		memoryService:   memoryService,
+		artifactService: artifactService,
+		pluginConfig:    pluginConfig,
+		triggerConfig:   triggerConfig,
+	}
+	for _, opt := range opts {
+		opt(retriable)
+	}
 	return &PubSubController{
-		runner: &RetriableRunner{
-			sessionService:  sessionService,
-			agentLoader:     agentLoader,
-			memoryService:   memoryService,
-			artifactService: artifactService,
-			pluginConfig:    pluginConfig,
-			triggerConfig:   triggerConfig,
-		},
+		runner:    retriable,
 		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
 	}
 }

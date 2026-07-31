@@ -121,12 +121,13 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	agent := config.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
-			AppName:         agent.Name(),
-			Agent:           agent,
-			MemoryService:   config.MemoryService,
-			SessionService:  config.SessionService,
-			ArtifactService: config.ArtifactService,
-			PluginConfig:    config.PluginConfig,
+			AppName:                agent.Name(),
+			Agent:                  agent,
+			MemoryService:          config.MemoryService,
+			SessionService:         config.SessionService,
+			ArtifactService:        config.ArtifactService,
+			PluginConfig:           config.PluginConfig,
+			EventsCompactionConfig: config.EventsCompactionConfig,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)

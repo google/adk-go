@@ -191,13 +191,14 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 	rootAgent := config.AgentLoader.RootAgent()
 
 	r, err := runner.New(runner.Config{
-		AppName:           s.agentEngineID,
-		Agent:             rootAgent,
-		SessionService:    config.SessionService,
-		MemoryService:     config.MemoryService,
-		ArtifactService:   config.ArtifactService,
-		PluginConfig:      config.PluginConfig,
-		AutoCreateSession: true,
+		AppName:                s.agentEngineID,
+		Agent:                  rootAgent,
+		SessionService:         config.SessionService,
+		MemoryService:          config.MemoryService,
+		ArtifactService:        config.ArtifactService,
+		PluginConfig:           config.PluginConfig,
+		EventsCompactionConfig: config.EventsCompactionConfig,
+		AutoCreateSession:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner: %v", err)

@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/internal/routers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
@@ -47,7 +48,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false, controllers.WithEventsCompactionConfig(cfg.EventsCompactionConfig))),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
@@ -68,6 +69,12 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
+
+	// EventsCompactionConfig enables context compaction for the sessions the
+	// runners created here drive: older events are periodically summarized so
+	// prompts stay small as a conversation grows. Nil, the default, disables
+	// compaction. See [compaction.Config].
+	EventsCompactionConfig *compaction.Config
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.

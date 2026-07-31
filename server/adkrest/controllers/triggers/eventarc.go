@@ -37,16 +37,20 @@ type EventarcController struct {
 }
 
 // NewEventarcController creates a new EventarcController.
-func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
+func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) *EventarcController {
+	retriable := &RetriableRunner{
+		sessionService:  sessionService,
+		agentLoader:     agentLoader,
+		memoryService:   memoryService,
+		artifactService: artifactService,
+		pluginConfig:    pluginConfig,
+		triggerConfig:   triggerConfig,
+	}
+	for _, opt := range opts {
+		opt(retriable)
+	}
 	return &EventarcController{
-		runner: &RetriableRunner{
-			sessionService:  sessionService,
-			agentLoader:     agentLoader,
-			memoryService:   memoryService,
-			artifactService: artifactService,
-			pluginConfig:    pluginConfig,
-			triggerConfig:   triggerConfig,
-		},
+		runner:    retriable,
 		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
 	}
 }

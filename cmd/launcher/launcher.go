@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/telemetry"
 )
 
@@ -63,4 +64,10 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+
+	// EventsCompactionConfig enables context compaction for the sessions the
+	// runners created here drive: older events are periodically summarized so
+	// prompts stay small as a conversation grows. Nil, the default, disables
+	// compaction. See [compaction.Config].
+	EventsCompactionConfig *compaction.Config
 }
