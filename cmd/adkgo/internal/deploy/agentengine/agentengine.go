@@ -308,7 +308,10 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 
 			p("Waiting for operation to complete...")
-			re, err := op.Wait(ctx)
+			// Agent Engine deployments can take 15-30 minutes for container build and deployment
+			waitCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+			defer cancel()
+			re, err := op.Wait(waitCtx)
 			if err != nil {
 				return fmt.Errorf("operation failed: %w", err)
 			}
@@ -397,7 +400,10 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 			}
 
 			p("Waiting for operation to complete...")
-			re, err := op.Wait(ctx)
+			// Agent Engine deployments can take 15-30 minutes for container build and deployment
+			waitCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+			defer cancel()
+			re, err := op.Wait(waitCtx)
 			if err != nil {
 				return fmt.Errorf("operation failed: %w", err)
 			}
