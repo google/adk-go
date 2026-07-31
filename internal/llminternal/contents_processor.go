@@ -26,9 +26,11 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -80,8 +82,13 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
 		// by model, UNLESS they have transcriptions.
+		//
+		// Compaction events are exempt: they carry their summary on
+		// Actions.Compaction rather than on Content, and compaction.Apply
+		// below expands them into content.
 		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
-			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil {
+			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
+			!compaction.IsCompactionEvent(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -102,12 +109,17 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		if shouldExcludeEvent(ev) {
 			continue
 		}
-		if isOtherAgentReply(agentName, ev) {
+		if isOtherAgentReply(agentName, ev) && !compaction.IsCompactionEvent(ev) {
 			filtered = append(filtered, ConvertForeignEvent(ev))
 		} else {
 			filtered = append(filtered, ev)
 		}
 	}
+
+	// Replace each compaction summary with the events it covers, so a long
+	// session is presented to the model as summaries plus recent raw turns.
+	// A no-op when the session holds no compaction events.
+	filtered = compactioninternal.Apply(filtered)
 
 	// Aggregate transcription events (convert to text parts on the fly)
 	var processedEvents []*session.Event

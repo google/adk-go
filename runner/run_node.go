@@ -192,6 +192,13 @@ func (r *Runner) runNode(
 			return
 		}
 	}
+
+	// Compact once the invocation is done and every event it produced has been
+	// persisted. Never mid-invocation: that is tail retention's job.
+	if err := r.compactAfterInvocation(ictx, storedSession); err != nil {
+		yield(nil, err)
+		return
+	}
 }
 
 // rootWorkflowName derives the persistence-namespacing name for the

@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
@@ -39,6 +40,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // Config is used to create a [Runner].
@@ -56,6 +58,17 @@ type Config struct {
 	PluginConfig PluginConfig
 	// optional
 	AutoCreateSession bool
+
+	// EventsCompactionConfig enables context compaction for the sessions this
+	// runner drives: older events are periodically summarized so prompts stay
+	// small as a conversation grows. Nil, the default, disables compaction.
+	//
+	// When the config names no Summarizer, the runner installs a
+	// [compaction.LLMSummarizer] over the root agent's model, which then has to
+	// be an LLM agent.
+	//
+	// optional
+	EventsCompactionConfig *compaction.Config
 }
 
 type PluginConfig struct {
@@ -109,6 +122,11 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
+	compactionConfig, err := resolveCompactionConfig(cfg.EventsCompactionConfig, cfg.Agent)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -118,7 +136,42 @@ func New(cfg Config) (*Runner, error) {
 		parents:           parents,
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
+		compactionConfig:  compactionConfig,
 	}, nil
+}
+
+// resolveCompactionConfig validates cfg and fills in the default summarizer.
+//
+// Resolving at construction time means a misconfigured runner fails fast at
+// New, rather than silently skipping compaction turns later, or blowing up
+// mid-conversation the first time a compaction triggers.
+func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*compaction.Config, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	// Copy so the caller's config is not mutated by the summarizer default.
+	resolved := *cfg
+	if resolved.Summarizer != nil {
+		return &resolved, nil
+	}
+
+	llmAgent, ok := rootAgent.(llminternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("EventsCompactionConfig needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
+	}
+	m := llminternal.Reveal(llmAgent).Model
+	if m == nil {
+		return nil, fmt.Errorf("EventsCompactionConfig needs a Summarizer: root agent %q has no model", rootAgent.Name())
+	}
+	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{Model: m})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the default compaction summarizer: %w", err)
+	}
+	resolved.Summarizer = summarizer
+	return &resolved, nil
 }
 
 // NewInMemory creates a [Runner] backed entirely by in-memory session,
@@ -150,6 +203,42 @@ type Runner struct {
 	parents           parentmap.Map
 	pluginManager     *plugininternal.PluginManager
 	autoCreateSession bool
+
+	// compactionConfig is nil when compaction is disabled. Otherwise it is a
+	// validated copy of Config.EventsCompactionConfig with the summarizer
+	// resolved.
+	compactionConfig *compaction.Config
+}
+
+// compactAfterInvocation runs post-invocation sliding-window compaction and
+// persists the summary, if one was produced.
+//
+// It runs once an invocation has finished and every event it produced has been
+// appended, so the compactor sees a complete turn.
+//
+// A failure is returned rather than swallowed. The turn's own events are
+// already committed, so the caller keeps everything the agent produced, and the
+// error reports only that history did not shrink. Hiding that would let a
+// session grow unbounded, and the first visible symptom would be prompts
+// failing against the model's context limit, far from the cause.
+//
+// The summary itself is deliberately not yielded to the caller. It is
+// bookkeeping for the next prompt, not part of the conversation.
+func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session) error {
+	if !compactioninternal.HasSlidingWindow(r.compactionConfig) {
+		return nil
+	}
+	summary, err := compactioninternal.SlidingWindow(ctx, r.compactionConfig, storedSession)
+	if err != nil {
+		return fmt.Errorf("post-invocation context compaction failed: %w", err)
+	}
+	if summary == nil {
+		return nil
+	}
+	if err := r.sessionService.AppendEvent(ctx, storedSession, summary); err != nil {
+		return fmt.Errorf("failed to append the context compaction event: %w", err)
+	}
+	return nil
 }
 
 func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
@@ -354,6 +443,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				return
 			}
 		}
+
+		// Compact once the invocation is done and every event it produced has
+		// been persisted. Never mid-invocation: that is tail retention's job.
+		if err := r.compactAfterInvocation(ctx, storedSession); err != nil {
+			yield(nil, err)
+			return
+		}
 	}
 }
 
@@ -443,6 +539,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		Live:          &cfg,
 	})
 	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	// Deliberately no compactionctx here: context compaction does not apply to
+	// live runs. A live session streams over a persistent connection instead of
+	// re-sending assembled history each turn, so replacing older events with a
+	// summary would not shrink anything.
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {
