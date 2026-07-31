@@ -1,0 +1,278 @@
+httprr trace v1
+1000 1709
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 768
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 31 Jul 2026 09:31:04 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=845
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": {
+                "city": "Zurich"
+              },
+              "id": "vvxsut2i"
+            },
+            "thoughtSignature": "ErgCCrUCARFNMg+wfIHepZb8dS7PYlKAB0F1KOpFYpWg7WoOTq2HFuwdsPBxkhLK57WWhM6ApsL3M85A0T6K2KvpxZKd9r0itJd8rDdiO+a9mGCqozdML2uUtNRBx7VCseW2ygHKEEormqKYoOwvxWr4mXzVCjWGNlJ7xpndkjxVcoJQONa4itP3SLTH7tBAk3eZ+4mGYu1GBEE1HAhn4rFYSbvzDfRUCsmJTH7No1x51lat923YL5MQXAeQzjPhkiMC7hAOsTERaiEQqc0iWU+qRTCK6zeBZCdPrTsmV8YXnt4nxwh/VpvyYMdU3MC6J0bX8VTDYw0SIJspZ2WsTBYZBJTiTOl9+qxi8nPCvG+XdqsghaWegK7WLKWNGkPLGaV3UBxuAf/Y8XljQhHI+5ROAxB0/ke0amrH"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 128,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 202,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 128
+      }
+    ],
+    "thoughtsTokenCount": 57,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 167
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "V2tsapGDJq2CkdUP_JnX0Qg",
+  "turnToken": "v1_ChdWMnRzYXBHREpxMkNrZFVQX0puWDBRZxIXVjJ0c2FwR0RKcTJDa2RVUF9KblgwUWc"
+}
+1678 1430
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1445
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"vvxsut2i","name":"get_weather"},"thoughtSignature":"ErgCCrUCARFNMg+wfIHepZb8dS7PYlKAB0F1KOpFYpWg7WoOTq2HFuwdsPBxkhLK57WWhM6ApsL3M85A0T6K2KvpxZKd9r0itJd8rDdiO+a9mGCqozdML2uUtNRBx7VCseW2ygHKEEormqKYoOwvxWr4mXzVCjWGNlJ7xpndkjxVcoJQONa4itP3SLTH7tBAk3eZ+4mGYu1GBEE1HAhn4rFYSbvzDfRUCsmJTH7No1x51lat923YL5MQXAeQzjPhkiMC7hAOsTERaiEQqc0iWU+qRTCK6zeBZCdPrTsmV8YXnt4nxwh/VpvyYMdU3MC6J0bX8VTDYw0SIJspZ2WsTBYZBJTiTOl9+qxi8nPCvG+XdqsghaWegK7WLKWNGkPLGaV3UBxuAf/Y8XljQhHI+5ROAxB0/ke0amrH"}],"role":"model"},{"parts":[{"functionResponse":{"id":"vvxsut2i","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 31 Jul 2026 09:31:05 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=981
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The weather in Zurich is currently sunny.",
+            "thoughtSignature": "Eu4BCusBARFNMg+l02Z2RlS/mwIunVh0Y3JYCaJg6iiZEEvzhFQLsF0d/xgXNz/EJIniaiZ/95C8bN/UOO4XXLxOul9StoX5I/6emXy//VgaO1tTCCKeG8E4G4reB1coAk8yWf1zu3P5aAOqeGB2kE49ncr/ypu7NKb4FnkRCNeeMgkEPWUf5JbCxw3LkuVOM6spBkqLaYM/XQgcdHbaZBQhrd1U2F66QoR+HbXWuKPaudPQjJZ0qpGlCgHvHLPsiST/ZsF92Sv3HBpAtiu9xrb6aFSss56JAaZBRpiISGsiS28ykV3LfpUd/gKQm1RYtQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 218,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 264,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 218
+      }
+    ],
+    "thoughtsTokenCount": 38,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 267
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "WGtsapr2HbSrkdUPn4qssQc",
+  "turnToken": "v1_ChdXR3RzYXByMkhiU3JrZFVQbjRxc3NRYxIXV0d0c2FwcjJIYlNya2RVUG40cXNzUWM"
+}
+2185 1359
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1952
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"vvxsut2i","name":"get_weather"},"thoughtSignature":"ErgCCrUCARFNMg+wfIHepZb8dS7PYlKAB0F1KOpFYpWg7WoOTq2HFuwdsPBxkhLK57WWhM6ApsL3M85A0T6K2KvpxZKd9r0itJd8rDdiO+a9mGCqozdML2uUtNRBx7VCseW2ygHKEEormqKYoOwvxWr4mXzVCjWGNlJ7xpndkjxVcoJQONa4itP3SLTH7tBAk3eZ+4mGYu1GBEE1HAhn4rFYSbvzDfRUCsmJTH7No1x51lat923YL5MQXAeQzjPhkiMC7hAOsTERaiEQqc0iWU+qRTCK6zeBZCdPrTsmV8YXnt4nxwh/VpvyYMdU3MC6J0bX8VTDYw0SIJspZ2WsTBYZBJTiTOl9+qxi8nPCvG+XdqsghaWegK7WLKWNGkPLGaV3UBxuAf/Y8XljQhHI+5ROAxB0/ke0amrH"}],"role":"model"},{"parts":[{"functionResponse":{"id":"vvxsut2i","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"},{"parts":[{"text":"The weather in Zurich is currently sunny.","thoughtSignature":"Eu4BCusBARFNMg+l02Z2RlS/mwIunVh0Y3JYCaJg6iiZEEvzhFQLsF0d/xgXNz/EJIniaiZ/95C8bN/UOO4XXLxOul9StoX5I/6emXy//VgaO1tTCCKeG8E4G4reB1coAk8yWf1zu3P5aAOqeGB2kE49ncr/ypu7NKb4FnkRCNeeMgkEPWUf5JbCxw3LkuVOM6spBkqLaYM/XQgcdHbaZBQhrd1U2F66QoR+HbXWuKPaudPQjJZ0qpGlCgHvHLPsiST/ZsF92Sv3HBpAtiu9xrb6aFSss56JAaZBRpiISGsiS28ykV3LfpUd/gKQm1RYtQ=="}],"role":"model"},{"parts":[{"text":"My favourite colour is teal, remember that."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 31 Jul 2026 09:31:06 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=675
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I will remember that your favorite color is teal.",
+            "thoughtSignature": "ErMBCrABARFNMg+i5TtHMmP35GOD+RL+tKoUldACpFrLbY3ruvRaaZWlyB83jYfEpKUiohialzva4lZV+xwFjfEHNEAr8XDhJsJUZFn0mMJVMINPY+HXGaqhgXmQLPMf1sqiqUMzPjF/LPbQp8a+y2NDOyS/ZNzDNco52SMz0oRM2oNWuP5RqFxdxcjwzoA9WmoiwyxoKdNdiBx7T/DTv+CfaSPAX6YpQjN8lrkAiMbQX8+26Mo="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 275,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 310,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 275
+      }
+    ],
+    "thoughtsTokenCount": 25,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 336
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "WWtsaqDGHMimkdUPpdei4Ag",
+  "turnToken": "v1_ChdXV3RzYXFER0hNaW1rZFVQcGRlaTRBZxIXV1d0c2FxREdITWlta2RVUHBkZWk0QWc"
+}
+1304 5320
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1071
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: What is the weather in Zurich?\ncompaction_agent called tool: get_weather({city: Zurich})\nTool response from get_weather: {weather: sunny in Zurich}\ncompaction_agent: The weather in Zurich is currently sunny.\nuser: My favourite colour is teal, remember that.\ncompaction_agent: I will remember that your favorite color is teal."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 31 Jul 2026 09:31:09 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3274
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal.\n\n### Context Summary\n* **Information Obtained & Key Decisions:** \n  * The user initially asked about the weather in Zurich.\n  * The agent called the tool `get_weather` with the parameter `Zurich` and obtained the result that it is currently sunny. This information was successfully communicated to the user.\n  * The user then stated that their favorite color is teal, which the agent acknowledged and agreed to remember.\n\n### Tools Used\n* `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 216,
+    "candidatesTokenCount": 149,
+    "totalTokenCount": 972,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 216
+      }
+    ],
+    "thoughtsTokenCount": 607,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 247
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "WmtsasPVCKXknsEP0qWMqAk",
+  "turnToken": "v1_ChdXbXRzYXNQVkNLWGtuc0VQMHFXTXFBaxIXV210c2FzUFZDS1hrbnNFUDBxV01xQWs"
+}
+5323 2076
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 5090
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal.\n\n### Context Summary\n* **Information Obtained \u0026 Key Decisions:** \n  * The user initially asked about the weather in Zurich.\n  * The agent called the tool `get_weather` with the parameter `Zurich` and obtained the result that it is currently sunny. This information was successfully communicated to the user.\n  * The user then stated that their favorite color is teal, which the agent acknowledged and agreed to remember.\n\n### Tools Used\n* `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks.","thoughtSignature":"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"}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 31 Jul 2026 09:31:10 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1285
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Your favorite color is teal.",
+            "thoughtSignature": "EtoFCtcFARFNMg/5LtevZAfHTSTrC+uC++Fn4NZbfcnWS0eotZR7IM4EUWKqNQdM8ClPszjPf5yXADYqmTIzJq7WnG113YpFf4ohH6Uo4voZWuWwYSDbjgOazokImv9Wj3wuDtAVnJ/EWifX2V8uuzA6EIKSwGXIYHGT4lw/1DzVhsc2CIWnAr5S3FAsEEZGGRck8uxVcmty3GVZgLn3883u48eHiYKwBaOyn0pBus6Tw4jkhxZwHItlahMnoL6RzByG32ZPxEoFPGJ2k1NjzNho9GaNyuUu++wdMfyR2h17Eq0dtghE6iSXAujLrIqpXIMawme/15ERNphlN3ipZk7lVkAKxS3OZLMXmeC+vQXV1hGjHZrdUUa3TOhF9d3DKtIvSQ6OWYjNfYhsV2KTPtFD2NPXuAndIKV7P54ZOB7YVAwM0apXwhDIgN7tWtt90VxlH/r+H8AYpyjX3eKCPHwNUnjZtysNPtVqxIuDtfxKiPp7weISsDl1c33u08Qok43wbEmv4PAU66OpiN1WM4x4XsJUqHPoCR9Kb2B4iN14SotB1FpL0v6qvHHL28BHixI9dVPc+S4qZ4xshy6l7rr3SHbdnN5VE7noWgr2iXQQ/XXneQZpIvybsNOvCp/SU9mXJd7zCPFAl8erKBDJI4/HYjW1T73jOf1UcT89B93LfLfyWmKVl2DIv7iYwsXsDMbSrU1SkBOMjax7uU0+i/OMz29unRPaKjn1IWkP3mE/WVM2oP7nWsozBKzoio7KXcYzoSalxksa+CnrHGSoJGqttF0xSAJOxVEbMFhCwyLAJjo00d3VjVB4xpRKru9tEJ3M5ijbTTRv0n1Od6/gLQjprm3P0qmP6S/Da7+hw4aH5ufhw9fiw/zG6xu1iTl1gwaMkJps6hwt/Nfw8u1UqyDShuCbYrQeCZHdo14oJQ8Of9zy7xgCwpw80POxc3tUfdraTnX4jIn/VQW0jQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 885,
+    "candidatesTokenCount": 6,
+    "totalTokenCount": 1059,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 885
+      }
+    ],
+    "thoughtsTokenCount": 168,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 932
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "XWtsatPnGqvinsEP3sz_kAk",
+  "turnToken": "v1_ChdYV3RzYXRQbkdxdmluc0VQM3N6X2tBaxIXWFd0c2F0UG5HcXZpbnNFUDNzel9rQWs"
+}

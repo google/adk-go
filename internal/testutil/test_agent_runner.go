@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type TestAgentRunner struct {
@@ -60,6 +61,13 @@ func (r *TestAgentRunner) session(t *testing.T, appName, userID, sessionID strin
 	})
 	r.lastSession = resp.Session
 	return resp.Session, err
+}
+
+// SessionService exposes the runner's session service so tests can inspect
+// stored events, including ones the runner appends without yielding, such as
+// context-compaction summaries.
+func (r *TestAgentRunner) SessionService() session.Service {
+	return r.sessionService
 }
 
 func (r *TestAgentRunner) SetInitSessionState(state map[string]any) {
@@ -129,6 +137,31 @@ func NewTestAgentRunnerWithPluginManager(t *testing.T, agent agent.Agent, plugin
 		Agent:          agent,
 		SessionService: sessionService,
 		PluginConfig:   pluginConfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &TestAgentRunner{
+		agent:          agent,
+		sessionService: sessionService,
+		appName:        appName,
+		runner:         runner,
+	}
+}
+
+// NewTestAgentRunnerWithCompaction creates a TestAgentRunner whose runner has
+// context compaction enabled. Useful for end-to-end tests that need summaries to
+// be produced and substituted into later prompts.
+func NewTestAgentRunnerWithCompaction(t *testing.T, agent agent.Agent, compactionConfig *compaction.Config) *TestAgentRunner {
+	appName := "test_app"
+	sessionService := session.InMemoryService()
+
+	runner, err := runner.New(runner.Config{
+		AppName:                appName,
+		Agent:                  agent,
+		SessionService:         sessionService,
+		EventsCompactionConfig: compactionConfig,
 	})
 	if err != nil {
 		t.Fatal(err)
