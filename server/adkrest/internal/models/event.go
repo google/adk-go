@@ -32,6 +32,7 @@ type EventActions struct {
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -97,6 +98,7 @@ func ToSessionEvent(event Event) *session.Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			Compaction:                 event.Actions.Compaction,
 		},
 	}
 }
@@ -134,6 +136,7 @@ func FromSessionEvent(event session.Event) Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			Compaction:                 event.Actions.Compaction,
 		},
 	}
 }

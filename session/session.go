@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
@@ -250,6 +251,33 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+
+	// Compaction, when non-nil, marks this event as a context-compaction
+	// summary standing in for a contiguous range of earlier events.
+	Compaction *EventCompaction `json:"compaction,omitempty"`
+}
+
+// EventCompaction records that a contiguous range of session [Event]s has been
+// replaced by a single piece of CompactedContent, typically a model-generated
+// summary.
+//
+// An EventCompaction is attached to a new [Event] through
+// [EventActions.Compaction]; the events it covers are left untouched in the
+// session. When the next LLM prompt is built, the contents processor uses the
+// range to skip the covered events and inserts CompactedContent in their place.
+//
+// Both bounds are inclusive, so an event whose timestamp ties EndTimestamp
+// counts as covered. Producers must therefore keep EndTimestamp strictly below
+// the timestamp of the oldest event they intend to leave un-compacted.
+type EventCompaction struct {
+	// StartTimestamp is the timestamp of the earliest covered event (inclusive).
+	StartTimestamp time.Time `json:"startTimestamp"`
+	// EndTimestamp is the timestamp of the latest covered event (inclusive).
+	// It is never before StartTimestamp.
+	EndTimestamp time.Time `json:"endTimestamp"`
+	// CompactedContent is the content that replaces the covered events in the
+	// prompt.
+	CompactedContent *genai.Content `json:"compactedContent"`
 }
 
 // Prefixes for defining session's state scopes
