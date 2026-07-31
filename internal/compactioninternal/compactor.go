@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -61,11 +62,47 @@ func SlidingWindow(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, nil
 	}
 
-	summary, err := cfg.Summarizer.SummarizeEvents(ctx, window)
+	summary, err := summarizeTraced(ctx, cfg, sess, telemetry.CompactionTriggerSlidingWindow, window)
 	if err != nil {
 		return nil, fmt.Errorf("sliding-window summarization failed: %w", err)
 	}
-	return stamp(ctx, summary), nil
+	return summary, nil
+}
+
+// summarizeTraced runs the configured summarizer inside a compact_events span
+// and stamps the resulting event.
+//
+// Stamping happens before the result is recorded so the span carries a real
+// event ID rather than an empty one. The span covers an actual summarization
+// only, so its presence in a trace means compaction really ran. A trigger that
+// was evaluated and declined produces nothing, which keeps the signal useful.
+func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.Session, trigger string, window []*session.Event) (*session.Event, error) {
+	sessionID := ""
+	if sess != nil {
+		sessionID = sess.ID()
+	}
+	ctx, span := telemetry.StartCompactEventsSpan(ctx, telemetry.StartCompactEventsSpanParams{
+		Trigger:            trigger,
+		SessionID:          sessionID,
+		SummarizerType:     fmt.Sprintf("%T", cfg.Summarizer),
+		EventCount:         len(window),
+		CompactionInterval: cfg.CompactionInterval,
+		OverlapSize:        cfg.OverlapSize,
+		TokenThreshold:     cfg.TokenThreshold,
+		EventRetentionSize: cfg.EventRetentionSize,
+	})
+	defer span.End()
+
+	summary, err := cfg.Summarizer.SummarizeEvents(ctx, window)
+	summary = stamp(ctx, summary)
+	telemetry.TraceCompactionResult(span, telemetry.TraceCompactionResultParams{
+		ResultEvent: summary,
+		Error:       err,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return summary, nil
 }
 
 // stamp fills in the identity fields a [Summarizer] leaves blank, so the
