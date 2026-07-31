@@ -26,11 +26,17 @@ import (
 
 // HasSlidingWindow reports whether sliding-window compaction is enabled.
 //
-// This lives here rather than as a method on compaction.Config because nothing
-// outside the framework needs to ask, and keeping it off the public type leaves
-// users with just the fields they set.
+// These live here rather than as methods on compaction.Config because nothing
+// outside the framework needs to ask: the runner and the request processor are
+// the only callers, and keeping them off the public type leaves users with just
+// the fields they set.
 func HasSlidingWindow(cfg *compaction.Config) bool {
 	return cfg != nil && cfg.CompactionInterval > 0
+}
+
+// HasTailRetention reports whether tail-retention compaction is enabled.
+func HasTailRetention(cfg *compaction.Config) bool {
+	return cfg != nil && cfg.TokenThreshold > 0
 }
 
 // SlidingWindow summarizes a window of completed invocations once enough of

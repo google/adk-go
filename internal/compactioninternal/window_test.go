@@ -354,6 +354,21 @@ func TestHasSlidingWindow(t *testing.T) {
 	}
 }
 
+func TestHasTailRetention(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *compaction.Config
+	if HasTailRetention(nilCfg) {
+		t.Error("a nil Config must report tail retention disabled")
+	}
+	if !HasTailRetention(&compaction.Config{TokenThreshold: 10}) {
+		t.Error("HasTailRetention() = false, want true when TokenThreshold > 0")
+	}
+	if HasTailRetention(&compaction.Config{CompactionInterval: 2}) {
+		t.Error("HasTailRetention() = true, want false when TokenThreshold is 0")
+	}
+}
+
 func TestIsCompactionEvent(t *testing.T) {
 	t.Parallel()
 

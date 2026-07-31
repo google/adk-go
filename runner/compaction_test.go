@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -417,3 +418,191 @@ func sessionEventsOf(t *testing.T, svc session.Service, userID, sessionID string
 }
 
 type failingSummarizer struct{}
+
+// usageModel replies with a canned answer and reports a fixed prompt token
+// count, so tail-retention compaction can be driven deterministically.
+type usageModel struct {
+	mu           sync.Mutex
+	prompts      [][]*genai.Content
+	promptTokens int32
+}
+
+func (m *usageModel) Name() string { return "usage" }
+
+func (m *usageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.prompts = append(m.prompts, req.Contents)
+	n := len(m.prompts)
+	tokens := m.promptTokens
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText(fmt.Sprintf("answer %d", n), "model"),
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: tokens},
+		}, nil)
+	}
+}
+
+func (m *usageModel) lastPrompt() []*genai.Content {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.prompts) == 0 {
+		return nil
+	}
+	return m.prompts[len(m.prompts)-1]
+}
+
+func TestRunnerTailRetentionCompactsMidInvocation(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Every model call reports a prompt well past the threshold, so compaction
+	// fires as soon as there are more events than the retained tail.
+	m := &usageModel{promptTokens: 5000}
+	summarizer := &recordingSummarizer{summary: "TAIL-SUMMARY"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 2,
+		Summarizer:         summarizer,
+	})
+
+	// First turn: no prior usage metadata and only the user event exists when
+	// the processor runs, so nothing to compact.
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+	if got := summarizer.calls(); got != 0 {
+		t.Fatalf("summarizer ran %d times on the first turn, want 0", got)
+	}
+
+	// Second turn: history now holds q1/answer 1/q2 plus a reported token
+	// count, so the processor compacts before the model call.
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}))
+	if got := summarizer.calls(); got == 0 {
+		t.Fatal("summarizer never ran on the second turn, want tail-retention compaction")
+	}
+
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got == 0 {
+		t.Fatal("no compaction event was persisted")
+	}
+
+	// The compaction landed before contents were built, so this very turn's
+	// prompt already carries the summary instead of the compacted turn.
+	prompt := promptText(m.lastPrompt())
+	if !strings.Contains(prompt, "TAIL-SUMMARY") {
+		t.Errorf("prompt does not contain the summary:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "q1") {
+		t.Errorf("prompt still contains the compacted turn q1:\n%s", prompt)
+	}
+}
+
+func TestRunnerTailRetentionRespectsThreshold(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Reported prompts stay well under the threshold, so nothing compacts no
+	// matter how many turns accumulate.
+	m := &usageModel{promptTokens: 10}
+	summarizer := &recordingSummarizer{summary: "unused"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         summarizer,
+	})
+
+	for range 5 {
+		drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q", genai.RoleUser), agent.RunConfig{}))
+	}
+
+	if got := summarizer.calls(); got != 0 {
+		t.Errorf("summarizer ran %d times below the token threshold, want 0", got)
+	}
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got != 0 {
+		t.Errorf("session holds %d compaction events below the threshold, want 0", got)
+	}
+}
+
+func TestRunnerTailRetentionFailureAbortsTheTurn(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	m := &usageModel{promptTokens: 5000}
+	r, _ := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         failingSummarizer{},
+	})
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+
+	// Second turn trips the threshold, and the summarizer fails. Unlike the
+	// post-invocation pass, this surfaces: the prompt is already near the
+	// context limit, so silently continuing would fail less informatively.
+	var gotErr error
+	for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("run succeeded despite a failing tail-retention summarizer, want the error surfaced")
+	}
+	if !strings.Contains(gotErr.Error(), "compaction") {
+		t.Errorf("error %q does not mention compaction, so the cause is hard to find", gotErr)
+	}
+}
+
+func TestRunnerBothStrategiesCoexist(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Both triggers are armed: tail retention fires mid-turn on the reported
+	// token count, sliding window fires after every completed turn. Neither is
+	// gated on the other, so this exercises the interleaving.
+	m := &usageModel{promptTokens: 5000}
+	summarizer := &recordingSummarizer{summary: "SUMMARY"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 2,
+		CompactionInterval: 1,
+		Summarizer:         summarizer,
+	})
+
+	for i := range 4 {
+		drain(t, r.Run(t.Context(), userID, sessionID,
+			genai.NewContentFromText(fmt.Sprintf("q%d", i), genai.RoleUser), agent.RunConfig{}))
+	}
+
+	sess := getSession(t, svc, userID, sessionID)
+	if got := len(compactionEventsIn(sess)); got == 0 {
+		t.Fatal("no compaction events were produced with both strategies enabled")
+	}
+
+	// Whatever mix of summaries accumulated, the prompt must stay coherent:
+	// every surviving compaction range is honoured and nothing is duplicated.
+	var events []*session.Event
+	for ev := range sess.Events().All() {
+		events = append(events, ev)
+	}
+	applied := compactioninternal.Apply(events)
+
+	seen := make(map[string]bool)
+	for _, ev := range applied {
+		if ev.ID == "" {
+			continue
+		}
+		if seen[ev.ID] {
+			t.Errorf("event %q appears twice in the compacted prompt", ev.ID)
+		}
+		seen[ev.ID] = true
+	}
+	if len(applied) >= len(events) {
+		t.Errorf("compaction did not shrink history: %d events in, %d out", len(events), len(applied))
+	}
+
+	// The newest summary must not be subsumed, or the prompt would lose it.
+	if latest := compactioninternal.LatestCompactionEvent(events); latest == nil {
+		t.Error("no surviving compaction event; every summary was subsumed")
+	}
+}

@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
@@ -241,6 +242,18 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	return nil
 }
 
+// compactionRuntime returns the runtime that intra-invocation compaction reads
+// off the context, or nil when compaction is disabled.
+func (r *Runner) compactionRuntime() *compactionctx.Runtime {
+	if r.compactionConfig == nil {
+		return nil
+	}
+	return &compactionctx.Runtime{
+		Config:         r.compactionConfig,
+		SessionService: r.sessionService,
+	}
+}
+
 func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
 	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   r.appName,
@@ -343,6 +356,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {

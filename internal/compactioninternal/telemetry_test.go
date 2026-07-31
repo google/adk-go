@@ -178,3 +178,32 @@ func TestSpanRecordsDecliningSummarizer(t *testing.T) {
 		t.Error("result_event_id is set although no summary was produced")
 	}
 }
+
+func TestTailRetentionEmitsSpan(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		withUsage(modelTextEvent("b", "inv1", 2, "a1"), 900),
+	}
+	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
+
+	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil); err != nil {
+		t.Fatalf("TailRetention() error = %v", err)
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	if want := "compact_events token_threshold"; spans[0].Name != want {
+		t.Errorf("span name = %q, want %q", spans[0].Name, want)
+	}
+	a := attrs(spans[0].Attributes)
+	if a["gen_ai.compaction.token_threshold"].AsInt64() != 100 {
+		t.Errorf("token_threshold = %d, want 100", a["gen_ai.compaction.token_threshold"].AsInt64())
+	}
+	if _, ok := a["gen_ai.compaction.compaction_interval"]; ok {
+		t.Error("compaction_interval attribute is present on a tail-retention span, want it omitted")
+	}
+}

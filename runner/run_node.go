@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
@@ -223,6 +224,7 @@ func (r *Runner) newNodeInvocationContext(
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 	})
 	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {
