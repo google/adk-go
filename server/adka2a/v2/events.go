@@ -346,13 +346,19 @@ func toGenAIRole(role a2a.MessageRole) genai.Role {
 	}
 }
 
+// toEventActions restores the EventActions fields a remote A2A peer may
+// legitimately set on the event we emit for it. TransferToAgent drives the
+// local orchestrator's own control flow (which agent runs next), so it must
+// never be rebuilt from metadata the peer controls -- otherwise a malicious
+// or compromised remote agent could redirect execution to an agent of its
+// own choosing within the local agent tree.
 func toEventActions(meta map[string]any) session.EventActions {
 	if meta == nil {
 		return session.EventActions{}
 	}
 	var result session.EventActions
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
-	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
+	// TransferToAgent intentionally NOT restored from peer metadata.
 	return result
 }
 
