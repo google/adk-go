@@ -76,6 +76,11 @@ func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController,
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.
 func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *http.Request) {
+	if err := verifyPushRequestAuth(r, c.runner.triggerConfig.ExpectedAudience); err != nil {
+		respondError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+		return
+	}
+
 	var event models.EventarcTriggerRequest
 	contentType := r.Header.Get("Content-Type")
 	// The HTTP Content-Type header MUST be set to the media type of an event format for structured mode.

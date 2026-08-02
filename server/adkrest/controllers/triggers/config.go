@@ -26,4 +26,16 @@ type TriggerConfig struct {
 	MaxDelay time.Duration
 	// MaxConcurrentRuns is the maximum number of concurrent runs.
 	MaxConcurrentRuns int
+	// ExpectedAudience, when non-empty, requires every request to carry a
+	// Google-signed OIDC bearer token (as attached by Pub/Sub push
+	// subscriptions and Eventarc triggers configured with a service account)
+	// whose audience claim matches this value; requests without one are
+	// rejected with 401 before the agent is invoked.
+	//
+	// This endpoint accepts arbitrary attacker-controlled content as agent
+	// input and otherwise has no authentication of its own: on platforms
+	// that don't already gate the endpoint with their own IAM check (or if
+	// that gate is ever misconfigured), leaving this unset means anyone who
+	// can reach the endpoint can trigger arbitrary agent runs.
+	ExpectedAudience string
 }

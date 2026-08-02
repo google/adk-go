@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/api/idtoken"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -235,6 +236,38 @@ func calculateBackoff(attempt int, base, maxDelay time.Duration) time.Duration {
 	delay := min(time.Duration(backoff), maxDelay)
 	jitter := time.Duration(rand.Float64() * float64(delay) * 0.5)
 	return delay + jitter
+}
+
+// validateIDToken verifies a Google-signed OIDC ID token against an expected
+// audience. It is a package variable (rather than a direct call to
+// idtoken.Validate) so tests in this package can substitute a fake verifier
+// without making a real network call to Google's certificate endpoint.
+var validateIDToken = idtoken.Validate
+
+// verifyPushRequestAuth requires a valid Google-signed OIDC bearer token when
+// expectedAudience is non-empty; it is a no-op when expectedAudience is empty,
+// preserving prior behavior for deployments that rely entirely on
+// platform-level access control (for example Cloud Run configured to require
+// IAM authentication) in front of this endpoint.
+//
+// Pub/Sub push subscriptions and Eventarc Cloud Run triggers configured with
+// a service account both attach exactly this kind of token, so this does not
+// require any change to how the trigger is configured on the Google Cloud
+// side — only that ExpectedAudience is set to match.
+func verifyPushRequestAuth(r *http.Request, expectedAudience string) error {
+	if expectedAudience == "" {
+		return nil
+	}
+	const bearerPrefix = "Bearer "
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
+		return fmt.Errorf("missing bearer token")
+	}
+	token := strings.TrimPrefix(authHeader, bearerPrefix)
+	if _, err := validateIDToken(r.Context(), token, expectedAudience); err != nil {
+		return fmt.Errorf("invalid identity token: %w", err)
+	}
+	return nil
 }
 
 // Resolve the target app name from the request.
