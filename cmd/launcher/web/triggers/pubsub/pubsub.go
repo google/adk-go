@@ -36,6 +36,7 @@ type pubsubConfig struct {
 	triggerBaseDelay  time.Duration
 	triggerMaxDelay   time.Duration
 	triggerMaxRuns    int
+	oidcAudience      string
 }
 
 type pubsubLauncher struct {
@@ -53,6 +54,9 @@ func NewLauncher() web.Sublauncher {
 	fs.DurationVar(&config.triggerBaseDelay, "trigger_base_delay", 1*time.Second, "Base delay for trigger retry exponential backoff")
 	fs.DurationVar(&config.triggerMaxDelay, "trigger_max_delay", 10*time.Second, "Maximum delay for trigger retry exponential backoff")
 	fs.IntVar(&config.triggerMaxRuns, "trigger_max_concurrent_runs", 100, "Maximum concurrent trigger runs")
+	fs.StringVar(&config.oidcAudience, "oidc_audience", "", "Expected audience of the Google-signed OIDC bearer token attached by Pub/Sub push subscriptions. "+
+		"If set, requests without a valid token for this audience are rejected with 401. If unset, this endpoint performs no authentication of its own and "+
+		"relies entirely on the deployment platform (for example Cloud Run configured to require IAM authentication) to restrict who can reach it.")
 
 	return &pubsubLauncher{
 		config: config,
@@ -110,6 +114,7 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 		BaseDelay:         p.config.triggerBaseDelay,
 		MaxDelay:          p.config.triggerMaxDelay,
 		MaxConcurrentRuns: p.config.triggerMaxRuns,
+		ExpectedAudience:  p.config.oidcAudience,
 	}
 
 	controller, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
@@ -137,4 +142,7 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 // UserMessage implements web.Sublauncher.
 func (p *pubsubLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       pubsub:  PubSub trigger endpoint is available at %s%s/apps/{app_name}/trigger/pubsub", webURL, p.config.pathPrefix))
+	if p.config.oidcAudience == "" {
+		printer("       pubsub:  WARNING: -oidc_audience is not set; this endpoint accepts unauthenticated requests unless the deployment platform restricts access on its own.")
+	}
 }
