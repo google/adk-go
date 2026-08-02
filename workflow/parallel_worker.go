@@ -99,6 +99,17 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 
 		resCh := make(chan workerResult, nItems)
 
+		// reportFailure cancels the remaining workers. runWorker calls it
+		// synchronously, before releasing its semaphore slot (see below).
+		var reportOnce sync.Once
+		var firstErr error
+		reportFailure := func(err error) {
+			reportOnce.Do(func() {
+				firstErr = err
+				cancelFunc()
+			})
+		}
+
 		// Branch isolation: derive a per-item sub-branch so each
 		// worker's wrapped node sees an isolated event history (the
 		// LLM flow's history filter scopes by branch prefix). Items
@@ -112,16 +123,32 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			if sem != nil {
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
+				case <-workerCtx.Done():
 					wg.Done()
 					continue
+				}
+				// Re-check with a default case: a plain two-case select
+				// would pick randomly if cancellation raced the send above.
+				select {
+				case <-workerCtx.Done():
+					<-sem
+					wg.Done()
+					continue
+				default:
+				}
+			} else {
+				select {
+				case <-workerCtx.Done():
+					wg.Done()
+					continue
+				default:
 				}
 			}
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
 
 			itemCtx := workerCtx.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &itemBranch}})
-			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
+			go n.runWorker(itemCtx, i, item, sem, resCh, &wg, reportFailure)
 		}
 
 		// Goroutine to close channel when all workers are done
@@ -130,17 +157,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			close(resCh)
 		}()
 
-		var firstErr error
-
 		for res := range resCh {
-			if res.err != nil {
-				if firstErr == nil {
-					firstErr = res.err
-					cancelFunc() // Cancel all other workers!
-				}
-				continue
-			}
-
 			if res.ev != nil {
 				if out, ok := extractOutput(res.ev); ok {
 					outputs[res.index] = out
@@ -166,7 +183,7 @@ type workerResult struct {
 	err   error
 }
 
-func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
+func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup, reportFailure func(error)) {
 	defer wg.Done()
 	defer func() {
 		if sem != nil {
@@ -200,7 +217,8 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 			}
 		}
 
-		// Cannot retry or exhausted attempts
+		// Cannot retry or exhausted attempts: report before releasing sem.
+		reportFailure(runErr)
 		resCh <- workerResult{index: idx, err: runErr}
 		return
 	}
