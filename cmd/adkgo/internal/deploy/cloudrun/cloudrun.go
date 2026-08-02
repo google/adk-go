@@ -132,26 +132,31 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				return fmt.Errorf("cannot enable Debug API without having enabled API")
 			}
 
-			absp, err := filepath.Abs(flags.source.entryPointPath)
+			// Checked before the temp dir is created so a rejected value does
+			// not leave one behind. It is checked whether or not --a2a is set:
+			// the flag can be flipped later, and a value that can never be
+			// emitted safely is worth reporting either way.
+			if err := util.ValidateDockerfileSafe(f.cloudRun.a2aAgentCardURL, "--a2a_agent_url"); err != nil {
+				return err
+			}
+
+			// The raw flag value, kept for the rejection message below: what
+			// the check sees is a basename derived from this, which a user who
+			// typed a whole path cannot find in their own command line.
+			origEntryPointPath := f.source.entryPointPath
+
+			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 
-			if flags.build.tempDir == "" {
-				flags.build.tempDir = os.TempDir()
-			}
-			absp, err = filepath.Abs(flags.build.tempDir)
-			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
-			}
-			f.build.tempDir, err = os.MkdirTemp(absp, "cloudrun_"+time.Now().Format("20060102_150405__")+"*")
-			if err != nil {
-				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
-			}
-			p("Using temp dir:", f.build.tempDir)
-
-			// come up with a executable name based on entry point path
+			// Deriving and checking the executable name happens before the temp
+			// dir is created, for the same reason as the --a2a_agent_url check
+			// above: everything here can fail, and cleanTemp only runs after a
+			// fully successful deploy, so a rejected invocation would otherwise
+			// leave an empty cloudrun_<timestamp>_* directory behind. Only
+			// execPath below actually needs the temp dir.
 			dir, file := path.Split(f.source.entryPointPath)
 			f.source.srcBasePath = dir
 			f.source.entryPointPath = file
@@ -161,7 +166,31 @@ func (f *deployCloudRunFlags) computeFlags() error {
 					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
-				f.build.execPath = path.Join(f.build.tempDir, exec)
+			}
+
+			// execFile becomes both COPY operands, and COPY splits its operands
+			// on whitespace, so a bare filename is not enough: it takes the
+			// allowlist even though this Dockerfile has no RUN instruction.
+			if err := util.ValidateShellArgSafe(f.build.execFile,
+				fmt.Sprintf("executable name derived from --entry_point_path %q:", origEntryPointPath)); err != nil {
+				return err
+			}
+
+			if f.build.tempDir == "" {
+				f.build.tempDir = os.TempDir()
+			}
+			absp, err = filepath.Abs(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
+			}
+			f.build.tempDir, err = os.MkdirTemp(absp, "cloudrun_"+time.Now().Format("20060102_150405__")+"*")
+			if err != nil {
+				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
+			}
+			p("Using temp dir:", f.build.tempDir)
+
+			if f.build.execPath == "" {
+				f.build.execPath = path.Join(f.build.tempDir, f.build.execFile)
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 
@@ -205,41 +234,45 @@ func (f *deployCloudRunFlags) prepareDockerfile() error {
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 
+			// Every value below is read off the receiver, not off the package
+			// global. computeFlags validates the receiver, so a read of the
+			// global here would let the guard and the line it guards come apart
+			// for any caller that is not the cobra RunE.
 			var b strings.Builder
 			b.WriteString(`
 FROM gcr.io/distroless/static-debian11
 
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
-EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
+EXPOSE ` + strconv.Itoa(f.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `"`)
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(f.cloudRun.serverPort) + `"`)
 
-			if flags.cloudRun.api {
+			if f.cloudRun.api {
 				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)
 
-				if flags.cloudRun.debugAPI {
+				if f.cloudRun.debugAPI {
 					b.WriteString(`, "-include_debug_api"`)
 				}
 			}
-			if flags.cloudRun.a2a {
-				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.cloudRun.a2aAgentCardURL + `"`)
+			if f.cloudRun.a2a {
+				b.WriteString(`, "a2a", "--a2a_agent_url", "` + f.cloudRun.a2aAgentCardURL + `"`)
 			}
-			if flags.cloudRun.webui {
+			if f.cloudRun.webui {
 				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"`)
 			}
-			if flags.cloudRun.pubsub {
+			if f.cloudRun.pubsub {
 				b.WriteString(`, "pubsub"`)
-				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.pubsubTrigger.maxRetries)
-				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String())
-				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String())
-				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns)
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, f.cloudRun.pubsubTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, f.cloudRun.pubsubTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, f.cloudRun.pubsubTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, f.cloudRun.pubsubTrigger.maxRuns)
 			}
-			if flags.cloudRun.eventarc {
+			if f.cloudRun.eventarc {
 				b.WriteString(`, "eventarc"`)
-				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.eventarcTrigger.maxRetries)
-				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.eventarcTrigger.baseDelay.String())
-				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.eventarcTrigger.maxDelay.String())
-				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.eventarcTrigger.maxRuns)
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, f.cloudRun.eventarcTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, f.cloudRun.eventarcTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, f.cloudRun.eventarcTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, f.cloudRun.eventarcTrigger.maxRuns)
 			}
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
