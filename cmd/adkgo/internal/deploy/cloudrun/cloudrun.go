@@ -159,6 +159,17 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 
+			// execFile is always meant to be a bare filename, so it gets the
+			// stricter shell-safe allowlist for defense-in-depth consistency
+			// with the same field in the agentengine deploy path, where it is
+			// embedded into a Dockerfile RUN (shell-form) instruction.
+			if err := util.ValidateShellArgSafe(f.build.execFile, "entry point"); err != nil {
+				return err
+			}
+			if err := util.ValidateDockerfileSafe(flags.cloudRun.a2aAgentCardURL, "--a2a_agent_url"); err != nil {
+				return err
+			}
+
 			return nil
 		})
 }
