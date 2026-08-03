@@ -115,6 +115,13 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 			toolsToResumeByFunctionCallID := map[string]*confirmedCall{}
+			// Record the order the confirmation requests appear in the event so we
+			// can re-dispatch the resumed calls in that same order below. Ranging
+			// over the map directly would use Go's randomized map iteration order,
+			// which makes the re-dispatched function calls, the assembled response,
+			// and the resulting StateDelta last-writer-wins merge all
+			// non-deterministic across runs.
+			var resumeOrder []string
 			for _, functionCall := range calls {
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
@@ -125,6 +132,14 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					continue
 				}
 
+				// Record each original call ID in resumeOrder only once: two
+				// confirmation requests in the same event can resolve to the same
+				// originalFunctionCall.ID, and the resumed tool must be dispatched
+				// once, not once per confirmation.
+				_, seen := toolsToResumeByFunctionCallID[originalFunctionCall.ID]
+				if !seen {
+					resumeOrder = append(resumeOrder, originalFunctionCall.ID)
+				}
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
 					confirmation: &confirmation,
 					call:         *originalFunctionCall,
@@ -154,9 +169,18 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			parts := make([]*genai.Part, 0)
+			// Re-dispatch in request order (resumeOrder), so the parts slice and the
+			// downstream response/StateDelta merge are deterministic.
+			parts := make([]*genai.Part, 0, len(toolsToResumeByFunctionCallID))
 			toolsToResumeConfirmation := make(map[string]*toolconfirmation.ToolConfirmation, len(toolsToResumeByFunctionCallID))
-			for callID, cc := range toolsToResumeByFunctionCallID {
+			for _, callID := range resumeOrder {
+				cc, ok := toolsToResumeByFunctionCallID[callID]
+				if !ok {
+					// Skip calls whose response is already present in this event
+					// snapshot (removed by the delete pass above); re-dispatching such
+					// a call would run its tool a second time within this resume.
+					continue
+				}
 				parts = append(parts, &genai.Part{FunctionCall: &cc.call})
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
