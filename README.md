@@ -18,7 +18,9 @@
       <a href="https://google.github.io/adk-docs/">Docs</a> &
       <a href="https://github.com/google/adk-go/tree/main/examples">Samples</a> &
       <a href="https://github.com/google/adk-python">Python ADK</a> &
-      <a href="https://github.com/google/adk-java">Java ADK</a> & 
+      <a href="https://github.com/google/adk-java">Java ADK</a> &
+      <a href="https://github.com/google/adk-kotlin">Kotlin ADK</a> &
+      <a href="https://github.com/google/adk-js">TypeScript ADK</a> &
       <a href="https://github.com/google/adk-web">ADK Web</a>.
     </h3>
 </html>
