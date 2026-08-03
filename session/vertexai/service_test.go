@@ -16,6 +16,7 @@ package vertexai
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,8 @@ import (
 
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/session/sessiontestsuite"
+
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 )
 
 // if you want to test it for yourself, you can regenerate all by running
@@ -168,15 +171,32 @@ func deleteAllFromApp(t *testing.T, v session.Service, app string) {
 	}
 
 	for _, s := range sessionsResp.Sessions {
-		err := v.Delete(cleanupCtx, &session.DeleteRequest{
-			AppName:   s.AppName(),
-			UserID:    s.UserID(),
-			SessionID: s.ID(),
-		})
-		if err != nil {
+		if err := deleteSessionRPC(cleanupCtx, v, s.AppName(), s.ID()); err != nil {
 			t.Errorf("error deleting session for delete all: %s", err)
 		}
 	}
+}
+
+// deleteSessionRPC issues the DeleteSession RPC directly instead of going
+// through the public Delete. Teardown only ever removes sessions it owns, so it
+// needs none of Delete's request-level behavior; decoupling the two keeps a
+// change to Delete from failing the teardown of every test in this package.
+func deleteSessionRPC(ctx context.Context, v session.Service, appName, sessionID string) error {
+	svc, ok := v.(*vertexAiService)
+	if !ok {
+		return fmt.Errorf("unexpected session.Service implementation %T", v)
+	}
+	reasoningEngine, err := svc.client.getReasoningEngineID(appName)
+	if err != nil {
+		return err
+	}
+	lro, err := svc.client.rpcClient.DeleteSession(ctx, &aiplatformpb.DeleteSessionRequest{
+		Name: sessionNameByID(sessionID, svc.client, reasoningEngine),
+	})
+	if err != nil {
+		return err
+	}
+	return lro.Wait(ctx)
 }
 
 func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), error) {
