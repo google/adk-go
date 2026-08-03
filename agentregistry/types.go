@@ -63,12 +63,36 @@ type Agent struct {
 
 // MCPServer is a registered MCP server.
 type MCPServer struct {
-	Name        string      `json:"name,omitempty"`
-	MCPServerID string      `json:"mcpServerId,omitempty"`
-	DisplayName string      `json:"displayName,omitempty"`
-	Description string      `json:"description,omitempty"`
-	Protocols   []Protocol  `json:"protocols,omitempty"`
-	Interfaces  []Interface `json:"interfaces,omitempty"`
+	Name        string         `json:"name,omitempty"`
+	MCPServerID string         `json:"mcpServerId,omitempty"`
+	DisplayName string         `json:"displayName,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Protocols   []Protocol     `json:"protocols,omitempty"`
+	Interfaces  []Interface    `json:"interfaces,omitempty"`
+	Tools       []Tool         `json:"tools,omitempty"`
+	CreateTime  string         `json:"createTime,omitempty"`
+	UpdateTime  string         `json:"updateTime,omitempty"`
+	Attributes  map[string]any `json:"attributes,omitempty"`
+}
+
+// Tool describes a tool the registry reports for an MCP server. This is the
+// registry's declared metadata; the live tool set is discovered over MCP when a
+// toolset actually connects (see [Client.MCPToolset]).
+type Tool struct {
+	Name        string       `json:"name,omitempty"`
+	Description string       `json:"description,omitempty"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// Annotations are behavioral hints for a [Tool]. Absent hints carry API-side
+// defaults (DestructiveHint and OpenWorldHint default to true), so a zero-value
+// false here can mean "unset" rather than an explicit false.
+type Annotations struct {
+	Title           string `json:"title,omitempty"`
+	DestructiveHint bool   `json:"destructiveHint,omitempty"`
+	IdempotentHint  bool   `json:"idempotentHint,omitempty"`
+	OpenWorldHint   bool   `json:"openWorldHint,omitempty"`
+	ReadOnlyHint    bool   `json:"readOnlyHint,omitempty"`
 }
 
 // Endpoint is a registered model endpoint.

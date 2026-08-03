@@ -19,33 +19,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.set-modules.outputs.modules }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - id: set-modules
+        run: |
+          MODULES=$(find . -not -path '*/\.git/*' -name go.mod -exec dirname {} \; | sort | jq -R -s -c 'split("\n")[:-1]')
+          echo "modules=$MODULES" >> $GITHUB_OUTPUT
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     
     - name: Setup
       uses: ./.github/actions/setup
 
-    - name: Tidy
+    - name: Initialize workspace
+      run: go work init && go work use -r .
+
+    - name: Tidy Check
+      working-directory: ${{ matrix.module }}
       run: go mod tidy -diff
       
     - name: Build
+      working-directory: ${{ matrix.module }}
       run: go build -mod=readonly -v ./...
 
     - name: Test
+      working-directory: ${{ matrix.module }}
       run: go test -race -mod=readonly -v -count=1 -shuffle=on ./...
   
   lint:
+    needs: discover
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     
     - name: Setup
       uses: ./.github/actions/setup
+
+    - name: Initialize workspace
+      run: go work init && go work use -r .
     
     - name: Lint
       uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
       with:
+        working-directory: ${{ matrix.module }}
         install-mode: goinstall
         version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1
+
+  guardrail:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    
+    - name: Setup
+      uses: ./.github/actions/setup
+
+    - name: Check root go.mod against internal modules
+      run: |
+        ROOT_REQS=$(go mod edit -json | jq -r '.Require // [] | .[] | .Path')
+        
+        FAIL=0
+        while IFS= read -r -d '' dir; do
+          MOD_PATH=$(cd "$dir" && go mod edit -json | jq -r '.Module.Path')
+          if [ -n "$MOD_PATH" ] && echo "$ROOT_REQS" | grep -F -x -q "$MOD_PATH"; then
+            echo "ERROR: Root go.mod requires internal submodule $MOD_PATH"
+            FAIL=1
+          fi
+        done < <(find . -mindepth 2 -not -path '*/\.git/*' -name go.mod -printf '%h\0')
+        
+        exit $FAIL
