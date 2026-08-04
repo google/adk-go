@@ -206,7 +206,7 @@ func TestConvertFunctionCall(t *testing.T) {
 			call: responses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: `{"arg":"val"}`,
+				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{"arg":"val"}`},
 			},
 			wantID:   "call-1",
 			wantName: "test_fn",
@@ -217,7 +217,7 @@ func TestConvertFunctionCall(t *testing.T) {
 			call: responses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: `{bad`,
+				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{bad`},
 			},
 			wantErr: true,
 		},
@@ -298,7 +298,7 @@ func TestConvertOutputItems(t *testing.T) {
 					Type:      "function_call",
 					CallID:    "call-1",
 					Name:      "fn",
-					Arguments: `{}`,
+					Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{}`},
 				},
 				{
 					Type: "reasoning",
