@@ -112,8 +112,8 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 
 func convertFunctionCall(item responses.ResponseOutputItemUnion) (*genai.Part, error) {
 	args := map[string]any{}
-	if item.Arguments != "" {
-		if err := json.Unmarshal([]byte(item.Arguments), &args); err != nil {
+	if item.Arguments.OfString != "" {
+		if err := json.Unmarshal([]byte(item.Arguments.OfString), &args); err != nil {
 			return nil, fmt.Errorf("openai: parse function call args: %w", err)
 		}
 	}
