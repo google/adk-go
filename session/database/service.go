@@ -33,6 +33,8 @@ type databaseService struct {
 	db *gorm.DB
 }
 
+var errStaleSession = errors.New("stale session")
+
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
 //
@@ -335,21 +337,55 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
-	// append it to session
-	if err := sess.appendEvent(event); err != nil {
-		return err
-	}
-
 	// Trim temp state before persisting
 	event = trimTempDeltaState(event)
-	// applyChanges and persist them
-	err := s.applyEvent(ctx, sess, event)
+	// A session returned by Get is normally an OCC write lease. A legitimate
+	// second writer can advance that lease, though, so refresh once and retry
+	// the append when the database reports a stale handle.
+	for attempt := 0; attempt < 2; attempt++ {
+		err := s.applyEvent(ctx, sess, event)
+		if err == nil {
+			// Update the local handle only after the transaction commits. This
+			// keeps a failed append from leaving the caller with a phantom event.
+			if err := sess.appendEvent(event); err != nil {
+				return err
+			}
+			sess.mu.Lock()
+			if event.Timestamp.After(sess.updatedAt) {
+				sess.updatedAt = event.Timestamp
+			}
+			sess.mu.Unlock()
+			return nil
+		}
+		if !errors.Is(err, errStaleSession) || attempt == 1 {
+			return err
+		}
+		if err := s.refreshSession(ctx, sess); err != nil {
+			return fmt.Errorf("failed to refresh stale session: %w", err)
+		}
+	}
+	return nil // unreachable
+}
+
+// refreshSession replaces the mutable contents of a local handle with the
+// current database snapshot after another writer advances its OCC lease.
+func (s *databaseService) refreshSession(ctx context.Context, sess *localSession) error {
+	resp, err := s.Get(ctx, &session.GetRequest{
+		AppName: sess.AppName(), UserID: sess.UserID(), SessionID: sess.ID(),
+	})
 	if err != nil {
 		return err
 	}
+	current, ok := resp.Session.(*localSession)
+	if !ok {
+		return fmt.Errorf("unexpected refreshed session type %T", resp.Session)
+	}
 
-	// update local session last update time
-	sess.updatedAt = event.Timestamp
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	sess.state = current.state
+	sess.events = current.events
+	sess.updatedAt = current.updatedAt
 	return nil
 }
 
@@ -375,7 +411,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		sessionUpdateTime := session.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
-				"stale session error: last update time from request (%s) is older than in database (%s)",
+				"%w: last update time from request (%s) is older than in database (%s)",
+				errStaleSession,
 				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
 				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
 			)
@@ -421,13 +458,13 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save event: %w", err)
 		}
 
-		storageSess.UpdateTime = event.Timestamp
+		if event.Timestamp.After(storageSess.UpdateTime) {
+			storageSess.UpdateTime = event.Timestamp
+		}
 		// Save the session to update its state and UpdateTime.
 		if err := tx.Save(&storageSess).Error; err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
-
-		session.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})

@@ -99,6 +99,56 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDatabaseService_AppendEvent_RefreshesStaleHandle(t *testing.T) {
+	createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(a): %v", err)
+	}
+	b, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(b): %v", err)
+	}
+
+	base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	eventB := &session.Event{ID: "event-b", Timestamp: base.Add(2 * time.Second), Actions: session.EventActions{StateDelta: map[string]any{"from-b": true}}}
+	eventA := &session.Event{ID: "event-a", Timestamp: base.Add(time.Second), Actions: session.EventActions{StateDelta: map[string]any{"from-a": true}}}
+	if err := s.AppendEvent(ctx, b.Session, eventB); err != nil {
+		t.Fatalf("AppendEvent(b): %v", err)
+	}
+	if err := s.AppendEvent(ctx, a.Session, eventA); err != nil {
+		t.Fatalf("AppendEvent(a) after another writer: %v", err)
+	}
+
+	if got := a.Session.Events().Len(); got != 2 {
+		t.Fatalf("refreshed handle has %d events, want 2", got)
+	}
+	if got, err := a.Session.State().Get("from-a"); err != nil || got != true {
+		t.Errorf("refreshed handle missing own state: got %v, err %v", got, err)
+	}
+	if got, err := a.Session.State().Get("from-b"); err != nil || got != true {
+		t.Errorf("refreshed handle missing second writer state: got %v, err %v", got, err)
+	}
+	if got := a.Session.LastUpdateTime(); !got.Equal(base.Add(2 * time.Second)) {
+		t.Errorf("LastUpdateTime() = %v, want %v", got, base.Add(2*time.Second))
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(final): %v", err)
+	}
+	if got.Session.Events().Len() != 2 {
+		t.Fatalf("database has %d events, want 2", got.Session.Events().Len())
+	}
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
