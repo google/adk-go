@@ -15,6 +15,7 @@
 package adkrest
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -22,26 +23,31 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/routers"
-	"google.golang.org/adk/server/adkrest/internal/services"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/internal/routers"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/session"
 )
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	debugTelemetry := services.NewDebugTelemetry()
+	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
+		TraceCapacity: cfg.DebugConfig.TraceCapacity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create debug telemetry service: %w", err)
+	}
 
 	router := mux.NewRouter().StrictSlash(true)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
@@ -61,6 +67,14 @@ type ServerConfig struct {
 	ArtifactService artifact.Service
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
+	DebugConfig     DebugTelemetryConfig
+}
+
+// DebugTelemetryConfig contains parameters for the debug telemetry.
+type DebugTelemetryConfig struct {
+	// Maximum number of traces to keep in memory.
+	// If <= 0, the default capacity 10_000 is used.
+	TraceCapacity int
 }
 
 // Server is an HTTP server that serves the ADK REST API.

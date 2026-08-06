@@ -22,13 +22,13 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"google.golang.org/adk/artifact"
-	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/loadartifactstool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
 func TestLoadArtifactsTool_Run(t *testing.T) {
@@ -364,7 +364,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{
@@ -378,5 +378,5 @@ func createToolContext(t *testing.T) tool.Context {
 		Artifacts: artifacts,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }

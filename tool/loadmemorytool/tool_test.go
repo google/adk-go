@@ -22,13 +22,13 @@ import (
 
 	"google.golang.org/genai"
 
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/loadmemorytool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/loadmemorytool"
 )
 
 type mockMemory struct {
@@ -40,11 +40,11 @@ func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) 
 	return nil
 }
 
-func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
+func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &memory.SearchMemoryResponse{Memories: m.memories}, nil
+	return &memory.SearchResponse{Memories: m.memories}, nil
 }
 
 func TestLoadMemoryTool_BasicProperties(t *testing.T) {
@@ -170,12 +170,12 @@ func TestLoadMemoryTool_ProcessRequest(t *testing.T) {
 	}
 }
 
-func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
+func createToolContext(t *testing.T, mem *mockMemory) agent.Context {
 	t.Helper()
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Memory: mem,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }

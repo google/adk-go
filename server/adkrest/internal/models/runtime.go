@@ -32,6 +32,12 @@ type RunAgentRequest struct {
 	Streaming bool `json:"streaming,omitempty"`
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
+
+	// FunctionCallEventID identifies the event whose function call this
+	// request answers (e.g. a human-in-the-loop reply from the web UI).
+	// Accepted for adk-python parity but currently ignored; declared so
+	// strict decoding (DisallowUnknownFields) does not reject the request.
+	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
@@ -49,4 +55,19 @@ func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
 	}
 
 	return nil
+}
+
+// blob represents a genai.blob sent by the client, explicitly mapping mime_type.
+type blob struct {
+	MIMEType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+}
+
+// LiveRequest represents the client request format for real-time interactions over WebSocket.
+type LiveRequest struct {
+	Content       *genai.Content       `json:"content,omitempty"`
+	Blob          *blob                `json:"blob,omitempty"`
+	ActivityStart *genai.ActivityStart `json:"activityStart,omitempty"`
+	ActivityEnd   *genai.ActivityEnd   `json:"activityEnd,omitempty"`
+	Close         bool                 `json:"close,omitempty"`
 }

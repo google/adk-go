@@ -21,7 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // Service is a definition of the memory service.
@@ -35,18 +35,18 @@ type Service interface {
 	AddSessionToMemory(ctx context.Context, s session.Session) error
 	// SearchMemory returns memory entries relevant to the given query.
 	// Empty slice is returned if there are no matches.
-	SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error)
+	SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 
-// SearchMemoryRequest represents a request for memory search.
-type SearchMemoryRequest struct {
+// SearchRequest represents a request for memory search.
+type SearchRequest struct {
 	Query   string
 	UserID  string
 	AppName string
 }
 
-// SearchMemoryResponse represents the response from a memory search.
-type SearchMemoryResponse struct {
+// SearchResponse represents the response from a memory search.
+type SearchResponse struct {
 	Memories []Entry
 }
 

@@ -22,10 +22,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // databaseService is an database implementation of sessionService.Service.
@@ -75,7 +75,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 
 	sessionID := req.SessionID
 	if sessionID == "" {
-		sessionID = uuid.NewString()
+		sessionID = platform.NewUUID(ctx)
 	}
 
 	stateMap := req.State
@@ -87,9 +87,9 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		userID:    req.UserID,
 		sessionID: sessionID,
 		state:     stateMap,
-		updatedAt: time.Now(),
+		updatedAt: platform.Now(ctx),
 	}
-	createdSession, err := createStorageSession(val)
+	createdSession, err := createStorageSession(ctx, val)
 	if err != nil {
 		return nil, err
 	}

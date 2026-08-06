@@ -17,23 +17,25 @@ package memory_test
 import (
 	"iter"
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func Test_inMemoryService_SearchMemory(t *testing.T) {
 	tests := []struct {
 		name         string
 		initSessions []session.Session
-		req          *memory.SearchMemoryRequest
-		wantResp     *memory.SearchMemoryResponse
+		req          *memory.SearchRequest
+		wantResp     *memory.SearchResponse
 		wantErr      bool
 	}{
 		{
@@ -66,12 +68,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "user1",
 				Query:   "quick hello",
 			},
-			wantResp: &memory.SearchMemoryResponse{
+			wantResp: &memory.SearchResponse{
 				Memories: []memory.Entry{
 					{
 						ID:             "event1",
@@ -95,12 +97,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "other_app",
 				UserID:  "user1",
 				Query:   "test text",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no leakage for different user",
@@ -109,12 +111,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "test text",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no matches",
@@ -123,21 +125,21 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "lookup on empty store",
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 	}
 	for _, tt := range tests {
@@ -172,7 +174,7 @@ func makeSession(t *testing.T, appName, userID, sessionID string, events []*sess
 	}
 }
 
-var sortMemories = cmp.Transformer("Sort", func(in *memory.SearchMemoryResponse) *memory.SearchMemoryResponse {
+var sortMemories = cmp.Transformer("Sort", func(in *memory.SearchResponse) *memory.SearchResponse {
 	slices.SortFunc(in.Memories, func(m1, m2 memory.Entry) int {
 		return m1.Timestamp.Compare(m2.Timestamp)
 	})
@@ -225,4 +227,44 @@ func must[V any](v V, err error) V {
 		panic(err)
 	}
 	return v
+}
+
+// Test_inMemoryService_SearchMemory_Concurrent runs SearchMemory and
+// AddSessionToMemory on the same app/user in parallel. The service is
+// documented as thread-safe, so under -race (as CI runs it) the two must not
+// touch the per-user session map without synchronization.
+func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
+	s := memory.InMemoryService()
+	ctx := t.Context()
+
+	// Seed one session so the per-user map is non-empty while searchers iterate.
+	if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", "seed", nil)); err != nil {
+		t.Fatalf("AddSessionToMemory() error = %v", err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				id := "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
+				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, nil)); err != nil {
+					t.Errorf("AddSessionToMemory() error = %v", err)
+					return
+				}
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if _, err := s.SearchMemory(ctx, &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "x"}); err != nil {
+					t.Errorf("SearchMemory() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

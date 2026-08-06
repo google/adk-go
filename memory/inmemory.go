@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
@@ -106,7 +106,7 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 	return nil
 }
 
-func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error) {
+func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 	queryWords := extractWords(req.Query)
 
 	k := key{
@@ -114,14 +114,19 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryReq
 		userID:  req.UserID,
 	}
 
-	s.mu.RLock()
-	values, ok := s.store[k]
-	s.mu.RUnlock()
-	if !ok {
-		return &SearchMemoryResponse{}, nil
-	}
+	res := &SearchResponse{}
 
-	res := &SearchMemoryResponse{}
+	// Hold the read lock for the whole scan. AddSessionToMemory writes into the
+	// per-user session map under the write lock, so releasing the lock before
+	// iterating would race with a concurrent write and can panic with
+	// "concurrent map iteration and map write".
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	values, ok := s.store[k]
+	if !ok {
+		return res, nil
+	}
 
 	for _, events := range values {
 		for _, e := range events {
