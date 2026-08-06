@@ -370,6 +370,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			eventsChan := make(chan *session.Event)
+			// Producers must guard sends with connCtx: once a reconnect (or any
+			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
+			// what unblocks them (issue #1152).
 			errChan := make(chan error)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
@@ -386,7 +389,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
-						errChan <- err
+						select {
+						case errChan <- err:
+						case <-connCtx.Done():
+						}
 						return
 					}
 					if resp != nil {
@@ -427,7 +433,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -436,7 +445,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
