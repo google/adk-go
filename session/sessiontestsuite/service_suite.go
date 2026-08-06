@@ -25,8 +25,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 // ExpectedSession represents a snapshot of a session's public state for test comparisons.
@@ -396,6 +396,32 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 					t.Errorf("Delete() non-existent error = %v, want nil or gRPC InvalidArgument", err)
 				}
 			}
+		}
+	})
+
+	t.Run("delete_session_respects_user_id", func(t *testing.T) {
+		s := setup(t)
+		ctx := t.Context()
+
+		c1, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+		if err != nil {
+			t.Fatalf("Create user1 failed: %v", err)
+		}
+
+		// A delete by a different user must not remove user1's session. Backends
+		// may either error or no-op; the invariant is that the session survives.
+		_ = s.Delete(ctx, &session.DeleteRequest{
+			AppName:   testAppName,
+			UserID:    "user2",
+			SessionID: c1.Session.ID(),
+		})
+
+		if _, err := s.Get(ctx, &session.GetRequest{
+			AppName:   testAppName,
+			UserID:    "user1",
+			SessionID: c1.Session.ID(),
+		}); err != nil {
+			t.Errorf("session was removed by a different user's delete: %v", err)
 		}
 	})
 

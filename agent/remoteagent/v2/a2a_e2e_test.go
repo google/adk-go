@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,20 +37,20 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 const (
@@ -377,9 +378,11 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 }
 
 func TestA2ACleanupPropagation(t *testing.T) {
+	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
+	// Artifact text the mock subagent streams; the cancel step keys off it.
+	const remoteArtifactText = "remote-subagent-working"
 	// Remote A2A server publishes a submitted task and start generating artifact updates
 	// until it detects a context cancelation
-	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
 	serverB := startA2AServer(&mockA2AExecutor{
 		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 			return func(yield func(a2a.Event, error) bool) {
@@ -393,7 +396,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 					return
 				}
 				for ctx.Err() == nil {
-					if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewTextPart("foo")), nil) {
+					if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewTextPart(remoteArtifactText)), nil) {
 						return
 					}
 					time.Sleep(1 * time.Millisecond)
@@ -427,27 +430,44 @@ func TestA2ACleanupPropagation(t *testing.T) {
 
 	client := newA2AClient(t, serverA)
 
-	// Send a streaming message in a detached goroutine, passing status update through chan
+	// Join the detached streaming/cancel goroutines before teardown; a late
+	// t.Errorf from an in-flight RPC on a finished test would panic.
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan a2a.Event, 10)
+	remoteStreamingChan := make(chan struct{})
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(statusUpdateEventChan)
+		remoteStreaming := false
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
 		for event, err := range client.SendStreamingMessage(t.Context(), &a2a.SendMessageRequest{Message: msg}) {
 			if err != nil {
 				t.Errorf("client.SendStreamingMessage() error = %v", err)
 				return
 			}
-			if _, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+			if tau, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+				if !remoteStreaming && artifactContainsText(tau, remoteArtifactText) {
+					remoteStreaming = true
+					close(remoteStreamingChan)
+				}
 				continue
 			}
 			statusUpdateEventChan <- event
 		}
 	}()
 
-	// Issue a task cancellation request
+	// Cancel only after the subagent's output reaches the client: before that the
+	// parent doesn't know the subagent task ID, so cancellation can't propagate.
 	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
+	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *a2a.Task, 1)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
 		if err != nil {
@@ -470,25 +490,12 @@ func TestA2ACleanupPropagation(t *testing.T) {
 		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
 	}
 
-	// Check subagent task got cancelled when the parent task was cancelled.
-	// Reads from channel twice because cleanup gets called both for cancelation and execution.
-	timeout := time.After(5 * time.Second)
-	for range 2 {
-		select {
-		case <-remoteCleanupCalledChan:
-		case <-timeout:
-			t.Fatalf("remote cleanup was not called")
-		}
-	}
+	// Subagent cleanup fires twice: once for cancelation, once for execution.
+	// A generous per-wait deadline avoids flaking under CPU contention.
+	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
 	remoteTaskID := <-remoteTaskIDChan
+	testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
 
-	for range 2 {
-		select {
-		case <-executorCleanupCalledChan:
-		case <-timeout:
-			t.Fatalf("executor cleanup was not called")
-		}
-	}
 	remoteClient := newA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
 	if err != nil {
@@ -497,6 +504,18 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	if remoteTask.Status.State != a2a.TaskStateCanceled {
 		t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
 	}
+
+	// Join the cancel RPC so it can't log on t after the test returns.
+	testutil.AwaitN(t, cancelResultChan, 1, "cancel task")
+}
+
+func artifactContainsText(tau *a2a.TaskArtifactUpdateEvent, substr string) bool {
+	for _, p := range tau.Artifact.Parts {
+		if strings.Contains(p.Text(), substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestA2ASingleHopFinalResponse(t *testing.T) {
@@ -574,7 +593,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -599,7 +618,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Name:  "model-agent",
 					Model: llmModel,
 					AfterModelCallbacks: []llmagent.AfterModelCallback{
-						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 							if event < 2 {
 								event++
 								return nil, nil
@@ -794,7 +813,7 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
-			func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+			func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 				if eventCount < 3 {
 					eventCount++
 					return nil, nil
@@ -886,7 +905,7 @@ func newLongRunningTool(t *testing.T) tool.Tool {
 		Name:          approvalToolName,
 		Description:   "Request approval before proceeding.",
 		IsLongRunning: true,
-	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
+	}, func(ctx agent.Context, x map[string]any) (approval, error) {
 		return approval{Status: approvalStatusPending, TicketID: a2a.NewContextID()}, nil
 	})
 	if err != nil {
@@ -901,7 +920,7 @@ func newToolConfirmation(t *testing.T) tool.Tool {
 	requestApproval, err := functiontool.New(functiontool.Config{
 		Name:        approvalToolName,
 		Description: "Request approval before proceeding.",
-	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
+	}, func(ctx agent.Context, x map[string]any) (approval, error) {
 		confirmation := ctx.ToolConfirmation()
 		if confirmation == nil {
 			ticketID := a2a.NewContextID()

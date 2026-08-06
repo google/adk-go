@@ -30,18 +30,18 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptoolset"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type Input struct {
@@ -111,7 +111,8 @@ func TestMCPToolSet(t *testing.T) {
 
 	wantEvents := []*session.Event{
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
@@ -128,7 +129,8 @@ func TestMCPToolSet(t *testing.T) {
 			},
 		},
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
@@ -146,7 +148,8 @@ func TestMCPToolSet(t *testing.T) {
 			},
 		},
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{

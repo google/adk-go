@@ -23,8 +23,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/platform"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 )
 
 func TestReadonlyContext(t *testing.T) {
@@ -41,10 +41,7 @@ func TestCallbackContext(t *testing.T) {
 	callback := NewCallbackContext(inv)
 
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
-	}
-	if got, ok := callback.(agent.InvocationContext); ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+		t.Errorf("callback context (%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
 }
 
@@ -58,7 +55,9 @@ func TestWithContext(t *testing.T) {
 
 	key := testKey{}
 	val := "val"
-	got := inv.WithContext(context.WithValue(baseCtx, key, val))
+
+	ctx := context.WithValue(baseCtx, key, val)
+	got := inv.WithICDelta(&agent.InvocationContextDelta{Context: &ctx})
 
 	if got.Value(key) != val {
 		t.Errorf("WithContext() did not update context")
