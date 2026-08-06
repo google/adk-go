@@ -1,0 +1,334 @@
+httprr trace v1
+1826 2239
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1593
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Look at the user's first message and immediately call\ntransfer_to_agent with agent_name set to \"billing\" (for billing\nquestions) or \"support\" (for technical questions). Never answer\nyourself; always transfer.\n\nYou are an agent. Your internal name is \"root\". The description about you is \"Routes the user to the right specialist.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: billing\nAgent description: Handles billing questions.\n\n\nAgent name: support\nAgent description: Handles technical support questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`billing`, `support`.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["billing","support"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:02 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1753
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "transfer_to_agent",
+              "args": {
+                "agent_name": "billing"
+              },
+              "id": "du9tm6qr"
+            },
+            "thoughtSignature": "EpUGCpIGAQw51sfnN9wvhSIvQhldAOEFRPHSj5Fzzc0ny+tvKPSuTHaYtfH5JhqaNSsE2LwlqdUGzYi0uUX2KNGq74nOOgGWqvHkGDvNqte0s2NlZ/HfhPZttc3oujeA1Nbvfxfg2l/gLFuNHLlPcjvVfYCY0JrmAK1AO0Y9pINi1L3nZ7gW1D8t6582WA3qskhIWexwEd9/nkQbkQ/L3QTieeJ/HxhV3/0/v7pDHvTVuJfQNSHs+2fvQnojuAzkNnKzUXr5FBJmypfQCZfvm4KLmyPDlNxho3DPMwdnOBd24zMOoXuwdvj5lPlNiN5VG+11A5ZTs1RjA87/oZu9M2f0v06nJ4NWBTzxRpHroX58/ss7cN0ycKFWe675BVf3yXNr3IiL/MhUVFJVTuYFTZECxido1wF5z5FiPWTElzAKpXU70YRHYLewzYUduIkHZimniR3x3aU4KYJkJdoNd/CfINW0WBYfnqqyypumL6bGEA4JjeOKiXrhP8XRoe1DNVsNqLki/ESTKynBoa1ajnBB06UZO2v19az/VgLdk/cS8C3p4qGcN7v0tlir9aKPIdFqJQnrwxUWfAExXUsn+VCylXmTyWRjboJYv9gdQYA7T3pvCg81VWXzvVvrbi+aIqyGkMeFCS2leVLe/6BH744miT8D6B3ZxhLsyHYh0f1qjE8r36y52fq23wQI9/LmMbVmzZCChoX5ho/Gm7wz87ErQ6vbP49Ax++J5NDHnEHV2OyUvHbuYAanjmYAdIarFxPR+DtzzaTrr7Tnb7y6u+74jn2CPMdvt5MqAPRh38VIjRmvBWGUr+Q+o57r1Xjdj95vGp/e6AAkND7CBvgqGG98XIPlJtft/jBRaTL++N3OKNf36Fq6mfPO9qViqD9x5NZwBv9Hpn7oXpD5SvfloYgTBKCpNWODor9A/NXo5THFxQDH2QGkhJRZkiuZOIQi8Prhgp1DAgUjxhBNBela3PqGVgRV+mQkiww69YMtbH3CCEK8ZCbgfKAbAA5Rh3R3gOyWuT0DeUG9JKntWRgRXK8FyQwTG3NO"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 322,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 511,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 322
+      }
+    ],
+    "thoughtsTokenCount": 169,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9H0yarH-POXPnsEPx72FoAw"
+}
+2223 1518
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1990
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are the billing specialist. Answer billing-related\nquestions concisely. If the user asks about anything OTHER than\nbilling (e.g. technical support), immediately call transfer_to_agent\nwith agent_name=\"support\" — do not attempt to answer yourself.\n\nYou are an agent. Your internal name is \"billing\". The description about you is \"Handles billing questions.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes the user to the right specialist.\n\n\nAgent name: support\nAgent description: Handles technical support questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`, `support`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root","support"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:03 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1171
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I can help you with your invoice. What is your question?",
+            "thoughtSignature": "EoADCv0CAQw51se4bsu9tQzxa0ufeMEst5yyWIh/DlWdi0blOLO+PAzO4UshYyU+jV4maE0+aQyiO5wa8KQBPAy8nv9ULcJRkkyuYpxvoL+YMOo2CCbnNi8ZnseYrl/Y+5CJW+rO1iGRRJO5n3KgeFdF5JFROu+2DXizYzMF0ChCc423ZxF30GtD8LXErvexvOIt7PisoQnCW428RHe+C/q03307BIBtyt1K2BWf/mc03iFgjqi6Ey7BtvCufG5wnac8inoX31xxns/NE+7GCM0ImvITQpJaO6sKHMe/VNIhLOsryjZkQklklTtKMIyf4t+7o6uHK/b3jjhhY/cRZ2MkEuh98BrgEc7MNEsXrS8JVXGfDgSz2zKZUGKOGkiRaY0Kxh3l/Re5keyIPZBFvklDcp4h+f7hXziApjnkJiKQvlYjVpsgwyv8mAr75OCEsWdbDSCKDqPwfftJDMUaLpZb68G47EByNk61dw1eDIMu+O003RJI5FlLfhlSu/HRVdF1"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 394,
+    "candidatesTokenCount": 13,
+    "totalTokenCount": 479,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 394
+      }
+    ],
+    "thoughtsTokenCount": 72,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9n0yaoX-LaOtkdUP34nq-Ao"
+}
+2937 1778
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2704
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"text":"I can help you with your invoice. What is your question?","thoughtSignature":"EoADCv0CAQw51se4bsu9tQzxa0ufeMEst5yyWIh/DlWdi0blOLO+PAzO4UshYyU+jV4maE0+aQyiO5wa8KQBPAy8nv9ULcJRkkyuYpxvoL+YMOo2CCbnNi8ZnseYrl/Y+5CJW+rO1iGRRJO5n3KgeFdF5JFROu+2DXizYzMF0ChCc423ZxF30GtD8LXErvexvOIt7PisoQnCW428RHe+C/q03307BIBtyt1K2BWf/mc03iFgjqi6Ey7BtvCufG5wnac8inoX31xxns/NE+7GCM0ImvITQpJaO6sKHMe/VNIhLOsryjZkQklklTtKMIyf4t+7o6uHK/b3jjhhY/cRZ2MkEuh98BrgEc7MNEsXrS8JVXGfDgSz2zKZUGKOGkiRaY0Kxh3l/Re5keyIPZBFvklDcp4h+f7hXziApjnkJiKQvlYjVpsgwyv8mAr75OCEsWdbDSCKDqPwfftJDMUaLpZb68G47EByNk61dw1eDIMu+O003RJI5FlLfhlSu/HRVdF1"}],"role":"model"},{"parts":[{"text":"Actually I need help resetting my password."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are the billing specialist. Answer billing-related\nquestions concisely. If the user asks about anything OTHER than\nbilling (e.g. technical support), immediately call transfer_to_agent\nwith agent_name=\"support\" — do not attempt to answer yourself.\n\nYou are an agent. Your internal name is \"billing\". The description about you is \"Handles billing questions.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes the user to the right specialist.\n\n\nAgent name: support\nAgent description: Handles technical support questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`, `support`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root","support"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:05 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1350
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "transfer_to_agent",
+              "args": {
+                "agent_name": "support"
+              },
+              "id": "9rx5b9f5"
+            },
+            "thoughtSignature": "ErwDCrkDAQw51sclwfLEd0VkrNmHymQ3OsNKxJ7KgmDZh+Wy6JVJs7R8Kz4PazWItWTJ5OyzrCyD8R/WCSNsg6Y3rU4JMnfOKEl0rktjmtJOGOMTjqgipWludmReRPxB1qf4Y9nk/l+44SJjCZ0vP3+FKbgfMq6VhdJ34i89uunWstjEGmI+bFIaHg0hAkInyiUgYaUWgjWlTBKQA/jkmObfrxssw8p1CZ75U0LUQhpJOQvC4UnuuakqAYOx9T9hlGdGkxTdr+sOk//rYD86kwKFIZQOIyfG7ZgvqvEGcMdcDjFLG9sCAQPgqElvKKsDr1eqOIVpxHmdRTv7QVPHHi8QJuquYBFDVYC5xWxCak/8Utwl+u7ht42GCvRnkmc1U3V+EZm8LWwCnB8PF4fWxgN+z0Z0Sjlhv6YZpfKlP38IHm7fRtCoyi8K/Qv6OJA/iBb+6NvKtEVAtyWVmpjQPRfP68En+u0HYk2KluQyQOVqeQ1PxhggERjZO2TQpp7zZTyh0mFzgl/I2GejtefhsX96m+7h4iOLhiU3iBPQvlyvFn05RyBqBtosNw/ZonY3R1+T7yf2HNaA94zwykOk"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 489,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 595,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 489
+      }
+    ],
+    "thoughtsTokenCount": 86,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "930yaujwOMPmnsEP1uDjsQo"
+}
+2664 1997
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2431
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] said: I can help you with your invoice. What is your question?"}],"role":"user"},{"parts":[{"text":"Actually I need help resetting my password."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"support\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] `transfer_to_agent` tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are the technical support specialist. Answer\ntechnical questions concisely. If the user asks about anything OTHER\nthan tech support (e.g. billing), immediately call transfer_to_agent\nwith agent_name=\"billing\".\n\nYou are an agent. Your internal name is \"support\". The description about you is \"Handles technical support questions.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes the user to the right specialist.\n\n\nAgent name: billing\nAgent description: Handles billing questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`billing`, `root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root","billing"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:07 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2023
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "To reset your password, please follow these steps:\n\n1. Go to the login page.\n2. Click on the **\"Forgot Password\"** or **\"Reset Password\"** link.\n3. Enter your registered email address and submit the request.\n4. Check your email inbox (and spam folder) for a password reset link.\n5. Click the link and follow the prompts to create a new password.",
+            "thoughtSignature": "EoUECoIEAQw51scR2I8d8ro9tivumF/g0a+6B9+eU2cDLh0qlngxop0osHGbxebUQD/E4QgZFOt8QmkfX4kmdc5ZDbf3btTQsB0+bSDRMrOzmRN8ylf5AwG0xY/tA/303lYGsIyqWNmGl9z7gSPUhgtMZvJF10RJXj8fSjUTM2gIFTuTfJIzwfRBUszkQ3HkyTEXauXcstlWAxTix3KA02xDGe1Xcx4Ig+XtLsN7Kug+Mq0kWv9UntJvMpFiKtSxqxdsQqYqPhBta1iVqEMm6yVOk4lgBtwZUm4MhIgGQmRN9nNf9vNHffB43TpqAT+yrKutQDE5tV2aWghs1B+0dUC8TyNFgoCDxEu2RvM43/kJ6fsQ04eslDyTL7lk6Ma54mGqZS4B8xKwhnXzZUFwfkizfq+U2InD5jKRGDRL+2T9hGxi50SkQkIXMM5+hRjb9qDvLNOv7h2lvxdQH7lcahRx8LLiJSOb7kttvoPtbBaSOd/qn8qtzmd+Rwd4dxDpDzMs34j0Ky0WGyq8XrPQIhUfxOEu2qro3dAITP/X7WHiHLw1tv0TRdN3AQvwWTb/v67RHUouHiWKTEH7WpHXUKuLgPH8hwkbcpi9bibMkNqo4H8fkQHB5hhh+wkcI4QtdM1WgAV97ARM2s7C/abAw7E85YGCYwkJMsZiqPfEPLGejaRmD9A2pA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 461,
+    "candidatesTokenCount": 87,
+    "totalTokenCount": 642,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 461
+      }
+    ],
+    "thoughtsTokenCount": 94,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "-X0yao7wD-bknsEP0vuCoQs"
+}
+3872 1662
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3639
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] said: I can help you with your invoice. What is your question?"}],"role":"user"},{"parts":[{"text":"Actually I need help resetting my password."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"support\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[billing] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"text":"To reset your password, please follow these steps:\n\n1. Go to the login page.\n2. Click on the **\"Forgot Password\"** or **\"Reset Password\"** link.\n3. Enter your registered email address and submit the request.\n4. Check your email inbox (and spam folder) for a password reset link.\n5. Click the link and follow the prompts to create a new password.","thoughtSignature":"EoUECoIEAQw51scR2I8d8ro9tivumF/g0a+6B9+eU2cDLh0qlngxop0osHGbxebUQD/E4QgZFOt8QmkfX4kmdc5ZDbf3btTQsB0+bSDRMrOzmRN8ylf5AwG0xY/tA/303lYGsIyqWNmGl9z7gSPUhgtMZvJF10RJXj8fSjUTM2gIFTuTfJIzwfRBUszkQ3HkyTEXauXcstlWAxTix3KA02xDGe1Xcx4Ig+XtLsN7Kug+Mq0kWv9UntJvMpFiKtSxqxdsQqYqPhBta1iVqEMm6yVOk4lgBtwZUm4MhIgGQmRN9nNf9vNHffB43TpqAT+yrKutQDE5tV2aWghs1B+0dUC8TyNFgoCDxEu2RvM43/kJ6fsQ04eslDyTL7lk6Ma54mGqZS4B8xKwhnXzZUFwfkizfq+U2InD5jKRGDRL+2T9hGxi50SkQkIXMM5+hRjb9qDvLNOv7h2lvxdQH7lcahRx8LLiJSOb7kttvoPtbBaSOd/qn8qtzmd+Rwd4dxDpDzMs34j0Ky0WGyq8XrPQIhUfxOEu2qro3dAITP/X7WHiHLw1tv0TRdN3AQvwWTb/v67RHUouHiWKTEH7WpHXUKuLgPH8hwkbcpi9bibMkNqo4H8fkQHB5hhh+wkcI4QtdM1WgAV97ARM2s7C/abAw7E85YGCYwkJMsZiqPfEPLGejaRmD9A2pA=="}],"role":"model"},{"parts":[{"text":"Actually, back to my invoice — what's the latest charge?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are the technical support specialist. Answer\ntechnical questions concisely. If the user asks about anything OTHER\nthan tech support (e.g. billing), immediately call transfer_to_agent\nwith agent_name=\"billing\".\n\nYou are an agent. Your internal name is \"support\". The description about you is \"Handles technical support questions.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes the user to the right specialist.\n\n\nAgent name: billing\nAgent description: Handles billing questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`billing`, `root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root","billing"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:08 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1355
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "transfer_to_agent",
+              "args": {
+                "agent_name": "billing"
+              },
+              "id": "usm8tod7"
+            },
+            "thoughtSignature": "EuQCCuECAQw51seE5+dCyRil65wZHFSLpQ4oOp85xlWGMdKBMYIJwQK7i5V/Cb56laV9mLI14vsIBH/wV4AUTVSPcCLgik85IurWgZBMyJ6uQF0tk25MaArl5iX3gowS3mbSf4BtbFxqPyUdNWHnPnsbzT0WAxd9bYXoe2Wq1L2qRIGHD98kaYqhgCefM3aq07LvOuDhshu2kx+7sH4ArzhUMPpLjaf6AJjIZCzB8TlMeZ3KkRtBDlb3MUns/QKGOP9CHW0X1HFseEE13rnhoMnf0/Q7bl1cppoSGMDZwS+r6mGNEvJeKp4IpEGIqnO+uRXcBUinmi8pPDZsFsoBPsw9r5uzd+oapH6DM4gyotiRNzBHw3n+dBmDoE1iuscyh7JC2IZ8e65GZ6kWJ0ayfpe4+OUR1SeIa5mv0kdpp+MhbOxUwcXhJU4/E/el4y8uIjCtnyVKpH5xA+R+wcZWCsAyJdgum5A="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 658,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 752,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 658
+      }
+    ],
+    "thoughtsTokenCount": 74,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "-30yaqz4ENykkdUPytuSiQ8"
+}
+4562 2225
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 4329
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"I have a question about my invoice."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"text":"I can help you with your invoice. What is your question?","thoughtSignature":"EoADCv0CAQw51se4bsu9tQzxa0ufeMEst5yyWIh/DlWdi0blOLO+PAzO4UshYyU+jV4maE0+aQyiO5wa8KQBPAy8nv9ULcJRkkyuYpxvoL+YMOo2CCbnNi8ZnseYrl/Y+5CJW+rO1iGRRJO5n3KgeFdF5JFROu+2DXizYzMF0ChCc423ZxF30GtD8LXErvexvOIt7PisoQnCW428RHe+C/q03307BIBtyt1K2BWf/mc03iFgjqi6Ey7BtvCufG5wnac8inoX31xxns/NE+7GCM0ImvITQpJaO6sKHMe/VNIhLOsryjZkQklklTtKMIyf4t+7o6uHK/b3jjhhY/cRZ2MkEuh98BrgEc7MNEsXrS8JVXGfDgSz2zKZUGKOGkiRaY0Kxh3l/Re5keyIPZBFvklDcp4h+f7hXziApjnkJiKQvlYjVpsgwyv8mAr75OCEsWdbDSCKDqPwfftJDMUaLpZb68G47EByNk61dw1eDIMu+O003RJI5FlLfhlSu/HRVdF1"}],"role":"model"},{"parts":[{"text":"Actually I need help resetting my password."}],"role":"user"},{"parts":[{"functionCall":{"args":{"agent_name":"support"},"id":"9rx5b9f5","name":"transfer_to_agent"},"thoughtSignature":"ErwDCrkDAQw51sclwfLEd0VkrNmHymQ3OsNKxJ7KgmDZh+Wy6JVJs7R8Kz4PazWItWTJ5OyzrCyD8R/WCSNsg6Y3rU4JMnfOKEl0rktjmtJOGOMTjqgipWludmReRPxB1qf4Y9nk/l+44SJjCZ0vP3+FKbgfMq6VhdJ34i89uunWstjEGmI+bFIaHg0hAkInyiUgYaUWgjWlTBKQA/jkmObfrxssw8p1CZ75U0LUQhpJOQvC4UnuuakqAYOx9T9hlGdGkxTdr+sOk//rYD86kwKFIZQOIyfG7ZgvqvEGcMdcDjFLG9sCAQPgqElvKKsDr1eqOIVpxHmdRTv7QVPHHi8QJuquYBFDVYC5xWxCak/8Utwl+u7ht42GCvRnkmc1U3V+EZm8LWwCnB8PF4fWxgN+z0Z0Sjlhv6YZpfKlP38IHm7fRtCoyi8K/Qv6OJA/iBb+6NvKtEVAtyWVmpjQPRfP68En+u0HYk2KluQyQOVqeQ1PxhggERjZO2TQpp7zZTyh0mFzgl/I2GejtefhsX96m+7h4iOLhiU3iBPQvlyvFn05RyBqBtosNw/ZonY3R1+T7yf2HNaA94zwykOk"}],"role":"model"},{"parts":[{"functionResponse":{"id":"9rx5b9f5","name":"transfer_to_agent"}}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[support] said: To reset your password, please follow these steps:\n\n1. Go to the login page.\n2. Click on the **\"Forgot Password\"** or **\"Reset Password\"** link.\n3. Enter your registered email address and submit the request.\n4. Check your email inbox (and spam folder) for a password reset link.\n5. Click the link and follow the prompts to create a new password."}],"role":"user"},{"parts":[{"text":"Actually, back to my invoice — what's the latest charge?"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[support] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"billing\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[support] `transfer_to_agent` tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are the billing specialist. Answer billing-related\nquestions concisely. If the user asks about anything OTHER than\nbilling (e.g. technical support), immediately call transfer_to_agent\nwith agent_name=\"support\" — do not attempt to answer yourself.\n\nYou are an agent. Your internal name is \"billing\". The description about you is \"Handles billing questions.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes the user to the right specialist.\n\n\nAgent name: support\nAgent description: Handles technical support questions.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`, `support`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root","support"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:59:10 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2082
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "To help you with that, could you please provide your account number or the email address associated with your account?",
+            "thoughtSignature": "EuEGCt4GAQw51sdUz2QZoMxVdTsDbNsHGA+VafoaltF+cBi6inS1y+NRalSVWewKeg07tkgUJ+jnz7xg5nyfzRcoWVbUjkRw9kFUcywySha//a5Sr5TVO743xvDQNQ611iRLVjN9SzNhI7ZdpH4LJsJuKHwLqHagBz4K7FhWhSTiIZbMHi+Z1D40iQ+sDFV3ip7WSpTKKdGRiVw9fgMl97UgHaknFMT57oY9UnBLLm1oYgZ5yQZjKsZtInng6hhGzsRxFcebP7cRb9xxWVRqmpqM7zNOPuLD+VH/QBZcNN0ZAp0dk6x55Twl0gpode88pCLbHeE/cTote7NcLZaADD/DGDwJ7tlgm0UnFDSWmYl7jJldFu5hIfN1QGLBpaXvHpULiJh3XLtXktO+DSxq8tI45sAZS/46bqjty6fJiOjSNZs8eXivlKF+J5QD0I4uslDc6vA/ZL1/+15p6OxE6IHal23SIDxdwmO8DJt/mvKonRnOvHUiVhK9W3rcsrm4fx0c87vfbZTgh0XbJQwh/VElt5S6MMlQXC4j0TuW1Wsi3zrVsmenQcdzlq+v5yDHFXlhGyZbXI7dZFmGBQ/UvyBxg2vDJFHGy+bWnSLyJhe3gC7V/zNImkUQUmtOFgSzwcE4UpJSQHG45LWW+GyZBKe8iPOoqh1PpuN1rP3MAWC2E7iJjtr0XBAdKIQmarxwqDuzy1Lmgqd3hVSd8omXSc37FtzOfE9d1viIAE9JJnymGjTYZThkspDe+KFnnJ86fP214C2adjjl6Qc8fxUHMGxmy7HMNsVYr0xN7pPdvE2s0p1KyMd9dyyoDC1Z8CfEpIv1Mc9LaCem9aO5C9eTStszDtCqcjmvQdX0Qu190Rx0cQi8xUWeKAvf50PSv2xE+x2ZrjJszDLjhL2XQ35aakab8fjqrQnTdpFyGycNwc53h6WoKro6ZaXsNkh8F7jal4EJ8FRvhInCSQErvstDaP8WBA3WnJpGG/qhP8J2JyXzLu10ZhNSDXALphsZ2Xy0ar4/LqWlwgc42EML38fTK2mbKsoHKJfJ9uUaKLubskdJ6+Cu47dTYOTozqBJt4q3Pli1uVj3g/e4vs4O6nz26ATKkbmxCFU8Swmb4zYK+woln36F8Q0zL56aueYFZT3kf91kGQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 761,
+    "candidatesTokenCount": 22,
+    "totalTokenCount": 963,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 761
+      }
+    ],
+    "thoughtsTokenCount": 180,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "_H0yarXHJ_Hp7M8PwK6siAs"
+}

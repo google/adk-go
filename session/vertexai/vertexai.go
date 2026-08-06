@@ -21,7 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/option"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // VertexAiSessionService
@@ -55,9 +55,6 @@ func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig, opts ...o
 func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
-	}
-	if req.SessionID != "" {
-		return nil, fmt.Errorf("user-provided Session id is not supported for VertexAISessionService: %q", req.SessionID)
 	}
 	sess, err := s.client.createSession(ctx, req)
 	if err != nil {

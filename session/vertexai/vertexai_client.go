@@ -16,7 +16,9 @@ package vertexai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,9 +32,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	vertexaiutil "google.golang.org/adk/util/vertexai"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
 
 	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
 	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
@@ -69,7 +71,7 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	}
 	// Convert and set the initial state if provided
 	if len(req.State) > 0 {
-		stateStruct, err := structpb.NewStruct(req.State)
+		stateStruct, err := toStructPB(req.State)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
 		}
@@ -86,8 +88,9 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		ReasoningEngine: reasoningEngine,
 	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  vertexaiutil.AgentEngineResource(aeData),
-		Session: pbSession,
+		Parent:    vertexaiutil.AgentEngineResource(aeData),
+		Session:   pbSession,
+		SessionId: req.SessionID,
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
 	if err != nil {
@@ -231,6 +234,17 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 	if err != nil {
 		return err
 	}
+	// Verify the session belongs to req.UserID before deleting (mirrors getSession).
+	if _, err := c.getSession(ctx, &session.GetRequest{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}); err != nil {
+		if isNotFoundError(err) {
+			return nil // A missing session is a no-op.
+		}
+		return err
+	}
 	lro, err := c.rpcClient.DeleteSession(ctx, &aiplatformpb.DeleteSessionRequest{
 		Name: sessionNameByID(req.SessionID, c, reasoningEngine),
 	})
@@ -251,14 +265,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 		return err
 	}
 
-	var eventState *aiplatformpb.EventActions
-	// Convert and set the initial state if provided
-	if len(event.Actions.StateDelta) > 0 {
-		sessionState, err := structpb.NewStruct(event.Actions.StateDelta)
-		if err != nil {
-			return fmt.Errorf("failed to convert state to structpb: %w", err)
-		}
-		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
+	eventActions, err := createAiplatformpbEventActions(event)
+	if err != nil {
+		return fmt.Errorf("failed to convert event actions: %w", err)
 	}
 
 	content, err := createAiplatformpbContent(event)
@@ -271,6 +280,16 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 		return fmt.Errorf("error creating metadata: %w", err)
 	}
 
+	// The legacy column-backed fields are still written below as a fallback
+	// for readers that ignore raw_event.
+	var rawEvent *structpb.Struct
+	if eventNeedsRawEvent(event) {
+		rawEvent, err = eventToRawEvent(event)
+		if err != nil {
+			return fmt.Errorf("error creating raw event: %w", err)
+		}
+	}
+
 	_, err = c.rpcClient.AppendEvent(ctx, &aiplatformpb.AppendEventRequest{
 		Name: sessionNameByID(sessionID, c, reasoningEngine),
 		Event: &aiplatformpb.SessionEvent{
@@ -281,10 +300,11 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 			Author:        event.Author,
 			InvocationId:  event.InvocationID,
 			Content:       content,
-			Actions:       eventState,
+			Actions:       eventActions,
 			EventMetadata: metadata,
 			ErrorCode:     event.ErrorCode,
 			ErrorMessage:  event.ErrorMessage,
+			RawEvent:      rawEvent,
 		},
 	})
 	if err != nil {
@@ -292,6 +312,55 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	}
 
 	return nil
+}
+
+// eventNeedsRawEvent reports whether the event carries state that has no
+// dedicated SessionEvent column and would be lost without raw_event.
+// Gating raw_event on this keeps plain events on their legacy wire format,
+// so the recorded replay fixtures stay valid.
+func eventNeedsRawEvent(event *session.Event) bool {
+	return event.Output != nil ||
+		event.NodeInfo != nil ||
+		event.IsolationScope != "" ||
+		event.RequestedInput != nil ||
+		len(event.Routes) > 0
+}
+
+// eventToRawEvent serializes a session.Event into a structpb.Struct for
+// the SessionEvent.raw_event field. Uses Go's JSON encoding; not yet
+// byte-compatible with adk-python's camelCase dump (cross-runtime parity
+// is tracked separately).
+//
+// Integers in the any-typed Output and StateDelta come back as float64
+// (structpb numbers and json.Unmarshal into any are both float64). This
+// matches the SQL backend, so the lossiness is framework-wide; store
+// values needing exact integer fidelity as strings.
+func eventToRawEvent(event *session.Event) (*structpb.Struct, error) {
+	b, err := json.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling event: %w", err)
+	}
+	s := &structpb.Struct{}
+	if err := s.UnmarshalJSON(b); err != nil {
+		return nil, fmt.Errorf("converting event to structpb: %w", err)
+	}
+	return s, nil
+}
+
+// eventFromRawEvent reconstructs a session.Event from a raw_event struct
+// written by eventToRawEvent. Identity fields (ID, Timestamp,
+// InvocationID, Author) are authoritative on the SessionEvent envelope,
+// so callers overwrite them after this returns.
+func eventFromRawEvent(raw *structpb.Struct) (*session.Event, error) {
+	b, err := json.Marshal(raw.AsMap())
+	if err != nil {
+		return nil, fmt.Errorf("marshaling raw event map: %w", err)
+	}
+	event := &session.Event{}
+	if err := json.Unmarshal(b, event); err != nil {
+		return nil, fmt.Errorf("unmarshaling raw event: %w", err)
+	}
+	return event, nil
 }
 
 func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, sessionID string, after time.Time, numRecentEvents int) ([]*session.Event, error) {
@@ -316,20 +385,34 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			return nil, fmt.Errorf("error fetching session events: %w", err)
 		}
 
-		content := aiplatformToGenaiContent(rpcResp)
 		id, err := sessionIdBySessionName(rpcResp.Name)
 		if err != nil {
 			return nil, fmt.Errorf("error fetching session events: %w", err)
 		}
 
+		// Prefer raw_event; fall back to legacy field reconstruction for
+		// events written before raw_event support.
+		if rpcResp.RawEvent != nil {
+			event, err := eventFromRawEvent(rpcResp.RawEvent)
+			if err != nil {
+				return nil, fmt.Errorf("error fetching session events: %w", err)
+			}
+			// Identity fields are authoritative on the envelope.
+			event.ID = id
+			event.Timestamp = rpcResp.Timestamp.AsTime()
+			event.InvocationID = rpcResp.InvocationId
+			event.Author = rpcResp.Author
+			events = append(events, event)
+			continue
+		}
+
+		content := aiplatformToGenaiContent(rpcResp)
 		event := &session.Event{
 			ID:           id,
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions: session.EventActions{
-				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
-			},
+			Actions:      aiplatformToSessionEventActions(rpcResp.Actions),
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -356,6 +439,48 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		return events[len(events)-numRecentEvents:], nil
 	}
 	return events, nil
+}
+
+func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventActions, error) {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+		return nil, nil
+	}
+
+	actions := &aiplatformpb.EventActions{}
+	if len(event.Actions.StateDelta) > 0 {
+		sessionState, err := toStructPB(event.Actions.StateDelta)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
+		}
+		actions.StateDelta = sessionState
+	}
+	if len(event.Actions.ArtifactDelta) > 0 {
+		actions.ArtifactDelta = make(map[string]int32, len(event.Actions.ArtifactDelta))
+		for name, version := range event.Actions.ArtifactDelta {
+			if version > math.MaxInt32 || version < math.MinInt32 {
+				return nil, fmt.Errorf("artifact %q version %d does not fit in int32", name, version)
+			}
+			actions.ArtifactDelta[name] = int32(version)
+		}
+	}
+	return actions, nil
+}
+
+func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session.EventActions {
+	if actions == nil {
+		return session.EventActions{}
+	}
+
+	eventActions := session.EventActions{
+		StateDelta: filterNilValues(actions.StateDelta.AsMap()),
+	}
+	if len(actions.ArtifactDelta) > 0 {
+		eventActions.ArtifactDelta = make(map[string]int64, len(actions.ArtifactDelta))
+		for name, version := range actions.ArtifactDelta {
+			eventActions.ArtifactDelta[name] = int64(version)
+		}
+	}
+	return eventActions
 }
 
 func sessionIdBySessionName(sn string) (string, error) {
@@ -504,7 +629,7 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 				}
 			}
 			if part.FunctionCall != nil {
-				args, err := structpb.NewStruct(part.FunctionCall.Args)
+				args, err := toStructPB(part.FunctionCall.Args)
 				if err != nil {
 					return nil, fmt.Errorf("failed to convert function call to structpb: %w", err)
 				}
@@ -517,7 +642,7 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 				}
 			}
 			if part.FunctionResponse != nil {
-				response, err := structpb.NewStruct(part.FunctionResponse.Response)
+				response, err := toStructPB(part.FunctionResponse.Response)
 				if err != nil {
 					return nil, fmt.Errorf("failed to convert function response to structpb: %w", err)
 				}
@@ -551,7 +676,7 @@ func createAiplatformpbMetadata(event *session.Event) (*aiplatformpb.EventMetada
 		Branch:             event.Branch,
 	}
 	if event.CustomMetadata != nil {
-		customMetadata, err := structpb.NewStruct(event.CustomMetadata)
+		customMetadata, err := toStructPB(event.CustomMetadata)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert event customMetadata to structpb: %w", err)
 		}
@@ -781,6 +906,22 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 	}
 
 	return out
+}
+
+// toStructPB converts an arbitrary Go value into a protobuf Struct.
+// It uses JSON marshaling as an intermediary step to safely serialize
+// the input data before constructing the *structpb.Struct.
+// Returns an error if any part of the JSON round-trip or conversion fails.
+func toStructPB(value any) (*structpb.Struct, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal value: %w", err)
+	}
+	res := &structpb.Struct{}
+	if err := res.UnmarshalJSON(data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON data to structpb: %w", err)
+	}
+	return res, nil
 }
 
 // derefString is a helper to safely dereference string pointers

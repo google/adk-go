@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -23,12 +22,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTool struct {
@@ -41,7 +40,7 @@ func (m *mockTool) IsLongRunning() bool { return false }
 func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
-func (m *mockTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) { return nil, nil }
+func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) { return nil, nil }
 
 type mockLLM struct {
 	model.LLM
@@ -81,7 +80,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -121,7 +120,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -147,7 +146,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -179,7 +178,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -197,7 +196,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 func TestCreateFinalModelResponseEvent(t *testing.T) {
 	// Setup context
 	a := utils.Must(agent.New(agent.Config{Name: "TestAgent"}))
-	invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Agent: a,
 	})
 
@@ -313,7 +312,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	}
 
 	t.Run("RunSuccess", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
@@ -327,7 +326,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
@@ -338,7 +337,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}

@@ -28,10 +28,10 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/server/agentengine/controllers"
-	"google.golang.org/adk/server/agentengine/controllers/method"
-	"google.golang.org/adk/server/agentengine/internal/routers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/agentengine/controllers"
+	"google.golang.org/adk/v2/server/agentengine/controllers/method"
+	"google.golang.org/adk/v2/server/agentengine/internal/routers"
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
@@ -93,6 +93,7 @@ func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []meth
 func listStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewStreamQueryHandler(config, agentEngineID, "async_stream_query", "async_stream"),
+		method.NewStreamingAgentRunWithEventsHandler(config, agentEngineID, "streaming_agent_run_with_events", "async_stream"),
 	}
 }
 
