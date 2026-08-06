@@ -72,9 +72,7 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 }
 
 func configFromOpts(opts ...Option) (*config, error) {
-	cfg := &config{
-		genAICaptureMessageContent: strings.TrimSpace(os.Getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")) == "true",
-	}
+	cfg := &config{}
 
 	for _, opt := range opts {
 		if err := opt.apply(cfg); err != nil {
@@ -91,9 +89,8 @@ func newInternal(cfg *config) (*Providers, error) {
 	// TODO(#479) init meter provider
 
 	return &Providers{
-		TracerProvider:             tp,
-		genAICaptureMessageContent: cfg.genAICaptureMessageContent,
-		LoggerProvider:             lp,
+		TracerProvider: tp,
+		LoggerProvider: lp,
 	}, nil
 }
 

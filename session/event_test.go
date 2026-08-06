@@ -21,15 +21,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // TestNewEventDefaults covers the deprecated NewEvent, which must keep its
 // original signature and use the wall clock and a random UUID.
 func TestNewEventDefaults(t *testing.T) {
 	before := time.Now()
-	ev := session.NewEvent("inv-1")
+	ev := session.NewEvent(t.Context(), "inv-1")
 	after := time.Now()
 
 	if ev.InvocationID != "inv-1" {
@@ -45,10 +45,10 @@ func TestNewEventDefaults(t *testing.T) {
 
 func TestNewEventUsesProviders(t *testing.T) {
 	fixedTime := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
-	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixedTime })
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
 	ctx = platform.WithUUIDProvider(ctx, func() string { return "fixed-event-id" })
 
-	ev := session.NewEventWithContext(ctx, "inv-1")
+	ev := session.NewEvent(ctx, "inv-1")
 
 	if ev.ID != "fixed-event-id" {
 		t.Errorf("ID = %q, want %q", ev.ID, "fixed-event-id")
@@ -67,7 +67,7 @@ func TestNewEventUsesProviders(t *testing.T) {
 func TestNewEventDeterministicReplay(t *testing.T) {
 	newCtx := func() context.Context {
 		var ids int
-		ctx := platform.WithUUIDProvider(context.Background(), func() string {
+		ctx := platform.WithUUIDProvider(t.Context(), func() string {
 			ids++
 			return "event-" + string(rune('0'+ids))
 		})
@@ -80,8 +80,8 @@ func TestNewEventDeterministicReplay(t *testing.T) {
 
 	run := func(ctx context.Context) []*session.Event {
 		return []*session.Event{
-			session.NewEventWithContext(ctx, "inv"),
-			session.NewEventWithContext(ctx, "inv"),
+			session.NewEvent(ctx, "inv"),
+			session.NewEvent(ctx, "inv"),
 		}
 	}
 

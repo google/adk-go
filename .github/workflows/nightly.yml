@@ -7,19 +7,42 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.set-modules.outputs.modules }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - id: set-modules
+        run: |
+          MODULES=$(find . -not -path '*/\.git/*' -name go.mod -exec dirname {} \; | sort | jq -R -s -c 'split("\n")[:-1]')
+          echo "modules=$MODULES" >> $GITHUB_OUTPUT
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     
     - name: Setup
       uses: ./.github/actions/setup
 
+
     - name: Nightly Test
+      working-directory: ${{ matrix.module }}
       run: go test -race -mod=readonly -v -count=1 -shuffle=on ./...
 
   vulncheck:
+    needs: discover
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.modules) }}
     steps:
     - name: Run govulncheck
       # NOTE: pinned to master HEAD instead of a tag. The latest release (v1.0.4)
@@ -28,5 +51,6 @@ jobs:
       # TODO: re-pin to a tagged release once upstream tags one past v1.0.4.
       uses: golang/govulncheck-action@31f7c5463448f83528bd771c2d978d940080c9fd # master, post-v1.0.4 (Node 24)
       with:
-           go-version-file: go.mod
+           go-version-file: ${{ matrix.module }}/go.mod
+           work-dir: ${{ matrix.module }}
            repo-checkout: true
