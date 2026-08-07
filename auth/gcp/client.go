@@ -78,7 +78,9 @@ type Client struct {
 // the corresponding default.
 type Config struct {
 	// HTTPClient calls the credential services. If nil, [NewClient] builds one
-	// from Application Default Credentials (cloud-platform scope).
+	// from Application Default Credentials (cloud-platform scope). If set, it is
+	// used verbatim and ADC is not applied, so it must carry its own credentials
+	// and should refuse redirects for the reason [NewClient] describes.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
 	AgentIdentityEndpoint string
@@ -93,6 +95,15 @@ type Config struct {
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
 // Credentials (cloud-platform scope) to authenticate calls to the services.
+//
+// ctx is retained by the token source backing the returned client and is used
+// for every later refresh, not just for discovery: a request-scoped ctx yields
+// a Client that works until the first token expiry and then fails every
+// retrieval with "context canceled". Pass a context that outlives the Client.
+//
+// The ADC-backed client refuses redirects. A credentials:retrieve call has no
+// reason to redirect, and following one would re-sign the request and hand the
+// cloud-platform token to the redirect target.
 func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	if cfg == nil {
 		cfg = &Config{}
@@ -110,7 +121,7 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	if cfg.ConnectorEndpoint != "" {
 		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
 	}
-	if cfg.PollTimeout != 0 {
+	if cfg.PollTimeout > 0 {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
@@ -118,7 +129,14 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
 		}
-		c.httpClient = oauth2.NewClient(ctx, creds.TokenSource)
+		hc := oauth2.NewClient(ctx, creds.TokenSource)
+		// oauth2.Transport re-signs every hop, below the layer where net/http
+		// strips credentials on a cross-host redirect, so a redirect would leak
+		// the token to whatever host it names.
+		hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		c.httpClient = hc
 	}
 	return c, nil
 }
@@ -241,6 +259,11 @@ func mapCredential(header, token string) (auth.Credential, error) {
 	}
 	// Non-bearer header -> header-based API key. Matches adk-python: key by the
 	// full returned header, and mirror the token into X-Goog-Api-Key too.
+	// Rejecting an unusable name here keeps the failure at the cause: net/http
+	// would otherwise accept the credential and abort the eventual request.
+	if !validHeaderFieldName(header) {
+		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", header)
+	}
 	key := auth.APIKeyCredential{Name: header, Value: token}
 	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
 }
@@ -272,15 +295,35 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 		return fmt.Errorf("gcp: read response: %w", err)
 	}
 	if len(data) > maxBody {
-		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
+		return fmt.Errorf("gcp: credentials service returned status %d with a response exceeding %d bytes", resp.StatusCode, maxBody)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gcp: credentials service returned status %d: %s", resp.StatusCode, truncateForError(strings.TrimSpace(string(data))))
+		// %q, not %s: the body is service-controlled and can carry control bytes
+		// that would otherwise forge lines in an operator's log.
+		return fmt.Errorf("gcp: credentials service returned status %d: %q", resp.StatusCode, truncateForError(strings.TrimSpace(string(data))))
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("gcp: decode response: %w", err)
 	}
 	return nil
+}
+
+// validHeaderFieldName reports whether s is an RFC 9110 field name (a token).
+// Hand-rolled because the module depends on golang.org/x/net only indirectly.
+func validHeaderFieldName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
@@ -291,10 +334,15 @@ func truncateForError(s string) string {
 		return s
 	}
 	// Back up to a rune boundary so a multi-byte rune straddling the cap isn't
-	// sliced into a mangled partial rune.
+	// sliced into a mangled partial rune. Bounded: the body need not be UTF-8 at
+	// all, and an unbounded scan over continuation bytes would walk to 0 and
+	// discard every byte of diagnostic context.
 	cut := max
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
+	for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); i++ {
 		cut--
+	}
+	if !utf8.RuneStart(s[cut]) {
+		cut = max
 	}
 	return s[:cut] + "..."
 }
