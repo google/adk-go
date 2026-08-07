@@ -301,6 +301,10 @@ type Config struct {
 	DisallowTransferToPeers bool
 
 	// Whether to include contents (conversation history) in the model request.
+	//
+	// Left unset, an agent placed as a single_turn workflow node sees only the
+	// current turn. Setting IncludeContentsDefault explicitly keeps the history
+	// even there.
 	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.

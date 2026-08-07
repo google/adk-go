@@ -48,16 +48,20 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// Two questions, deliberately answered from different sources.
 		//
 		// Whether to hide history follows the placement alone — a mode this
-		// invocation bound to THIS agent. A single_turn agent that merely
-		// declares the mode and is then reached by transfer_to_agent keeps
-		// the conversation, because no placement put it where history has
-		// to go.
+		// invocation bound to THIS agent. An agent that merely declares
+		// single_turn and is then reached by transfer_to_agent keeps the
+		// conversation, because no placement put it where history has to go.
+		// The placement also loses to an explicit IncludeContents: asking
+		// for history beats being placed somewhere that hides it, as in
+		// adk-python, where _llm_agent_wrapper.py gates the same override on
+		// include_contents being absent from model_fields_set.
 		//
 		// How to shape the turn also honours the declaration, since the
 		// single-turn nudge describes the agent rather than its placement.
 		boundMode, bound := BoundMode(ctx, name)
+		placementHidesHistory := bound && boundMode == ModeSingleTurn && state.IncludeContents == ""
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" || (bound && boundMode == ModeSingleTurn) {
+		if state.IncludeContents == "none" || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		isSingleTurn := ModeFor(ctx, name, state.Mode) == ModeSingleTurn

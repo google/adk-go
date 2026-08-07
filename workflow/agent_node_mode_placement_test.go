@@ -253,3 +253,52 @@ func TestAgentNode_DeclaredSingleTurn_DropsHistory(t *testing.T) {
 		}
 	}
 }
+
+// Asking for history explicitly beats the node's single_turn placement, the
+// way adk-python only forces include_contents="none" when the caller left the
+// field unset.
+func TestAgentNode_ExplicitIncludeContents_BeatsPlacement(t *testing.T) {
+	t.Parallel()
+
+	llm := &capturingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:            "worker",
+		Model:           llm,
+		IncludeContents: llmagent.IncludeContentsDefault,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+
+	prior := &session.Event{
+		Author:      "user",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+	}
+	for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
+		if err != nil {
+			t.Fatalf("workflow.Run: %v", err)
+		}
+	}
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	var sawHistory bool
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				sawHistory = true
+			}
+		}
+	}
+	if !sawHistory {
+		t.Errorf("explicit IncludeContentsDefault was overridden by the placement; contents = %v", llm.got.Contents)
+	}
+}
