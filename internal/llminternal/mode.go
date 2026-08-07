@@ -16,12 +16,22 @@ package llminternal
 
 import "context"
 
-// An agent that declares no Mode takes one from where it is placed: chat
-// as a runner root, single_turn as a workflow node. Placement belongs to
-// the invocation and one agent instance serves many concurrent
-// invocations, so both the placement default and the mode it resolves to
-// travel on the context. State.Mode stays the agent's own declaration and
-// is never written to after construction.
+// Mode resolution.
+//
+// An agent that declares no Mode takes one from where it is placed: chat at a
+// runner root, single_turn at a workflow node. State.Mode is the agent's own
+// immutable declaration, so the resolved mode lives on the invocation instead —
+// one agent instance serves many concurrent invocations, and the same instance
+// may sit at two different placements.
+//
+// Readers that only test for task mode (basic_processor, outputschema_processor)
+// deliberately stay on the declaration: no placement ever defaults to task, so
+// there is nothing for them to resolve.
+//
+// The binding names the agent it describes. A bare context value would be
+// inherited by every nested activation and would then govern an agent it was
+// never resolved for: a peer reached by transfer, or a child that declares its
+// own mode. Callers therefore bind per agent and read per agent.
 
 // ResolveMode returns declared when set, else byPlacement.
 func ResolveMode(declared, byPlacement Mode) Mode {
@@ -31,38 +41,42 @@ func ResolveMode(declared, byPlacement Mode) Mode {
 	return declared
 }
 
-type (
-	placementModeKey struct{}
-	resolvedModeKey  struct{}
-)
+type boundModeKey struct{}
 
-// WithPlacementMode returns ctx carrying the mode agents run under here
-// unless they declare otherwise. Set by whatever places an agent: the
-// runner for a root agent, an AgentNode for a graph node.
-func WithPlacementMode(ctx context.Context, mode Mode) context.Context {
-	return context.WithValue(ctx, placementModeKey{}, mode)
+type boundMode struct {
+	agent string
+	mode  Mode
 }
 
-// PlacementMode returns the default imposed by ctx's placement, or
-// fallback when it imposes none.
-func PlacementMode(ctx context.Context, fallback Mode) Mode {
-	if m, ok := ctx.Value(placementModeKey{}).(Mode); ok && m != ModeUnset {
+// WithBoundMode returns ctx carrying the mode the named agent runs under for
+// this invocation. Set by whatever places the agent: the runner for a root
+// agent, an AgentNode for a graph node.
+func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Context {
+	if agentName == "" || mode == ModeUnset {
+		return ctx
+	}
+	return context.WithValue(ctx, boundModeKey{}, boundMode{agent: agentName, mode: mode})
+}
+
+// BoundMode reports the mode this invocation bound to agentName, and whether it
+// bound one at all. A binding made for a different agent does not count.
+//
+// Use this only to ask "did a placement put THIS agent in that mode" — a
+// declared mode is deliberately not consulted. Callers wanting the mode an
+// agent actually runs under want [ModeFor].
+func BoundMode(ctx context.Context, agentName string) (Mode, bool) {
+	b, ok := ctx.Value(boundModeKey{}).(boundMode)
+	if !ok || b.agent == "" || b.agent != agentName {
+		return ModeUnset, false
+	}
+	return b.mode, true
+}
+
+// ModeFor returns the mode agentName runs under: the mode this invocation bound
+// to it, else its own declaration.
+func ModeFor(ctx context.Context, agentName string, declared Mode) Mode {
+	if m, ok := BoundMode(ctx, agentName); ok {
 		return m
 	}
-	return fallback
-}
-
-// WithResolvedMode returns ctx carrying the mode now in effect, so the
-// request processors downstream agree with the agent runner on it.
-func WithResolvedMode(ctx context.Context, mode Mode) context.Context {
-	return context.WithValue(ctx, resolvedModeKey{}, mode)
-}
-
-// ResolvedMode returns the mode in effect on ctx, or fallback when the
-// agent runs outside a path that resolves one.
-func ResolvedMode(ctx context.Context, fallback Mode) Mode {
-	if m, ok := ctx.Value(resolvedModeKey{}).(Mode); ok && m != ModeUnset {
-		return m
-	}
-	return fallback
+	return declared
 }

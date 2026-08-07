@@ -39,10 +39,11 @@ import (
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
 // Per-mode behaviour:
 //
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
-//     agent with a single user-content event derived from nodeInput,
-//     drives one Agent.Run, post-processes the model reply into the
-//     terminal Output, then returns.
+//   - single_turn: the wrapper binds the mode to the agent for this
+//     invocation, so the contents processor scopes history to the
+//     current turn. It seeds the agent with a single user-content event
+//     derived from nodeInput, drives one Agent.Run, post-processes the
+//     model reply into the terminal Output, then returns.
 //   - task: the wrapper drives Agent.Run and watches for the
 //     finish_task FunctionCall; once the matching FinishTaskTool
 //     FunctionResponse signals success, the wrapper promotes the FC
@@ -70,9 +71,12 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 		state := llminternal.Reveal(llmA)
 
+		// A placement binds the mode it resolved for this agent. Without one
+		// the agent is a plain conversational callee (a transfer target, say),
+		// which is what an undeclared mode means everywhere else.
 		mode := llminternal.ResolveMode(
-			state.Mode,
-			llminternal.PlacementMode(ctx, llminternal.ModeSingleTurn),
+			llminternal.ModeFor(ctx, a.Name(), state.Mode),
+			llminternal.ModeChat,
 		)
 		switch mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
@@ -81,9 +85,10 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				a.Name(), mode))
 			return
 		}
-		// Publish the resolved mode so the request processors downstream
-		// see this placement's mode, not the agent's declaration.
-		ctx = ctx.WithAgentContext(llminternal.WithResolvedMode(ctx, mode))
+		// Re-bind under this agent's own name so the request processors
+		// downstream agree with the branch taken here, and so a mode resolved
+		// for this agent never governs a peer or child.
+		ctx = ctx.WithAgentContext(llminternal.WithBoundMode(ctx, a.Name(), mode))
 
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
@@ -138,7 +143,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if !ok || llmA == nil {
 		return nil
 	}
-	if llminternal.ResolvedMode(ctx, llminternal.Reveal(llmA).Mode) != llminternal.ModeSingleTurn {
+	if ctx == nil {
+		return nil
+	}
+	if llminternal.ModeFor(ctx, a.Name(), llminternal.Reveal(llmA).Mode) != llminternal.ModeSingleTurn {
 		return nil
 	}
 	content := nodeInputToContent(nodeInput)

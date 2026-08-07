@@ -90,8 +90,12 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 
 		// A graph node is a one-shot placement: an agent that declares no
-		// mode runs single_turn here.
-		ctx = ctx.WithAgentContext(llminternal.WithPlacementMode(ctx, llminternal.ModeSingleTurn))
+		// mode runs single_turn here. Bound under the agent's own name so it
+		// cannot govern a peer this agent later transfers to.
+		if llmA, ok := n.agent.(llminternal.Agent); ok {
+			mode := llminternal.ResolveMode(llminternal.Reveal(llmA).Mode, llminternal.ModeSingleTurn)
+			ctx = ctx.WithAgentContext(llminternal.WithBoundMode(ctx, n.agent.Name(), mode))
+		}
 
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the

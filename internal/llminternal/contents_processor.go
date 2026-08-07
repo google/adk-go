@@ -44,13 +44,24 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // In python, no error is yielded.
 		}
 		state := llmAgent.internal()
-		isSingleTurn := ResolvedMode(ctx, state.Mode) == ModeSingleTurn
+		name := ctx.Agent().Name()
+		// Two questions, deliberately answered from different sources.
+		//
+		// Whether to hide history follows the placement alone — a mode this
+		// invocation bound to THIS agent. A single_turn agent that merely
+		// declares the mode and is then reached by transfer_to_agent keeps
+		// the conversation, because no placement put it where history has
+		// to go.
+		//
+		// How to shape the turn also honours the declaration, since the
+		// single-turn nudge describes the agent rather than its placement.
+		boundMode, bound := BoundMode(ctx, name)
 		fn := buildContentsDefault // "" or "default".
-		// A single_turn agent produces its answer in one exchange, so it
-		// gets the current turn only, never the conversation history.
-		if state.IncludeContents == "none" || isSingleTurn {
+		if state.IncludeContents == "none" || (bound && boundMode == ModeSingleTurn) {
 			fn = buildContentsCurrentTurnContextOnly
 		}
+		isSingleTurn := ModeFor(ctx, name, state.Mode) == ModeSingleTurn
+
 		// A compaction record instructs prompt assembly to drop a span of
 		// history and substitute content in its place. EventActions is
 		// writable by tool code, and the REST create-session body maps it

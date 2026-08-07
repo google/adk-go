@@ -28,9 +28,10 @@ import (
 )
 
 // An agent that declares no mode gets one from its placement, and the
-// contents processor must honour that resolved mode rather than the
-// agent's blank declaration: a single_turn placement sees the current
-// turn only, a chat placement sees the whole conversation.
+// contents processor must honour the mode bound to THAT agent rather than
+// the agent's blank declaration: a single_turn placement sees the current
+// turn only, a chat placement sees the whole conversation. A binding made
+// for a different agent must be ignored.
 func TestContentsRequestProcessor_HonoursResolvedModeOverDeclaration(t *testing.T) {
 	const agentName = "worker"
 
@@ -66,7 +67,7 @@ func TestContentsRequestProcessor_HonoursResolvedModeOverDeclaration(t *testing.
 			}))
 
 			ctx := icontext.NewInvocationContext(
-				llminternal.WithResolvedMode(t.Context(), tc.resolved),
+				llminternal.WithBoundMode(t.Context(), agentName, tc.resolved),
 				icontext.InvocationContextParams{
 					Agent:   testAgent,
 					Session: &fakeSession{events: history},
@@ -92,5 +93,76 @@ func TestContentsRequestProcessor_HonoursResolvedModeOverDeclaration(t *testing.
 				t.Errorf("history present = %v, want %v (contents: %v)", gotHistory, tc.wantHistory, req.Contents)
 			}
 		})
+	}
+}
+
+// A mode bound for one agent must not reach another: the second agent falls
+// back to its own declaration.
+func TestContentsRequestProcessor_BoundModeIsScopedToItsAgent(t *testing.T) {
+	history := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older turn", "user")}},
+		{Author: "other", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "other", Model: &testModel{}}))
+
+	// single_turn was resolved for "worker", not for the agent running here.
+	ctx := icontext.NewInvocationContext(
+		llminternal.WithBoundMode(t.Context(), "worker", llminternal.ModeSingleTurn),
+		icontext.InvocationContextParams{Agent: testAgent, Session: &fakeSession{events: history}},
+	)
+
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("ContentsRequestProcessor: %v", err)
+		}
+	}
+	var sawHistory bool
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p != nil && p.Text == "older turn" {
+				sawHistory = true
+			}
+		}
+	}
+	if !sawHistory {
+		t.Errorf("a mode bound for another agent suppressed this agent's history; contents = %v", req.Contents)
+	}
+}
+
+// Declaring single_turn shapes the turn, but it does not by itself hide the
+// conversation: only a placement that seeded the agent with one synthetic turn
+// does that. A single_turn agent run outside such a placement keeps its history.
+func TestContentsRequestProcessor_DeclaredSingleTurnWithoutPlacementKeepsHistory(t *testing.T) {
+	history := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older turn", "user")}},
+		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  "worker",
+		Model: &testModel{},
+		Mode:  llmagent.ModeSingleTurn,
+	}))
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   testAgent,
+		Session: &fakeSession{events: history},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("ContentsRequestProcessor: %v", err)
+		}
+	}
+	var sawHistory bool
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p != nil && p.Text == "older turn" {
+				sawHistory = true
+			}
+		}
+	}
+	if !sawHistory {
+		t.Errorf("declared single_turn outside a placement lost its history; contents = %v", req.Contents)
 	}
 }

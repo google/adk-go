@@ -582,7 +582,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), rootMode))
 				return
 			}
-			ctx = llminternal.WithPlacementMode(ctx, llminternal.ModeChat)
+			ctx = llminternal.WithBoundMode(ctx, r.rootAgent.Name(), rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {

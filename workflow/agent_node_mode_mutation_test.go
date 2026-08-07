@@ -120,9 +120,15 @@ func TestLlmAgent_SubAgentModeResolution_IsConstructionOrderIndependent(t *testi
 		t.Fatalf("llmagent.New(coordinator): %v", err)
 	}
 
+	// An undeclared sub-agent is a chat peer in both orders, reached by
+	// transfer, so the coordinator installs no delegation tool for it.
+	var want []string
 	gotA, gotB := coordinatorToolNames(t, coordA), coordinatorToolNames(t, coordB)
 	if !slices.Equal(gotA, gotB) {
 		t.Errorf("coordinator tools depend on construction order:\n  coordinator-first = %v\n  node-first        = %v", gotA, gotB)
+	}
+	if !slices.Equal(gotA, want) {
+		t.Errorf("coordinator tools = %v, want %v", gotA, want)
 	}
 }
 
