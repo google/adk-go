@@ -1,0 +1,846 @@
+# ADK for Go: Documentation Summary
+# Valid for ADK Go version: v0.1.0
+
+This document provides a detailed summary of the Go Agent Development Kit (ADK), complete with code samples for each major concept.
+
+## 1. Core Concepts: Building Your First Agent
+
+### 1.1. The `LlmAgent`
+
+The `LlmAgent` is the fundamental building block for creating agents powered by Large Language Models. You configure its identity, instructions, and capabilities upon creation.
+
+**Example: Creating a basic `LlmAgent`**
+This agent is configured with a name, a model, a description, and a system instruction that defines its persona and task.
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
+)
+
+func createBasicAgent(model model.LLM) (agent.Agent, error) {
+	a, err := llmagent.New(llmagent.Config{
+		Name:        "capital_agent",
+		Model:       model,
+		Description: "Answers questions about the capital city of a country.",
+		Instruction: `You are an agent that provides the capital city of a country.
+When a user asks for the capital:
+1. Identify the country name.
+2. Use the 'get_capital_city' tool to find the capital.
+3. Respond clearly to the user.`,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+```
+
+### 1.2. Tools
+
+Tools are functions that an `LlmAgent` can call to interact with external systems, perform calculations, or access data.
+
+#### 1.2.1. Function Tools
+
+You can create a tool directly from a Go function. The function signature must match the schema you define, with `tool.Context` as the first argument.
+
+**Signature:** `func(ctx tool.Context, args MyArgsStruct) MyResultStruct`
+
+**Example: A tool to get a stock price**
+This example defines `getStockPriceArgs` and `getStockPriceResults` structs for typed inputs and outputs. The `getStockPrice` function implements the tool's logic.
+
+```go
+import (
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+)
+
+// Input schema for the tool
+type getStockPriceArgs struct {
+	Symbol string `json:"symbol" jsonschema:"The stock ticker symbol, e.g., GOOG"`
+}
+
+// Output schema for the tool
+type getStockPriceResults struct {
+	Symbol string  `json:"symbol"`
+	Price  float64 `json:"price,omitempty"`
+	Error  string  `json:"error,omitempty"`
+}
+
+// The function implementing the tool's logic.
+func getStockPrice(ctx tool.Context, input getStockPriceArgs) getStockPriceResults {
+	// ... implementation ...
+	return getStockPriceResults{Symbol: input.Symbol, Price: 300.6}
+}
+
+// Creating the tool from the function.
+func createFunctionTool() (tool.Tool, error) {
+	t, err := functiontool.New(
+		functiontool.Config{
+			Name:        "get_stock_price",
+			Description: "Retrieves the current stock price for a given symbol.",
+		},
+		getStockPrice,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+```
+
+#### 1.2.2. Built-in Tools
+
+The ADK provides pre-built tools for common tasks, such as `GoogleSearch`.
+
+**Example: An agent with Google Search capability**
+
+```go
+import (
+	"context"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/genai"
+)
+
+func createSearchAgent(ctx context.Context) (agent.Agent, error) {
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
+	if err != nil {
+		return nil, err
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:        "basic_search_agent",
+		Model:       model,
+		Description: "Agent to answer questions using Google Search.",
+		Tools:       []tool.Tool{geminitool.GoogleSearch{}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+```
+
+## 2. Multi-Agent Systems
+
+Complex tasks can be broken down by composing multiple agents. `WorkflowAgents` orchestrate the execution flow of their `SubAgents`.
+
+### 2.1. `SequentialAgent`
+
+Executes a list of sub-agents in a fixed order. State changes made by one agent are available to the next.
+
+**Example: A code generation pipeline**
+This agent runs a writer, then a reviewer, then a refactorer in sequence.
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/sequentialagent"
+)
+
+func createCodePipeline(codeWriter, codeReviewer, codeRefactorer agent.Agent) (agent.Agent, error) {
+	a, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "CodePipelineAgent",
+			SubAgents: []agent.Agent{codeWriter, codeReviewer, codeRefactorer},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+```
+
+### 2.2. `ParallelAgent`
+
+Executes its sub-agents concurrently, which is useful for independent, time-consuming tasks.
+
+**Example: Parallel research**
+This agent runs three different research agents at the same time.
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/parallelagent"
+)
+
+func createParallelResearchers(researcher1, researcher2, researcher3 agent.Agent) (agent.Agent, error) {
+	a, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "ParallelWebResearchAgent",
+			SubAgents: []agent.Agent{researcher1, researcher2, researcher3},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+```
+
+### 2.3. `LoopAgent`
+
+Repeatedly executes its sub-agents for a set number of iterations or until a `StopCondition` is met.
+
+**Example: An iterative document improvement loop**
+This loop runs a critic and a writer agent up to 5 times. A tool (`exitLoop`) is used to escalate and break the loop early if the document is satisfactory.
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/loopagent"
+	"google.golang.org/adk/tool/exitlooptool"
+)
+
+func createRefinementLoop(criticAgent, refinerAgent agent.Agent) (agent.Agent, error) {
+	a, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "RefinementLoop",
+			SubAgents: []agent.Agent{criticAgent, refinerAgent},
+			Tools:     []tool.Tool{exitlooptool.New()},
+		},
+		MaxIterations: 5,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+```
+
+### 2.4. `AgentTool`: An Agent as a Tool
+
+You can wrap any agent, making it callable as a tool by another agent. This is a powerful pattern for hierarchical task delegation.
+
+**Example: A `MainAgent` that uses a `SummarizerAgent` as a tool**
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/agenttool"
+)
+
+// Assume 'summarizerAgent' is a pre-existing agent.Agent instance.
+// Assume 'mainAgentModel' is a pre-existing model.LLM instance.
+var summarizerAgent agent.Agent
+var mainAgentModel model.LLM
+
+// 1. Wrap the existing agent in an AgentTool.
+summarizeTool := agenttool.New(summarizerAgent, nil)
+
+// 2. Provide the new tool to another agent.
+mainAgent, err := llmagent.New(llmagent.Config{
+	Name:  "MainAgent",
+	Model: mainAgentModel,
+	Tools: []tool.Tool{summarizeTool},
+})
+if err != nil {
+	// ... handle error ...
+}
+```
+
+## 3. Advanced Concepts
+
+### 3.1. Custom Agents
+
+For ultimate control over orchestration, you can implement the `agent.Agent` interface directly by providing a `Run` function.
+
+**Signature (`Run` method):** `Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]`
+
+**Example: A custom story-writing workflow**
+The `StoryFlowAgent` struct holds its sub-agents, and its `Run` method defines the exact execution logic, including conditional steps.
+
+```go
+import (
+	"iter"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
+)
+
+type StoryFlowAgent struct {
+	storyGenerator     agent.Agent
+	revisionLoopAgent  agent.Agent
+	postProcessorAgent agent.Agent
+}
+
+// Run defines the custom execution logic.
+func (s *StoryFlowAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// Stage 1: Initial Story Generation
+		for event, err := range s.storyGenerator.Run(ctx) {
+			if err != nil {
+				if !yield(nil, err) {
+					return
+				}
+				return
+			}
+			if !yield(event, nil) {
+				return
+			}
+		}
+
+		// Stage 2: Critic-Reviser Loop
+		for event, err := range s.revisionLoopAgent.Run(ctx) {
+			if err != nil {
+				if !yield(nil, err) {
+					return
+				}
+				return
+			}
+			if !yield(event, nil) {
+				return
+			}
+		}
+
+		// Stage 3: Conditional Regeneration based on state
+		toneResult, err := ctx.Session().State().Get("tone_check_result")
+		if err != nil {
+			if !yield(nil, err) {
+				return
+			}
+			return
+		}
+		if tone, ok := toneResult.(string); ok && tone == "negative" {
+			for event, err := range s.storyGenerator.Run(ctx) {
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					return
+				}
+				if !yield(event, nil) {
+					return
+				}
+			}
+		}
+	}
+}
+```
+
+### 3.2. Context and State Management
+
+In the ADK, "context" is the bundle of information available to agents and tools during an operation. It's essential for maintaining state, passing data, and accessing services like Artifact Storage and Memory.
+
+One powerful feature of context is the ability to use **Instruction Templates**. By including `{key}` placeholders in an agent's `Instruction` string, the ADK will automatically inject the corresponding value from the session state. For example, if the state contains `{"username": "Alex"}`, an instruction like `"Summarize this for {username}"` will become `"Summarize this for Alex"` at runtime.
+
+The ADK provides the following specialized context objects for different situations:
+
+#### Types of Context
+
+1.  **`agent.InvocationContext`**
+    *   **Where Used:** Received as the `ctx` argument in an agent's `Run` method.
+    *   **Purpose:** Provides access to the entire state of the current invocation, including the session, agent instance, and services.
+    *   **Example:**
+        ```go
+        import (
+        	"fmt"
+        	"iter"
+        	"google.golang.org/adk/agent"
+        	"google.golang.org/adk/session"
+        )
+
+        type MyAgent struct {}
+
+        func (a *MyAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+        	return func(yield func(*session.Event, error) bool) {
+        		agentName := ctx.Agent().Name()
+        		sessionID := ctx.Session().ID()
+        		fmt.Printf("Agent %s running in session %s\n", agentName, sessionID)
+        		if !yield(&session.Event{Author: agentName}, nil) {
+        			return
+        		}
+        	}
+        }
+        ```
+
+2.  **`agent.ReadonlyContext`**
+*   **Where Used:** In scenarios where only read access is needed, like `InstructionProvider` functions.
+*   **Purpose:** Offers a safe, read-only view of `invocation_id`, `agent_name`, and `state`.
+*   **Example:**
+    ```go
+    import (
+    	"fmt"
+    	"google.golang.org/adk/agent"
+    )
+
+    func myInstructionProvider(ctx agent.ReadonlyContext) (string, error) {
+    	userTier, err := ctx.ReadonlyState().Get("user_tier")
+    	if err != nil {
+    		return "", err // Handle error
+    	}
+    	if userTier == nil {
+    		userTier = "standard" // Default value
+    	}
+    	return fmt.Sprintf("Process the request for a %v user.", userTier), nil
+    }
+    ```
+
+3.  **`agent.CallbackContext`**
+    *   **Where Used:** Passed to agent and model lifecycle callbacks (e.g., `BeforeModelCallback`).
+    *   **Purpose:** Allows reading and writing to state and interacting with artifacts within callbacks.
+    *   **Example:**
+        ```go
+        import (
+        	"fmt"
+        	"google.golang.org/adk/agent"
+        	"google.golang.org/adk/model"
+        )
+
+        func myBeforeModelCb(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+        	callCount, err := ctx.State().Get("model_calls")
+        	if err != nil {
+        		return nil, err
+        	}
+        	newCount := callCount.(int) + 1
+        	ctx.State().Set("model_calls", newCount) // Write to state
+        	fmt.Printf("Preparing model call #%d\n", newCount)
+        	return nil, nil // Allow model call to proceed
+        }
+        ```
+
+4.  **`tool.Context`**
+    *   **Where Used:** Passed to `FunctionTool` implementations and tool execution callbacks.
+    *   **Purpose:** Provides everything `CallbackContext` does, plus methods for memory search, artifact listing, and authentication.
+    *   **Example:**
+        ```go
+        import (
+        	"fmt"
+        	"google.golang.org/adk/tool"
+        )
+
+        func searchExternalAPI(tc tool.Context, input searchExternalAPIArgs) searchExternalAPIResults {
+        	apiKey, err := tc.State().Get("api_key")
+        	if err != nil || apiKey == "" {
+        		return searchExternalAPIResults{Status: "Auth Required"}
+        	}
+        	fmt.Printf("Tool executing with API key. Invocation: %s\n", tc.InvocationID())
+        	// ... logic to search memory or list artifacts ...
+        	// relevantDocs, _ := tc.SearchMemory(tc, "query")
+        	// availableFiles, _ := tc.Artifacts().List()
+        	return searchExternalAPIResults{Result: "Data fetched."}
+        }
+        ```
+
+#### Example: Managing State within a Tool
+The `tool.Context` provides `Get()` and `Set()` methods to read from and write to the session state, allowing tools to pass data to each other or remember user preferences. This tool reads a `preferences` map from the state, updates it, and writes it back.
+
+```go
+import (
+	"google.golang.org/adk/tool"
+)
+
+type updateUserPreferenceArgs struct {
+	Preference string `json:"preference" jsonschema:"The name of the preference to set."`
+	Value      string `json:"value" jsonschema:"The value to set for the preference."`
+}
+
+type updateUserPreferenceResult struct {
+	Status            string `json:"status"`
+	UpdatedPreference string `json:"updated_preference"`
+}
+
+func updateUserPreference(ctx tool.Context, args updateUserPreferenceArgs) updateUserPreferenceResult {
+	userPrefsKey := "user:preferences"
+	val, err := ctx.State().Get(userPrefsKey) // Read from state
+	if err != nil {
+		return updateUserPreferenceResult{Status: "error", UpdatedPreference: args.Preference, Message: err.Error()}
+	}
+
+	preferencesMap, _ := val.(map[string]any)
+	if preferencesMap == nil {
+		preferencesMap = make(map[string]any)
+	}
+
+	preferencesMap[args.Preference] = args.Value
+
+	if err := ctx.State().Set(userPrefsKey, preferencesMap); err != nil {
+		return updateUserPreferenceResult{Status: "error", UpdatedPreference: args.Preference, Message: err.Error()}
+	}
+
+	return updateUserPreferenceResult{Status: "success", UpdatedPreference: args.Preference}
+}
+```
+
+### 3.3. Callbacks
+
+Callbacks are functions that hook into the agent lifecycle, allowing you to inspect, modify, or even short-circuit operations. Each callback type has a specific signature and purpose.
+
+#### `BeforeAgentCallback`
+Runs before an agent's `Run` method is executed. It can be used to log entry into an agent or to skip the agent's execution entirely by returning a `*genai.Content` object.
+
+**Signature:** `func(ctx agent.CallbackContext) (*genai.Content, error)`
+
+**Example: Skipping an agent based on session state.**
+```go
+func onBeforeAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+	skip, err := ctx.State().Get("skip_llm_agent")
+	if err != nil {
+		return nil, err
+	}
+	if skip == true {
+		// Returning a non-nil content object skips the agent.
+		return genai.NewContentFromText(
+			fmt.Sprintf("Agent %s skipped by before_agent_callback.", ctx.AgentName()),
+			genai.RoleModel,
+		), nil
+	}
+	// Returning nil allows the agent to run normally.
+	return nil, nil
+}
+```
+
+#### `AfterAgentCallback`
+Runs after an agent's `Run` method has completed. It can inspect the final state or override the agent's generated output by returning a new `*genai.Content` object.
+
+**Signature:** `func(ctx agent.CallbackContext) (*genai.Content, error)`
+
+**Example: Appending a note to the agent's output.**
+```go
+func onAfterAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+	addNote, err := ctx.State().Get("add_concluding_note")
+	if err != nil {
+		return nil, err
+	}
+	if addNote == true {
+		// Returning a non-nil content object replaces the agent's original output.
+		return genai.NewContentFromText(
+			"Concluding note added by after_agent_callback.",
+			genai.RoleModel,
+		), nil
+	}
+	// Returning nil uses the agent's original output.
+	return nil, nil
+}
+```
+
+#### `BeforeModelCallback`
+Runs just before the LLM is called. It can modify the request (`*model.LLMRequest`) or skip the LLM call entirely by returning a `*model.LLMResponse`.
+
+**Signature:** `func(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error)`
+
+**Example: A "guardrail" to block forbidden topics.**
+```go
+func onBeforeModelGuardrail(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+	for _, content := range req.Contents {
+		for _, part := range content.Parts {
+			if strings.Contains(part.Text, "finance") {
+				// By returning a non-nil response, we override the LLM call.
+				return &model.LLMResponse{
+					Content: genai.NewContentFromText(
+						"I'm sorry, but I cannot discuss financial topics.",
+						genai.RoleModel,
+					),
+				}, nil
+			}
+		}
+	}
+	// Returning nil allows the default LLM call to proceed.
+	return nil, nil
+}
+```
+
+#### `AfterModelCallback`
+Runs immediately after the LLM call returns a response. It can be used to log the raw response, handle errors, or modify the `*model.LLMResponse` before the agent processes it further.
+
+**Signature:** `func(ctx agent.CallbackContext, resp *model.LLMResponse, respErr error) (*model.LLMResponse, error)`
+
+**Example: Modifying the LLM's text response.**
+```go
+func onAfterModel(ctx agent.CallbackContext, resp *model.LLMResponse, respErr error) (*model.LLMResponse, error) {
+	if respErr != nil || resp == nil {
+		return nil, respErr // Pass through errors
+	}
+	// Modify the response text
+	originalText := resp.Content.Parts[0].Text
+	modifiedText := strings.ReplaceAll(originalText, "joke", "funny story")
+	resp.Content.Parts[0].Text = modifiedText
+	return resp, nil
+}
+```
+
+Here's how `onAfterModel` can be passed to an agent:
+
+```go
+	// Create an LLM agent and pass the onAfterModel callback
+	myAgent, err := llmagent.New(llmagent.Config{
+		Name:                "my_llm_agent",
+		Description:         "An agent that tells funny stories instead of jokes.",
+		Model:               mockModel, // Replace with your actual model
+		Instruction:         "You are a helpful assistant.",
+		AfterModelCallbacks: []llmagent.AfterModelCallback{onAfterModel}, // Pass the callback here
+	})
+	if err != nil {
+		log.Fatalf("Failed to create LLM agent: %v", err)
+	}
+```
+
+#### `BeforeToolCallback`
+Runs before a tool is executed. It can modify the arguments passed to the tool by returning a new `map[string]any`. If the returned map is not nil, it replaces the original arguments.
+
+**Signature:** `func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error)`
+
+**Example: Intercepting and changing a tool's arguments.**
+```go
+func onBeforeTool(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	if t.Name() == "getCapitalCity" {
+		if country, ok := args["country"].(string); ok && strings.ToLower(country) == "canada" {
+			// Modify the arguments before the tool is called.
+			args["country"] = "France"
+			return args, nil
+		}
+	}
+	// Returning nil proceeds with the original arguments.
+	return nil, nil
+}
+```
+
+#### `AfterToolCallback`
+Runs after a tool has been executed. It can modify the result returned by the tool by returning a new `map[string]any`.
+
+**Signature:** `func(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)`
+
+**Example: Appending extra information to a tool's result.**
+```go
+func onAfterTool(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+	if err != nil {
+		return nil, err // Pass through errors
+	}
+	if t.Name() == "getCapitalCity" {
+		if originalResult, ok := result["result"].(string); ok {
+			// Modify the result map.
+			result["note_added_by_callback"] = true
+			result["result"] = fmt.Sprintf("%s (Note: This is the capital of the USA).", originalResult)
+			return result, nil
+		}
+	}
+	// Returning nil uses the original result.
+	return nil, nil
+}
+```
+
+### 3.4. Artifacts and Memory
+
+-   **Artifacts**: Allow agents to store and retrieve files (like images, PDFs, or text) associated with a session.
+-   **Memory**: Allows an agent to recall information from previous, completed sessions.
+
+**Example: Using Artifacts and Memory in a Tool**
+This tool loads a document from the `ArtifactService`, searches `MemoryService` for related context, performs an analysis, and saves the result as a new artifact.
+
+```go
+import (
+	"fmt"
+
+	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
+)
+
+type processDocumentArgs struct {
+	DocumentName  string `json:"document_name" jsonschema:"The name of the document to be processed."`
+	AnalysisQuery string `json:"analysis_query" jsonschema:"The query for the analysis."`
+}
+
+type processDocumentResult struct {
+	Status           string `json:"status"`
+	AnalysisArtifact string `json:"analysis_artifact,omitempty"`
+	Version          int64  `json:"version,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
+func processDocument(ctx tool.Context, args processDocumentArgs) processDocumentResult {
+	// 1. Load a document from the Artifact service
+	loadResp, err := ctx.Artifacts().Load(ctx, args.DocumentName)
+	if err != nil {
+		return processDocumentResult{Status: "error", Message: fmt.Sprintf("Document not found: %v", err)}
+	}
+	_ = loadResp.Part // The loaded document part can be used for analysis.
+
+	// 2. Search memory for related context
+	memoryResp, err := ctx.SearchMemory(ctx, args.AnalysisQuery)
+	if err != nil {
+		return processDocumentResult{Status: "error", Message: fmt.Sprintf("Memory search failed: %v", err)}
+	}
+
+	// 3. Perform analysis (placeholder logic)
+	analysisResult := fmt.Sprintf("Analysis of '%s' using %d memory results.",
+		args.DocumentName, len(memoryResp.Memories))
+
+	// 4. Save the result as a new artifact
+	analysisPart := genai.NewPartFromText(analysisResult)
+	newArtifactName := fmt.Sprintf("analysis_%s", args.DocumentName)
+	if _, err := ctx.Artifacts().Save(ctx, newArtifactName, analysisPart); err != nil {
+		return processDocumentResult{Status: "error", Message: fmt.Sprintf("Failed to save artifact: %v", err)}
+	}
+
+	return processDocumentResult{Status: "success", AnalysisArtifact: newArtifactName}
+}
+```
+
+---
+
+## 4. Agent2Agent (A2A) Communication
+
+The ADK supports the Agent2Agent (A2A) protocol, enabling agents to communicate with each other over a network. This is essential for building distributed, multi-agent systems.
+
+### 4.1. Exposing an Agent via A2A
+
+You can expose an agent as a remote service by using the ADK's built-in launcher framework. This handles the server setup and agent card generation for you.
+
+**Example: Exposing a "Prime Checker" agent**
+This code snippet creates an agent that checks for prime numbers and exposes it on `localhost:8001` using the web launcher.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/web"
+	"google.golang.org/adk/cmd/launcher/web/a2a"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/server/restapi/services"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
+)
+
+// isPrime checks if a number is prime.
+func isPrime(n int) bool {
+	if n <= 1 {
+		return false
+	}
+	for i := 2; i*i <= n; i++ {
+		if n%i == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+type checkPrimeToolArgs struct {
+	Nums []int `json:"nums" jsonschema:"A list of numbers to check for primality."`
+}
+
+func checkPrimeTool(tc tool.Context, args checkPrimeToolArgs) string {
+	var primes []int
+	for _, num := range args.Nums {
+		if isPrime(num) {
+			primes = append(primes, num)
+		}
+	}
+	if len(primes) == 0 {
+		return "No prime numbers found."
+	}
+	var primeStrings []string
+	for _, p := range primes {
+		primeStrings = append(primeStrings, strconv.Itoa(p))
+	}
+	return fmt.Sprintf("%s are prime numbers.", strings.Join(primeStrings, ", "))
+}
+
+func main() {
+	ctx := context.Background()
+	primeTool, err := functiontool.New(functiontool.Config{
+		Name:        "prime_checking",
+		Description: "Check if numbers in a list are prime using efficient mathematical algorithms",
+	}, checkPrimeTool)
+	if err != nil {
+		log.Fatalf("Failed to create prime_checking tool: %v", err)
+	}
+
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	primeAgent, err := llmagent.New(llmagent.Config{
+		Name:        "check_prime_agent",
+		Description: "An agent that can check whether numbers are prime.",
+		Instruction: `
+You check whether numbers are prime.
+When checking prime numbers, call the check_prime tool with a list of integers. Be sure to pass in a list of integers. You should never pass in a string.
+You should not rely on the previous history on prime results.
+    `,
+		Model: model,
+		Tools: []tool.Tool{primeTool},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	// Create launcher. The a2a.NewLauncher() will dynamically generate the agent card.
+	port := 8001
+	launcher := web.NewLauncher(a2a.NewLauncher())
+	_, err = launcher.Parse([]string{
+		"--port", strconv.Itoa(port),
+		"a2a", "--a2a_agent_url", "http://localhost:" + strconv.Itoa(port),
+	})
+	if err != nil {
+		log.Fatalf("launcher.Parse() error = %v", err)
+	}
+
+	// Create ADK config
+	config := &adk.Config{
+		AgentLoader:    services.NewSingleAgentLoader(primeAgent),
+		SessionService: session.InMemoryService(),
+	}
+
+	log.Printf("Starting A2A prime checker server on port %d\n", port)
+	// Run launcher
+	if err := launcher.Run(context.Background(), config); err != nil {
+		log.Fatalf("launcher.Run() error = %v", err)
+	}
+}
+```
+
+### 4.2. Consuming a Remote Agent
+
+Your local agents can interact with remote A2A agents. You configure a "remote agent" instance by providing the URL to its agent card.
+
+**Example: Consuming the remote "Prime Checker"**
+This code creates a local agent that can use the remote prime checker. The ADK handles the network communication transparently.
+
+```go
+import (
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/remoteagent"
+)
+
+func newPrimeAgentClient() (agent.Agent, error) {
+	// Point to the auto-generated agent card of the remote agent.
+	agentCardURL := "http://localhost:8001/.well-known/agent-card.json"
+
+	a, err := remoteagent.New(
+		&remoteagent.A2AConfig{
+			AgentCardSource: agentCardURL,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+```
+
+---
+
+## 5. API Reference
+
+For a complete and detailed API reference, please visit the official Go documentation.
+
+-   [:octicons-arrow-right-24: View Go API Docs](https://pkg.go.dev/google.golang.org/adk)
