@@ -52,7 +52,7 @@ type gcsService struct {
 	storageClient gcsClient
 	bucket        gcsBucket
 	// sleep waits for d or until ctx is done; a field so tests can stub out the
-	// Save retry backoff. Defaults to sleepContext.
+	// Save retry backoff. Never nil: every construction site sets it.
 	sleep func(ctx context.Context, d time.Duration) error
 }
 
@@ -124,17 +124,17 @@ var ErrVersionConflict = errors.New("artifact version conflict")
 // Save writes version max+1 with a does-not-exist precondition and, if another
 // writer already took that version, backs off and retries with a fresh one (up
 // to [maxSaveAttempts]). It returns [ErrVersionConflict] if that budget is
-// exhausted rather than overwriting an existing version.
+// exhausted rather than overwriting an existing version. Each attempt costs one
+// listing plus one upload.
+//
+// The scheme only holds if every writer uses it: adk-python's
+// GcsArtifactService still writes max+1 unconditionally, so a bucket shared with
+// it can still lose a version.
 func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*artifact.SaveResponse, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-
-	sleep := s.sleep
-	if sleep == nil {
-		sleep = sleepContext
-	}
 
 	var lastErr error
 	for attempt := range maxSaveAttempts {
@@ -162,8 +162,8 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 		// Lost the race for this version. Back off (skip after the final attempt)
 		// and retry with a fresh version.
 		if attempt < maxSaveAttempts-1 {
-			if err := sleep(ctx, backoffDelay(attempt)); err != nil {
-				return nil, err
+			if err := s.sleep(ctx, backoffDelay(attempt)); err != nil {
+				return nil, fmt.Errorf("failed to save artifact %q: %w", fileName, err)
 			}
 		}
 	}

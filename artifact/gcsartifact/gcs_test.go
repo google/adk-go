@@ -157,6 +157,51 @@ func TestSaveExhaustsRetriesOnPersistentConflict(t *testing.T) {
 	}
 }
 
+// TestSaveZeroByteArtifact checks that an empty payload still creates a real,
+// listable version. SaveRequest.Validate only requires Part.InlineData, so this
+// is reachable through the public API, and treating "no bytes" as "no object"
+// would make the second save overwrite the first.
+func TestSaveZeroByteArtifact(t *testing.T) {
+	svc := newGCSServiceForTesting("zerobyte")
+	req := func() *artifact.SaveRequest {
+		return &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+			Part: genai.NewPartFromBytes([]byte{}, "application/octet-stream"),
+		}
+	}
+
+	for want := int64(1); want <= 2; want++ {
+		resp, err := svc.Save(t.Context(), req())
+		if err != nil {
+			t.Fatalf("Save() failed: %v", err)
+		}
+		if resp.Version != want {
+			t.Errorf("Save() version = %d, want %d", resp.Version, want)
+		}
+	}
+
+	versions, err := svc.Versions(t.Context(), &artifact.VersionsRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+	})
+	if err != nil {
+		t.Fatalf("Versions() failed: %v", err)
+	}
+	slices.Sort(versions.Versions)
+	if diff := cmp.Diff([]int64{1, 2}, versions.Versions); diff != "" {
+		t.Errorf("stored versions mismatch (-want +got):\n%s", diff)
+	}
+
+	loaded, err := svc.Load(t.Context(), &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+	})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if got := loaded.Part.InlineData.Data; len(got) != 0 {
+		t.Errorf("Load() data = %q, want empty", got)
+	}
+}
+
 // TestBackoffDelayBounds checks the jittered backoff stays within [0, saveRetryMaxDelay].
 func TestBackoffDelayBounds(t *testing.T) {
 	for attempt := range maxSaveAttempts {
@@ -273,7 +318,7 @@ func (f *fakeBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 			continue
 		}
 		b.mu.Lock()
-		if !b.deleted && b.data != nil {
+		if b.exists {
 			attrs = append(attrs, &storage.ObjectAttrs{Name: b.name, ContentType: b.contentType})
 		}
 		b.mu.Unlock()
@@ -284,10 +329,13 @@ func (f *fakeBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 // fakeBlob is the shared backing store for one object name; handles reference it
 // by pointer so concurrent writers to the same name exercise the precondition.
 type fakeBlob struct {
-	mu          sync.Mutex
-	name        string
+	mu   sync.Mutex
+	name string
+	// exists tracks presence separately from data: a handle can be taken
+	// without creating an object, and a zero-byte artifact does exist (real GCS
+	// creates and lists one).
+	exists      bool
 	data        []byte
-	deleted     bool
 	contentType string
 }
 
@@ -313,18 +361,19 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.deleted || b.data == nil {
+	if !b.exists {
 		return nil, storage.ErrObjectNotExist
 	}
 	return &storage.ObjectAttrs{Name: b.name, Created: time.Now(), ContentType: b.contentType}, nil
 }
 
-// delete marks the object as deleted in memory.
+// delete removes the object from the in-memory store.
 func (o *fakeObject) delete(ctx context.Context) error {
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.deleted = true
+	b.exists = false
+	b.data = nil
 	return nil
 }
 
@@ -333,7 +382,7 @@ func (o *fakeObject) newReader(ctx context.Context) (io.ReadCloser, error) {
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.deleted || b.data == nil {
+	if !b.exists {
 		return nil, fs.ErrNotExist
 	}
 	return io.NopCloser(bytes.NewReader(b.data)), nil
@@ -367,12 +416,12 @@ func (w *fakeWriter) Close() error {
 	b := w.obj.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if w.obj.mustNotExist && !b.deleted && b.data != nil {
+	if w.obj.mustNotExist && b.exists {
 		return &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "conditionNotMet"}
 	}
 	b.data = w.buffer.Bytes()
 	b.contentType = w.contentType
-	b.deleted = false
+	b.exists = true
 	return nil
 }
 
