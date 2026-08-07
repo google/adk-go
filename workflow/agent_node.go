@@ -50,13 +50,6 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-	}
-
 	// The wrapped agent's Run already emits an invoke_agent span, so
 	// the scheduler must not add a redundant invoke_node wrapper —
 	// whether this node is activated by a static edge or delegated to
@@ -95,6 +88,10 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			yield(nil, err)
 			return
 		}
+
+		// A graph node is a one-shot placement: an agent that declares no
+		// mode runs single_turn here.
+		ctx = ctx.WithAgentContext(llminternal.WithPlacementMode(ctx, llminternal.ModeSingleTurn))
 
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the

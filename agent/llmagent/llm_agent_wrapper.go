@@ -70,20 +70,21 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 		state := llminternal.Reveal(llmA)
 
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-		switch state.Mode {
+		mode := llminternal.ResolveMode(
+			state.Mode,
+			llminternal.PlacementMode(ctx, llminternal.ModeSingleTurn),
+		)
+		switch mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q only supports task, single_turn, and chat mode, got %q",
-				a.Name(), state.Mode))
+				a.Name(), mode))
 			return
 		}
+		// Publish the resolved mode so the request processors downstream
+		// see this placement's mode, not the agent's declaration.
+		ctx = ctx.WithAgentContext(llminternal.WithResolvedMode(ctx, mode))
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
@@ -95,7 +96,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     carry one,
 		//   - relies on the embedded InvocationContext for everything
 		//     else (memory, run config, etc.).
-		switch state.Mode {
+		switch mode {
 		case llminternal.ModeChat:
 			runChat(a, ctx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
@@ -118,7 +119,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
-			if state.Mode == llminternal.ModeSingleTurn {
+			if mode == llminternal.ModeSingleTurn {
 				runSingleTurn(a, ic, yield)
 			} else {
 				runTask(a, ic, yield)
@@ -137,7 +138,7 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if !ok || llmA == nil {
 		return nil
 	}
-	if llminternal.Reveal(llmA).Mode != llminternal.ModeSingleTurn {
+	if llminternal.ResolvedMode(ctx, llminternal.Reveal(llmA).Mode) != llminternal.ModeSingleTurn {
 		return nil
 	}
 	content := nodeInputToContent(nodeInput)

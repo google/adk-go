@@ -153,11 +153,9 @@ func installTaskTools(a *llmAgent) error {
 			continue
 		}
 		subState := llminternal.Reveal(subInternal)
-		if subState.Mode == llminternal.ModeUnset {
-			subState.Mode = llminternal.ModeChat
-		}
-
-		switch subState.Mode {
+		// A sub-agent that declares no mode is a chat peer, reached via
+		// transfer_to_agent rather than through a tool on the parent.
+		switch llminternal.ResolveMode(subState.Mode, llminternal.ModeChat) {
 		case llminternal.ModeSingleTurn:
 			t, err := workflowinternal.NewSingleTurnTool(sub)
 			if err != nil {

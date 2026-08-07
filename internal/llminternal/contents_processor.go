@@ -44,9 +44,11 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // In python, no error is yielded.
 		}
 		state := llmAgent.internal()
+		isSingleTurn := ResolvedMode(ctx, state.Mode) == ModeSingleTurn
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
-			// Include current turn context only (no conversation history)
+		// A single_turn agent produces its answer in one exchange, so it
+		// gets the current turn only, never the conversation history.
+		if state.IncludeContents == "none" || isSingleTurn {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		// A compaction record instructs prompt assembly to drop a span of
@@ -67,7 +69,6 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		isSingleTurn := state.Mode == ModeSingleTurn
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)
