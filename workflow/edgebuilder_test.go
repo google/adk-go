@@ -17,6 +17,7 @@ package workflow
 import (
 	"iter"
 	"reflect"
+	"slices"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -77,9 +78,11 @@ func TestEdgeBuilder(t *testing.T) {
 		{
 			name: "AddRoutes",
 			build: func(b *EdgeBuilder) *EdgeBuilder {
+				// Literal order is the reverse of sorted order, so this case can
+				// tell the two apart.
 				return b.AddRoutes(nodeA, map[string]Node{
-					"42":         nodeB,
 					"workflow_C": nodeC,
+					"42":         nodeB,
 				})
 			},
 			expected: []Edge{
@@ -94,22 +97,51 @@ func TestEdgeBuilder(t *testing.T) {
 			edges := tc.build(NewEdgeBuilder()).Build()
 
 			if len(edges) != len(tc.expected) {
-				t.Fatalf("expected %d edges, got %d", len(tc.expected), len(edges))
+				t.Fatalf("got %d edges, want %d", len(edges), len(tc.expected))
 			}
-
-			for _, exp := range tc.expected {
-				found := false
-				for _, actual := range edges {
-					if actual.From == exp.From && actual.To == exp.To && reflect.DeepEqual(actual.Route, exp.Route) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected edge not found: From %s, To %s, Route %v", exp.From.Name(), exp.To.Name(), exp.Route)
+			for i, want := range tc.expected {
+				if got := edges[i]; got.From != want.From || got.To != want.To || !reflect.DeepEqual(got.Route, want.Route) {
+					t.Errorf("edge %d = %s→%s (route %v), want %s→%s (route %v)",
+						i, got.From.Name(), got.To.Name(), got.Route,
+						want.From.Name(), want.To.Name(), want.Route)
 				}
 			}
 		})
+	}
+}
+
+func TestEdgeBuilder_AddRoutesSortsByRoute(t *testing.T) {
+	from := newDummyNode("router")
+	// Insertion order deliberately differs from sorted order; ranging the map
+	// would pick a fresh random order on every run.
+	routes := map[string]Node{
+		"tech":    newDummyNode("tech_node"),
+		"billing": newDummyNode("billing_node"),
+		"sales":   newDummyNode("sales_node"),
+		"abuse":   newDummyNode("abuse_node"),
+	}
+
+	edges := NewEdgeBuilder().AddRoutes(from, routes).Build()
+
+	if len(edges) != len(routes) {
+		t.Fatalf("got %d edges, want %d", len(edges), len(routes))
+	}
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		route, ok := e.Route.(StringRoute)
+		if !ok {
+			t.Fatalf("edge %d route = %T, want StringRoute", i, e.Route)
+		}
+		got[i] = string(route)
+		if e.From != from {
+			t.Errorf("edge %d from = %s, want %s", i, e.From.Name(), from.Name())
+		}
+		if want := routes[got[i]]; e.To != want {
+			t.Errorf("edge %d route %q points at %s, want %s", i, got[i], e.To.Name(), want.Name())
+		}
+	}
+	if want := []string{"abuse", "billing", "sales", "tech"}; !slices.Equal(got, want) {
+		t.Errorf("route order = %v, want %v", got, want)
 	}
 }
 

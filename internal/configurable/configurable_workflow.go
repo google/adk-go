@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -126,7 +127,10 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 		}
 
 		var chainNodes []workflow.Node
-		var routeMaps []map[string]string
+		var routes []routeEntry
+		// Tracked separately from len(routes): an empty route map still selects
+		// the routing branch, which allows a 1-node chain.
+		sawRouteMap := false
 
 		for _, item := range edgeNode.Content {
 			switch item.Kind {
@@ -137,17 +141,18 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 				}
 				chainNodes = append(chainNodes, n)
 			case yaml.MappingNode:
-				var m map[string]string
-				if err := item.Decode(&m); err != nil {
-					return nil, fmt.Errorf("invalid route map format: %w", err)
+				sawRouteMap = true
+				r, err := decodeRouteMap(item)
+				if err != nil {
+					return nil, err
 				}
-				routeMaps = append(routeMaps, m)
+				routes = append(routes, r...)
 			default:
 				return nil, fmt.Errorf("unsupported YAML node kind in edge chain: %v", item.Kind)
 			}
 		}
 
-		if len(routeMaps) == 0 {
+		if !sawRouteMap {
 			if len(chainNodes) < 2 {
 				return nil, fmt.Errorf("workflow edge chain must have at least 2 nodes")
 			}
@@ -162,31 +167,160 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 
 			routerNode := chainNodes[len(chainNodes)-1]
 
-			for _, routeMap := range routeMaps {
-				for routeVal, targetRef := range routeMap {
-					targetNode, err := resolveNodeLike(ctx, parentPath, targetRef)
-					if err != nil {
-						return nil, err
-					}
-
-					var route workflow.Route
-					if strings.EqualFold(routeVal, "default") {
-						route = workflow.Default
-					} else {
-						route = workflow.StringRoute(routeVal)
-					}
-
-					edges = append(edges, workflow.Edge{
-						From:  routerNode,
-						To:    targetNode,
-						Route: route,
-					})
+			for _, r := range routes {
+				targetNode, err := resolveNodeLike(ctx, parentPath, r.target)
+				if err != nil {
+					return nil, err
 				}
+
+				var route workflow.Route
+				if strings.EqualFold(r.route, "default") {
+					route = workflow.Default
+				} else {
+					route = workflow.StringRoute(r.route)
+				}
+
+				edges = append(edges, workflow.Edge{
+					From:  routerNode,
+					To:    targetNode,
+					Route: route,
+				})
 			}
 		}
 	}
 
 	return edges, nil
+}
+
+// routeEntry is one `<route>: <target ref>` pair of a YAML route map. target is
+// a reference still to be resolved by resolveNodeLike, not a node.
+type routeEntry struct {
+	route  string
+	target string
+	line   int
+}
+
+// mergeTag marks a YAML merge key (`<<`), which splices another mapping's
+// entries into this one.
+const mergeTag = "!!merge"
+
+// decodeRouteMap reads a YAML route map as pairs in the order they were
+// written, expanding merge keys in place. Decoding into a map[string]string
+// instead would randomize the order of the resulting edges, and edge order is
+// observable at runtime: it drives the order successors are started in, and the
+// pending queue under max concurrency.
+func decodeRouteMap(n *yaml.Node) ([]routeEntry, error) {
+	return decodeRoutes(n, nil)
+}
+
+// decodeRoutes expands one route mapping. merging holds the mappings currently
+// being expanded, so a merge key pointing back at one of them is reported rather
+// than recursed into forever.
+func decodeRoutes(n *yaml.Node, merging []*yaml.Node) ([]routeEntry, error) {
+	if len(n.Content)%2 != 0 {
+		return nil, fmt.Errorf("invalid route map format: line %d: mapping has an odd number of nodes (%d), expected key/value pairs", n.Line, len(n.Content))
+	}
+	explicit := explicitRoutes(n)
+	routes := make([]routeEntry, 0, len(n.Content)/2)
+	seen := make(map[string]int, len(n.Content)/2)
+	for i := 0; i < len(n.Content); i += 2 {
+		key, val := n.Content[i], n.Content[i+1]
+		if key.Tag == mergeTag {
+			merged, err := mergedRoutes(val, append(merging, n))
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range merged {
+				// An explicitly written route always wins over a merged one, and
+				// among merged ones the first wins.
+				if _, dup := seen[r.route]; explicit[r.route] || dup {
+					continue
+				}
+				seen[r.route] = r.line
+				routes = append(routes, r)
+			}
+			continue
+		}
+		r, err := decodeRoutePair(key, val)
+		if err != nil {
+			return nil, err
+		}
+		if first, dup := seen[r.route]; dup {
+			return nil, fmt.Errorf("invalid route map format: line %d: route %q is already defined at line %d", r.line, r.route, first)
+		}
+		seen[r.route] = r.line
+		routes = append(routes, r)
+	}
+	return routes, nil
+}
+
+// explicitRoutes returns the route names written directly in n, ignoring merge
+// keys. Malformed keys are skipped; decodeRouteMap reports them.
+func explicitRoutes(n *yaml.Node) map[string]bool {
+	names := make(map[string]bool, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key := n.Content[i]
+		if key.Tag == mergeTag {
+			continue
+		}
+		var name string
+		if key.Decode(&name) == nil {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// mergedRoutes resolves the value of a merge key: a mapping, an alias to one, or
+// a sequence of those. Earlier mappings in a sequence win.
+func mergedRoutes(val *yaml.Node, merging []*yaml.Node) ([]routeEntry, error) {
+	resolved := resolveAlias(val)
+	switch resolved.Kind {
+	case yaml.MappingNode:
+		if slices.Contains(merging, resolved) {
+			return nil, fmt.Errorf("invalid route map format: line %d: merge key refers to a route map that is already being merged", resolved.Line)
+		}
+		return decodeRoutes(resolved, merging)
+	case yaml.SequenceNode:
+		var routes []routeEntry
+		for _, item := range resolved.Content {
+			sub, err := mergedRoutes(item, merging)
+			if err != nil {
+				return nil, err
+			}
+			routes = append(routes, sub...)
+		}
+		return routes, nil
+	default:
+		return nil, fmt.Errorf("invalid route map format: line %d: merge key requires a mapping or a sequence of mappings", val.Line)
+	}
+}
+
+func decodeRoutePair(key, val *yaml.Node) (routeEntry, error) {
+	r := routeEntry{line: key.Line}
+	// Decode rather than reading Node.Value directly so aliases resolve.
+	if err := key.Decode(&r.route); err != nil {
+		return r, fmt.Errorf("invalid route map format: line %d: route must be a scalar: %w", key.Line, err)
+	}
+	// A null key decodes to "" without error, which would build a permanently
+	// dead edge.
+	if resolveAlias(key).ShortTag() == "!!null" {
+		return r, fmt.Errorf("invalid route map format: line %d: route must not be null (quote it to route on the literal string)", key.Line)
+	}
+	if err := val.Decode(&r.target); err != nil {
+		return r, fmt.Errorf("invalid route map format: line %d: target of route %q must be a scalar node reference: %w", val.Line, r.route, err)
+	}
+	return r, nil
+}
+
+// resolveAlias follows an alias to the node it points at. The bound guards a
+// self-referential anchor, which would otherwise loop forever; an unresolved
+// alias is returned as-is and rejected by the caller.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; i < 100 && n.Kind == yaml.AliasNode && n.Alias != nil; i++ {
+		n = n.Alias
+	}
+	return n
 }
 
 // resolveNodeLike maps a YAML identifier to a concrete workflow.Node.

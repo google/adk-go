@@ -20,14 +20,18 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/genai"
+	"gopkg.in/yaml.v3"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type mockSession struct{}
@@ -586,4 +590,302 @@ edges:
 	if val, ok := toolOut["result"].(string); !ok || val != "tool_output" {
 		t.Errorf("expected tool output result 'tool_output', got %v", toolOut["result"])
 	}
+}
+
+// handlerFn stands in for a route target; the edge-order tests only parse the
+// graph, they never run it.
+func handlerFn(ctx agent.Context, input string) (string, error) {
+	return input, nil
+}
+
+func init() {
+	for i := 1; i <= 9; i++ {
+		RegisterNodeFunction(fmt.Sprintf("h%d", i), handlerFn)
+	}
+}
+
+func TestParseEdges_PreservesRouteDeclarationOrder(t *testing.T) {
+	// Routes are declared in neither alphabetical nor handler order, so this
+	// distinguishes "declaration order" from both a map range and a sort. Enough
+	// of them to spill past Go's single-bucket map layout, where iteration is
+	// only a random rotation and would too often match by luck.
+	const config = `
+edges:
+  - - START
+    - upper_fn
+    - ZETA: h1
+      ALPHA: h2
+      MIKE: h3
+      OSCAR: h4
+      BRAVO: h5
+      YANKEE: h6
+      CHARLIE: h7
+      TANGO: h8
+      default: h9
+`
+	var cfg struct {
+		Edges []yaml.Node `yaml:"edges"`
+	}
+	if err := yaml.Unmarshal([]byte(config), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	edges, err := parseEdges(t.Context(), "", cfg.Edges)
+	if err != nil {
+		t.Fatalf("parseEdges() error = %v", err)
+	}
+
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		got[i] = fmt.Sprintf("%s->%s(%s)", e.From.Name(), e.To.Name(), routeLabel(e.Route))
+	}
+	want := []string{
+		"START->upper_fn(none)",
+		"upper_fn->h1(ZETA)",
+		"upper_fn->h2(ALPHA)",
+		"upper_fn->h3(MIKE)",
+		"upper_fn->h4(OSCAR)",
+		"upper_fn->h5(BRAVO)",
+		"upper_fn->h6(YANKEE)",
+		"upper_fn->h7(CHARLIE)",
+		"upper_fn->h8(TANGO)",
+		"upper_fn->h9(<default>)",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseEdges() =\n\t%v\nwant\n\t%v", got, want)
+	}
+}
+
+// parseConfigEdges parses `edges:` out of a YAML document and runs parseEdges,
+// returning the edges rendered as "from->to(route)" strings.
+func parseConfigEdges(t *testing.T, config string) ([]string, error) {
+	t.Helper()
+	var cfg struct {
+		Edges []yaml.Node `yaml:"edges"`
+	}
+	if err := yaml.Unmarshal([]byte(config), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+	edges, err := parseEdges(t.Context(), "", cfg.Edges)
+	if err != nil {
+		return nil, err
+	}
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		got[i] = fmt.Sprintf("%s->%s(%s)", e.From.Name(), e.To.Name(), routeLabel(e.Route))
+	}
+	return got, nil
+}
+
+// Merge keys let one route map reuse another; they must expand in place, with an
+// explicitly written route beating a merged one of the same name.
+func TestParseEdges_MergeKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   []string
+	}{
+		{
+			name: "expands in place",
+			config: `
+shared: &shared
+  ZETA: h1
+  ALPHA: h2
+edges:
+  - - START
+    - upper_fn
+    - <<: *shared
+      MIKE: h3
+`,
+			want: []string{"START->upper_fn(none)", "upper_fn->h1(ZETA)", "upper_fn->h2(ALPHA)", "upper_fn->h3(MIKE)"},
+		},
+		{
+			name: "explicit route beats merged",
+			config: `
+shared: &shared
+  ZETA: h1
+edges:
+  - - START
+    - upper_fn
+    - ZETA: h2
+      <<: *shared
+`,
+			want: []string{"START->upper_fn(none)", "upper_fn->h2(ZETA)"},
+		},
+		{
+			name: "sequence of mappings, earlier wins",
+			config: `
+a: &a
+  ZETA: h1
+b: &b
+  ZETA: h2
+  ALPHA: h3
+edges:
+  - - START
+    - upper_fn
+    - <<: [*a, *b]
+`,
+			want: []string{"START->upper_fn(none)", "upper_fn->h1(ZETA)", "upper_fn->h3(ALPHA)"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseConfigEdges(t, tc.config)
+			if err != nil {
+				t.Fatalf("parseEdges() error = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("parseEdges() =\n\t%v\nwant\n\t%v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Keys and values must go through Decode, not Node.Value, or aliases stop
+// resolving.
+func TestParseEdges_ResolvesAliases(t *testing.T) {
+	const config = `
+routeName: &route ZETA
+target: &target h1
+edges:
+  - - START
+    - upper_fn
+    - *route : *target
+`
+	got, err := parseConfigEdges(t, config)
+	if err != nil {
+		t.Fatalf("parseEdges() error = %v", err)
+	}
+	want := []string{"START->upper_fn(none)", "upper_fn->h1(ZETA)"}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseEdges() = %v, want %v", got, want)
+	}
+}
+
+func TestParseEdges_DefaultRoute(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   []string
+	}{
+		{
+			name:   "case insensitive",
+			config: "edges:\n  - - START\n    - upper_fn\n    - DEFAULT: h1\n",
+			want:   []string{"START->upper_fn(none)", "upper_fn->h1(<default>)"},
+		},
+		{
+			name:   "keeps its declared position when first",
+			config: "edges:\n  - - START\n    - upper_fn\n    - default: h1\n      ZETA: h2\n",
+			want:   []string{"START->upper_fn(none)", "upper_fn->h1(<default>)", "upper_fn->h2(ZETA)"},
+		},
+		{
+			name:   "keeps its declared position when in the middle",
+			config: "edges:\n  - - START\n    - upper_fn\n    - ZETA: h2\n      Default: h1\n      ALPHA: h3\n",
+			want:   []string{"START->upper_fn(none)", "upper_fn->h2(ZETA)", "upper_fn->h1(<default>)", "upper_fn->h3(ALPHA)"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseConfigEdges(t, tc.config)
+			if err != nil {
+				t.Fatalf("parseEdges() error = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("parseEdges() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An empty route map still selects the routing branch, which tolerates a
+// single-node chain.
+func TestParseEdges_EmptyRouteMap(t *testing.T) {
+	got, err := parseConfigEdges(t, "edges:\n  - - upper_fn\n    - {}\n")
+	if err != nil {
+		t.Fatalf("parseEdges() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("parseEdges() = %v, want no edges", got)
+	}
+}
+
+func TestParseEdges_RouteMapErrors(t *testing.T) {
+	tests := []struct {
+		name, config, wantErr string
+	}{
+		{
+			name:    "duplicate route reports both lines",
+			config:  "edges:\n  - - START\n    - upper_fn\n    - ALPHA: h1\n      ALPHA: h2\n",
+			wantErr: `line 5: route "ALPHA" is already defined at line 4`,
+		},
+		{
+			name:    "non-scalar route",
+			config:  "edges:\n  - - START\n    - upper_fn\n    - ? [a, b]\n      : h1\n",
+			wantErr: "route must be a scalar",
+		},
+		{
+			name:    "non-scalar target",
+			config:  "edges:\n  - - START\n    - upper_fn\n    - ALPHA: {x: y}\n",
+			wantErr: `target of route "ALPHA" must be a scalar node reference`,
+		},
+		{
+			name:    "null route",
+			config:  "edges:\n  - - START\n    - upper_fn\n    - ~: h1\n",
+			wantErr: "route must not be null",
+		},
+		{
+			name:    "merge key with a scalar value",
+			config:  "edges:\n  - - START\n    - upper_fn\n    - <<: h1\n",
+			wantErr: "merge key requires a mapping or a sequence of mappings",
+		},
+		{
+			// Without the cycle guard this recurses until the stack overflows,
+			// which is fatal and cannot be recovered.
+			name:    "self-referential merge key",
+			config:  "m: &m\n  <<: *m\nedges:\n  - - START\n    - upper_fn\n    - <<: *m\n",
+			wantErr: "already being merged",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseConfigEdges(t, tc.config)
+			if err == nil {
+				t.Fatalf("parseEdges() succeeded, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("parseEdges() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// The odd-Content guard is unreachable through the YAML parser, which always
+// emits key/value pairs, so it takes a hand-built node.
+func TestDecodeRouteMap_OddContent(t *testing.T) {
+	n := &yaml.Node{
+		Kind:    yaml.MappingNode,
+		Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "ALPHA"}},
+	}
+	_, err := decodeRouteMap(n)
+	if err == nil {
+		t.Fatal("decodeRouteMap() succeeded on an odd Content length, want error")
+	}
+	if want := "odd number of nodes (1)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("decodeRouteMap() error = %v, want it to contain %q", err, want)
+	}
+}
+
+func routeLabel(r workflow.Route) string {
+	// Checked before the type switch so it cannot be confused with the literal
+	// StringRoute("default").
+	if r == workflow.Default {
+		return "<default>"
+	}
+	switch v := r.(type) {
+	case nil:
+		return "none"
+	case workflow.StringRoute:
+		return string(v)
+	}
+	return fmt.Sprintf("%T", r)
 }
