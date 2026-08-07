@@ -19,6 +19,7 @@ import (
 	"errors"
 	"iter"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -829,5 +830,64 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 
 	if got, want := finalOutput, "This is the output text."; got != want {
 		t.Errorf("expected automatically extracted output %q, got %q", want, got)
+	}
+}
+
+type endInvContext struct {
+	agent.Context
+	ptr *atomic.Bool
+}
+
+func (c *endInvContext) EndInvocationPtr() *atomic.Bool {
+	return c.ptr
+}
+
+func TestAgentNode_EndInvocationPropagated(t *testing.T) {
+	called := false
+	myAgent, err := agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				called = true
+				if ctx.Ended() {
+					t.Errorf("expected ctx.Ended() to be false initially")
+				}
+				ctx.EndInvocation()
+				yield(&session.Event{Author: "test_agent"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	node, err := NewAgentNode(myAgent, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ptr := new(atomic.Bool)
+	ptr.Store(false)
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session"}
+
+	wrappedCtx := &endInvContext{
+		Context: agent.NewContext(mockCtx),
+		ptr:     ptr,
+	}
+
+	for _, err := range node.Run(wrappedCtx, nil) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if !called {
+		t.Error("expected agent to be called")
+	}
+
+	if !ptr.Load() {
+		t.Error("expected parent EndInvocation ptr to be updated to true")
 	}
 }

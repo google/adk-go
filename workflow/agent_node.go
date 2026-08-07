@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"sync/atomic"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -101,6 +102,10 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		// activation's branch; the scheduler assigns sub-branches at
 		// fan-out, and the LLM flow's history filter scopes events
 		// by branch prefix.
+		var endInvPtr *atomic.Bool
+		if carrier, ok := ctx.(interface{ EndInvocationPtr() *atomic.Bool }); ok {
+			endInvPtr = carrier.EndInvocationPtr()
+		}
 		params := internalcontext.InvocationContextParams{
 			Artifacts:      ctx.Artifacts(),
 			Memory:         ctx.Memory(),
@@ -110,7 +115,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			Agent:          n.agent,
 			UserContent:    userContent,
 			RunConfig:      ctx.RunConfig(),
-			EndInvocation:  ctx.Ended(),
+			EndInvocation:  endInvPtr,
 			InvocationID:   ctx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)

@@ -16,6 +16,7 @@ package context
 
 import (
 	"context"
+	"sync/atomic"
 
 	"google.golang.org/genai"
 
@@ -35,7 +36,7 @@ type InvocationContextParams struct {
 
 	UserContent                 *genai.Content
 	RunConfig                   *agent.RunConfig
-	EndInvocation               bool
+	EndInvocation               *atomic.Bool
 	InvocationID                string
 	LiveSessionResumptionHandle string
 	Path                        string
@@ -46,6 +47,9 @@ type InvocationContextParams struct {
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	if params.InvocationID == "" {
 		params.InvocationID = "e-" + platform.NewUUID(ctx)
+	}
+	if params.EndInvocation == nil {
+		params.EndInvocation = new(atomic.Bool)
 	}
 	return &InvocationContext{
 		Context: ctx,
@@ -96,10 +100,16 @@ func (c *InvocationContext) RunConfig() *agent.RunConfig {
 }
 
 func (c *InvocationContext) EndInvocation() {
-	c.params.EndInvocation = true
+	if c.params.EndInvocation != nil {
+		c.params.EndInvocation.Store(true)
+	}
 }
 
 func (c *InvocationContext) Ended() bool {
+	return c.params.EndInvocation != nil && c.params.EndInvocation.Load()
+}
+
+func (c *InvocationContext) EndInvocationPtr() *atomic.Bool {
 	return c.params.EndInvocation
 }
 
