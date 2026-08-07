@@ -1247,6 +1247,52 @@ func TestRemoteAgent_CustomConverters(t *testing.T) {
 	}
 }
 
+func TestRemoteAgent_ScopedMessageUsesSeededInput(t *testing.T) {
+	const scope = "workflow/node@1"
+	const inheritedContextID = "context-from-sibling"
+
+	remoteResponse := newEventFromParts("remote-agent", genai.NewPartFromText("sibling response"))
+	remoteResponse.IsolationScope = "workflow/other@1"
+	remoteResponse.LLMResponse.CustomMetadata = adka2a.ToCustomMetadata(a2a.NewTaskID(), inheritedContextID)
+	sharedHistory := newEventFromParts("user", genai.NewPartFromText("shared history"))
+
+	ctx := t.Context()
+	store := session.InMemoryService()
+	created, err := store.Create(ctx, &session.CreateRequest{AppName: t.Name(), UserID: "test"})
+	if err != nil {
+		t.Fatalf("store.Create() error = %v", err)
+	}
+	for _, event := range []*session.Event{sharedHistory, remoteResponse} {
+		if err := store.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("store.AppendEvent() error = %v", err)
+		}
+	}
+	remote, err := agent.New(agent.Config{Name: "remote-agent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	invocation := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Agent:          remote,
+		Session:        created.Session,
+		IsolationScope: scope,
+		UserContent:    genai.NewContentFromText("seeded node input", genai.RoleUser),
+	})
+
+	msg, err := newMessage(invocation, A2AConfig{})
+	if err != nil {
+		t.Fatalf("newMessage() error = %v", err)
+	}
+	if msg.ContextID != "" {
+		t.Fatalf("message.ContextID = %q, want empty contextID", msg.ContextID)
+	}
+	if got := len(msg.Parts); got != 1 {
+		t.Fatalf("len(message.Parts) = %d, want 1", got)
+	}
+	if got := msg.Parts[0].Text(); got != "seeded node input" {
+		t.Errorf("message.Parts[0].Text() = %q, want %q", got, "seeded node input")
+	}
+}
+
 func TestRemoteAgent_CleanupCallback(t *testing.T) {
 	testCases := []struct {
 		name                  string

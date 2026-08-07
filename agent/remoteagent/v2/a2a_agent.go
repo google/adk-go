@@ -344,6 +344,25 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 }
 
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
+	// Workflow nodes execute in an isolation scope and receive their input
+	// through UserContent. The shared session contains events from sibling
+	// nodes, so it must not be used to seed a scoped remote invocation or to
+	// inherit an A2A context from an earlier node.
+	if ctx.IsolationScope() != "" {
+		msg := a2a.NewMessage(a2a.MessageRoleUser)
+		if userContent := ctx.UserContent(); userContent != nil && len(userContent.Parts) > 0 {
+			event := session.NewEvent(ctx, ctx.InvocationID())
+			event.Author = "user"
+			event.Content = userContent
+			parts, err := convertParts(ctx, cfg, event)
+			if err != nil {
+				return nil, fmt.Errorf("event part conversion failed: %w", err)
+			}
+			msg.Parts = append(msg.Parts, parts...)
+		}
+		return msg, nil
+	}
+
 	events := ctx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
 		event := userFnCall.response
