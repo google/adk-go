@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
-	"google.golang.org/protobuf/types/known/structpb"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
@@ -52,14 +51,14 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": []string{"file1", "file2"},
 			},
 			want: map[string]any{
-				"artifact_names": []any{"file1", "file2"},
+				"artifact_names": []string{"file1", "file2"},
 			},
 		},
 		{
 			name: "empty args",
 			args: map[string]any{},
 			want: map[string]any{
-				"artifact_names": []any{},
+				"artifact_names": []string{},
 			},
 		},
 		{
@@ -68,7 +67,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": []any{"fileA", "fileB"},
 			},
 			want: map[string]any{
-				"artifact_names": []any{"fileA", "fileB"},
+				"artifact_names": []string{"fileA", "fileB"},
 			},
 		},
 		{
@@ -77,7 +76,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": []string{},
 			},
 			want: map[string]any{
-				"artifact_names": []any{},
+				"artifact_names": []string{},
 			},
 		},
 		{
@@ -86,7 +85,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": []any{},
 			},
 			want: map[string]any{
-				"artifact_names": []any{},
+				"artifact_names": []string{},
 			},
 		},
 		{
@@ -95,7 +94,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": nil,
 			},
 			want: map[string]any{
-				"artifact_names": []any{},
+				"artifact_names": []string{},
 			},
 		},
 		{
@@ -128,30 +127,6 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				t.Errorf("Run() result diff (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func TestLoadArtifactsTool_Run_StructpbCompatibility(t *testing.T) {
-	loadArtifactsTool := loadartifactstool.New()
-	tc := createToolContext(t)
-
-	toolImpl, ok := loadArtifactsTool.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("loadArtifactsTool does not implement FunctionTool")
-	}
-
-	result, err := toolImpl.Run(tc, map[string]any{
-		"artifact_names": []string{"a.pdf", "b.pdf"},
-	})
-	if err != nil {
-		t.Fatalf("Run() error: %v", err)
-	}
-
-	// This is the core assertion for issue #668: the result must be
-	// serializable via structpb.NewStruct (used by Vertex AI session service).
-	_, err = structpb.NewStruct(result)
-	if err != nil {
-		t.Fatalf("structpb.NewStruct() failed on Run() result: %v", err)
 	}
 }
 

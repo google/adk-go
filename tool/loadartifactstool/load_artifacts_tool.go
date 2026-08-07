@@ -109,12 +109,8 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 			artifactNames = []string{}
 		}
 	}
-	anyNames := make([]any, len(artifactNames))
-	for i, name := range artifactNames {
-		anyNames[i] = name
-	}
 	result := map[string]any{
-		"artifact_names": anyNames,
+		"artifact_names": artifactNames,
 	}
 	return result, nil
 }
