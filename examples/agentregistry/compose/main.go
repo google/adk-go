@@ -48,9 +48,10 @@ func main() {
 		log.Fatal("GOOGLE_CLOUD_PROJECT must be set")
 	}
 	location := cmp.Or(os.Getenv("GOOGLE_CLOUD_LOCATION"), "global")
-	// Enabling the Cloud Run API auto-registers a server declaring this tool,
-	// so the default works in most projects without registering anything.
-	want := cmp.Or(os.Getenv("REGISTRY_TOOL"), "list_services")
+	// Enabling the Cloud Run API auto-registers a server declaring this tool, so
+	// the default works without registering anything. Prefer a distinctive name:
+	// a generic one like "list_services" is declared by several servers.
+	want := cmp.Or(os.Getenv("REGISTRY_TOOL"), "deploy_service_from_image")
 
 	client, err := agentregistry.New(ctx, agentregistry.Config{
 		ProjectID: project,
@@ -60,7 +61,7 @@ func main() {
 		log.Fatalf("Failed to create the registry client: %v", err)
 	}
 
-	server, err := pickProvider(ctx, client, want, os.Getenv("REGISTRY_PROVIDER"))
+	server, err := pickProvider(ctx, client, want)
 	if err != nil {
 		log.Fatalf("Failed to find a provider for %q: %v", want, explain(err))
 	}
@@ -125,41 +126,35 @@ func explain(err error) error {
 	return fmt.Errorf("HTTP %d — %s", apiErr.StatusCode, detail)
 }
 
-// pickProvider resolves a capability to the MCP server that will serve it: it
-// scans the catalog for servers declaring a tool called name, narrows them to
-// those whose display name contains provider (when non-empty), and returns the
-// first survivor.
+// pickProvider resolves a capability to the MCP server that will serve it, by
+// scanning the catalog for servers that declare a tool called name.
 //
 // This is the lookup a hardcoded endpoint cannot do — the answer depends on what
 // is registered in this project right now, and it comes from the catalog's own
-// metadata rather than from connecting to every candidate in turn. Tool names
-// are not unique across servers, hence the provider filter.
-func pickProvider(ctx context.Context, c *agentregistry.Client, name, provider string) (*agentregistry.MCPServer, error) {
+// metadata rather than from connecting to every candidate in turn.
+//
+// Tool names are not unique across servers, so a capability can have several
+// providers. This takes the first and names the rest; a real application would
+// apply its own policy, such as a trusted publisher or an explicit allowlist.
+func pickProvider(ctx context.Context, c *agentregistry.Client, name string) (*agentregistry.MCPServer, error) {
 	var matches []*agentregistry.MCPServer
 	for server, err := range c.AllMCPServers(ctx) {
 		if err != nil {
 			return nil, err
 		}
-		if !slices.ContainsFunc(server.Tools, func(t agentregistry.Tool) bool { return t.Name == name }) {
-			continue
+		if slices.ContainsFunc(server.Tools, func(t agentregistry.Tool) bool { return t.Name == name }) {
+			matches = append(matches, server)
 		}
-		if provider != "" && !strings.Contains(server.DisplayName, provider) {
-			continue
-		}
-		matches = append(matches, server)
 	}
-
-	switch {
-	case len(matches) == 0 && provider != "":
-		return nil, fmt.Errorf("no registered MCP server matching %q declares it", provider)
-	case len(matches) == 0:
+	if len(matches) == 0 {
 		return nil, fmt.Errorf("no registered MCP server declares it; run the discover sample to see what is available")
-	case len(matches) > 1:
-		names := make([]string, 0, len(matches))
-		for _, m := range matches {
-			names = append(names, m.DisplayName)
+	}
+	if len(matches) > 1 {
+		others := make([]string, 0, len(matches)-1)
+		for _, m := range matches[1:] {
+			others = append(others, m.DisplayName)
 		}
-		log.Printf("%d servers declare %q (%s); set REGISTRY_PROVIDER to pin one", len(matches), name, strings.Join(names, ", "))
+		log.Printf("%q is also declared by %s", name, strings.Join(others, ", "))
 	}
 	return matches[0], nil
 }
