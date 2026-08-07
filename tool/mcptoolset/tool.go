@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -40,6 +40,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		mcpClient:                   client,
 		requireConfirmation:         requireConfirmation,
 		requireConfirmationProvider: requireConfirmationProvider,
+		metadataProvider:            metadataProvider,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -66,6 +67,8 @@ type mcpTool struct {
 	requireConfirmation bool
 
 	requireConfirmationProvider tool.ConfirmationProvider
+
+	metadataProvider MetadataProvider
 }
 
 // Name implements the tool.Tool.
@@ -117,10 +120,20 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}
 	}
 
-	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
+	params := &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
-	})
+	}
+	if t.metadataProvider != nil {
+		meta, err := t.metadataProvider(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("metadata provider for MCP tool %q failed: %w", t.name, err)
+		}
+		// A nil map is fine: Meta is `omitempty`, so no `_meta` is sent.
+		params.Meta = meta
+	}
+
+	res, err := t.mcpClient.CallTool(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
