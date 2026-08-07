@@ -33,9 +33,9 @@ type CredentialProvider interface {
 	// and deadlines.
 	//
 	// A provider that needs the acting user's identity (for example the GCP
-	// provider, which keys on the user) recovers the ADK context from ctx via a
-	// shared helper introduced together with the first provider that needs it —
-	// so identity rides on the one ADK context rather than an auth-specific key.
+	// provider, which keys on the user) recovers it from ctx via
+	// [agent.IdentityFromContext] — so identity rides on the one ADK context
+	// rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
 	// non-interactively, Credential returns a *ConsentRequiredError carrying the

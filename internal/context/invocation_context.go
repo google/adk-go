@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -119,6 +120,21 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	newCtx := *c
 	newCtx.Context = ctx
 	return &newCtx
+}
+
+// Value implements context.Context. It returns this invocation's [agent.Identity]
+// for the ADK self key (so agent.IdentityFromContext can recover it); every other
+// key, and a context with no session, delegates to the embedded context —
+// preserving existing behavior and never panicking.
+func (c *InvocationContext) Value(key any) any {
+	if key == adkcontext.IdentityKey && c.params.Session != nil {
+		return agent.Identity{
+			UserID:    c.params.Session.UserID(),
+			AppName:   c.params.Session.AppName(),
+			SessionID: c.params.Session.ID(),
+		}
+	}
+	return c.Context.Value(key)
 }
 
 // ResumedInput always returns (nil, false) for the base
