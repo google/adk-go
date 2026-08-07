@@ -432,6 +432,48 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 			t.Errorf("leading content mismatch (-want +got):\n%s", diff)
 		}
 	})
+
+	t.Run("single_turn derives none when IncludeContents unset", func(t *testing.T) {
+		stAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:  taskAgentName,
+			Model: &testModel{},
+			Mode:  llmagent.ModeSingleTurn,
+		}))
+		state := llminternal.Reveal(stAgent.(llminternal.Agent))
+		if state.IncludeContents != "" {
+			t.Fatalf("IncludeContents = %q, want unset", state.IncludeContents)
+		}
+		if got := state.EffectiveIncludeContents(); got != "none" {
+			t.Fatalf("EffectiveIncludeContents() = %q, want none", got)
+		}
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			Agent:          stAgent,
+			IsolationScope: fcID,
+			Session:        &fakeSession{events: events},
+		})
+		req := &model.LLMRequest{}
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			}
+		}
+		if state.IncludeContents != "" {
+			t.Fatalf("IncludeContents mutated to %q during process", state.IncludeContents)
+		}
+		wantLeading := &genai.Content{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{
+				{Text: string(argsJSON)},
+				{Text: llminternal.SingleTurnNudge},
+			},
+		}
+		if len(req.Contents) == 0 {
+			t.Fatal("expected at least one content; got none")
+		}
+		if diff := cmp.Diff(wantLeading, req.Contents[0]); diff != "" {
+			t.Errorf("leading content mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T) {

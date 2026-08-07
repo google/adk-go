@@ -148,11 +148,13 @@ func installTaskTools(a *llmAgent) error {
 		if !ok {
 			continue
 		}
+		// ModeUnset means chat for sub-agents. Set at parent construction
+		// (not the hot path) so later AgentNode wrapping cannot flip them
+		// to single_turn via ModeUnset defaults.
 		subState := llminternal.Reveal(subInternal)
 		if subState.Mode == llminternal.ModeUnset {
 			subState.Mode = llminternal.ModeChat
 		}
-
 		switch subState.Mode {
 		case llminternal.ModeSingleTurn:
 			t, err := workflowinternal.NewSingleTurnTool(sub)
