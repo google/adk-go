@@ -17,6 +17,7 @@ package remoteagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -329,6 +330,14 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 
 	if cfg.RemoteTaskCleanupCallback != nil {
 		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
+		return
+	}
+
+	// Best-effort remote cancellation: skip the cancel RPC when the invocation was
+	// torn down by cancellation or a deadline. The context lifetime is unreliable
+	// during forced teardown (a detached parent may already have ended), and
+	// adk-python does not cancel remote tasks at all; the remote task expires on its own.
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}
 

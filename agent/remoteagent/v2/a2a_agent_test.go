@@ -1397,6 +1397,57 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 	}
 }
 
+func TestCleanupRemoteTask_SkipsCancelOnTeardown(t *testing.T) {
+	lastEvent := &a2a.Task{ID: a2a.NewTaskID(), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}
+	if lastEvent.TaskInfo().TaskID == "" {
+		t.Fatalf("lastEvent.TaskInfo().TaskID is empty, want non-empty")
+	}
+
+	testCases := []struct {
+		name       string
+		cause      error
+		wantCancel bool
+	}{
+		{name: "deadline exceeded", cause: context.DeadlineExceeded, wantCancel: false},
+		{name: "canceled", cause: context.Canceled, wantCancel: false},
+		{name: "wrapped deadline exceeded", cause: fmt.Errorf("wrapped: %w", context.DeadlineExceeded), wantCancel: false},
+		{name: "nil cause still cancels", cause: nil, wantCancel: true},
+		{name: "other error still cancels", cause: errors.New("some rpc error"), wantCancel: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeA2AClient{}
+			cleanupRemoteTask(t.Context(), A2AConfig{}, &a2a.AgentCard{}, fake, lastEvent, tc.cause)
+			if fake.cancelCalled != tc.wantCancel {
+				t.Fatalf("CancelTask called = %v, want %v (cause = %v)", fake.cancelCalled, tc.wantCancel, tc.cause)
+			}
+		})
+	}
+}
+
+// fakeA2AClient records whether CancelTask was invoked. Only CancelTask has behavior.
+type fakeA2AClient struct {
+	cancelCalled bool
+}
+
+var _ A2AClient = (*fakeA2AClient)(nil)
+
+func (c *fakeA2AClient) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	return nil, nil
+}
+
+func (c *fakeA2AClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {}
+}
+
+func (c *fakeA2AClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	c.cancelCalled = true
+	return &a2a.Task{}, nil
+}
+
+func (c *fakeA2AClient) Destroy() error { return nil }
+
 func TestRemoteAgent_PartConverter(t *testing.T) {
 	event := &session.Event{
 		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
