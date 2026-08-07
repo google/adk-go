@@ -41,7 +41,9 @@ type connectorOperation struct {
 func (o connectorOperation) result(resource string) (outcome, error) {
 	if o.Error != nil {
 		if o.Error.Message != "" {
-			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %s", o.Error.Code, o.Error.Message)
+			// Same treatment doPost gives a response body: the message is
+			// service-controlled and otherwise bypasses both the cap and escaping.
+			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %q", o.Error.Code, truncateForError(o.Error.Message))
 		}
 		return nil, fmt.Errorf("gcp: connector operation failed (code %d)", o.Error.Code)
 	}

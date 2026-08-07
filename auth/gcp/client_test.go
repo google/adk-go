@@ -21,6 +21,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -181,20 +184,27 @@ func TestRetrieveRoutesByResource(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotPath, gotMethod, gotUserID string
+			var gotPath, gotMethod, gotUserID, gotContinueURI string
+			var gotScopes []string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath, gotMethod = r.URL.Path, r.Method
 				var body struct {
-					UserID string `json:"userId"`
+					UserID      string   `json:"userId"`
+					Scopes      []string `json:"scopes"`
+					ContinueURI string   `json:"continueUri"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&body)
-				gotUserID = body.UserID
+				gotUserID, gotScopes, gotContinueURI = body.UserID, body.Scopes, body.ContinueURI
 				_, _ = io.WriteString(w, `{"done":true,"response":{"token":"t","header":"Authorization: Bearer"},"success":{"token":"t","header":"Authorization: Bearer"}}`)
 			}))
 			defer srv.Close()
 
-			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
-				Request{Resource: tc.resource, UserID: "user-1"}); err != nil {
+			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+				Resource:    tc.resource,
+				UserID:      "user-1",
+				Scopes:      []string{"scope-a", "scope-b"},
+				ContinueURI: "https://example.test/continue",
+			}); err != nil {
 				t.Fatalf("RetrieveCredential() error = %v", err)
 			}
 			if gotMethod != http.MethodPost {
@@ -205,6 +215,14 @@ func TestRetrieveRoutesByResource(t *testing.T) {
 			}
 			if gotUserID != "user-1" {
 				t.Errorf("body userId = %q, want %q", gotUserID, "user-1")
+			}
+			// ContinueURI is what makes the 3-legged flow work, so a wrong tag
+			// here would be silent and expensive.
+			if !slices.Equal(gotScopes, []string{"scope-a", "scope-b"}) {
+				t.Errorf("body scopes = %q, want [scope-a scope-b]", gotScopes)
+			}
+			if gotContinueURI != "https://example.test/continue" {
+				t.Errorf("body continueUri = %q, want %q", gotContinueURI, "https://example.test/continue")
 			}
 		})
 	}
@@ -234,11 +252,26 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
 		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
 	}
-	c := &Client{httpClient: http.DefaultClient}
+	// Point at a live server: a client with no endpoint fails at transport for
+	// every input, which cannot tell a rejected request from an unreachable one.
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits.Add(1)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := c.RetrieveCredential(t.Context(), tc.req); err == nil {
-				t.Errorf("RetrieveCredential(%+v) = nil error, want error", tc.req)
+			hits.Store(0)
+			_, err := c.RetrieveCredential(t.Context(), tc.req)
+			if err == nil {
+				t.Fatalf("RetrieveCredential(%+v) = nil error, want error", tc.req)
+			}
+			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "invalid characters") {
+				t.Errorf("error = %v, want a request-validation error", err)
+			}
+			if got := hits.Load(); got != 0 {
+				t.Errorf("credentials service called %d time(s); a rejected request must not reach the wire", got)
 			}
 		})
 	}
@@ -294,8 +327,13 @@ func TestMapCredential(t *testing.T) {
 		{name: "authorization bearer", header: "Authorization: Bearer", token: "t", wantBearer: "t"},
 		{name: "authorization bearer lowercase", header: "authorization: bearer", token: "t", wantBearer: "t"},
 		{name: "custom header", header: "X-Goog-Api-Key", token: "k", wantAPIKey: [2]string{"X-Goog-Api-Key", "k"}},
+		// A name that is NOT X-Goog-Api-Key: with the mirror deleted, the two
+		// assertions in wantAPIKey would otherwise read the same header and pass.
+		{name: "third-party header is mirrored", header: "X-Acme-Token", token: "k", wantAPIKey: [2]string{"X-Acme-Token", "k"}},
 		{name: "empty header", header: "", token: "t", wantErr: true},
 		{name: "empty token", header: "Authorization: Bearer", token: "", wantErr: true},
+		{name: "header carrying a scheme is not a usable field name", header: "X-Api-Key: Token", token: "k", wantErr: true},
+		{name: "bare authorization is not a usable field name", header: "Authorization", token: "k", wantAPIKey: [2]string{"Authorization", "k"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -408,5 +446,123 @@ func wantAPIKey(t *testing.T, cred auth.Credential, name, value string) {
 	}
 	if got := h.Get("X-Goog-Api-Key"); got != value {
 		t.Errorf("X-Goog-Api-Key = %q, want %q (adk-python parity)", got, value)
+	}
+}
+
+// TestNewClientRefusesRedirects pins the ADC client's redirect guard: oauth2's
+// transport re-signs every hop below net/http's cross-host stripping, so a
+// followed redirect would hand the cloud-platform token to the target and let
+// it dictate the returned credential. Drives the real ADC branch of NewClient,
+// so deleting the guard fails here.
+func TestNewClientRefusesRedirects(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"ADC-TOKEN","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+
+	var targetSawAuth string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetSawAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"success":{"token":"attacker","header":"Authorization: Bearer"}}`)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","token_uri":"`+tokenSrv.URL+`"}`), 0o600); err != nil {
+		t.Fatalf("write fake ADC: %v", err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
+
+	c, err := NewClient(t.Context(), &Config{
+		AgentIdentityEndpoint: redirector.URL,
+		ConnectorEndpoint:     redirector.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+	if err == nil {
+		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", cred)
+	}
+	if targetSawAuth != "" {
+		t.Errorf("redirect target received Authorization %q; the token must not leave the configured host", targetSawAuth)
+	}
+}
+
+// TestDoPostOversizeKeepsStatus: the size check runs first, so it must carry the
+// status or the most actionable field is lost.
+func TestDoPostOversizeKeepsStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, strings.Repeat("x", (1<<20)+10))
+	}))
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("error = %v, want it to name status 502", err)
+	}
+}
+
+// TestDoPostEscapesErrorBody: a service-controlled body must not be able to
+// forge log lines through the returned error.
+func TestDoPostEscapesErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "unavailable\r\nINFO auth: credential granted user=victim")
+	}))
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want error")
+	}
+	if strings.Contains(err.Error(), "\r\n") {
+		t.Errorf("error carries raw control bytes: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), `\r\n`) {
+		t.Errorf("error = %q, want the body escaped", err.Error())
+	}
+}
+
+func TestTruncateForError(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "short is unchanged", in: "nope", want: "nope"},
+		{name: "long is cut", in: strings.Repeat("a", 2000), want: strings.Repeat("a", 1024) + "..."},
+		// A body need not be UTF-8; an unbounded backup would walk to 0 here and
+		// throw away every byte of diagnostic context.
+		{name: "non utf8 keeps context", in: strings.Repeat("\x80", 2000), want: strings.Repeat("\x80", 1024) + "..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := truncateForError(tc.in); got != tc.want {
+				t.Errorf("truncateForError() length = %d, want %d", len(got), len(tc.want))
+			}
+		})
+	}
+}
+
+func TestNewClientRejectsNegativePollTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	c, err := NewClient(t.Context(), &Config{HTTPClient: srv.Client(), PollTimeout: -time.Second})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if c.pollTimeout != defaultPollTimeout {
+		t.Errorf("pollTimeout = %v, want the default %v (a negative value must not mean 'never retry')",
+			c.pollTimeout, defaultPollTimeout)
 	}
 }
