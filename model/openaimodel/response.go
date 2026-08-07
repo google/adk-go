@@ -111,11 +111,11 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 }
 
 func convertFunctionCall(item responses.ResponseOutputItemUnion) (*genai.Part, error) {
-	args := map[string]any{}
-	if item.Arguments.OfString != "" {
-		if err := json.Unmarshal([]byte(item.Arguments.OfString), &args); err != nil {
-			return nil, fmt.Errorf("openai: parse function call args: %w", err)
-		}
+	args, err := functionCallArgs(item.Arguments)
+	if err != nil {
+		// Name the offending call: convertOutputItems aborts the entire
+		// response on the first error, so nothing else identifies it.
+		return nil, fmt.Errorf("%w (name %q, call_id %q)", err, item.Name, item.CallID)
 	}
 	return &genai.Part{
 		FunctionCall: &genai.FunctionCall{
@@ -124,6 +124,42 @@ func convertFunctionCall(item responses.ResponseOutputItemUnion) (*genai.Part, e
 			Args: args,
 		},
 	}, nil
+}
+
+// functionCallArgs decodes the arguments of a function call output item.
+func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map[string]any, error) {
+	var raw string
+	switch v := arguments.OfResponseToolSearchCallArguments.(type) {
+	case nil:
+		// Absent, null, or a value built by hand rather than decoded.
+		raw = arguments.OfString
+	case string:
+		// A JSON string; OfString holds the same value already unquoted.
+		raw = arguments.OfString
+	default:
+		raw = arguments.JSON.OfResponseToolSearchCallArguments.Raw()
+		if raw == "" {
+			// No wire bytes to recover, so this value was built by hand; there
+			// is no original payload for a re-encode to disagree with.
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrFunctionCallArgs, err)
+			}
+			raw = string(b)
+		}
+	}
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrFunctionCallArgs, err)
+	}
+	if args == nil {
+		// The payload was JSON null: the call takes no arguments.
+		return map[string]any{}, nil
+	}
+	return args, nil
 }
 
 func finishReason(resp *responses.Response) genai.FinishReason {

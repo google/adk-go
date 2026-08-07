@@ -327,9 +327,16 @@ func eventNeedsRawEvent(event *session.Event) bool {
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
-// the SessionEvent.raw_event field. Uses Go's JSON encoding; not yet
-// byte-compatible with adk-python's camelCase dump (cross-runtime parity
-// is tracked separately).
+// the SessionEvent.raw_event field. session.Event is tagged camelCase, so the
+// keys match adk-python's dump; the timestamp is the remaining difference,
+// written here as an RFC 3339 string where adk-python writes epoch seconds.
+// Readers of raw_event take the timestamp from the SessionEvent envelope
+// rather than the blob, so that difference does not normally reach them. Note
+// the dependency is not unconditional on the adk-python side: it overrides
+// only `if timestamp_obj` (vertex_ai_session_service.py), so a raw_event whose
+// envelope carries no timestamp leaves the RFC 3339 string in place against a
+// float field and fails validation for the whole event. The service populates
+// the envelope, so this is a guard on an invariant rather than a live risk.
 //
 // Integers in the any-typed Output and StateDelta come back as float64
 // (structpb numbers and json.Unmarshal into any are both float64). This
