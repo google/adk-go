@@ -831,3 +831,115 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 		t.Errorf("expected automatically extracted output %q, got %q", want, got)
 	}
 }
+
+// TestNodeIsResuming_InvocationScope pins resume detection scoping to the
+// current invocation and the node's own agent.
+func TestNodeIsResuming_InvocationScope(t *testing.T) {
+	const agentName = "worker"
+	raise := func(inv, author, id string) *session.Event {
+		return &session.Event{InvocationID: inv, Author: author, LongRunningToolIDs: []string{id}}
+	}
+	answer := func(inv, id string) *session.Event {
+		ev := &session.Event{InvocationID: inv, Author: "user"}
+		ev.LLMResponse.Content = &genai.Content{
+			Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: id}}},
+		}
+		return ev
+	}
+
+	tests := []struct {
+		name         string
+		events       sliceEvents
+		invocationID string
+		want         bool
+	}{
+		{
+			name:         "answered in current invocation is a resume",
+			events:       sliceEvents{raise("inv1", agentName, "A"), answer("inv1", "A")},
+			invocationID: "inv1",
+			want:         true,
+		},
+		{
+			// A finished cycle stays in history but must not resume inv2.
+			name:         "answered only in a prior invocation is not a resume",
+			events:       sliceEvents{raise("inv1", agentName, "A"), answer("inv1", "A")},
+			invocationID: "inv2",
+			want:         false,
+		},
+		{
+			name:         "raised but unanswered is not a resume",
+			events:       sliceEvents{raise("inv1", agentName, "A")},
+			invocationID: "inv1",
+			want:         false,
+		},
+		{
+			name:         "interrupt raised by another node is not this node's resume",
+			events:       sliceEvents{raise("inv1", "other", "A"), answer("inv1", "A")},
+			invocationID: "inv1",
+			want:         false,
+		},
+		{
+			// Nested delegation: the interrupt is authored by a sub-agent, not
+			// this node's agent, so author scoping excludes it (see nodeIsResuming).
+			name: "delegated sub-agent's interrupt is not the coordinator's resume",
+			events: sliceEvents{
+				{InvocationID: "inv1", Author: agentName},
+				raise("inv1", "subagent", "A"),
+				answer("inv1", "A"),
+			},
+			invocationID: "inv1",
+			want:         false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := &eventsSession{events: tc.events}
+			if got := nodeIsResuming(sess, tc.invocationID, agentName); got != tc.want {
+				t.Errorf("nodeIsResuming(_, %q, %q) = %v, want %v", tc.invocationID, agentName, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewAgentNode_RerunOnResumeDefault pins the isLlmAgent-gated default:
+// a non-LlmAgent node gets no default, and an explicit value always wins.
+func TestNewAgentNode_RerunOnResumeDefault(t *testing.T) {
+	nonLLM, err := agent.New(agent.Config{
+		Name: "plain",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	rerunTrue, rerunFalse := true, false
+
+	tests := []struct {
+		name string
+		cfg  NodeConfig
+		want *bool
+	}{
+		{name: "non-LlmAgent gets no default", cfg: NodeConfig{}, want: nil},
+		{name: "explicit true wins", cfg: NodeConfig{RerunOnResume: &rerunTrue}, want: &rerunTrue},
+		{name: "explicit false wins", cfg: NodeConfig{RerunOnResume: &rerunFalse}, want: &rerunFalse},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := NewAgentNode(nonLLM, tc.cfg)
+			if err != nil {
+				t.Fatalf("NewAgentNode: %v", err)
+			}
+			switch got := node.Config().RerunOnResume; {
+			case tc.want == nil:
+				if got != nil {
+					t.Errorf("RerunOnResume = %v, want nil", *got)
+				}
+			case got == nil:
+				t.Errorf("RerunOnResume = nil, want %v", *tc.want)
+			case *got != *tc.want:
+				t.Errorf("RerunOnResume = %v, want %v", *got, *tc.want)
+			}
+		})
+	}
+}

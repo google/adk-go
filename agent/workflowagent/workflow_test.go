@@ -170,7 +170,7 @@ func TestWorkflowAgent(t *testing.T) {
 	}
 }
 
-func TestDecodeWorkflowInputResponse(t *testing.T) {
+func TestDecodeResumeResponse(t *testing.T) {
 	tests := []struct {
 		name string
 		fr   *genai.FunctionResponse
@@ -244,9 +244,9 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeWorkflowInputResponse(tc.fr)
+			got := decodeResumeResponse(tc.fr)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("decodeWorkflowInputResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
+				t.Errorf("decodeResumeResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
 			}
 		})
 	}

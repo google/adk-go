@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -50,23 +51,36 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-	}
-
-	// The wrapped agent's Run already emits an invoke_agent span, so
-	// the scheduler must not add a redundant invoke_node wrapper —
-	// whether this node is activated by a static edge or delegated to
-	// via RunNode. Mirrors runner.newAgentNode.
-	cfg.EmitsOwnSpan = true
+	cfg = applyAgentNodeDefaults(a, cfg)
 
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
 	}, nil
+}
+
+// applyAgentNodeDefaults fills in the AgentNode config defaults, mirroring
+// applyDynamicDefaults. EmitsOwnSpan is always set: the agent's Run already
+// emits invoke_agent, so the scheduler must not add a redundant invoke_node
+// wrapper. LlmAgent nodes additionally default to single_turn mode and to
+// re-entry on resume (so a paused agent finishes instead of handing off),
+// matching runner.newAgentNode / adk-python build_node; other kinds keep the
+// engine default and an explicit RerunOnResume always wins.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+	cfg.EmitsOwnSpan = true
+
+	llmA, ok := a.(llminternal.Agent)
+	if !ok {
+		return cfg
+	}
+	if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
+		state.Mode = llminternal.ModeSingleTurn
+	}
+	if cfg.RerunOnResume == nil {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+	return cfg
 }
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
@@ -90,6 +104,12 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		// On resume, re-feeding the input would make a single_turn/task
+		// LlmAgent re-call the still-pending tool and pause again; drop it
+		// so the agent continues from history. Mirrors runner.runAgentNodeBody.
+		if nodeIsResuming(ctx.Session(), ctx.InvocationID(), n.agent.Name()) {
+			input = nil
+		}
 		userContent, err := nodeInputToContent(input)
 		if err != nil {
 			yield(nil, err)
@@ -161,6 +181,57 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			}
 		}
 	}
+}
+
+// nodeIsResuming reports whether this node's agent raised a long-running
+// interrupt that a later FunctionResponse has since answered — i.e. this turn is
+// a HITL resume of THIS node, so Run should drop the node input.
+//
+// The open-interrupt set is scoped to invocationID and to the agent's own events
+// (by author), stricter than the runner's unscoped answeredOpenInterrupts, so a
+// prior run or a sibling node's resume isn't taken for this node's. (A single
+// agent per invocation lets the runner stay unscoped; a graph can't.)
+//
+// Author scoping means an interrupt raised under a different author — e.g. a
+// sub-agent the coordinator delegated to — is not seen here; that resume rides
+// on the child node's own Run.
+func nodeIsResuming(sess session.Session, invocationID, agentName string) bool {
+	if sess == nil {
+		return false
+	}
+	events := sess.Events()
+	if events == nil {
+		return false
+	}
+	open := map[string]struct{}{}
+	answered := map[string]struct{}{}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		if ev.Author == agentName {
+			for _, id := range ev.LongRunningToolIDs {
+				if id != "" {
+					open[id] = struct{}{}
+				}
+			}
+		}
+		for _, fr := range utils.FunctionResponses(utils.Content(ev)) {
+			if fr != nil && fr.ID != "" {
+				answered[fr.ID] = struct{}{}
+			}
+		}
+	}
+	for id := range open {
+		if _, ok := answered[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model
