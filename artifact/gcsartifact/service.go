@@ -127,9 +127,8 @@ var ErrVersionConflict = errors.New("artifact version conflict")
 // exhausted rather than overwriting an existing version. Each attempt costs one
 // listing plus one upload.
 //
-// The scheme only holds if every writer uses it: adk-python's
-// GcsArtifactService still writes max+1 unconditionally, so a bucket shared with
-// it can still lose a version.
+// The scheme only holds if every writer uses the precondition: a bucket also
+// written by a client that assigns versions unconditionally can still lose one.
 func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*artifact.SaveResponse, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
