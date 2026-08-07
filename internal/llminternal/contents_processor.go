@@ -43,18 +43,28 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // In python, no error is yielded.
 		}
 		state := llmAgent.internal()
+		name := ctx.Agent().Name()
+		// Two questions, deliberately answered from different sources.
+		// Hiding history follows the placement alone: only an agent a
+		// placement seeded with one synthetic turn loses its history, and
+		// only while the caller left IncludeContents unset — asking for
+		// history explicitly beats the placement, as it does in adk-python
+		// (_llm_agent_wrapper.py gates the same override on
+		// include_contents being absent from model_fields_set).
+		// Shaping that turn as single_turn also honours the declaration.
+		boundMode, bound := BoundMode(ctx, name)
+		placementHidesHistory := bound && boundMode == ModeSingleTurn && state.IncludeContents == ""
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
-			// Include current turn context only (no conversation history)
+		if state.IncludeContents == "none" || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}
+		isSingleTurn := ModeFor(ctx, name, state.Mode) == ModeSingleTurn
 		var events []*session.Event
 		if ctx.Session() != nil {
 			for e := range ctx.Session().Events().All() {
 				events = append(events, e)
 			}
 		}
-		isSingleTurn := state.Mode == ModeSingleTurn
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)
