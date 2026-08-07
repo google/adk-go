@@ -39,6 +39,8 @@ require (
 
 require github.com/hashicorp/golang-lru/v2 v2.0.7
 
+require github.com/ergochat/readline v0.1.3
+
 require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
