@@ -349,7 +349,7 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	}
 
 	// update local session last update time
-	sess.updatedAt = event.Timestamp
+	sess.setUpdatedAt(event.Timestamp)
 	return nil
 }
 
@@ -427,7 +427,9 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
-		session.updatedAt = storageSess.UpdateTime
+		// The in-memory updatedAt is set by the caller once the transaction has
+		// committed. Writing it here would both race with LastUpdateTime and
+		// advance the timestamp for an append that is about to be rolled back.
 
 		return nil // Returning nil commits the transaction.
 	})
