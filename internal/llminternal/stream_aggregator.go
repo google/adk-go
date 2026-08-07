@@ -78,7 +78,9 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 
 func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMResponse) *model.LLMResponse {
 	s.response = llmResponse
-	s.usageMetadata = llmResponse.UsageMetadata
+	if llmResponse.UsageMetadata != nil {
+		s.usageMetadata = llmResponse.UsageMetadata
+	}
 	if llmResponse.GroundingMetadata != nil {
 		s.groundingMetadata = llmResponse.GroundingMetadata
 	}
