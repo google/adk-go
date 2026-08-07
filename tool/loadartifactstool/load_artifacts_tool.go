@@ -173,9 +173,21 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.ToolContext, 
 	if !ok {
 		return nil
 	}
-	artifactNames, ok := artifactNamesRaw.([]string)
-	if !ok {
-		return fmt.Errorf("invalid artifact names type: %T, expected []string", artifactNamesRaw)
+	var artifactNames []string
+	switch names := artifactNamesRaw.(type) {
+	case []string:
+		artifactNames = names
+	case []any:
+		artifactNames = make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			artifactNames[i] = s
+		}
+	default:
+		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
 	}
 	if len(artifactNames) == 0 {
 		return nil
