@@ -23,6 +23,7 @@ package preloadmemorytool
 
 import (
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -105,11 +106,22 @@ func formatMemories(memories []memory.Entry) string {
 			continue
 		}
 
+		// Memory entry content is attacker-influenced: it is whatever was
+		// fed to the agent earlier by any pathway that can write entries for
+		// this (appName, userID) pair. Escape HTML-style angle brackets so
+		// the rendered text cannot break out of the surrounding
+		// <PAST_CONVERSATIONS>...</PAST_CONVERSATIONS> wrapper in the system
+		// instruction template. Without this, a stored memory entry that
+		// contains the literal string "</PAST_CONVERSATIONS>" closes the
+		// wrapper, and any text that follows it is treated by the LLM as a
+		// new system instruction instead of as previous conversation context.
+		memText = html.EscapeString(memText)
+
 		if !mem.Timestamp.IsZero() {
 			lines = append(lines, fmt.Sprintf("Time: %s", mem.Timestamp.Format(time.RFC3339)))
 		}
 		if mem.Author != "" {
-			memText = fmt.Sprintf("%s: %s", mem.Author, memText)
+			memText = fmt.Sprintf("%s: %s", html.EscapeString(mem.Author), memText)
 		}
 		lines = append(lines, memText)
 	}
