@@ -51,6 +51,63 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 	}
 }
 
+func Test_databaseService_AppAndUserStateUpdateTimes(t *testing.T) {
+	dbNow := time.Date(2026, time.July, 22, 1, 2, 3, 456000000, time.UTC)
+	s := emptyService(t)
+	s.db.NowFunc = func() time.Time { return dbNow }
+
+	created, err := s.Create(t.Context(), &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+		State: map[string]any{
+			"app:setting":     "initial",
+			"user:preference": "initial",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	assertStateUpdateTimes(t, s, "app", "user", dbNow)
+
+	dbNow = dbNow.Add(time.Minute)
+	event := &session.Event{
+		ID:        "state-update",
+		Timestamp: created.Session.LastUpdateTime().Add(time.Second),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"app:setting":     "updated",
+				"user:preference": "updated",
+			},
+		},
+	}
+	if err := s.AppendEvent(t.Context(), created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	assertStateUpdateTimes(t, s, "app", "user", dbNow)
+}
+
+func assertStateUpdateTimes(t *testing.T, s *databaseService, appName, userID string, want time.Time) {
+	t.Helper()
+
+	var appState storageAppState
+	if err := s.db.First(&appState, "app_name = ?", appName).Error; err != nil {
+		t.Fatalf("fetch app state: %v", err)
+	}
+	if !appState.UpdateTime.Equal(want) {
+		t.Errorf("app state UpdateTime = %v, want %v", appState.UpdateTime, want)
+	}
+
+	var userState storageUserState
+	if err := s.db.First(&userState, "app_name = ? AND user_id = ?", appName, userID).Error; err != nil {
+		t.Fatalf("fetch user state: %v", err)
+	}
+	if !userState.UpdateTime.Equal(want) {
+		t.Errorf("user state UpdateTime = %v, want %v", userState.UpdateTime, want)
+	}
+}
+
 // TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip guards that
 // the storage layer serializes/deserializes the workflow event fields
 // (NodeInfo, RequestedInput, Routes, IsolationScope); dropping them
