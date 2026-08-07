@@ -735,6 +735,43 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "after invoked for aggregated partial events",
+			events: func(rc *a2asrv.ExecutorContext) []a2a.Event {
+				lastChunkArtifact := a2a.NewArtifactEvent(rc, a2a.NewTextPart("Hel"))
+				lastChunk := a2a.NewArtifactUpdateEvent(rc, lastChunkArtifact.Artifact.ID, a2a.NewTextPart("lo"))
+				lastChunk.LastChunk = true
+				flushedArtifact := a2a.NewArtifactEvent(rc, a2a.NewTextPart("bye"))
+				return []a2a.Event{
+					a2a.NewSubmittedTask(rc, rc.Message),
+					lastChunkArtifact,
+					lastChunk,
+					flushedArtifact,
+					a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil),
+				}
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.SendMessageRequest, result *session.Event, err error) (*session.Event, error) {
+					if result == nil {
+						return nil, nil
+					}
+					result.CustomMetadata = nil
+					if result.Content == nil || result.Partial || result.TurnComplete {
+						return nil, nil
+					}
+					result.Content = genai.NewContentFromText(result.Content.Parts[0].Text+"!", genai.RoleModel)
+					return nil, nil
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("Hel", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("lo", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("Hello!", genai.RoleModel)},
+				{Content: genai.NewContentFromText("bye", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("bye!", genai.RoleModel)},
+				{TurnComplete: true},
+			},
+		},
+		{
 			name: "after error stops the run",
 			events: func(rc *a2asrv.ExecutorContext) []a2a.Event {
 				finalEvent := a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil)

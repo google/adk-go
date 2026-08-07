@@ -281,6 +281,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 			if event != nil { // an event might be skipped
 				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+					if toEmit != event {
+						if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, toEmit, nil); cbResp != nil || cbErr != nil {
+							if cbErr != nil {
+								return yieldErr(cbErr)
+							}
+							toEmit = cbResp
+						}
+					}
 					if !yield(toEmit, nil) {
 						return false
 					}
