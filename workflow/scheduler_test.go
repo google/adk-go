@@ -183,6 +183,264 @@ func TestScheduler_FailedSiblingsCancelled(t *testing.T) {
 	}
 }
 
+// TestScheduler_ExternalCancellationFailsRun verifies that cancellation of
+// the workflow's invocation context is surfaced to the caller, rather than
+// being mistaken for scheduler-initiated sibling cancellation.
+func TestScheduler_ExternalCancellationFailsRun(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	n := newCancelObservingNode("n")
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	select {
+	case <-n.started:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for node to start")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Workflow.Run ended cleanly after external cancellation")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+}
+
+// TestScheduler_ExternalCancellationDuringPendingRetry covers the ordering
+// in which no completion is left to classify: the node's activation has
+// already been handled and rescheduled as a retry, so the only thing
+// keeping the loop alive is the retry timer. Cancelling here makes
+// cancelAll stop that timer and empty retryTimers, ending the loop without
+// another trip through handleCompletion. The cancellation has to be
+// recorded when it is observed, or the run reports success with the graph
+// half-executed.
+func TestScheduler_ExternalCancellationDuringPendingRetry(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	// The delay only has to outlast the test: the retry must still be
+	// pending when the context is cancelled, and must never fire.
+	n := newRetryTestNode("flaky", 100, NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   5,
+			InitialDelay:  time.Hour,
+			BackoffFactor: 1.0,
+			ShouldRetry:   func(error) bool { return true },
+		},
+	})
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	// Wait for the first attempt to fail, then give the consumer a moment
+	// to process that completion and arm the retry timer. If the sleep is
+	// too short the cancel merely lands on a different ordering, one the
+	// test above already covers -- it cannot make this test flaky.
+	waitForCalls(t, n, 1)
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+	if got := n.calls.Load(); got != 1 {
+		t.Errorf("node attempts = %d, want 1 (the retry must not run under a dead context)", got)
+	}
+}
+
+// TestScheduler_ExternalCancellationPrefersNodeError verifies that a node
+// that failed for its own reason keeps that error even though the
+// invocation context is dead. Reporting a bare context.Canceled here would
+// hide the reason the run stopped, which matters most when the caller
+// cancelled *because* something went wrong.
+func TestScheduler_ExternalCancellationPrefersNodeError(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	nodeErr := errors.New("node failed on its own terms")
+	n := newReleasableErroringNode("n", nodeErr)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	select {
+	case <-n.started:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for node to start")
+	}
+	// Cancel first, then let the node fail: its completion is classified
+	// with parentCtx already dead.
+	cancel()
+	close(n.release)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, nodeErr) {
+			t.Fatalf("Run error = %v, want it to wrap %v", err, nodeErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+}
+
+// TestScheduler_ExternalCancellationMarksNodeCancelled pins the lifecycle
+// status of an externally cancelled node. adk-python marks every task it
+// reaps during shutdown CANCELLED whether the engine or the caller
+// cancelled it (_workflow.py _cleanup_all_tasks, run from a finally), and
+// leaving the node at NodeRunning here would instead claim it still has a
+// task in flight.
+// Both flavours of a dying context are covered: on a deadline runNode
+// reports context.DeadlineExceeded, which must still read as the context
+// dying rather than as a failure the node decided on by itself.
+func TestScheduler_ExternalCancellationMarksNodeCancelled(t *testing.T) {
+	tests := []struct {
+		name string
+		kill func(context.Context) (context.Context, func())
+	}{
+		{
+			name: "cancel",
+			kill: func(parent context.Context) (context.Context, func()) {
+				return context.WithCancel(parent)
+			},
+		},
+		{
+			name: "deadline",
+			kill: func(parent context.Context) (context.Context, func()) {
+				ctx, cancel := context.WithTimeout(parent, 100*time.Millisecond)
+				return ctx, func() {
+					// The deadline does the killing; waiting on Done makes
+					// the ordering explicit, and cancel only frees the timer.
+					<-ctx.Done()
+					cancel()
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockCtx := newSeededMockCtx(t)
+			ctx, kill := tt.kill(mockCtx.Context)
+			mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+			n := newCancelObservingNode("n")
+			w := mustNew(t, []Edge{{From: Start, To: n}})
+
+			// Drive the scheduler directly, as Workflow.RunNode does, so
+			// the RunState survives the run and can be inspected.
+			c := agent.Promote(mockCtx)
+			s := newScheduler(c, w.graph, w.maxConcurrency)
+			s.state.EnsureNode(Start.Name()).Input = nil
+			s.scheduleNode(Start, nil, "", c.Branch())
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.run(func(*session.Event, error) bool { return true })
+				s.wg.Wait()
+			}()
+
+			select {
+			case <-n.started:
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for node to start")
+			}
+			kill()
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timeout waiting for scheduler to finish")
+			}
+
+			ns := s.state.Nodes[n.Name()]
+			if ns == nil {
+				t.Fatalf("no NodeState recorded for %q", n.Name())
+			}
+			if ns.Status != NodeCancelled {
+				t.Errorf("node status = %v, want NodeCancelled", ns.Status)
+			}
+		})
+	}
+}
+
+// TestScheduler_ExternalDeadlineSurfacesCause covers the other way an
+// invocation context dies. The run must report the cause rather than a
+// blanket context.Canceled, so a caller can tell a request timeout apart
+// from a deliberate cancellation.
+func TestScheduler_ExternalDeadlineSurfacesCause(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithTimeout(mockCtx.Context, 50*time.Millisecond)
+	defer cancel()
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	n := newCancelObservingNode("n")
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+}
+
 // TestScheduler_CallerBreakStopsScheduling verifies that when the
 // caller breaks out of the event range loop, the scheduler stops
 // dispatching new successor nodes — not just stops yielding events.
@@ -402,20 +660,67 @@ func (n *erroringNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, err
 	}
 }
 
+// releasableErroringNode signals when it has started and then blocks
+// until release is closed before failing. It lets a test order the
+// node's failure after some other event, such as the cancellation of
+// the invocation context.
+type releasableErroringNode struct {
+	BaseNode
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func newReleasableErroringNode(name string, err error) *releasableErroringNode {
+	return &releasableErroringNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		err:      err,
+	}
+}
+
+func (n *releasableErroringNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		close(n.started)
+		<-n.release
+		yield(nil, n.err)
+	}
+}
+
+// waitForCalls blocks until the node has been activated at least want
+// times, so a test can order an action after a given attempt without
+// reaching into scheduler state.
+func waitForCalls(t *testing.T, n *retryTestNode, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for n.calls.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %d node attempts, got %d", want, n.calls.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // cancelObservingNode blocks until its context is cancelled, then
 // records that fact via cancelObserved. Used to verify sibling
 // cancellation and timeout behaviour.
 type cancelObservingNode struct {
 	BaseNode
+	started        chan struct{}
 	cancelObserved atomic.Bool
 }
 
 func newCancelObservingNode(name string) *cancelObservingNode {
-	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
+	return &cancelObservingNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		started:  make(chan struct{}),
+	}
 }
 
 func (n *cancelObservingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		close(n.started)
 		<-ctx.Done()
 		n.cancelObserved.Store(true)
 	}

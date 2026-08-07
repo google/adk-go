@@ -15,7 +15,9 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -242,6 +244,209 @@ func TestConvertFunctionCall(t *testing.T) {
 				t.Fatalf("unexpected args: %+v", got.FunctionCall.Args)
 			}
 		})
+	}
+}
+
+// TestConvertFunctionCall_DecodedArguments exercises the arguments field
+// through the SDK's real UnmarshalJSON path. Constructing
+// ResponseOutputItemUnionArguments as a struct literal bypasses that decoding
+// entirely, so it cannot tell which union arm a given wire payload populates.
+func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		wantArgs map[string]any
+		wantErr  bool
+	}{
+		{
+			name:     "string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"{\"location\":\"Paris\"}"}`,
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			// OpenAI-compatible endpoints commonly send a bare JSON object
+			// here rather than a string. These arguments must not be dropped.
+			name:     "object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{"location":"Paris"}}`,
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "empty object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{}}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "empty string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":""}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "null arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":null}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "absent arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c"}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			// A JSON string holding the literal null means "no arguments",
+			// matching a null in the bare arm. It must not yield a nil map:
+			// a tool wrapper writing to one would panic.
+			name:     "null string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"null"}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			// Both arms must follow encoding/json's last-one-wins rule, as
+			// every other JSON consumer in the package does. The SDK decodes
+			// with gjson, which keeps the first occurrence, so decoding the
+			// bare arm from anything but the original bytes would resolve
+			// this to /tmp/safe and make the two arms disagree.
+			name:     "duplicate keys in object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{"path":"/tmp/safe","path":"/etc/shadow"}}`,
+			wantArgs: map[string]any{"path": "/etc/shadow"},
+		},
+		{
+			name:     "duplicate keys in string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"{\"path\":\"/tmp/safe\",\"path\":\"/etc/shadow\"}"}`,
+			wantArgs: map[string]any{"path": "/etc/shadow"},
+		},
+		{
+			// A non-object payload must surface an error rather than degrade
+			// into an empty argument map.
+			name:    "array arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":[1,2]}`,
+			wantErr: true,
+		},
+		{
+			name:    "number arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":42}`,
+			wantErr: true,
+		},
+		{
+			name:    "bool arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":true}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object string arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":"[1,2]"}`,
+			wantErr: true,
+		},
+		{
+			// Out of range for float64. The SDK's decoder turns this into
+			// +Inf, so it must be rejected from the original bytes rather
+			// than reported as a re-encoding failure.
+			name:    "out of range number in object arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":{"x":1e400}}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed string arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":"{not json"}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var item responses.ResponseOutputItemUnion
+			if err := json.Unmarshal([]byte(tc.raw), &item); err != nil {
+				t.Fatalf("json.Unmarshal(%s) err = %v", tc.raw, err)
+			}
+			got, err := convertFunctionCall(item)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("convertFunctionCall() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if !errors.Is(err, ErrFunctionCallArgs) {
+					t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+				}
+				return
+			}
+			if got.FunctionCall.Args == nil {
+				t.Errorf("Args = nil, want non-nil (a nil map panics on write)")
+			}
+			if diff := cmp.Diff(tc.wantArgs, got.FunctionCall.Args); diff != "" {
+				t.Errorf("Args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestConvertFunctionCall_HandBuiltArguments covers values constructed as struct
+// literals rather than decoded from the wire, as callers do in their own tests.
+// These carry no JSON metadata and no original bytes, so neither arm can be
+// discriminated by presence alone.
+func TestConvertFunctionCall_HandBuiltArguments(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     responses.ResponseOutputItemUnionArguments
+		wantArgs map[string]any
+	}{
+		{
+			name:     "string arm",
+			args:     responses.ResponseOutputItemUnionArguments{OfString: `{"location":"Paris"}`},
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "bare arm",
+			args:     responses.ResponseOutputItemUnionArguments{OfResponseToolSearchCallArguments: map[string]any{"location": "Paris"}},
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "zero value",
+			args:     responses.ResponseOutputItemUnionArguments{},
+			wantArgs: map[string]any{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertFunctionCall(responses.ResponseOutputItemUnion{Arguments: tc.args})
+			if err != nil {
+				t.Fatalf("convertFunctionCall() err = %v", err)
+			}
+			if diff := cmp.Diff(tc.wantArgs, got.FunctionCall.Args); diff != "" {
+				t.Errorf("Args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestConvertResponse_BadFunctionCallArgs covers what the convertFunctionCall
+// tests structurally cannot, by going through the whole conversion:
+// convertOutputItems stops at the first error, so a single undecodable
+// arguments payload discards the entire response — the model's text is lost
+// with it, rather than the response degrading to its remaining parts. The
+// sentinel must also survive that wrapping chain, and the error must name the
+// offending call, since nothing else survives to identify it.
+func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
+	const raw = `{"id":"r","model":"m","output":[
+		{"type":"message","content":[{"type":"output_text","text":"hello"}]},
+		{"type":"function_call","name":"write_file","call_id":"call-1","arguments":[1,2]}]}`
+
+	var resp responses.Response
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v", err)
+	}
+	got, err := convertResponse(&resp)
+	if err == nil {
+		t.Fatalf("convertResponse() = %+v, want error", got)
+	}
+	// The preceding text part does not survive.
+	if got != nil {
+		t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
+	}
+	if !errors.Is(err, ErrFunctionCallArgs) {
+		t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+	}
+	for _, want := range []string{`write_file`, `call-1`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
 	}
 }
 
