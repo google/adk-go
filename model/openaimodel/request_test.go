@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -53,6 +54,67 @@ func TestBuildOpenAIParams_Text(t *testing.T) {
 	}
 	if got, want := textParts[0].OfInputText.Text, "ping"; got != want {
 		t.Fatalf("text mismatch got=%q want=%q", got, want)
+	}
+}
+
+// TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText guards that a replayed
+// assistant turn is serialized as an output message with content type
+// "output_text". Sending "input_text" for the assistant role makes the OpenAI
+// Responses API reject every multi-turn request with HTTP 400 from the second
+// message onward.
+func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
+	req := &model.LLMRequest{
+		Model: "gpt-4o-mini",
+		Contents: []*genai.Content{
+			genai.NewContentFromText("hi", genai.RoleUser),
+			genai.NewContentFromText("hello there", genai.RoleModel),
+			genai.NewContentFromText("can you code", genai.RoleUser),
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+
+	items := params.Input.OfInputItemList
+	if len(items) != 3 {
+		t.Fatalf("got %d input items, want 3: %+v", len(items), items)
+	}
+
+	// User turns remain easy input messages using input_text.
+	if items[0].OfMessage == nil || items[2].OfMessage == nil {
+		t.Fatalf("user turns should be easy input messages: %+v", items)
+	}
+	if got := items[0].OfMessage.Content.OfInputItemContentList[0].OfInputText.Type; got != constant.InputText("input_text") {
+		t.Errorf("user content type = %q, want input_text", got)
+	}
+
+	// The assistant turn must be an output message using output_text.
+	out := items[1].OfOutputMessage
+	if out == nil {
+		t.Fatalf("assistant turn should be an output message, got %+v", items[1])
+	}
+	if len(out.Content) != 1 || out.Content[0].OfOutputText == nil {
+		t.Fatalf("assistant output message content malformed: %+v", out.Content)
+	}
+	if got, want := out.Content[0].OfOutputText.Text, "hello there"; got != want {
+		t.Errorf("assistant text = %q, want %q", got, want)
+	}
+	if got := out.Content[0].OfOutputText.Type; got != constant.OutputText("output_text") {
+		t.Errorf("assistant content type = %q, want output_text", got)
+	}
+
+	// Verify the wire format OpenAI actually receives: the assistant item must
+	// marshal with "output_text" and never "input_text".
+	raw, err := json.Marshal(items[1])
+	if err != nil {
+		t.Fatalf("marshal assistant item: %v", err)
+	}
+	if !strings.Contains(string(raw), `"output_text"`) {
+		t.Errorf("assistant item JSON missing output_text: %s", raw)
+	}
+	if strings.Contains(string(raw), `"input_text"`) {
+		t.Errorf("assistant item JSON must not contain input_text: %s", raw)
 	}
 }
 
