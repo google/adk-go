@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/auth"
@@ -84,6 +85,68 @@ func TestProviderRequiresADKContext(t *testing.T) {
 func TestNewProviderValidatesScheme(t *testing.T) {
 	if _, err := gcp.NewProvider(gcp.Scheme{}, nil); err == nil {
 		t.Fatal("NewProvider() = nil error, want error for empty scheme Name")
+	}
+}
+
+func TestProviderCachesCredential(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	// Default (in-memory) store; two resolves for the same app+user+resource.
+	p, err := gcp.NewProvider(gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"}, &gcp.ProviderConfig{Client: client})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	for i := range 2 {
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("call %d: Credential() error = %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("service calls = %d, want 1 (second resolve should hit the cache)", got)
+	}
+}
+
+func TestProviderSkipsCacheWithoutExpiry(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		// No expireTime: lifetime unknown, so the provider must not cache.
+		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"}, &gcp.ProviderConfig{Client: client})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	for i := range 2 {
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("call %d: Credential() error = %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("service calls = %d, want 2 (unknown expiry must not be cached)", got)
 	}
 }
 

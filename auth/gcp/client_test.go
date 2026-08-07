@@ -47,6 +47,7 @@ func TestRetrieveCredential(t *testing.T) {
 		bodies      []string
 		wantCalls   int       // >0 => assert the number of service calls
 		wantBearer  string    // expect a bearer credential carrying this token
+		wantExpiry  string    // non-empty => expect this timestamp as ExpiresAt
 		wantAPIKey  [2]string // expect an API-key credential {name, value}
 		wantConsent [2]string // expect *auth.ConsentRequiredError {authURI, nonce}
 		wantErrIs   error     // expect errors.Is(err, target)
@@ -58,6 +59,13 @@ func TestRetrieveCredential(t *testing.T) {
 			resource:   authProviderResource,
 			bodies:     []string{`{"success":{"token":"tok","header":"Authorization: Bearer"}}`},
 			wantBearer: "tok",
+		},
+		{
+			name:       "agent identity bearer with expiry",
+			resource:   authProviderResource,
+			bodies:     []string{`{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`},
+			wantBearer: "tok",
+			wantExpiry: "2999-01-01T00:00:00Z",
 		},
 		{
 			name:       "agent identity custom header",
@@ -130,7 +138,7 @@ func TestRetrieveCredential(t *testing.T) {
 			srv, calls := sequenceServer(tc.bodies...)
 			defer srv.Close()
 
-			cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+			got, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 				Request{Resource: tc.resource, UserID: "u"})
 
 			switch {
@@ -138,12 +146,20 @@ func TestRetrieveCredential(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RetrieveCredential() error = %v", err)
 				}
-				wantBearer(t, cred, tc.wantBearer)
+				wantBearer(t, got.Credential, tc.wantBearer)
+				if tc.wantExpiry != "" {
+					want, _ := time.Parse(time.RFC3339, tc.wantExpiry)
+					if !got.ExpiresAt.Equal(want) {
+						t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, want)
+					}
+				} else if !got.ExpiresAt.IsZero() {
+					t.Errorf("ExpiresAt = %v, want zero", got.ExpiresAt)
+				}
 			case tc.wantAPIKey[0] != "":
 				if err != nil {
 					t.Fatalf("RetrieveCredential() error = %v", err)
 				}
-				wantAPIKey(t, cred, tc.wantAPIKey[0], tc.wantAPIKey[1])
+				wantAPIKey(t, got.Credential, tc.wantAPIKey[0], tc.wantAPIKey[1])
 			case tc.wantConsent[0] != "":
 				var consent *auth.ConsentRequiredError
 				if !errors.As(err, &consent) {
