@@ -197,6 +197,23 @@ func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ 
 
 var _ model.LLM = (*scriptedLLM)(nil)
 
+// constLLM is a stateless model.LLM safe for concurrent use: every call yields
+// the same final text response. Used by parallel-dispatch tests where the
+// scriptedLLM's mutable callIdx would itself race.
+type constLLM struct{ text string }
+
+func (constLLM) Name() string { return "const-mock" }
+
+func (m constLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{genai.NewPartFromText(m.text)}},
+		}, nil)
+	}
+}
+
+var _ model.LLM = constLLM{}
+
 func newStubNodeContext(t *testing.T, a agent.Agent, isolationScope string) agent.Context {
 	t.Helper()
 	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
@@ -787,6 +804,68 @@ func TestRunLLMAgentAsNode_Task_HappyPath(t *testing.T) {
 	}
 	if !sawSuccessFR {
 		t.Error("expected the task agent to receive a finish_task FunctionResponse event")
+	}
+}
+
+// TestRunLLMAgentAsNode_ParallelDispatchNoRace guards against a data race when
+// the same single_turn sub-agent is dispatched by multiple parallel function
+// calls in one model turn (google/adk-go#1137). Each dispatch previously wrote
+// the sub-agent's shared IncludeContents/Mode state unsynchronized. Under
+// -race this fails on the pre-fix code and passes once resolution is guarded.
+func TestRunLLMAgentAsNode_ParallelDispatchNoRace(t *testing.T) {
+	t.Parallel()
+
+	doer := makeLLMAgent(t, "doer",
+		withMode(llmagent.ModeSingleTurn),
+		func(c *llmagent.Config) { c.Model = constLLM{text: "sub-agent done"} },
+	)
+
+	// One coordinator turn emits two function calls to the same sub-agent, so
+	// the runner dispatches "doer" on two goroutines concurrently.
+	coordLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "doer", Args: map[string]any{"request": "a"}}},
+						{FunctionCall: &genai.FunctionCall{ID: "fc-2", Name: "doer", Args: map[string]any{"request": "b"}}},
+					},
+				},
+			},
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{genai.NewPartFromText("all done")},
+				},
+			},
+		},
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      "coord",
+		Model:     coordLLM,
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{doer},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	svc := session.InMemoryService()
+	if _, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: coord, SessionService: svc, AppName: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range r.Run(t.Context(), "u", "s",
+		&genai.Content{Parts: []*genai.Part{genai.NewPartFromText("go")}, Role: "user"},
+		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			t.Fatalf("runner.Run: %v", err)
+		}
 	}
 }
 
