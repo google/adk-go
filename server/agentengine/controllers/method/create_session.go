@@ -85,10 +85,18 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 		return fmt.Errorf("json.Unmarshal() failed: %v", err)
 	}
 
+	// Use the authenticated identity from context when available so that
+	// callers cannot act on behalf of an arbitrary user by supplying a
+	// different user_id (BOLA/IDOR).  In deployments without authentication
+	// middleware the caller-supplied value is used as before.
+	effectiveUserID := resolveUserID(ctx, req.Input.UserID)
+
+	// Strip "app:" and "user:" prefixed keys from externally-supplied state to
+	// prevent callers from poisoning shared app-wide or per-user state stores.
 	ssReq := &session.CreateRequest{
 		AppName: c.agentEngineID,
-		UserID:  req.Input.UserID,
-		State:   req.Input.State,
+		UserID:  effectiveUserID,
+		State:   sanitizeExternalState(req.Input.State),
 	}
 	resp, err := c.sessionService.Create(ctx, ssReq)
 	if err != nil {
