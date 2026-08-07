@@ -19,7 +19,7 @@ export GOOGLE_CLOUD_PROJECT=your-project
 export GOOGLE_CLOUD_LOCATION=global   # the registry's default location
 ```
 
-You probably don't have to register anything to try the samples: enabling a supported Google Cloud API auto-registers its **remote MCP server** in your registry. A fresh project typically already lists `run.googleapis.com`, `logging.googleapis.com`, `compute.googleapis.com`, and friends — all of which `compose` can consume as-is.
+You probably don't have to register anything to try the samples: enabling a supported Google Cloud API auto-registers its **remote MCP server** in your registry. A fresh project typically already lists `run.googleapis.com`, `logging.googleapis.com`, `compute.googleapis.com`, and friends — all of which `bind` can consume as-is.
 
 The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUOTA_PROJECT`, the credentials' `quota_project_id`, then `GOOGLE_CLOUD_PROJECT`, in that order). `gcloud` picks its quota project separately, so pass `--billing-project` to it or an unrelated default can deny the call with `USER_PROJECT_DENIED`.
 
@@ -49,9 +49,9 @@ The message names the exact permission and resource; either grant it or set `GOO
 | Example | What it demonstrates | LLM? |
 |---|---|---|
 | [`discover`](./discover) | Browse the catalog: `AllAgents` / `AllMCPServers` / `AllEndpoints` with a server-side filter and automatic paging | No |
-| [`compose`](./compose) | Bind an agent to a *capability*: find the MCP server that declares the tool you need, then `MCPToolset` it | Yes |
+| [`bind`](./bind) | Bind an agent to a *capability*: find the MCP server that declares the tool you need, then `MCPToolset` it | Yes |
 
-Start with `discover` to see what your project has; `compose` then needs no resource names at all.
+Start with `discover` to see what your project has; `bind` then needs no resource names at all.
 
 ## How the pieces fit
 

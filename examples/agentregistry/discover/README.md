@@ -1,6 +1,6 @@
 # Discovering the registry catalog
 
-Print everything a project has published to the Google Cloud Agent Registry: A2A agents, MCP servers, and model endpoints. This is the sample to run first — it gives you the full resource names that [`compose`](../compose) and the factory helpers take as input.
+Print everything a project has published to the Google Cloud Agent Registry: A2A agents, MCP servers, and model endpoints. This is the sample to run first — it shows what your project actually has, and the tool names it prints are the capabilities [`bind`](../bind) can look for.
 
 - **Concept:** Page through a collection with `Client.All*`, narrow it server-side with `WithFilter`.
 - **Needs LLM?** No
@@ -92,4 +92,4 @@ A failure is a typed `*agentregistry.APIError`; `explain` unwraps it so a denial
 - **Resource IDs are generated, not chosen.** You register a `Service`; the registry projects `Agent`/`McpServer` resources with IDs like `agentregistry-00000000-0000-0000-...`. Copy the whole resource name out of this output rather than trying to construct it.
 - **Paging is per round trip.** `WithPageSize(10)` bounds one request, not the total; `All*` keeps requesting until the registry stops returning a page token. Use `ListAgents` directly if you want to own the token.
 - **The filter runs server-side.** It is forwarded verbatim to the API as the `filter` query parameter, so it is neither validated nor rewritten on the way out — a malformed expression usually reads as "no matches".
-- **`Tools` on an MCP server is registry metadata.** It is what was uploaded with the server spec; the live tool set is whatever the server reports over MCP once [`compose`](../compose) connects to it.
+- **`Tools` on an MCP server is registry metadata.** It is what was uploaded with the server spec; the live tool set is whatever the server reports over MCP once [`bind`](../bind) connects to it.

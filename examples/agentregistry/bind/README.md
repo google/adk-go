@@ -1,4 +1,4 @@
-# Composing an agent from a capability
+# Binding an agent to a capability
 
 Build a running `LlmAgent` without knowing a single endpoint. You name the **tool you need**; the registry decides which MCP server provides it, and the sample binds that server at startup.
 
@@ -54,7 +54,7 @@ export GOOGLE_API_KEY=...
 # ...or Vertex AI (GOOGLE_CLOUD_PROJECT/LOCATION are already set above)
 export GOOGLE_GENAI_USE_VERTEXAI=true
 
-go run ./examples/agentregistry/compose/ console
+go run ./examples/agentregistry/bind/ console
 ```
 
 No resource names to paste: the default capability is `deploy_service_from_image`, which any project with the Cloud Run API enabled already provides.
@@ -72,7 +72,7 @@ The launcher also serves `restapi`, `a2a`, and `webui`; run with `help` to see t
 Real output. The default capability resolves to one provider, and the tools it brings are then callable:
 
 ```text
-$ go run ./examples/agentregistry/compose/ console
+$ go run ./examples/agentregistry/bind/ console
 Tool "deploy_service_from_image" is provided by "run.googleapis.com" (projects/my-project/locations/global/mcpServers/agentregistry-00000000-0000-0000-76f4-702f82fb93ff)
 
 User -> List the Cloud Run services in project my-project, region us-central1. Say which tool you used.
@@ -87,7 +87,7 @@ Asking for a deploy capability and then listing services is the point: you bind 
 Ask for a generic capability and the ambiguity is reported rather than hidden:
 
 ```text
-$ REGISTRY_TOOL=list_services go run ./examples/agentregistry/compose/ console
+$ REGISTRY_TOOL=list_services go run ./examples/agentregistry/bind/ console
 "list_services" is also declared by run.googleapis.com
 Tool "list_services" is provided by "agentregistry.googleapis.com" (projects/my-project/locations/global/mcpServers/agentregistry-00000000-0000-0000-7ea4-5846298719d4)
 ```
@@ -95,7 +95,7 @@ Tool "list_services" is provided by "agentregistry.googleapis.com" (projects/my-
 Ask for one nobody provides, and you find out before an agent exists:
 
 ```text
-$ REGISTRY_TOOL=send_carrier_pigeon go run ./examples/agentregistry/compose/ console
+$ REGISTRY_TOOL=send_carrier_pigeon go run ./examples/agentregistry/bind/ console
 Failed to find a provider for "send_carrier_pigeon": no registered MCP server
 declares it; run the discover sample to see what is available
 ```
