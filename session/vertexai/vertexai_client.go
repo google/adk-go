@@ -170,6 +170,16 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	}, nil
 }
 
+// quoteFilterLiteral quotes a value for safe use as a Google AIP-160 filter
+// string literal. Backslashes are escaped first, then double quotes, so that
+// caller-controlled input stays inside the quoted value and cannot inject
+// additional filter predicates. See https://google.aip.dev/160.
+func quoteFilterLiteral(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
 func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequest) ([]session.Session, error) {
 	sessions := make([]session.Session, 0)
 
@@ -188,7 +198,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
 	if req.UserID != "" {
-		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
+		rpcReq.Filter = "userId=" + quoteFilterLiteral(req.UserID)
 	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
 	for {
