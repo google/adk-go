@@ -109,6 +109,16 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
+	// Resolve the root's mode at construction: State is shared and Run may
+	// be called concurrently, so Run must only ever read it (issue #1137).
+	// Done after all fallible validation so a failed New leaves the agent
+	// untouched.
+	if llmA, ok := cfg.Agent.(llminternal.Agent); ok {
+		if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
+			state.Mode = llminternal.ModeChat // an LlmAgent root must be chat mode
+		}
+	}
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -207,11 +217,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
-			}
-
+			// Mode was resolved in New; this must stay a pure read (issue #1137).
 			if llmInternalState.Mode != llminternal.ModeChat {
 				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
 				return

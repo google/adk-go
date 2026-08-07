@@ -44,7 +44,12 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		}
 		state := llmAgent.internal()
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
+		// single_turn implies "none" unless the user set IncludeContents
+		// explicitly ("" == unset; see llmagent.Config.IncludeContents).
+		// Derived, not stored: State is shared across concurrent dispatches
+		// of one agent, so nothing may write it at run time (issue #1137).
+		if state.IncludeContents == "none" ||
+			(state.IncludeContents == "" && state.Mode == ModeSingleTurn) {
 			// Include current turn context only (no conversation history)
 			fn = buildContentsCurrentTurnContextOnly
 		}
