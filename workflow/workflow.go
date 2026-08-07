@@ -227,6 +227,14 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 //
 // Optional Option values configure engine behaviour
 // (concurrency cap, etc.); see WithMaxConcurrency.
+//
+// Validation runs in phases. Each phase reports every violation it
+// finds so a caller can fix them all in one pass; two or more are
+// combined with errors.Join, and errors.Is still matches the individual
+// sentinels (ErrDuplicateNodeName, ErrMultipleDefaultRoutes, …). A
+// failing phase stops the rest, because later phases assume the earlier
+// ones hold — there is no point checking routing on a graph whose node
+// names collide.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
 		return nil, err
