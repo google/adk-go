@@ -226,9 +226,31 @@ func init() {
 			toolFilterStr[i] = t.(string)
 		}
 
+		// Security: Validate the MCP server command against the operator-provided policy.
+		// This implements a trust-boundary model where YAML agent configs are treated
+		// as untrusted input, and only explicitly permitted commands can be executed.
+		policy := GetGlobalMCPPolicy()
+		if policy == nil {
+			return nil, fmt.Errorf(
+				"MCP subprocess spawning from YAML config is disabled by default for security. " +
+					"Call configurable.SetGlobalMCPPolicy() to permit specific MCP server commands")
+		}
+
+		// Resolve the command to its real absolute path to prevent basename spoofing
+		// (e.g., "../../evil/npx" should not match a policy entry for "/usr/bin/npx").
+		resolvedCmd, err := ResolveBinaryPath(command)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve MCP server command %q: %w", command, err)
+		}
+
+		// Validate the resolved command and arguments against the policy.
+		if err := ValidateMCPCommand(policy, resolvedCmd, serverArgsStr); err != nil {
+			return nil, fmt.Errorf("blocked MCP server: %w", err)
+		}
+
 		mcpSet, err := mcptoolset.New(mcptoolset.Config{
 			Transport: &mcp.CommandTransport{
-				Command: exec.Command(command, serverArgsStr...),
+				Command: exec.Command(resolvedCmd, serverArgsStr...),
 			},
 			ToolFilter: tool.StringPredicate(toolFilterStr),
 		})
