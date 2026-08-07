@@ -93,7 +93,7 @@ gcloud agent-registry services describe my-agent \
 
 Three traps worth knowing before you spend an afternoon on them:
 
-- **Use `--agent-spec-type=a2a-agent-card`, not `no-spec`.** `RemoteAgent` (like adk-python's `get_remote_a2a_agent`) looks for a protocol of type `A2A_AGENT`. `no-spec` registers a `CUSTOM` protocol instead, and resolution fails with `A2A connection URI not found`.
+- **Use `--agent-spec-type=a2a-agent-card`, not `no-spec`.** `RemoteAgent` looks for a protocol of type `A2A_AGENT`. `no-spec` registers a `CUSTOM` protocol instead, and resolution fails with `A2A connection URI not found`.
 - **The card's `skills` must be non-empty**, each with `id`/`name`/`description`/`tags`, or the create call is rejected.
 - **The card's `protocolBinding` must match how your server actually serves** — `HTTP+JSON` for `a2asrv.NewRESTHandler`, `JSONRPC` for `a2asrv.NewJSONRPCHandler`. A mismatch only shows up as an empty reply at the first message. (The registry stores the binding as `HTTP_JSON`; the client maps that to A2A's `HTTP+JSON`. Both spellings are correct in their own domain.)
 

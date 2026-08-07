@@ -65,7 +65,6 @@ No resource names to paste: the default capability is `list_services`, which any
 | `GOOGLE_CLOUD_LOCATION` | no | Registry location, defaults to `global` |
 | `REGISTRY_TOOL` | no | Capability to look for, defaults to `list_services` |
 | `REGISTRY_PROVIDER` | no | Substring of the provider's display name, to break a tie |
-| `GOOGLE_MODEL` | no | Model to drive the hub, defaults to `gemini-flash-latest` |
 
 The launcher also serves `restapi`, `a2a`, and `webui`; run with `help` to see the options.
 

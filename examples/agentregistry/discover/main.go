@@ -38,7 +38,6 @@ func main() {
 	if project == "" {
 		log.Fatal("GOOGLE_CLOUD_PROJECT must be set")
 	}
-	// The registry's default location, as in adk-python.
 	location := cmp.Or(os.Getenv("GOOGLE_CLOUD_LOCATION"), "global")
 
 	client, err := agentregistry.New(ctx, agentregistry.Config{

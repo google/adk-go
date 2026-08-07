@@ -75,7 +75,7 @@ func main() {
 
 	// The empty config resolves the backend from the environment: a Gemini API
 	// key, or Vertex AI when GOOGLE_GENAI_USE_VERTEXAI is set.
-	m, err := gemini.NewModel(ctx, cmp.Or(os.Getenv("GOOGLE_MODEL"), "gemini-flash-latest"), &genai.ClientConfig{})
+	m, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create the model: %v", err)
 	}
