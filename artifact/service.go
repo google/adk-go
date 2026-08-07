@@ -32,6 +32,9 @@ type Service interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
+	// Implementations that assign versions optimistically may fail to claim one
+	// while other writers save the same artifact; that failure is transient and
+	// the call can be retried.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
