@@ -235,9 +235,7 @@ func TestEventProcessor_Process(t *testing.T) {
 					LLMResponse: modelResponseFromParts(genai.NewPartFromText("This will take a while")),
 				},
 			},
-			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.NewTextPart("This will take a while")),
-			},
+			processed: nil,
 
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
@@ -249,6 +247,7 @@ func TestEventProcessor_Process(t *testing.T) {
 							p.SetMeta(a2aDataPartMetaLongRunningKey, true)
 							return p
 						}(),
+						a2a.NewTextPart("This will take a while"),
 					},
 				}),
 			},

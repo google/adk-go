@@ -93,10 +93,7 @@ func TestA2AInputRequired(t *testing.T) {
 			createApproval: func(t *testing.T, toolCall *genai.FunctionCall, pendingResponse *genai.FunctionResponse) *genai.Part {
 				return createLongRunningToolApproval(t, pendingResponse)
 			},
-			wantFirstArtifactParts: a2a.ContentParts{
-				a2a.NewTextPart(modelTextRequiresApproval),
-				a2a.NewTextPart(modelTextWaitingForApproval),
-			},
+			wantFirstArtifactParts:  a2a.ContentParts{},
 			wantSecondArtifactParts: a2a.ContentParts{a2a.NewTextPart(modelTextTaskComplete)},
 		},
 		{
@@ -156,8 +153,13 @@ func TestA2AInputRequired(t *testing.T) {
 			if task1.Status.State != a2a.TaskStateInputRequired {
 				t.Fatalf("client.SendMessage(Initial) result state = %q, want %q", task1.Status.State, a2a.TaskStateInputRequired)
 			}
-			if len(task1.Artifacts) != 1 {
-				t.Fatalf("len(task.Artifacts) = %d, want 1", len(task1.Artifacts))
+			// With the fix for issue #913, text parts for long-running tools are now in the status message, not artifacts
+			wantTask1Artifacts := 1
+			if len(tc.wantFirstArtifactParts) == 0 {
+				wantTask1Artifacts = 0
+			}
+			if len(task1.Artifacts) != wantTask1Artifacts {
+				t.Fatalf("len(task.Artifacts) = %d, want %d", len(task1.Artifacts), wantTask1Artifacts)
 			}
 
 			// Incomplete followup keeps the task in input-required
@@ -167,8 +169,12 @@ func TestA2AInputRequired(t *testing.T) {
 			if task2.Status.State != a2a.TaskStateInputRequired {
 				t.Fatalf("client.SendMessage(IncompleteInput) result state = %q, want %q", task2.Status.State, a2a.TaskStateInputRequired)
 			}
-			if len(task2.Artifacts) != 1 {
-				t.Fatalf("len(task.Artifacts) = %d, want 1", len(task2.Artifacts))
+			wantTask2Artifacts := 1
+			if len(tc.wantFirstArtifactParts) == 0 {
+				wantTask2Artifacts = 0
+			}
+			if len(task2.Artifacts) != wantTask2Artifacts {
+				t.Fatalf("len(task.Artifacts) = %d, want %d", len(task2.Artifacts), wantTask2Artifacts)
 			}
 
 			// Required input gets delivered
@@ -224,24 +230,44 @@ func TestA2AInputRequired(t *testing.T) {
 				cmpopts.IgnoreMapEntries(func(k string, v any) bool { return strings.HasSuffix(k, "id") }),
 				cmpopts.IgnoreFields(a2a.Message{}, "ID"),
 			}
-			if len(task3.Artifacts) != 2 {
-				t.Fatalf("len(task.Artifacts) = %d, want 2", len(task3.Artifacts))
-			}
+			// With the fix for issue #913, only the completion artifact exists (text parts are in status message)
+			if len(tc.wantFirstArtifactParts) == 0 {
+				// For long-running tools, no separate artifact for input-required phase
+				if len(task3.Artifacts) != 1 {
+					t.Fatalf("len(task.Artifacts) = %d, want 1", len(task3.Artifacts))
+				}
 
-			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
-			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
-				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
-			}
+				gotHistory := task3.History
+				wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
+				if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
+					t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
+				}
 
-			gotFirstArtifactParts := adka2a.WithoutPartialArtifacts(task3.Artifacts)[0].Parts
-			if diff := cmp.Diff(tc.wantFirstArtifactParts, gotFirstArtifactParts, opts...); diff != "" {
-				t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
-			}
+				gotSecondArtifactParts := task3.Artifacts[0].Parts
+				if diff := cmp.Diff(tc.wantSecondArtifactParts, gotSecondArtifactParts, opts...); diff != "" {
+					t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
+				}
+			} else {
+				// For tool confirmation, artifacts still exist
+				if len(task3.Artifacts) != 2 {
+					t.Fatalf("len(task.Artifacts) = %d, want 2", len(task3.Artifacts))
+				}
 
-			gotSecondArtifactParts := task3.Artifacts[1].Parts
-			if diff := cmp.Diff(tc.wantSecondArtifactParts, gotSecondArtifactParts, opts...); diff != "" {
-				t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
+				gotHistory := task3.History
+				wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
+				if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
+					t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
+				}
+
+				gotFirstArtifactParts := adka2a.WithoutPartialArtifacts(task3.Artifacts)[0].Parts
+				if diff := cmp.Diff(tc.wantFirstArtifactParts, gotFirstArtifactParts, opts...); diff != "" {
+					t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
+				}
+
+				gotSecondArtifactParts := task3.Artifacts[1].Parts
+				if diff := cmp.Diff(tc.wantSecondArtifactParts, gotSecondArtifactParts, opts...); diff != "" {
+					t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
+				}
 			}
 		})
 	}
@@ -266,12 +292,11 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			createApproval: func(t *testing.T, toolCall *genai.FunctionCall, pendingResponse *genai.FunctionResponse) *genai.Part {
 				return createLongRunningToolApproval(t, pendingResponse)
 			},
+			// With the fix for issue #913, text parts after long-running function calls are in the status message
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
 				genai.NewPartFromFunctionResponse(transferToolName, nil),
-				genai.NewPartFromText(modelTextRequiresApproval),
-				genai.NewPartFromText(modelTextWaitingForApproval),
 			}, []string{}),
 			wantSecondArtifactParts: a2a.ContentParts{
 				a2a.NewTextPart(modelTextTaskComplete),
