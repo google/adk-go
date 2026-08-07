@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -213,8 +215,52 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			resp.Part,
+			safeArtifactPart(artifactName, resp.Part),
 		},
 		Role: genai.RoleUser,
 	}, nil
+}
+
+func safeArtifactPart(artifactName string, part *genai.Part) *genai.Part {
+	if part == nil {
+		return genai.NewPartFromText(fmt.Sprintf("Artifact %q has no content.", artifactName))
+	}
+	if part.InlineData == nil {
+		return part
+	}
+
+	blob := part.InlineData
+	mimeType := strings.ToLower(strings.TrimSpace(blob.MIMEType))
+	data := blob.Data
+	if len(data) == 0 {
+		return genai.NewPartFromText(fmt.Sprintf("Artifact %q has no inline data.", artifactName))
+	}
+	if isSupportedInlineMIMEType(mimeType) {
+		return part
+	}
+	if isTextLikeMIMEType(mimeType) || mimeType == "" {
+		if utf8.Valid(data) {
+			return genai.NewPartFromText(string(data))
+		}
+	}
+	if mimeType == "" {
+		mimeType = "unknown"
+	}
+	return genai.NewPartFromText(fmt.Sprintf(
+		"Artifact %q has unsupported MIME type %q and %d bytes of binary content.",
+		artifactName, mimeType, len(data)))
+}
+
+func isSupportedInlineMIMEType(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "image/") ||
+		strings.HasPrefix(mimeType, "audio/") ||
+		strings.HasPrefix(mimeType, "video/") ||
+		mimeType == "application/pdf"
+}
+
+func isTextLikeMIMEType(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "text/") ||
+		mimeType == "application/csv" ||
+		mimeType == "application/json" ||
+		mimeType == "application/xml"
 }
