@@ -86,8 +86,7 @@ A change is complete only when all of these pass locally:
 - **Callbacks over subclassing** (`Before*`/`After*` for Agent/Model/Tool);
   returning non-nil from a `Before` callback short-circuits execution.
 - **Errors:** wrap with `fmt.Errorf("…: %w", err)`. Use `%v` only when
-  deliberately not exposing the wrapped error's type — ask "would I be OK if a
-  caller wrote `errors.Is` against this?". Don't convert existing `%w` to `%v`;
+  deliberately not exposing the wrapped error's type. Don't convert existing `%w` to `%v`;
   it might break callers silently. Wrap sentinels first:
   `fmt.Errorf("%w: …: %w", ErrX, err)`. Tool confirmation uses sentinel errors
   (e.g. `tool.ErrConfirmationRequired`).
