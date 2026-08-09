@@ -89,7 +89,7 @@ func TestConvertersRoundTrip(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Convert to log.Value
+			// Convert to attribute.Value
 			val := toLogValue(tc.val)
 			// Convert back to any
 			got := FromLogValue(val)
