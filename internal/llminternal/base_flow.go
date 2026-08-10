@@ -380,6 +380,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err)
 					sess.pushError(err)
+					// cleanup, not a bare return: genai dials the live socket
+					// with a context-less websocket.DefaultDialer.Dial, and
+					// nothing in the SDK watches a context, so only an explicit
+					// Close releases it. Returning without cleanup strands the
+					// connection for the life of the process.
+					cleanup()
 					return
 				}
 			}
