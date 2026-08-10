@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package session provides types to manage user sessions and their states.
 package session
 
 import (
