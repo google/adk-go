@@ -352,6 +352,10 @@ func toGenAIRole(role a2a.MessageRole) genai.Role {
 // never be rebuilt from metadata the peer controls -- otherwise a malicious
 // or compromised remote agent could redirect execution to an agent of its
 // own choosing within the local agent tree.
+//
+// A caller that has made its own trust decision about the remote peer (see
+// [remoteagent.A2AConfig.AllowTransferToAgent]) can restore TransferToAgent
+// itself using [TransferToAgentFromMeta], after this function returns.
 func toEventActions(meta map[string]any) session.EventActions {
 	if meta == nil {
 		return session.EventActions{}
