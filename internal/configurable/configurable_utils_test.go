@@ -142,3 +142,60 @@ func TestResolveAgentReferenceRelativeParentPath(t *testing.T) {
 		t.Error("ResolveAgentReference with a relative parent path and an escaping reference succeeded, want an error")
 	}
 }
+
+// TestResolveAgentReferenceSymlinkedParentDir covers a parent directory that is
+// itself reached through a symlink, together with a reference that does not
+// exist on disk. Resolving only the parent side of the containment check would
+// leave the two sides rooted differently — the target has no symlinks to
+// resolve, so it keeps its unresolved spelling — and a missing file would be
+// reported as a traversal instead of as not found.
+func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) failed: %v", realDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "root_agent.yaml"), []byte("agent_class: LlmAgent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(root_agent.yaml) failed: %v", err)
+	}
+
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Skipf("symlinks are not supported in this environment: %v", err)
+	}
+
+	parentPath := filepath.Join(alias, "root_agent.yaml")
+	if _, err := ResolveAgentReference(context.Background(), parentPath, "missing.yaml"); err != nil &&
+		strings.Contains(err.Error(), traversalError) {
+		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no traversal rejection", parentPath, "missing.yaml", err)
+	}
+
+	// The symlinked parent must not weaken the check itself.
+	if _, err := ResolveAgentReference(context.Background(), parentPath, filepath.Join("..", "outside.yaml")); err == nil {
+		t.Error("ResolveAgentReference through a symlinked parent with an escaping reference succeeded, want an error")
+	}
+}
+
+// TestResolveConfigReferenceRejectsVolumeQualifiedRefs covers references that
+// carry a volume name. On Windows a drive-relative reference such as
+// `C:node.yaml` is not absolute yet still escapes the parent directory, so
+// IsAbs alone is not a sufficient guard. filepath.VolumeName is empty on Unix,
+// where these are ordinary (if odd) relative file names.
+func TestResolveConfigReferenceRejectsVolumeQualifiedRefs(t *testing.T) {
+	_, parentPath := newAgentDir(t)
+
+	for _, refPath := range []string{`C:node.yaml`, `D:\escaped.yaml`, `\\host\share\escaped.yaml`} {
+		_, err := resolveConfigReference(parentPath, refPath)
+		if filepath.VolumeName(refPath) == "" {
+			// Not volume-qualified on this platform; nothing to assert.
+			continue
+		}
+		if err == nil {
+			t.Errorf("resolveConfigReference(%q, %q) succeeded, want rejection", parentPath, refPath)
+		}
+	}
+}
