@@ -15,6 +15,8 @@
 package database
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,5 +209,49 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+func TestStaleSessionErrorTimestampFormat(t *testing.T) {
+	s, err := NewSessionService(sqlite.Open(":memory:"))
+	if err != nil {
+		t.Fatalf("NewSessionService failed: %v", err)
+	}
+	if err := AutoMigrate(s); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	ctx := context.Background()
+
+	createResp, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "test-app",
+		UserID:  "test-user",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	// Make session updatedAt older than what's stored in DB to trigger stale error
+	localSess := createResp.Session.(*localSession)
+	localSess.updatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	event := &session.Event{
+		ID:        "e1",
+		Timestamp: time.Now(),
+	}
+
+	err = s.AppendEvent(ctx, localSess, event)
+	if err == nil {
+		t.Fatalf("expected stale session error, got nil")
+	}
+
+	errStr := err.Error()
+	if !strings.Contains(errStr, "stale session error") {
+		t.Fatalf("expected stale session error, got: %v", errStr)
+	}
+	if strings.Contains(errStr, "1970-01-21") {
+		t.Errorf("error message timestamp formatted as 1970-01-21: %s", errStr)
+	}
+	if !strings.Contains(errStr, "2026-01-01") {
+		t.Errorf("error message expected to contain 2026-01-01, got: %s", errStr)
 	}
 }
