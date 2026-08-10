@@ -47,7 +47,7 @@ type Tool interface {
 
 // Context is an alias for agent.ToolContext.
 //
-// Deprecated: use agent.Context directly. This alias exists only to
+// Deprecated: use agent.ToolContext directly. This alias exists only to
 // minimize churn during the migration and will be removed in a future
 // release.
 type Context = agent.ToolContext
@@ -197,6 +197,20 @@ func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *confirmationTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+	if rp, ok := t.runnableTool.(interface {
+		ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error
+	}); ok {
+		_, existedBefore := req.Tools[t.Name()]
+		if err := rp.ProcessRequest(ctx, req); err != nil {
+			return err
+		}
+		// If the inner tool packed itself into req.Tools during ProcessRequest,
+		// replace it with the confirmation wrapper so confirmationTool.Run is invoked.
+		if !existedBefore && req.Tools != nil && req.Tools[t.Name()] != nil {
+			req.Tools[t.Name()] = t
+			return nil
+		}
+	}
 	return toolutils.PackTool(req, t)
 }
 
