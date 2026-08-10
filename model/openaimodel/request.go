@@ -95,12 +95,23 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if len(textParts) == 0 {
 				return nil
 			}
-			msg, err := newMessage(curRole, textParts)
-			if err != nil {
-				return err
-			}
-			if msg != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+			switch curRole {
+			case genai.RoleModel:
+				out, err := newOutputMessage(textParts)
+				if err != nil {
+					return err
+				}
+				if out != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: out})
+				}
+			default:
+				msg, err := newMessage(curRole, textParts)
+				if err != nil {
+					return err
+				}
+				if msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+				}
 			}
 			textParts = textParts[:0]
 			return nil
@@ -182,6 +193,22 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 			OfInputItemContentList: contentList,
 		},
 	}, nil
+}
+
+func newOutputMessage(texts []string) (*responses.ResponseOutputMessageParam, error) {
+	content := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
+	for _, txt := range texts {
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		content = append(content, responses.ResponseOutputMessageContentUnionParam{
+			OfOutputText: &responses.ResponseOutputTextParam{Text: txt},
+		})
+	}
+	if len(content) == 0 {
+		return nil, nil
+	}
+	return &responses.ResponseOutputMessageParam{Content: content}, nil
 }
 
 func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
