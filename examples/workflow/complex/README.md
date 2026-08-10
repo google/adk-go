@@ -91,6 +91,6 @@ Agent -> ## Recent Sustainable Technology Advancements                    (Synth
 
 ## Notes
 
-A `JoinNode` is the only node that may have several **unconditional** incoming edges; converging plain nodes that way is rejected (`ErrUnsupportedFanIn`). Wrapping an `LlmAgent` in an `AgentNode` defaults it to single-turn mode, which is what lets the synthesis agent sit mid-graph: a chat-mode agent may only be wired directly from `Start`.
+A `JoinNode` is the only node that may have several **unconditional** incoming edges; converging plain nodes that way is rejected (`ErrUnsupportedFanIn`). An `LlmAgent` that declares no mode runs single-turn at a graph node, which is what lets the synthesis agent sit mid-graph: a chat-mode agent may only be wired directly from `Start`. The mode is resolved per placement, so the agent's own declaration is left untouched and the same instance may be placed elsewhere.
 
 This fan-out/gather behavior matches adk-python's graph workflow, which emits the same per-researcher events before the synthesis.

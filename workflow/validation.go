@@ -234,8 +234,9 @@ func validateChatModeWiring(edges []Edge) error {
 	return nil
 }
 
-// agentNodeMode returns the LlmAgent mode of node, or ok=false when node
-// is not an AgentNode wrapping an LlmAgent.
+// agentNodeMode returns the mode the LlmAgent wrapped by node runs under
+// as a graph node, or ok=false when node is not an AgentNode wrapping an
+// LlmAgent.
 func agentNodeMode(node Node) (llminternal.Mode, bool) {
 	agentNode, ok := node.(*AgentNode)
 	if !ok {
@@ -245,7 +246,7 @@ func agentNodeMode(node Node) (llminternal.Mode, bool) {
 	if !ok || llmA == nil {
 		return llminternal.ModeUnset, false
 	}
-	return llminternal.Reveal(llmA).Mode, true
+	return llminternal.ResolveMode(llminternal.Reveal(llmA).Mode, llminternal.ModeSingleTurn), true
 }
 
 // validateUniqueEdges checks that there are no duplicate edges in the workflow.
