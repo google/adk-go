@@ -141,7 +141,7 @@ func Validate(fm *Frontmatter) error {
 // Markdown instruction body. It validates the Frontmatter before building.
 func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err := Validate(fm); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidFrontmatter, err)
+		return nil, fmt.Errorf("invalid frontmatter: %v", err)
 	}
 	marshalled, err := yaml.Marshal(fm)
 	if err != nil {
