@@ -18,6 +18,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Every job here only reads the repository: it checks out, builds, tests and
+# lints. Declaring that once at the top keeps each job from inheriting the
+# broader default token.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

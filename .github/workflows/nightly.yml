@@ -6,6 +6,11 @@ on:
 
   workflow_dispatch:
 
+# Both jobs only read the repository: they check out, test and scan for known
+# vulnerabilities.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
