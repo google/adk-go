@@ -50,9 +50,10 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
+	// ModeUnset means single_turn when wrapped as a workflow node. Set at
+	// construction so concurrent RunLLMAgentAsNode calls never write Mode.
 	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
+		if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
 			state.Mode = llminternal.ModeSingleTurn
 		}
 	}

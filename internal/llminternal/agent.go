@@ -66,4 +66,18 @@ type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
 
+// EffectiveIncludeContents returns the include-contents policy for building
+// LLM request history. single_turn defaults to "none" only when the field was
+// left unset (""), so an explicit IncludeContents value is preserved. This is
+// derived at read time so concurrent dispatches never mutate shared State.
+func (s *State) EffectiveIncludeContents() string {
+	if s.IncludeContents != "" {
+		return s.IncludeContents
+	}
+	if s.Mode == ModeSingleTurn {
+		return "none"
+	}
+	return "default"
+}
+
 func Reveal(a Agent) *State { return a.internal() }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -160,11 +162,84 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 	}
 }
 
+func TestRunLLMAgentAsNode_ParallelSingleTurnDispatch_NoRace(t *testing.T) {
+	const (
+		coordName  = "coordinator"
+		workerName = "worker"
+	)
+	worker, err := llmagent.New(llmagent.Config{
+		Name:        workerName,
+		Description: "Handles delegated work.",
+		Model:       staticTextLLM("task done"),
+		Mode:        llmagent.ModeSingleTurn,
+		// Leave IncludeContents unset: effective policy is derived as "none"
+		// at read time and must not be written onto shared State.
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+	workerState := llminternal.Reveal(worker.(llminternal.Agent))
+	if got := workerState.IncludeContents; got != "" {
+		t.Fatalf("worker IncludeContents before run = %q, want unset", got)
+	}
+	if got := workerState.EffectiveIncludeContents(); got != "none" {
+		t.Fatalf("EffectiveIncludeContents() = %q, want none", got)
+	}
+
+	coordLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{
+						agentCallPart("call-a", workerName, "do task A"),
+						agentCallPart("call-b", workerName, "do task B"),
+					},
+				},
+			},
+			{
+				Content: genai.NewContentFromText("all done", genai.RoleModel),
+			},
+		},
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      coordName,
+		Model:     coordLLM,
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{worker},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	events := runChatCoordinatorOneTurn(t, coord, "fan out")
+
+	var workerEvents int
+	for _, ev := range events {
+		if ev != nil && ev.Author == workerName {
+			workerEvents++
+		}
+	}
+	if workerEvents == 0 {
+		t.Fatalf("expected events from %q, got none", workerName)
+	}
+
+	// Invariant: parallel fan-out must not mutate shared IncludeContents
+	// (the race that prompted #1137 wrote IncludeContents="none" here).
+	if got := workerState.IncludeContents; got != "" {
+		t.Fatalf("worker IncludeContents after parallel run = %q, want still unset", got)
+	}
+	if got := workerState.Mode; got != llmagent.ModeSingleTurn {
+		t.Fatalf("worker Mode after parallel run = %q, want single_turn", got)
+	}
+}
+
 // scriptedLLM is a model.LLM that yields a fixed sequence of
 // LLMResponses, one per call to GenerateContent. After exhausting the
 // script, subsequent calls yield a terminal "done" text — this lets
 // the runner's outer turn loop exit cleanly without hanging.
 type scriptedLLM struct {
+	mu       sync.Mutex
 	turns    []*model.LLMResponse
 	callIdx  int
 	doneText string // override for the post-script fallback
@@ -173,8 +248,10 @@ type scriptedLLM struct {
 func (s *scriptedLLM) Name() string { return "scripted-mock" }
 
 func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	s.mu.Lock()
 	idx := s.callIdx
 	s.callIdx++
+	s.mu.Unlock()
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if idx < len(s.turns) {
 			yield(s.turns[idx], nil)
@@ -196,6 +273,28 @@ func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ 
 }
 
 var _ model.LLM = (*scriptedLLM)(nil)
+
+type staticTextLLM string
+
+func (staticTextLLM) Name() string { return "static-text" }
+
+func (s staticTextLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content: genai.NewContentFromText(string(s), genai.RoleModel),
+		}, nil)
+	}
+}
+
+var _ model.LLM = staticTextLLM("")
+
+func agentCallPart(id, name, request string) *genai.Part {
+	return &genai.Part{FunctionCall: &genai.FunctionCall{
+		ID:   id,
+		Name: name,
+		Args: map[string]any{"request": request},
+	}}
+}
 
 func newStubNodeContext(t *testing.T, a agent.Agent, isolationScope string) agent.Context {
 	t.Helper()
