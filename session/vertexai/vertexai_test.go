@@ -15,14 +15,26 @@
 package vertexai
 
 import (
+	"context"
+	"fmt"
+	"math"
+	"net"
 	"testing"
+	"time"
+
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/util/vertexai"
 
-	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"google.golang.org/api/option"
 	"google.golang.org/genai"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -477,4 +489,250 @@ func TestCreateAiplatformpbMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEventActionsConverters(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "session to aiplatform includes artifact delta",
+			run: func(t *testing.T) {
+				wantStateDelta := map[string]any{"user:theme": "dark"}
+				wantArtifactDelta := map[string]int32{"chart.html": 3, "table.csv": 7}
+				event := &session.Event{
+					Actions: session.EventActions{
+						StateDelta:    wantStateDelta,
+						ArtifactDelta: map[string]int64{"chart.html": 3, "table.csv": 7},
+					},
+				}
+
+				actions, err := createAiplatformpbEventActions(event)
+				if err != nil {
+					t.Fatalf("createAiplatformpbEventActions() failed: %v", err)
+				}
+				if actions == nil {
+					t.Fatal("createAiplatformpbEventActions() returned nil")
+				}
+				if actions.StateDelta == nil {
+					t.Fatal("actions.StateDelta is nil")
+				}
+				if diff := cmp.Diff(wantStateDelta, actions.StateDelta.AsMap()); diff != "" {
+					t.Errorf("actions.StateDelta mismatch (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(wantArtifactDelta, actions.ArtifactDelta); diff != "" {
+					t.Errorf("actions.ArtifactDelta mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		{
+			name: "session to aiplatform rejects artifact version outside int32",
+			run: func(t *testing.T) {
+				event := &session.Event{
+					Actions: session.EventActions{
+						ArtifactDelta: map[string]int64{"chart.html": int64(math.MaxInt32) + 1},
+					},
+				}
+
+				_, err := createAiplatformpbEventActions(event)
+				if err == nil {
+					t.Fatal("createAiplatformpbEventActions() succeeded, want error")
+				}
+				want := `artifact "chart.html" version 2147483648 does not fit in int32`
+				if got := err.Error(); got != want {
+					t.Errorf("createAiplatformpbEventActions() error = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			name: "aiplatform to session includes artifact delta",
+			run: func(t *testing.T) {
+				want := session.EventActions{
+					StateDelta:    map[string]any{"user:theme": "dark"},
+					ArtifactDelta: map[string]int64{"chart.html": 3, "table.csv": 7},
+				}
+				stateDelta, err := structpb.NewStruct(map[string]any{"user:theme": "dark"})
+				if err != nil {
+					t.Fatalf("structpb.NewStruct() failed: %v", err)
+				}
+
+				actions := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
+					StateDelta:    stateDelta,
+					ArtifactDelta: map[string]int32{"chart.html": 3, "table.csv": 7},
+				})
+
+				if diff := cmp.Diff(want, actions); diff != "" {
+					t.Errorf("actions mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		{
+			name: "aiplatform to session nil actions",
+			run: func(t *testing.T) {
+				if diff := cmp.Diff(session.EventActions{}, aiplatformToSessionEventActions(nil)); diff != "" {
+					t.Errorf("actions mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestVertexAiClientEventActionsRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		in   session.EventActions
+		want session.EventActions
+	}{
+		{
+			name: "artifact delta only",
+			in: session.EventActions{
+				ArtifactDelta: map[string]int64{"chart.html": 1},
+			},
+			want: session.EventActions{
+				StateDelta:    map[string]any{},
+				ArtifactDelta: map[string]int64{"chart.html": 1},
+			},
+		},
+		{
+			name: "state delta only",
+			in: session.EventActions{
+				StateDelta: map[string]any{"user:theme": "dark"},
+			},
+			want: session.EventActions{
+				StateDelta: map[string]any{"user:theme": "dark"},
+			},
+		},
+		{
+			name: "both deltas",
+			in: session.EventActions{
+				StateDelta:    map[string]any{"user:theme": "dark"},
+				ArtifactDelta: map[string]int64{"chart.html": 1},
+			},
+			want: session.EventActions{
+				StateDelta:    map[string]any{"user:theme": "dark"},
+				ArtifactDelta: map[string]int64{"chart.html": 1},
+			},
+		},
+		{
+			name: "empty deltas",
+			in: session.EventActions{
+				StateDelta:    map[string]any{},
+				ArtifactDelta: map[string]int64{},
+			},
+			want: session.EventActions{
+				StateDelta: map[string]any{},
+			},
+		},
+		{
+			name: "no actions at all",
+			in:   session.EventActions{},
+			want: session.EventActions{
+				StateDelta: map[string]any{},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := &fakeVertexAiSessionService{}
+			client := newFakeVertexAiClient(t, service)
+
+			event := session.NewEvent("invocation-1")
+			event.Author = "agent"
+			event.Actions = tc.in
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+				t.Fatalf("appendEvent() failed: %v", err)
+			}
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() failed: %v", err)
+			}
+			if gotLen := len(got); gotLen != 1 {
+				t.Fatalf("len(got) = %d, want 1", gotLen)
+			}
+			if diff := cmp.Diff(tc.want, got[0].Actions); diff != "" {
+				t.Errorf("Actions mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+type fakeVertexAiSessionService struct {
+	aiplatformpb.UnimplementedSessionServiceServer
+	events []*aiplatformpb.SessionEvent
+}
+
+func (s *fakeVertexAiSessionService) AppendEvent(ctx context.Context, req *aiplatformpb.AppendEventRequest) (*aiplatformpb.AppendEventResponse, error) {
+	event, ok := proto.Clone(req.Event).(*aiplatformpb.SessionEvent)
+	if !ok {
+		return nil, fmt.Errorf("unexpected event type %T", req.Event)
+	}
+	event.Name = fmt.Sprintf("%s/events/event-%d", req.Name, len(s.events)+1)
+	if event.Actions == nil {
+		// Vertex AI materializes an empty Actions message on read-back.
+		event.Actions = &aiplatformpb.EventActions{}
+	}
+	s.events = append(s.events, event)
+	return &aiplatformpb.AppendEventResponse{}, nil
+}
+
+func (s *fakeVertexAiSessionService) ListEvents(ctx context.Context, req *aiplatformpb.ListEventsRequest) (*aiplatformpb.ListEventsResponse, error) {
+	events := make([]*aiplatformpb.SessionEvent, 0, len(s.events))
+	for _, event := range s.events {
+		cloned, ok := proto.Clone(event).(*aiplatformpb.SessionEvent)
+		if !ok {
+			return nil, fmt.Errorf("unexpected event type %T", event)
+		}
+		events = append(events, cloned)
+	}
+	return &aiplatformpb.ListEventsResponse{SessionEvents: events}, nil
+}
+
+func newFakeVertexAiClient(t *testing.T, service aiplatformpb.SessionServiceServer) *vertexAiClient {
+	t.Helper()
+
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	aiplatformpb.RegisterSessionServiceServer(server, service)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	client, err := newVertexAiClient(t.Context(), "us-central1", "test-project", "123",
+		option.WithGRPCConn(conn),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("newVertexAiClient() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close() failed: %v", err)
+		}
+	})
+	return client
 }
