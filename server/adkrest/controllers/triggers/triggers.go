@@ -52,7 +52,7 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 	}
 	sessResp, err := r.sessionService.Create(ctx, sessReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session: %v", err)
+		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
 	userMessage := genai.Content{
@@ -64,7 +64,7 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 
 	curAgent, err := r.agentLoader.LoadAgent(appName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load agent: %v", err)
+		return nil, fmt.Errorf("failed to load agent: %w", err)
 	}
 
 	runR, err := runner.New(runner.Config{
@@ -76,7 +76,7 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 		PluginConfig:    r.pluginConfig,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner: %v", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
 	return r.runAgentWithRetry(ctx, runR, sessResp.Session.UserID(), sessResp.Session.ID(), &userMessage)

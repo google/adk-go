@@ -141,11 +141,11 @@ func Validate(fm *Frontmatter) error {
 // Markdown instruction body. It validates the Frontmatter before building.
 func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err := Validate(fm); err != nil {
-		return nil, fmt.Errorf("invalid frontmatter: %v", err)
+		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
 	marshalled, err := yaml.Marshal(fm)
 	if err != nil {
-		return nil, fmt.Errorf("marshal frontmatter: %v", err)
+		return nil, fmt.Errorf("marshal frontmatter: %w", err)
 	}
 	return slices.Concat(frontmatterSeparator, marshalled, frontmatterSeparator, []byte(markdown)), nil
 }
