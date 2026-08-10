@@ -772,3 +772,30 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 		t.Errorf("status multiset = {Error:%d, Unset:%d}, want {Error:1, Unset:1}", errCount, unsetCount)
 	}
 }
+
+func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
+	const nItems = 5
+	var started int32
+
+	wrapped := NewFunctionNode("slow_or_fail", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			return 0, errors.New("error 0")
+		}
+		atomic.AddInt32(&started, 1)
+		time.Sleep(50 * time.Millisecond)
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exCtx := agent.NewContext(newMockCtx(t))
+
+	for range pw.Run(exCtx, []any{0, 1, 2, 3, 4}) {
+	}
+
+	if got := atomic.LoadInt32(&started); got >= nItems-1 {
+		t.Errorf("started = %d, want fewer than %d items dispatched after fail-fast cancellation", got, nItems-1)
+	}
+}
