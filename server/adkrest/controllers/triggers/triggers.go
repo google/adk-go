@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package triggers provides HTTP handlers that run an agent in response
+// to external events such as Pub/Sub or Eventarc, retrying rate-limited
+// runs with exponential backoff and jitter.
 package triggers
 
 import (

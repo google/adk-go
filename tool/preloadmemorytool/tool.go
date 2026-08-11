@@ -18,7 +18,6 @@
 // Unlike loadmemorytool which is called explicitly by the model, this tool
 // runs automatically for each LLM request and injects relevant memory context
 // into the system instructions.
-
 package preloadmemorytool
 
 import (

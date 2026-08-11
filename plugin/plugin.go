@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package plugin provides.
+// Package plugin provides lifecycle hooks that observe and intercept an agent
+// run, exposing Before*/After* callbacks for the run, agent, model, and tool
+// stages.
 package plugin
 
 import (
