@@ -58,6 +58,8 @@ type frontmatterYAML struct {
 
 type allowedToolsYAML []string
 
+const allowedToolsFormat = "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression)"
+
 func (a *allowedToolsYAML) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.SequenceNode:
@@ -75,14 +77,20 @@ func (a *allowedToolsYAML) UnmarshalYAML(node *yaml.Node) error {
 		if node.Tag != "!!str" {
 			return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
 		}
-		*a = splitAllowedTools(node.Value)
+		tools, err := splitAllowedTools(node.Value)
+		if err != nil {
+			return err
+		}
+		*a = tools
 		return nil
 	default:
 		return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
 	}
 }
 
-func splitAllowedTools(value string) []string {
+// splitAllowedTools splits tool names or tool expressions separated by
+// whitespace or commas. Separators inside balanced parentheses are preserved.
+func splitAllowedTools(value string) ([]string, error) {
 	var tools []string
 	var current strings.Builder
 	depth := 0
@@ -100,9 +108,10 @@ func splitAllowedTools(value string) []string {
 			depth++
 			current.WriteRune(r)
 		case r == ')':
-			if depth > 0 {
-				depth--
+			if depth == 0 {
+				return nil, fmt.Errorf("%s: unexpected ')'", allowedToolsFormat)
 			}
+			depth--
 			current.WriteRune(r)
 		case depth == 0 && (unicode.IsSpace(r) || r == ','):
 			flush()
@@ -110,8 +119,11 @@ func splitAllowedTools(value string) []string {
 			current.WriteRune(r)
 		}
 	}
+	if depth != 0 {
+		return nil, fmt.Errorf("%s: unclosed '('", allowedToolsFormat)
+	}
 	flush()
-	return tools
+	return tools, nil
 }
 
 func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
