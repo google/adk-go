@@ -64,6 +64,22 @@ var (
 	ErrPollTimeout = errors.New("gcp: timed out waiting for credentials")
 )
 
+// APIError is returned when a credential service responds with a non-2xx
+// status. Callers match it with errors.As to tell a fatal status (say 403) from
+// a transient one (503) without matching on the message.
+type APIError struct {
+	// StatusCode is the HTTP status code of the response.
+	StatusCode int
+	// Body is the response body, truncated, useful for diagnosing the failure.
+	Body string
+}
+
+func (e *APIError) Error() string {
+	// %q, not %s: the body is service-controlled and can carry control bytes
+	// that would otherwise forge lines in an operator's log.
+	return fmt.Sprintf("gcp: credentials service returned status %d: %q", e.StatusCode, e.Body)
+}
+
 // Client retrieves end-user credentials from the Agent Identity / IAM Connector
 // credential services and maps them to [auth.Credential].
 type Client struct {
@@ -296,13 +312,13 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	if err != nil {
 		return fmt.Errorf("gcp: read response: %w", err)
 	}
-	if len(data) > maxBody {
-		return fmt.Errorf("gcp: credentials service returned status %d with a response exceeding %d bytes", resp.StatusCode, maxBody)
-	}
+	// Classify the status before the size check, so an oversized error page still
+	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// %q, not %s: the body is service-controlled and can carry control bytes
-		// that would otherwise forge lines in an operator's log.
-		return fmt.Errorf("gcp: credentials service returned status %d: %q", resp.StatusCode, truncateForError(strings.TrimSpace(string(data))))
+		return &APIError{StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
+	}
+	if len(data) > maxBody {
+		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("gcp: decode response: %w", err)

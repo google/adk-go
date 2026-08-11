@@ -236,8 +236,15 @@ func TestRetrieveHTTPError(t *testing.T) {
 
 	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
-	if err == nil || !strings.Contains(err.Error(), "500") {
-		t.Fatalf("error = %v, want it to mention status 500", err)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusInternalServerError)
+	}
+	if !strings.Contains(apiErr.Body, "nope") {
+		t.Errorf("Body = %q, want it to carry the response body", apiErr.Body)
 	}
 }
 
@@ -525,8 +532,8 @@ func fakeADC(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
 }
 
-// TestDoPostOversizeKeepsStatus: the size check runs first, so it must carry the
-// status or the most actionable field is lost.
+// TestDoPostOversizeKeepsStatus: an error page big enough to trip the body cap
+// must still report its status, the most actionable field.
 func TestDoPostOversizeKeepsStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -535,11 +542,26 @@ func TestDoPostOversizeKeepsStatus(t *testing.T) {
 	defer srv.Close()
 	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 		Request{Resource: authProviderResource, UserID: "u"})
-	if err == nil {
-		t.Fatal("RetrieveCredential() = nil error, want error")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
 	}
-	if !strings.Contains(err.Error(), "502") {
-		t.Errorf("error = %v, want it to name status 502", err)
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
+	}
+}
+
+// A 2xx body over the cap must be rejected, not handed to json.Unmarshal
+// truncated (and thus garbled).
+func TestDoPostRejectsOversizeSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"success":{"token":"t","header":"Authorization: Bearer"}}`+strings.Repeat(" ", 1<<20))
+	}))
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("error = %v, want the oversize response rejected", err)
 	}
 }
 
