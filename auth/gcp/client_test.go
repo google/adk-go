@@ -455,11 +455,7 @@ func wantAPIKey(t *testing.T, cred auth.Credential, name, value string) {
 // it dictate the returned credential. Drives the real ADC branch of NewClient,
 // so deleting the guard fails here.
 func TestNewClientRefusesRedirects(t *testing.T) {
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"access_token":"ADC-TOKEN","token_type":"Bearer","expires_in":3600}`)
-	}))
-	defer tokenSrv.Close()
+	fakeADC(t)
 
 	var targetSawAuth string
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -471,12 +467,6 @@ func TestNewClientRefusesRedirects(t *testing.T) {
 		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
 	}))
 	defer redirector.Close()
-
-	adc := filepath.Join(t.TempDir(), "adc.json")
-	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","token_uri":"`+tokenSrv.URL+`"}`), 0o600); err != nil {
-		t.Fatalf("write fake ADC: %v", err)
-	}
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
 
 	c, err := NewClient(t.Context(), &Config{
 		AgentIdentityEndpoint: redirector.URL,
@@ -492,6 +482,47 @@ func TestNewClientRefusesRedirects(t *testing.T) {
 	if targetSawAuth != "" {
 		t.Errorf("redirect target received Authorization %q; the token must not leave the configured host", targetSawAuth)
 	}
+}
+
+// TestNewClientOutlivesConstructionCtx pins the token source's detachment from
+// the construction context. Callers build the client inside a bounded,
+// request-scoped context (the auth/gcp credential provider does exactly that),
+// and every token minted after that context ends must still authenticate.
+func TestNewClientOutlivesConstructionCtx(t *testing.T) {
+	fakeADC(t)
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	c, err := NewClient(ctx, &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	cancel()
+
+	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+	if err != nil {
+		t.Fatalf("RetrieveCredential() error = %v", err)
+	}
+	wantBearer(t, cred, "tok")
+}
+
+// fakeADC points Application Default Credentials at a local token server so the
+// ADC branch of NewClient runs offline. The token expires immediately, so every
+// call mints a fresh one and the token source's own context stays observable.
+func fakeADC(t *testing.T) {
+	t.Helper()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"ADC-TOKEN","token_type":"Bearer","expires_in":1}`)
+	}))
+	t.Cleanup(tokenSrv.Close)
+
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","token_uri":"`+tokenSrv.URL+`"}`), 0o600); err != nil {
+		t.Fatalf("write fake ADC: %v", err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
 }
 
 // TestDoPostOversizeKeepsStatus: the size check runs first, so it must carry the

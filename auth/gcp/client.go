@@ -96,10 +96,9 @@ type Config struct {
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
 // Credentials (cloud-platform scope) to authenticate calls to the services.
 //
-// ctx is retained by the token source backing the returned client and is used
-// for every later refresh, not just for discovery: a request-scoped ctx yields
-// a Client that works until the first token expiry and then fails every
-// retrieval with "context canceled". Pass a context that outlives the Client.
+// ctx bounds credential discovery only: the token source backing the returned
+// client is detached from ctx's cancellation, so a Client built inside a
+// request-scoped context keeps refreshing its token after that request ends.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -125,7 +124,10 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
-		creds, err := google.FindDefaultCredentials(ctx, cloudPlatformScope)
+		// The token source captures this context and reuses it for every later
+		// refresh, so it must outlive the call; discovery itself needs no
+		// cancellation (its only network probe bounds itself).
+		creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
 		if err != nil {
 			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
 		}
