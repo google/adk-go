@@ -123,6 +123,26 @@ func TestParse_Valid(t *testing.T) {
 			wantInstruction: "Markdown Body",
 		},
 		{
+			name:  "allowed tools as specification scalar",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Bash(git:*) Bash(jq:*) Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Bash(git:*)", "Bash(jq:*)", "Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed tools scalar with spaces inside parentheses",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read, Bash(kubectl get:*)\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read", "Bash(kubectl get:*)"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
 			name: "valid full frontmatter",
 			input: `---
 name: my-cool-skill
