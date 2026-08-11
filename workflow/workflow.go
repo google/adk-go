@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package workflow hosts workflow definitions and primitives for building
+// multi-agent applications.
 package workflow
 
 import (

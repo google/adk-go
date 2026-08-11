@@ -486,3 +486,63 @@ func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
 
 	assertNoRunLiveLeak(t, baseline)
 }
+
+func TestRunLiveCloseStopsIdleSession(t *testing.T) {
+	baseline, _ := runLiveStacks()
+
+	// connGone fires when the fake server's read returns, i.e. once the client
+	// has torn the socket down. Buffered so the handler never blocks, whether
+	// the test consumed the signal or gave up and failed.
+	connGone := make(chan struct{}, 1)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		blockUntilClientCloses(conn) // an idle server: no unsolicited traffic
+		connGone <- struct{}{}
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	// The context is deliberately left alive across the assertions below:
+	// this test is about Close standing on its own, with no help from ctx.
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	// The setup-complete acknowledgement. Once it lands the connection is up
+	// and the flow is settling into the idle consumer select.
+	if _, _, ok := next(); !ok {
+		t.Fatal("iterator ended before the setup-complete event; the connection never came up")
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Fatalf("connection count = %d, want 1", got)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if _, _, ok := next(); ok {
+		t.Error("iterator produced an event after Close")
+	}
+
+	select {
+	case <-connGone:
+	case <-time.After(10 * time.Second):
+		_, stacks := runLiveStacks()
+		t.Fatalf("Close did not release the live connection: the websocket is still "+
+			"open and the flow is still running:\n%s", stacks)
+	}
+
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1 (Close must not trigger a reconnect)", got)
+	}
+	assertNoRunLiveLeak(t, baseline)
+}
