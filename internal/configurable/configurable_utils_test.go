@@ -114,6 +114,69 @@ func TestResolveAgentReferenceAllowsPathsInsideAgentDir(t *testing.T) {
 	}
 }
 
+// TestResolveToolReferenceMcpToolsetNonStringArgs reproduces the bug where a
+// non-string element in the McpToolset "args" or "tool_filter" lists triggered
+// an unchecked type assertion that panicked and killed the process. The factory
+// must now return a descriptive error instead of crashing.
+func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
+	newArgs := func(serverArgs, toolFilter []any) map[string]any {
+		return map[string]any{
+			"stdio_connection_params": map[string]any{
+				"server_params": map[string]any{
+					"command": "echo",
+					"args":    serverArgs,
+				},
+			},
+			"tool_filter": toolFilter,
+		}
+	}
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string // empty means a valid config is expected
+	}{
+		{
+			name:    "non-string in server args",
+			args:    newArgs([]any{"a", 1, 2}, []any{"a"}),
+			wantErr: "server_params.args[1]",
+		},
+		{
+			name:    "non-string in tool filter",
+			args:    newArgs([]any{"a"}, []any{true}),
+			wantErr: "tool_filter[0]",
+		},
+		{
+			name:    "all strings is valid",
+			args:    newArgs([]any{"a", "b"}, []any{"t1"}),
+			wantErr: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// A non-string element previously triggered a panic; the call must
+			// return normally (with or without an error), never crash.
+			_, toolset, err := ResolveToolReference(context.Background(), "McpToolset", tc.args)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ResolveToolReference(McpToolset) = %v, want no error", err)
+				}
+				if toolset == nil {
+					t.Fatal("ResolveToolReference(McpToolset) returned a nil toolset, want non-nil")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ResolveToolReference(McpToolset) succeeded, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("ResolveToolReference(McpToolset) = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestResolveAgentReferenceRelativeParentPath covers a parent path that is not
 // absolute, which the containment check must normalise before comparing.
 func TestResolveAgentReferenceRelativeParentPath(t *testing.T) {
