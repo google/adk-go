@@ -159,14 +159,14 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	if lastContent == nil || len(lastContent.Parts) == 0 {
 		return nil
 	}
-	firstPart := lastContent.Parts[0]
-	if firstPart.FunctionResponse == nil {
-		return nil
+	var functionResponse *genai.FunctionResponse
+	for _, part := range lastContent.Parts {
+		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+			functionResponse = part.FunctionResponse
+			break
+		}
 	}
-
-	functionResponse := firstPart.FunctionResponse
-
-	if functionResponse.Name != "load_artifacts" {
+	if functionResponse == nil {
 		return nil
 	}
 	artifactNamesRaw, ok := functionResponse.Response["artifact_names"]
