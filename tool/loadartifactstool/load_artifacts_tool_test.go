@@ -229,6 +229,68 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall_AnySlice(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	tc := createToolContext(t)
+	artifacts := map[string]*genai.Part{
+		"doc1.txt": {Text: "This is the content of doc1.txt"},
+	}
+	for name, part := range artifacts {
+		_, err := tc.Artifacts().Save(t.Context(), name, part)
+		if err != nil {
+			t.Fatalf("Failed to save artifact %s: %v", name, err)
+		}
+	}
+
+	// Simulate the function response after a structpb round-trip, where
+	// []string becomes []any ([]interface{}).
+	functionResponse := &genai.FunctionResponse{
+		Name: "load_artifacts",
+		Response: map[string]any{
+			"artifact_names": []any{"doc1.txt"},
+		},
+	}
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse(functionResponse.Name, functionResponse.Response),
+				},
+			},
+		},
+	}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+
+	if len(llmRequest.Contents) != 2 {
+		t.Fatalf("Expected 2 content, but got: %v", llmRequest.Contents)
+	}
+
+	appendedContent := llmRequest.Contents[1]
+	if appendedContent.Role != "user" {
+		t.Errorf("Appended Content Role: got %v, want 'user'", appendedContent.Role)
+	}
+	if len(appendedContent.Parts) != 2 {
+		t.Fatalf("Expected 2 parts in appended content, but got: %v", appendedContent.Parts)
+	}
+	if appendedContent.Parts[0].Text != "Artifact doc1.txt is:" {
+		t.Errorf("First part: got %v, want 'Artifact doc1.txt is:'", appendedContent.Parts[0].Text)
+	}
+	if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
+		t.Errorf("Second part: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
+	}
+}
+
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing.T) {
 	loadArtifactsTool := loadartifactstool.New()
 
