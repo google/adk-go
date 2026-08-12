@@ -138,8 +138,8 @@ func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
 	}{
 		{
 			name:    "non-string in server args",
-			args:    newArgs([]any{1, 2, 3}, []any{"a"}),
-			wantErr: "server_params.args[0]",
+			args:    newArgs([]any{"a", 1, 2}, []any{"a"}),
+			wantErr: "server_params.args[1]",
 		},
 		{
 			name:    "non-string in tool filter",
