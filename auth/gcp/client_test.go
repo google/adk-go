@@ -216,11 +216,11 @@ func TestRetrieveRoutesByResource(t *testing.T) {
 			if gotUserID != "user-1" {
 				t.Errorf("body userId = %q, want %q", gotUserID, "user-1")
 			}
-			// ContinueURI is what makes the 3-legged flow work, so a wrong tag
-			// here would be silent and expensive.
 			if !slices.Equal(gotScopes, []string{"scope-a", "scope-b"}) {
 				t.Errorf("body scopes = %q, want [scope-a scope-b]", gotScopes)
 			}
+			// ContinueURI is what makes the 3-legged flow work, so a wrong tag
+			// here would be silent and expensive.
 			if gotContinueURI != "https://example.test/continue" {
 				t.Errorf("body continueUri = %q, want %q", gotContinueURI, "https://example.test/continue")
 			}
@@ -340,7 +340,7 @@ func TestMapCredential(t *testing.T) {
 		{name: "empty header", header: "", token: "t", wantErr: true},
 		{name: "empty token", header: "Authorization: Bearer", token: "", wantErr: true},
 		{name: "header carrying a scheme is not a usable field name", header: "X-Api-Key: Token", token: "k", wantErr: true},
-		{name: "bare authorization is not a usable field name", header: "Authorization", token: "k", wantAPIKey: [2]string{"Authorization", "k"}},
+		{name: "bare authorization maps to an api key", header: "Authorization", token: "k", wantAPIKey: [2]string{"Authorization", "k"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -600,8 +600,11 @@ func TestTruncateForError(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Report the tail as well as the length: a body that is cut at the
+			// wrong place can still come out the right size.
 			if got := truncateForError(tc.in); got != tc.want {
-				t.Errorf("truncateForError() length = %d, want %d", len(got), len(tc.want))
+				t.Errorf("truncateForError() = %d bytes ending %q, want %d bytes ending %q",
+					len(got), got[max(0, len(got)-8):], len(tc.want), tc.want[max(0, len(tc.want)-8):])
 			}
 		})
 	}
