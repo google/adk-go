@@ -40,6 +40,11 @@ type runNodeOptions struct {
 // auto-counter), and exclude the composite-path separators '/' and
 // '@'. Violations surface as ErrInvalidRunID from RunNode.
 //
+// A stable id makes the call idempotent within one invocation: a repeat
+// returns the first run's output without re-running the child, and calls
+// that overlap in time share one execution and its outcome. A failed or
+// interrupted run is not retained, so a later call runs the child again.
+//
 // Mirrors adk-python's run_id kwarg
 // (https://adk.dev/graphs/dynamic/#custom-execution-ids).
 func WithRunID(id string) RunNodeOption {
