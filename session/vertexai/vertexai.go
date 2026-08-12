@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package vertexai provides a session.Service backed by the Vertex AI
+// Agent Engine runtime.
 package vertexai
 
 import (
