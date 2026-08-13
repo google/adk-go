@@ -108,6 +108,10 @@ func (req *SaveRequest) Validate() error {
 		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
 
+	// Validate that the key segments don't contain path separators
+	if err := validatePathSegments(req.AppName, req.UserID, req.SessionID); err != nil {
+		return err
+	}
 	// Validate that FileName doesn't contain path separators
 	if err := validateFileName(req.FileName); err != nil {
 		return err
@@ -118,6 +122,21 @@ func (req *SaveRequest) Validate() error {
 func validateFileName(name string) error {
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		return fmt.Errorf("invalid name: filename cannot contain path separators")
+	}
+	return nil
+}
+
+// validatePathSegments rejects appName, userID, or sessionID values that contain
+// a path separator ('/' or '\').
+func validatePathSegments(appName, userID, sessionID string) error {
+	for _, f := range []requiredField{
+		{Name: "AppName", Value: appName},
+		{Name: "UserID", Value: userID},
+		{Name: "SessionID", Value: sessionID},
+	} {
+		if strings.Contains(f.Value, "/") || strings.Contains(f.Value, "\\") {
+			return fmt.Errorf("invalid %s: cannot contain path separators", f.Name)
+		}
 	}
 	return nil
 }
@@ -153,6 +172,10 @@ func (req *LoadRequest) Validate() error {
 		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
+	// Validate that the key segments don't contain path separators
+	if err := validatePathSegments(req.AppName, req.UserID, req.SessionID); err != nil {
+		return err
+	}
 	// Validate that FileName doesn't contain path separators
 	if err := validateFileName(req.FileName); err != nil {
 		return err
@@ -193,6 +216,10 @@ func (req *DeleteRequest) Validate() error {
 		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
+	// Validate that the key segments don't contain path separators
+	if err := validatePathSegments(req.AppName, req.UserID, req.SessionID); err != nil {
+		return err
+	}
 	// Validate that FileName doesn't contain path separators
 	if err := validateFileName(req.FileName); err != nil {
 		return err
@@ -222,7 +249,9 @@ func (req *ListRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid list request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
-	return nil
+
+	// Validate that the key segments don't contain path separators
+	return validatePathSegments(req.AppName, req.UserID, req.SessionID)
 }
 
 // ListResponse is the return type of [ArtifactService.List].
@@ -253,6 +282,10 @@ func (req *VersionsRequest) Validate() error {
 		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
+	// Validate that the key segments don't contain path separators
+	if err := validatePathSegments(req.AppName, req.UserID, req.SessionID); err != nil {
+		return err
+	}
 	// Validate that FileName doesn't contain path separators
 	if err := validateFileName(req.FileName); err != nil {
 		return err
@@ -301,6 +334,10 @@ func (req *GetArtifactVersionRequest) Validate() error {
 		return fmt.Errorf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
+	// Validate that the key segments don't contain path separators
+	if err := validatePathSegments(req.AppName, req.UserID, req.SessionID); err != nil {
+		return err
+	}
 	// Validate that FileName doesn't contain path separators
 	if err := validateFileName(req.FileName); err != nil {
 		return err

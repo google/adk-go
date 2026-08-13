@@ -122,6 +122,42 @@ func TestSaveRequest_Validate(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
+		{
+			name: "AppName with path separator",
+			req: &SaveRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+				Part:      genai.NewPartFromText("data"),
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+				Part:      genai.NewPartFromText("data"),
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+				FileName:  "file.txt",
+				Part:      genai.NewPartFromText("data"),
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
+		},
 	}
 	executeValidatorTestCases(t, "SaveRequest", testCases)
 }
@@ -174,6 +210,39 @@ func TestLoadRequest_Validate(t *testing.T) {
 			},
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
+		},
+		{
+			name: "AppName with path separator",
+			req: &LoadRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &LoadRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &LoadRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "LoadRequest", testCases)
@@ -228,6 +297,39 @@ func TestDeleteRequest_Validate(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
+		{
+			name: "AppName with path separator",
+			req: &DeleteRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &DeleteRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &DeleteRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
+		},
 	}
 	executeValidatorTestCases(t, "DeleteRequest", testCases)
 }
@@ -267,6 +369,36 @@ func TestListRequest_Validate(t *testing.T) {
 			req:        &ListRequest{},
 			wantErr:    true,
 			wantErrMsg: "invalid list request: missing required fields: AppName, UserID, SessionID",
+		},
+		{
+			name: "AppName with path separator",
+			req: &ListRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &ListRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &ListRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "ListRequest", testCases)
@@ -321,6 +453,39 @@ func TestVersionsRequest_Validate(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
+		{
+			name: "AppName with path separator",
+			req: &VersionsRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &VersionsRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &VersionsRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
+		},
 	}
 	executeValidatorTestCases(t, "VersionsRequest", testCases)
 }
@@ -373,6 +538,39 @@ func TestGetArtifactVersionRequest_Validate(t *testing.T) {
 			},
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
+		},
+		{
+			name: "AppName with path separator",
+			req: &GetArtifactVersionRequest{
+				AppName:   "My/App",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name: "UserID with path separator",
+			req: &GetArtifactVersionRequest{
+				AppName:   "MyApp",
+				UserID:    "user/123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name: "SessionID with backslash separator",
+			req: &GetArtifactVersionRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: `sess\abc`,
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "GetArtifactVersionRequest", testCases)
@@ -441,6 +639,54 @@ func TestValidateRequiredStrings(t *testing.T) {
 			got := validateRequiredStrings(tc.input)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("validateRequiredStrings() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidatePathSegments(t *testing.T) {
+	testCases := []struct {
+		name                       string
+		appName, userID, sessionID string
+		wantErrMsg                 string // "" means no error
+	}{
+		{
+			name:    "all clean",
+			appName: "MyApp", userID: "user-123", sessionID: "sess-abc",
+		},
+		{
+			name:    "forward slash in appName",
+			appName: "My/App", userID: "user-123", sessionID: "sess-abc",
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+		{
+			name:    "forward slash in userID",
+			appName: "MyApp", userID: "user/123", sessionID: "sess-abc",
+			wantErrMsg: "invalid UserID: cannot contain path separators",
+		},
+		{
+			name:    "backslash in sessionID",
+			appName: "MyApp", userID: "user-123", sessionID: `sess\abc`,
+			wantErrMsg: "invalid SessionID: cannot contain path separators",
+		},
+		{
+			name:    "appName reported before userID when both are bad",
+			appName: "a/b", userID: "c/d", sessionID: "sess-abc",
+			wantErrMsg: "invalid AppName: cannot contain path separators",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePathSegments(tc.appName, tc.userID, tc.sessionID)
+			if tc.wantErrMsg == "" {
+				if err != nil {
+					t.Errorf("validatePathSegments() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErrMsg {
+				t.Errorf("validatePathSegments() = %v, want %q", err, tc.wantErrMsg)
 			}
 		})
 	}
