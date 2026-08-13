@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -45,15 +46,28 @@ type CredentialKey struct {
 type CredentialStore interface {
 	// Get returns the cached, unexpired credential for key, if present.
 	Get(ctx context.Context, key CredentialKey) (Credential, bool, error)
-	// Set stores cred for key. A zero expiresAt means the entry does not expire.
+	// Set stores cred for key until expiresAt. Both cred and expiresAt are
+	// required: a caller that cannot establish a lifetime must not cache, rather
+	// than cache forever.
 	Set(ctx context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error
+	// Delete removes any entry for key, so a credential can be invalidated ahead
+	// of its expiry — on consent revocation, logout, or a downstream 401.
+	// Removing an absent key is not an error.
+	Delete(ctx context.Context, key CredentialKey) error
 }
 
+// sweepEvery is how many Set calls pass between sweeps of expired entries.
+// Nothing else evicts a principal that resolves once and never returns.
+const sweepEvery = 256
+
 // InMemoryCredentialStore is a concurrency-safe, process-local [CredentialStore]
-// (per app+user+key, across sessions). It mirrors adk-python's
-// InMemoryCredentialService.
+// (per app+user+key, across sessions). It serves the same role as adk-python's
+// InMemoryCredentialService, which buckets the same way, and adds per-entry
+// expiry. The zero value is ready to use.
 type InMemoryCredentialStore struct {
+	// mu guards entries. Not an RWMutex: Get evicts on expiry, so readers write.
 	mu      sync.Mutex
+	sets    uint64
 	entries map[CredentialKey]cacheEntry
 }
 
@@ -70,13 +84,17 @@ func NewInMemoryCredentialStore() *InMemoryCredentialStore {
 // Get implements [CredentialStore]. Expiry is evaluated against the context's
 // clock ([platform.Now]), so tests can drive it deterministically.
 func (s *InMemoryCredentialStore) Get(ctx context.Context, key CredentialKey) (Credential, bool, error) {
+	// Resolved before the lock: platform.Now is caller-supplied, and a clock that
+	// reaches back into the store would deadlock on this non-reentrant mutex.
+	now := platform.Now(ctx)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[key]
 	if !ok {
 		return nil, false, nil
 	}
-	if !e.expiresAt.IsZero() && platform.Now(ctx).Add(expirySkew).After(e.expiresAt) {
+	if now.Add(expirySkew).After(e.expiresAt) {
 		delete(s.entries, key)
 		return nil, false, nil
 	}
@@ -84,10 +102,37 @@ func (s *InMemoryCredentialStore) Get(ctx context.Context, key CredentialKey) (C
 }
 
 // Set implements [CredentialStore].
-func (s *InMemoryCredentialStore) Set(_ context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error {
+func (s *InMemoryCredentialStore) Set(ctx context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error {
+	if cred == nil {
+		return fmt.Errorf("auth: Set requires a credential")
+	}
+	if expiresAt.IsZero() {
+		return fmt.Errorf("auth: Set requires an expiry for %+v", key)
+	}
+	now := platform.Now(ctx)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.entries == nil {
+		s.entries = make(map[CredentialKey]cacheEntry)
+	}
+	s.sets++
+	if s.sets%sweepEvery == 0 {
+		for k, e := range s.entries {
+			if now.Add(expirySkew).After(e.expiresAt) {
+				delete(s.entries, k)
+			}
+		}
+	}
 	s.entries[key] = cacheEntry{cred: cred, expiresAt: expiresAt}
+	return nil
+}
+
+// Delete implements [CredentialStore].
+func (s *InMemoryCredentialStore) Delete(_ context.Context, key CredentialKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, key)
 	return nil
 }
 
