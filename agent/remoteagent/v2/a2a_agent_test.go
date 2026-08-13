@@ -1397,6 +1397,118 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 	}
 }
 
+type delayedFirstEventClient struct {
+	streamStarted chan struct{}
+	releaseEvent  chan struct{}
+	canceledTask  chan a2a.TaskID
+}
+
+func (c *delayedFirstEventClient) SendMessage(context.Context, *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (c *delayedFirstEventClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		close(c.streamStarted)
+		<-c.releaseEvent
+		if ctx.Err() != nil {
+			return
+		}
+		task := &a2a.Task{
+			ID:        "remote-task",
+			ContextID: "remote-context",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+		}
+		yield(task, nil)
+	}
+}
+
+func (c *delayedFirstEventClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	c.canceledTask <- req.ID
+	return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+}
+
+func (c *delayedFirstEventClient) Destroy() error { return nil }
+
+func TestRemoteAgent_CancelsRemoteTaskWhenContextCanceledBeforeFirstEvent(t *testing.T) {
+	client := &delayedFirstEventClient{
+		streamStarted: make(chan struct{}),
+		releaseEvent:  make(chan struct{}),
+		canceledTask:  make(chan a2a.TaskID, 1),
+	}
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("http://example.invalid", a2a.TransportProtocolJSONRPC)},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+	}
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) {
+			return client, nil
+		},
+		AfterRequestCallbacks: []AfterA2ARequestCallback{
+			func(agent.Context, *a2a.SendMessageRequest, *session.Event, error) (*session.Event, error) {
+				t.Error("AfterA2ARequestCallback called after invocation cancellation")
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	sess := prepareSession(t, ctx, []*session.Event{newUserHello()})
+	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:   sess,
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+	runDone := make(chan struct{})
+	emitted := make(chan *session.Event, 1)
+	go func() {
+		defer close(runDone)
+		for event := range remoteAgent.Run(ictx) {
+			emitted <- event
+		}
+	}()
+
+	<-client.streamStarted
+	cancel()
+	close(client.releaseEvent)
+
+	select {
+	case taskID := <-client.canceledTask:
+		if taskID != "remote-task" {
+			t.Fatalf("CancelTask() task ID = %q, want %q", taskID, "remote-task")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for remote task cancellation")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent run to finish")
+	}
+	select {
+	case event := <-emitted:
+		t.Fatalf("agent emitted event after invocation cancellation: %v", event)
+	default:
+	}
+}
+
+func TestRemoteTaskStreamContext_BoundsTaskIDWait(t *testing.T) {
+	parent, cancelParent := context.WithCancel(t.Context())
+	streamCtx := newRemoteTaskStreamContext(parent, time.Millisecond)
+	defer streamCtx.close()
+
+	cancelParent()
+	select {
+	case <-streamCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stream context was not canceled after task ID wait timeout")
+	}
+}
+
 func TestRemoteAgent_PartConverter(t *testing.T) {
 	event := &session.Event{
 		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{

@@ -196,6 +196,48 @@ type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
 }
 
+const remoteTaskIDWaitTimeout = 5 * time.Second
+
+// remoteTaskStreamContext keeps the remote stream alive briefly after the
+// invocation is canceled so cleanup can learn the remote task ID. It still
+// bounds that wait and cancels immediately once the ID is available.
+type remoteTaskStreamContext struct {
+	context.Context
+	cancel         context.CancelFunc
+	taskIDReceived chan struct{}
+	stopParentWait func() bool
+}
+
+func newRemoteTaskStreamContext(parent context.Context, timeout time.Duration) *remoteTaskStreamContext {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	streamCtx := &remoteTaskStreamContext{
+		Context:        ctx,
+		cancel:         cancel,
+		taskIDReceived: make(chan struct{}),
+	}
+	streamCtx.stopParentWait = context.AfterFunc(parent, func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-streamCtx.taskIDReceived:
+			streamCtx.cancel()
+		case <-timer.C:
+			streamCtx.cancel()
+		case <-streamCtx.Done():
+		}
+	})
+	return streamCtx
+}
+
+func (c *remoteTaskStreamContext) markTaskIDReceived() {
+	close(c.taskIDReceived)
+}
+
+func (c *remoteTaskStreamContext) close() {
+	c.stopParentWait()
+	c.cancel()
+}
+
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		card, err := iremoteagent.ResolveAgentCard(ctx, a.serverConfig)
@@ -295,7 +337,27 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		for a2aEvent, a2aErr := range sender.SendStreamingMessage(ctx, req) {
+		if ctx.Err() != nil {
+			return
+		}
+
+		streamCtx := newRemoteTaskStreamContext(ctx, remoteTaskIDWaitTimeout)
+		defer streamCtx.close()
+		taskIDReceived := false
+		for a2aEvent, a2aErr := range sender.SendStreamingMessage(streamCtx, req) {
+			if a2aEvent != nil {
+				lastEvent = a2aEvent
+				if !taskIDReceived && a2aEvent.TaskInfo().TaskID != "" {
+					taskIDReceived = true
+					streamCtx.markTaskIDReceived()
+				}
+			}
+			if ctx.Err() != nil {
+				if taskIDReceived {
+					return
+				}
+				continue
+			}
 			if !processEvent(a2aEvent, a2aErr) {
 				return
 			}
