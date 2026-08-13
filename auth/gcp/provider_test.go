@@ -17,9 +17,11 @@ package gcp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"google.golang.org/adk/v2/auth"
@@ -28,15 +30,24 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// TestProviderCredential drives two users through one shared provider: the
+// provider is long-lived, so serving one user's credential to another is the
+// failure that matters. It also pins scopes and continueUri on the wire.
 func TestProviderCredential(t *testing.T) {
-	var gotUserID string
+	var gotUsers []string
+	var gotScopes []string
+	var gotContinueURI string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			UserID string `json:"userId"`
+			UserID      string   `json:"userId"`
+			Scopes      []string `json:"scopes"`
+			ContinueURI string   `json:"continueUri"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotUserID = body.UserID
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+		gotUsers = append(gotUsers, body.UserID)
+		gotScopes, gotContinueURI = body.Scopes, body.ContinueURI
+		// Echo the caller back, so a credential served to the wrong user shows up.
+		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer"}}`)
 	}))
 	defer srv.Close()
 
@@ -47,37 +58,73 @@ func TestProviderCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	scopes := []string{"s1", "s2"}
 	p, err := gcp.NewProvider(
-		gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap", Scopes: []string{"s1"}},
+		gcp.Scheme{
+			Name:        "projects/p/locations/l/authProviders/ap",
+			Scopes:      scopes,
+			ContinueURI: "https://example.test/continue",
+		},
 		&gcp.ProviderConfig{Client: client},
 	)
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
+	scopes[0] = "mutated" // the provider must have cloned this
 
-	cred, err := p.Credential(adkContext(t, "user-1"))
-	if err != nil {
-		t.Fatalf("Credential() error = %v", err)
+	for _, user := range []string{"alice", "bob"} {
+		cred, err := p.Credential(adkContext(t, user))
+		if err != nil {
+			t.Fatalf("Credential(%q) error = %v", user, err)
+		}
+		if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok-"+user {
+			t.Errorf("credential for %q = %+v, want bearer %q", user, cred, "tok-"+user)
+		}
 	}
-	if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok" {
-		t.Fatalf("credential = %+v, want bearer token %q", cred, "tok")
+	if !slices.Equal(gotUsers, []string{"alice", "bob"}) {
+		t.Errorf("service saw users %q, want [alice bob]", gotUsers)
 	}
-	if gotUserID != "user-1" {
-		t.Errorf("service saw userId = %q, want %q (identity from agent.IdentityFromContext)", gotUserID, "user-1")
+	if !slices.Equal(gotScopes, []string{"s1", "s2"}) {
+		t.Errorf("body scopes = %q, want [s1 s2] (caller's later mutation must not leak)", gotScopes)
+	}
+	if gotContinueURI != "https://example.test/continue" {
+		t.Errorf("body continueUri = %q, want the scheme's", gotContinueURI)
 	}
 }
 
 func TestProviderRequiresADKContext(t *testing.T) {
+	// Fails the test if reached: the guard must reject before any service call.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("credentials service must not be called without an ADK identity")
+	}))
+	defer srv.Close()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
 	p, err := gcp.NewProvider(
 		gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"},
-		&gcp.ProviderConfig{Client: &gcp.Client{}},
+		&gcp.ProviderConfig{Client: client},
 	)
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
-	// Plain context: no ADK identity to resolve, so no service call is made.
-	if _, err := p.Credential(t.Context()); err == nil {
-		t.Fatal("Credential() = nil error, want error for missing ADK context")
+	_, err = p.Credential(t.Context())
+	if !errors.Is(err, gcp.ErrNoActingUser) {
+		t.Fatalf("Credential() error = %v, want gcp.ErrNoActingUser", err)
+	}
+}
+
+func TestNewProviderRejectsUnconstructedClient(t *testing.T) {
+	_, err := gcp.NewProvider(
+		gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"},
+		&gcp.ProviderConfig{Client: &gcp.Client{}},
+	)
+	if err == nil {
+		t.Fatal("NewProvider() = nil error, want a zero Client rejected")
 	}
 }
 

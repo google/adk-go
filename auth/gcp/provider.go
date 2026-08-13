@@ -17,9 +17,9 @@ package gcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/singleflight"
 
@@ -49,18 +49,29 @@ type ProviderConfig struct {
 	Client *Client
 }
 
+// ErrNoActingUser means the provider could not determine the acting end user,
+// either because the context is not an ADK context or because the invocation
+// carries no user.
+var ErrNoActingUser = errors.New("gcp: no acting user")
+
 // NewProvider returns an [auth.CredentialProvider] that resolves credentials for
 // the given GCP resource via the Agent Identity / IAM Connector services.
 //
 // The acting user is taken from the ADK context ([agent.IdentityFromContext]) at
-// resolve time, so the provider must run within an agent invocation (e.g. wired
-// into mcptoolset or remoteagent).
+// resolve time, so the provider must run within an agent invocation — and every
+// request it authenticates must descend from the invoking user's context. That
+// holds for mcptoolset's per-call requests, but not for a transport that shares
+// one connection across invocations.
 func NewProvider(scheme Scheme, cfg *ProviderConfig) (auth.CredentialProvider, error) {
 	if scheme.Name == "" {
 		return nil, errors.New("gcp: NewProvider requires a scheme Name")
 	}
 	if cfg == nil {
 		cfg = &ProviderConfig{}
+	}
+	// A zero Client would nil-deref deep inside net/http on first use.
+	if cfg.Client != nil && cfg.Client.httpClient == nil {
+		return nil, errors.New("gcp: ProviderConfig.Client must come from NewClient")
 	}
 	// Defensive copy: the provider outlives this call and re-reads Scopes per request, so it must not alias a caller-mutable slice.
 	scheme.Scopes = slices.Clone(scheme.Scopes)
@@ -80,8 +91,11 @@ var _ auth.CredentialProvider = (*provider)(nil)
 // Credential implements [auth.CredentialProvider].
 func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	id, ok := agent.IdentityFromContext(ctx)
-	if !ok || id.UserID == "" {
-		return nil, errors.New("gcp: no acting user in ADK context; provider must run within an agent invocation")
+	if !ok {
+		return nil, fmt.Errorf("%w: provider must run within an agent invocation", ErrNoActingUser)
+	}
+	if id.UserID == "" {
+		return nil, fmt.Errorf("%w: invocation for app %q session %q has an empty UserID", ErrNoActingUser, id.AppName, id.SessionID)
 	}
 
 	client, err := p.resolveClient(ctx)
@@ -96,18 +110,20 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	})
 }
 
-// clientInitTimeout bounds the lazy ADC lookup so a hung probe fails fast
-// instead of blocking callers indefinitely.
-const clientInitTimeout = 30 * time.Second
-
 // resolveClient returns the configured client, creating a default one (backed by
 // Application Default Credentials) on first use.
 //
-// Concurrent first callers are coalesced via singleflight so the (up to
-// clientInitTimeout) ADC lookup runs once, off the mutex. Construction uses
-// [context.WithoutCancel] so the cached client isn't tied to one request's
-// cancellation (but keeps its values). A failed init is not cached; the next
-// call retries.
+// Concurrent first callers are coalesced via singleflight so the ADC lookup runs
+// once, off the mutex, and each waits on its own ctx: auth.Transport resolves a
+// credential per outbound request, so a slow cold start must not outlive the
+// request that triggered it. Init runs on a context detached from the caller's
+// cancellation (values kept) so the shared client isn't bound to one request. A
+// failed init is not cached; the next call retries.
+//
+// The lookup cannot be bounded by a context: FindDefaultCredentials reads the
+// credentials file with os.ReadFile and probes with the context-free
+// metadata.OnGCE(), neither of which observes cancellation. The bound therefore
+// lives on the waiting side, not on the context handed to NewClient.
 func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	p.mu.Lock()
 	c := p.client
@@ -116,17 +132,15 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 		return c, nil
 	}
 
-	v, err, _ := p.clientInit.Do("client", func() (any, error) {
-		// A prior winner may have set the client while we waited on Do.
+	ch := p.clientInit.DoChan("client", func() (any, error) {
+		// A prior winner may have set the client while we waited.
 		p.mu.Lock()
 		c := p.client
 		p.mu.Unlock()
 		if c != nil {
 			return c, nil
 		}
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), clientInitTimeout)
-		defer cancel()
-		nc, err := NewClient(dctx, nil)
+		nc, err := NewClient(context.WithoutCancel(ctx), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -135,8 +149,13 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 		p.mu.Unlock()
 		return nc, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(*Client), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.(*Client), nil
 }

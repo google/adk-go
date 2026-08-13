@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 	"time"
 
 	"google.golang.org/genai"
@@ -377,10 +378,24 @@ func (c *commonContext) UserID() string {
 // delegates, so a wrapped ADK context can still supply the identity and Value
 // never panics.
 func (c *commonContext) Value(key any) any {
-	if key == adkcontext.IdentityKey && c.invocationContext != nil && c.invocationContext.Session() != nil {
+	if key == adkcontext.IdentityKey && c.hasSession() {
 		return Identity{UserID: c.UserID(), AppName: c.AppName(), SessionID: c.SessionID()}
 	}
+	if c.Context == nil {
+		return nil
+	}
 	return c.Context.Value(key)
+}
+
+// hasSession reports whether an identity can be read off this context. The
+// reflect check rejects a typed-nil Session, which survives != nil and then
+// panics on use.
+func (c *commonContext) hasSession() bool {
+	if c.invocationContext == nil {
+		return false
+	}
+	s := c.invocationContext.Session()
+	return s != nil && !reflect.ValueOf(s).IsNil()
 }
 
 var (

@@ -22,5 +22,7 @@ type ctxKey int
 
 // IdentityKey is the context value key for the agent.Identity of an ADK context.
 // It lives in an internal package with an unexported type, so no code outside
-// the module can name or forge it.
+// the module can name the key. The value it addresses is the exported
+// agent.Identity, which any in-process context wrapper can read or substitute on
+// the way through — no less than it could call the credential services directly.
 const IdentityKey ctxKey = 0
