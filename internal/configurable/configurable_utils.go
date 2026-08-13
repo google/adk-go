@@ -220,11 +220,19 @@ func init() {
 		}
 		serverArgsStr := make([]string, len(serverArgs))
 		for i, arg := range serverArgs {
-			serverArgsStr[i] = arg.(string)
+			s, ok := arg.(string)
+			if !ok {
+				return nil, fmt.Errorf("server_params.args[%d]: expected string, got %T (%v)", i, arg, arg)
+			}
+			serverArgsStr[i] = s
 		}
 		toolFilterStr := make([]string, len(toolFilter))
 		for i, t := range toolFilter {
-			toolFilterStr[i] = t.(string)
+			s, ok := t.(string)
+			if !ok {
+				return nil, fmt.Errorf("tool_filter[%d]: expected string, got %T (%v)", i, t, t)
+			}
+			toolFilterStr[i] = s
 		}
 
 		mcpSet, err := mcptoolset.New(mcptoolset.Config{

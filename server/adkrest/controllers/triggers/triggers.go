@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package triggers provides HTTP handlers that run an agent in response
+// to external events such as Pub/Sub or Eventarc, retrying rate-limited
+// runs with exponential backoff and jitter.
 package triggers
 
 import (
@@ -35,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// RetriableRunner runs an agent with retry semantics, creating a new session per retry.
 type RetriableRunner struct {
 	sessionService  session.Service
 	agentLoader     agent.Loader
@@ -44,6 +48,7 @@ type RetriableRunner struct {
 	triggerConfig   TriggerConfig
 }
 
+// RunAgent runs the agent for the given message and returns the resulting events.
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
 	// Each retry = new session
 	sessReq := &session.CreateRequest{

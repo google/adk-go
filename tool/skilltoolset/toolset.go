@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package skilltoolset provides a toolset that lets an agent discover and
+// use skills: folders of instructions and resources that extend its
+// capabilities.
 package skilltoolset
 
 import (
