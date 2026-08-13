@@ -70,6 +70,14 @@ func TestRetrieveCredential(t *testing.T) {
 			wantExpiry: "2999-01-01T00:00:00Z",
 		},
 		{
+			// An unparseable expiry leaves ExpiresAt zero, which the provider
+			// reads as "don't cache"; the credential itself is still usable.
+			name:       "agent identity bearer with unparseable expiry",
+			resource:   authProviderResource,
+			bodies:     []string{`{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"not-a-time"}}`},
+			wantBearer: "tok",
+		},
+		{
 			name:       "agent identity custom header",
 			resource:   authProviderResource,
 			bodies:     []string{`{"success":{"token":"KEY","header":"X-Goog-Api-Key"}}`},
