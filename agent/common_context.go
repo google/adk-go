@@ -32,7 +32,7 @@ import (
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
 
-// Promotes Context from non-commonContext to commonContext
+// Promote promotes Context to commonContext
 func Promote(parent InvocationContext) Context {
 	if c, ok := parent.(*commonContext); ok {
 		return c

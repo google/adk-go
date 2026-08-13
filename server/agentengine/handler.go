@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package agentengine brings functionality of serving commands for AgentEngine-deployed code
+// Package agentengine brings functionality of serving commands for AgentEngine-deployed code.
 package agentengine
 
 import (
