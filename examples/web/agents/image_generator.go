@@ -76,7 +76,6 @@ type generateImageResult struct {
 	Status   string `json:"Status"`
 }
 
-// GetImageGeneratorAgent returns an agent that generates images using the given model.
 func GetImageGeneratorAgent(ctx context.Context, model model.LLM) agent.Agent {
 	generateImageTool, err := functiontool.New(
 		functiontool.Config{

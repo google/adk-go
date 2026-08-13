@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command vertexai is an example agent that uses a Vertex AI-backed session service.
 package main
 
 import (
