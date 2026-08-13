@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/guardrail"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
@@ -872,6 +873,92 @@ func TestModelCallbacks(t *testing.T) {
 			}
 			if afterModelCallbacksCalled == false && tc.dontRunAfterCanonicalCallback == false {
 				t.Error("after model should be called")
+			}
+		})
+	}
+}
+
+func TestOnGuardrailBlockedCallbackPlugin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		blockedCallbackFn llmagent.OnGuardrailBlockedCallback
+		onErrorCallbackFn llmagent.OnToolErrorCallback
+		wantResponse      map[string]any
+	}{
+		{
+			name: "plugin OnGuardrailBlockedCallback called for ErrGuardrailBlocked",
+			blockedCallbackFn: func(ctx agent.Context, t tool.Tool, args map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+				return map[string]any{"blocked": true, "policy": blocked.Policy}, nil
+			},
+			onErrorCallbackFn: func(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				return map[string]any{"error": "should not reach OnToolErrorCallback"}, nil
+			},
+			wantResponse: map[string]any{"blocked": true, "policy": "rate-limit"},
+		},
+		{
+			name:         "default guardrail response when no OnGuardrailBlockedCallback registered",
+			wantResponse: map[string]any{"error": `guardrail "rate-limit" blocked tool call: quota exceeded`},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ft, err := functiontool.New(functiontool.Config{Name: "testTool"}, func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+				return map[string]any{"result": "should not run"}, nil
+			})
+			if err != nil {
+				t.Fatalf("failed to create function tool: %v", err)
+			}
+
+			p, err := plugin.New(plugin.Config{
+				Name: "guardrail-plugin",
+				BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, &guardrail.ErrGuardrailBlocked{Policy: "rate-limit", Reason: "quota exceeded"}
+				},
+				OnGuardrailBlockedCallback: tc.blockedCallbackFn,
+				OnToolErrorCallback:        tc.onErrorCallbackFn,
+			})
+			if err != nil {
+				t.Fatalf("failed to create plugin: %v", err)
+			}
+
+			mdl := &testutil.MockModel{
+				Responses: []*genai.Content{
+					genai.NewContentFromFunctionCall("testTool", map[string]any{}, genai.RoleModel),
+				},
+			}
+
+			a, err := llmagent.New(llmagent.Config{
+				Name:  "test_agent",
+				Model: mdl,
+				Tools: []tool.Tool{ft},
+			})
+			if err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+
+			r := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{
+				Plugins: []*plugin.Plugin{p},
+			})
+
+			stream := r.Run(t, "session", "user input")
+			parts, err := testutil.CollectParts(stream)
+			if err != nil && err.Error() != "no data" {
+				t.Fatalf("agent stream error: %v", err)
+			}
+
+			var got map[string]any
+			for _, part := range parts {
+				if part.FunctionResponse != nil {
+					got = part.FunctionResponse.Response
+				}
+			}
+			if diff := cmp.Diff(tc.wantResponse, got); diff != "" {
+				t.Errorf("response mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

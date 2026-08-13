@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/guardrail"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
@@ -207,6 +208,23 @@ func (pm *PluginManager) RunOnToolErrorCallback(ctx agent.Context, tool tool.Too
 		callback := plugin.OnToolErrorCallback()
 		if callback != nil {
 			newResult, err := callback(ctx, tool, args, err)
+			if err != nil {
+				return nil, err
+			}
+			if newResult != nil {
+				return newResult, nil // Early exit
+			}
+		}
+	}
+	return nil, nil
+}
+
+// RunOnGuardrailBlockedCallback runs the OnGuardrailBlockedCallback for all plugins.
+func (pm *PluginManager) RunOnGuardrailBlockedCallback(ctx agent.Context, tool tool.Tool, args map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+	for _, plugin := range pm.plugins {
+		callback := plugin.OnGuardrailBlockedCallback()
+		if callback != nil {
+			newResult, err := callback(ctx, tool, args, blocked)
 			if err != nil {
 				return nil, err
 			}

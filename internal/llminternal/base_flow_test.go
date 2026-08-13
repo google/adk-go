@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/guardrail"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
@@ -95,13 +96,14 @@ func (m *mockRequestProcessorToolset) Tools(ctx agent.ReadonlyContext) ([]tool.T
 }
 
 type testCase struct {
-	name                 string
-	tool                 toolinternal.FunctionTool
-	args                 map[string]any
-	beforeToolCallbacks  []BeforeToolCallback
-	afterToolCallbacks   []AfterToolCallback
-	onToolErrorCallbacks []OnToolErrorCallback
-	want                 map[string]any
+	name                        string
+	tool                        toolinternal.FunctionTool
+	args                        map[string]any
+	beforeToolCallbacks         []BeforeToolCallback
+	afterToolCallbacks          []AfterToolCallback
+	onToolErrorCallbacks        []OnToolErrorCallback
+	onGuardrailBlockedCallbacks []OnGuardrailBlockedCallback
+	want                        map[string]any
 }
 
 func TestCallTool(t *testing.T) {
@@ -379,6 +381,71 @@ func TestCallTool(t *testing.T) {
 			},
 			want: map[string]any{"error": "error_from_after_tool"},
 		},
+		// --- guardrail routing ---
+		{
+			name: "ErrGuardrailBlocked routes to OnGuardrailBlockedCallback, not OnToolErrorCallback",
+			tool: &mockFunctionTool{
+				name: "transfer",
+				runFunc: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool must not run after guardrail block")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, &guardrail.ErrGuardrailBlocked{Policy: "aml", Reason: "suspicious pattern"}
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					t.Error("OnToolErrorCallback must not be called for a guardrail block")
+					return nil, nil
+				},
+			},
+			onGuardrailBlockedCallbacks: []OnGuardrailBlockedCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+					return map[string]any{"blocked": true, "policy": blocked.Policy}, nil
+				},
+			},
+			want: map[string]any{"blocked": true, "policy": "aml"},
+		},
+		{
+			name: "ErrGuardrailBlocked default response when no OnGuardrailBlockedCallback registered",
+			tool: &mockFunctionTool{
+				name: "transfer",
+				runFunc: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool must not run after guardrail block")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, &guardrail.ErrGuardrailBlocked{Policy: "pii", Reason: "PII detected"}
+				},
+			},
+			want: map[string]any{"error": `guardrail "pii" blocked tool call: PII detected`},
+		},
+		{
+			name: "non-guardrail error still routes to OnToolErrorCallback",
+			tool: &mockFunctionTool{
+				name: "transfer",
+				runFunc: func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("network timeout")
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"error": "handled: " + err.Error()}, nil
+				},
+			},
+			onGuardrailBlockedCallbacks: []OnGuardrailBlockedCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, blocked *guardrail.ErrGuardrailBlocked) (map[string]any, error) {
+					t.Error("OnGuardrailBlockedCallback must not be called for a non-guardrail error")
+					return nil, nil
+				},
+			},
+			want: map[string]any{"error": "handled: network timeout"},
+		},
 		{
 			name: "before callback error passed to on tool error callback and passed to after tool called and handled",
 			tool: &mockFunctionTool{
@@ -416,9 +483,10 @@ func TestCallTool(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Flow{
-				BeforeToolCallbacks:  tc.beforeToolCallbacks,
-				AfterToolCallbacks:   tc.afterToolCallbacks,
-				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
+				BeforeToolCallbacks:         tc.beforeToolCallbacks,
+				AfterToolCallbacks:          tc.afterToolCallbacks,
+				OnToolErrorCallbacks:        tc.onToolErrorCallbacks,
+				OnGuardrailBlockedCallbacks: tc.onGuardrailBlockedCallbacks,
 			}
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 			got := f.callTool(agent.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
