@@ -15,10 +15,19 @@
 package web
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/gorilla/mux"
+	"go.opentelemetry.io/otel/sdk/resource"
+
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/telemetry"
 )
 
 func TestH2CFlag(t *testing.T) {
@@ -118,5 +127,57 @@ func assertProtocol(t *testing.T, client *http.Client, url string, wantMajor int
 	}
 	if resp.ProtoMajor != wantMajor {
 		t.Errorf("response protocol = %q, want HTTP/%d", resp.Proto, wantMajor)
+	}
+}
+
+type telemetryFailSublauncher struct{}
+
+func (telemetryFailSublauncher) Keyword() string { return "repro" }
+
+func (telemetryFailSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (telemetryFailSublauncher) CommandLineSyntax() string                         { return "" }
+func (telemetryFailSublauncher) SimpleDescription() string                         { return "" }
+func (telemetryFailSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (telemetryFailSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	return nil
+}
+
+// TestRunDoesNotLeakListenerWhenTelemetryInitFails covers issue #1350: when
+// telemetry initialization fails, Run must not leave an HTTP listener bound.
+func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	// A resource whose schema URL conflicts with resource.Default()'s makes
+	// resource.Merge fail, so telemetry init fails without touching the network.
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+
+	if err := l.Run(context.Background(), config); err == nil {
+		t.Fatalf("Run() succeeded, want telemetry initialization failure")
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("port %d still bound after Run() returned an error: listener leaked", port)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
