@@ -234,3 +234,151 @@ func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
 	}
 }
+
+func TestInMemoryService_Create_AppAndUserStateUpdatesReflectedInGet(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	// 1. Create a session with initial app, user, and session state.
+	createResp1, err := service.Create(ctx, &session.CreateRequest{
+		AppName:   "testapp",
+		UserID:    "alice",
+		SessionID: "sess1",
+		State: map[string]any{
+			"app:counter":   1,
+			"user:nickname": "al",
+			"session_val":   "v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create sess1: %v", err)
+	}
+
+	// Verify initial merged state on creation response.
+	state1 := createResp1.Session.State()
+	val, err := state1.Get("app:counter")
+	if err != nil || val != 1 {
+		t.Errorf("sess1 app:counter = %v, %v; want 1, nil", val, err)
+	}
+	val, err = state1.Get("user:nickname")
+	if err != nil || val != "al" {
+		t.Errorf("sess1 user:nickname = %v, %v; want 'al', nil", val, err)
+	}
+	val, err = state1.Get("session_val")
+	if err != nil || val != "v1" {
+		t.Errorf("sess1 session_val = %v, %v; want 'v1', nil", val, err)
+	}
+
+	// 2. Create a second session for the same app and user, and update app and user state via AppendEvent.
+	createResp2, err := service.Create(ctx, &session.CreateRequest{
+		AppName:   "testapp",
+		UserID:    "alice",
+		SessionID: "sess2",
+	})
+	if err != nil {
+		t.Fatalf("Create sess2: %v", err)
+	}
+
+	updateEvent := &session.Event{
+		ID:        "update_evt",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"app:counter":   2,
+				"user:nickname": "ally",
+			},
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp2.Session, updateEvent); err != nil {
+		t.Fatalf("AppendEvent sess2: %v", err)
+	}
+
+	// 3. Call Get on sess1. It should reflect updated app and user state, but retain its own session state.
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "alice",
+		SessionID: "sess1",
+	})
+	if err != nil {
+		t.Fatalf("Get sess1: %v", err)
+	}
+
+	gotState := getResp.Session.State()
+	val, err = gotState.Get("app:counter")
+	if err != nil || val != 2 {
+		t.Errorf("Get sess1 app:counter = %v, %v; want 2 (updated), nil", val, err)
+	}
+	val, err = gotState.Get("user:nickname")
+	if err != nil || val != "ally" {
+		t.Errorf("Get sess1 user:nickname = %v, %v; want 'ally' (updated), nil", val, err)
+	}
+	val, err = gotState.Get("session_val")
+	if err != nil || val != "v1" {
+		t.Errorf("Get sess1 session_val = %v, %v; want 'v1' (retained), nil", val, err)
+	}
+}
+
+func TestInMemoryService_List_FiltersByAppNameAndUser(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	// Create sessions across different apps and users.
+	sessionsToCreate := []struct {
+		app     string
+		user    string
+		session string
+	}{
+		{"appA", "user1", "s1"},
+		{"appA", "user2", "s2"},
+		{"appB", "user1", "s3"},
+	}
+
+	for _, s := range sessionsToCreate {
+		_, err := service.Create(ctx, &session.CreateRequest{
+			AppName:   s.app,
+			UserID:    s.user,
+			SessionID: s.session,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s, %s, %s): %v", s.app, s.user, s.session, err)
+		}
+	}
+
+	// 1. List for appA, user1 -> only s1
+	list1, err := service.List(ctx, &session.ListRequest{
+		AppName: "appA",
+		UserID:  "user1",
+	})
+	if err != nil {
+		t.Fatalf("List(appA, user1): %v", err)
+	}
+	if len(list1.Sessions) != 1 || list1.Sessions[0].ID() != "s1" {
+		t.Errorf("List(appA, user1) = %v; want [s1]", list1.Sessions)
+	}
+
+	// 2. List for appA without user -> s1 and s2 (not s3 from appB)
+	list2, err := service.List(ctx, &session.ListRequest{
+		AppName: "appA",
+	})
+	if err != nil {
+		t.Fatalf("List(appA): %v", err)
+	}
+	if len(list2.Sessions) != 2 {
+		t.Fatalf("List(appA) len = %d; want 2", len(list2.Sessions))
+	}
+	ids := map[string]bool{list2.Sessions[0].ID(): true, list2.Sessions[1].ID(): true}
+	if !ids["s1"] || !ids["s2"] {
+		t.Errorf("List(appA) = %v; want s1 and s2", list2.Sessions)
+	}
+
+	// 3. List for appB -> only s3
+	list3, err := service.List(ctx, &session.ListRequest{
+		AppName: "appB",
+	})
+	if err != nil {
+		t.Fatalf("List(appB): %v", err)
+	}
+	if len(list3.Sessions) != 1 || list3.Sessions[0].ID() != "s3" {
+		t.Errorf("List(appB) = %v; want [s3]", list3.Sessions)
+	}
+}

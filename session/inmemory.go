@@ -67,24 +67,23 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
-	state := req.State
-	if state == nil {
-		state = make(stateMap)
+	appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(req.State)
+	appState := s.updateAppState(appDelta, req.AppName)
+	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
+
+	sessionState := make(stateMap)
+	if len(sessionDelta) > 0 {
+		maps.Copy(sessionState, sessionDelta)
 	}
 	val := &session{
 		id:        key,
-		state:     state,
+		state:     sessionState,
 		updatedAt: platform.Now(ctx),
 	}
-
 	s.sessions.Set(encodedKey, val)
-	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
-	appState := s.updateAppState(appDelta, req.AppName)
-	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
-	val.state = sessionutils.MergeStates(appState, userState, state)
 
 	copiedSession := copySessionWithoutStateAndEvents(val)
-	copiedSession.state = maps.Clone(val.state)
+	copiedSession.state = sessionutils.MergeStates(appState, userState, sessionState)
 	copiedSession.events = slices.Clone(val.events)
 
 	return &CreateResponse{
@@ -163,7 +162,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 			return nil, fmt.Errorf("failed to decode key: %w", err)
 		}
 
-		if key.appName != appName && key.userID != userID {
+		if key.appName != appName || (userID != "" && key.userID != userID) {
 			break
 		}
 		copiedSession := copySessionWithoutStateAndEvents(storedSession)
