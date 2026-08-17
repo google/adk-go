@@ -168,6 +168,16 @@ func TestRunSSEHandler(t *testing.T) {
 				"event: error\ndata: {\"error\":\"agent failed again\"}\n\n",
 			},
 		},
+		{
+			name: "with nil events in stream",
+			results: []testAgentResult{
+				{event: nil, err: nil},
+				{event: makeEvent("invocation-1", "testApp", "Hello from agent"), err: nil},
+				{event: nil, err: nil},
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   []string{"data: {", "Hello from agent"},
+		},
 	}
 
 	for _, tt := range tc {
@@ -307,5 +317,73 @@ func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
 	})
 	if c.eventsCompactionConfig != cfg {
 		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
+	}
+}
+
+func TestRunHandler_GuardsNilEvents(t *testing.T) {
+	fakeAgent, err := agent.New(agent.Config{
+		Name: "testApp",
+		Run: testAgent([]testAgentResult{
+			{event: nil, err: nil},
+			{event: makeEvent("invocation-1", "testApp", "Hello from agent"), err: nil},
+			{event: nil, err: nil},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	id := fakes.SessionKey{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+	sessionService := fakes.FakeSessionService{
+		Sessions: map[fakes.SessionKey]fakes.TestSession{
+			id: {
+				Id:            id,
+				SessionState:  fakes.TestState{},
+				SessionEvents: fakes.TestEvents{},
+				UpdatedAt:     time.Now(),
+			},
+		},
+	}
+
+	controller := NewRuntimeAPIController(
+		&sessionService,
+		nil,
+		agent.NewSingleLoader(fakeAgent),
+		nil,
+		10*time.Second,
+		runner.PluginConfig{},
+		false,
+	)
+
+	reqObj := models.RunAgentRequest{
+		AppName:   "testApp",
+		UserId:    "testUser",
+		SessionId: "testSession",
+		NewMessage: genai.Content{
+			Parts: []*genai.Part{{Text: "Hello"}},
+		},
+	}
+	reqBytes, _ := json.Marshal(reqObj)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+	rr := httptest.NewRecorder()
+
+	if err := controller.RunHandler(rr, req); err != nil {
+		t.Fatalf("RunHandler failed: %v", err)
+	}
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	var events []models.Event
+	if err := json.Unmarshal(rr.Body.Bytes(), &events); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 }
