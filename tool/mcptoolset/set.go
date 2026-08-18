@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -156,7 +157,17 @@ type Config struct {
 	// ElicitationHandler handles elicitation/create requests from the MCP
 	// server, including URL-mode elicitations that servers use for
 	// out-of-band interactions such as auth challenges. Setting it makes the
-	// client advertise the elicitation capability.
+	// client advertise the elicitation capability for both form and URL mode.
+	//
+	// For URL mode the handler must not return until the out-of-band
+	// interaction has completed: nothing waits for the server's
+	// notifications/elicitation/complete notification on its behalf, and the
+	// call is retried as soon as the handler returns. A handler that returns
+	// early makes the server re-request input until the retry budget is spent.
+	// A server that reports the URL through the CodeURLElicitationRequired
+	// (-32042) error code rather than through an elicitation request is not
+	// handled at all.
+	//
 	// It can only be set when Client is nil; for a custom Client, set the
 	// handler in the client's mcp.ClientOptions instead.
 	ElicitationHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
@@ -211,6 +222,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
+		if llminternal.IsReservedToolName(mcpTool.Name) {
+			return nil, fmt.Errorf("MCP server advertises tool %q, a name reserved by the framework", mcpTool.Name)
+		}
+
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
