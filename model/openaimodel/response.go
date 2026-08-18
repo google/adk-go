@@ -29,6 +29,9 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 	if resp == nil {
 		return nil, ErrEmptyResponse
 	}
+	if resp.Status == responses.ResponseStatusFailed {
+		return nil, failedResponseError(resp)
+	}
 	candidate, err := buildCandidate(resp)
 	if err != nil {
 		return nil, err
@@ -40,6 +43,22 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 		UsageMetadata:  convertUsage(resp.Usage),
 		PromptFeedback: promptFeedback(resp),
 	}, nil
+}
+
+// failedResponseError renders a server-side failure as an error, preferring the
+// server's own message.
+func failedResponseError(resp *responses.Response) error {
+	switch msg, code := resp.Error.Message, string(resp.Error.Code); {
+	case msg != "" && code != "":
+		return fmt.Errorf("%w: %s (%s)", ErrResponseFailed, msg, code)
+	case msg != "":
+		return fmt.Errorf("%w: %s", ErrResponseFailed, msg)
+	case code != "":
+		return fmt.Errorf("%w: %s", ErrResponseFailed, code)
+	default:
+		// The server said "failed" and nothing more.
+		return ErrResponseFailed
+	}
 }
 
 func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
@@ -172,8 +191,19 @@ func finishReason(resp *responses.Response) genai.FinishReason {
 	case "content_filter":
 		return genai.FinishReasonSafety
 	case "":
+		// No reason given, so the status is all that is left to go on.
+	default:
+		return genai.FinishReasonOther
+	}
+	switch resp.Status {
+	case responses.ResponseStatusCompleted, "":
+		// Absent status: a hand-built response, or a provider that omits the
+		// field. Reading it as completed keeps the reason-only path intact.
 		return genai.FinishReasonStop
 	default:
+		// "cancelled", "queued", "in_progress", a bare "incomplete", or a
+		// status a later SDK adds. None of them is a clean stop. "failed"
+		// never reaches here: convertResponse returns early on it.
 		return genai.FinishReasonOther
 	}
 }
