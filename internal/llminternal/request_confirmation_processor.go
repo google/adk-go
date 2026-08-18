@@ -206,4 +206,3 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 		}
 	}
 }
-

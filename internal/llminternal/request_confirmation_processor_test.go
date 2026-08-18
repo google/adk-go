@@ -710,4 +710,3 @@ func TestRequestConfirmationRejectsForeignAuthoredFunctionCall(t *testing.T) {
 		)
 	}
 }
-
