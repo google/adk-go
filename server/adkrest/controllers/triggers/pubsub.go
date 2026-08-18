@@ -106,7 +106,7 @@ func messageContentFromPubSub(req models.PubSubTriggerRequest) (string, error) {
 
 	agentMessage, err := json.Marshal(messageContent)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal agent message: %v", err)
+		return "", fmt.Errorf("failed to marshal agent message: %w", err)
 	}
 	return string(agentMessage), nil
 }

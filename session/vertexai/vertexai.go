@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package vertexai provides a session.Service backed by the Vertex AI
+// Agent Engine runtime.
 package vertexai
 
 import (
@@ -29,6 +31,7 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
+// VertexAIServiceConfig configures a Vertex AI-backed session service.
 type VertexAIServiceConfig struct {
 	// ProjectID with VertexAI API enabled.
 	ProjectID string

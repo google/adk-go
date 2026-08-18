@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package database provides a session.Service backed by a relational
+// database (for example PostgreSQL, Spanner, or SQLite) using GORM.
 package database
 
 import (
