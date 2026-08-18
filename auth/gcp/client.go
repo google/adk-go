@@ -99,12 +99,19 @@ type Config struct {
 	// and should refuse redirects for the reason [NewClient] describes.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
+	// It is used as given, not parsed: an http:// value would send the ADC token
+	// in the clear, so keep it https outside tests.
 	AgentIdentityEndpoint string
-	// ConnectorEndpoint overrides the IAM Connector base URL (scheme+host).
+	// ConnectorEndpoint overrides the IAM Connector base URL (scheme+host), with
+	// the same caveat as AgentIdentityEndpoint.
 	ConnectorEndpoint string
 	// PollTimeout bounds the wall-clock time spent retrying a pending retrieval.
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
+	//
+	// To bound requests without giving up ADC, put an [http.Client] carrying a
+	// Timeout in the context passed to [NewClient] under [oauth2.HTTPClient]:
+	// its Timeout is carried through to the ADC-backed client.
 	PollTimeout time.Duration
 }
 
@@ -112,9 +119,10 @@ type Config struct {
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
 // Credentials (cloud-platform scope) to authenticate calls to the services.
 //
-// ctx bounds credential discovery only: the token source backing the returned
-// client is detached from ctx's cancellation, so a Client built inside a
-// request-scoped context keeps refreshing its token after that request ends.
+// ctx is used for credential discovery only, and its cancellation is not
+// honored: the token source backing the returned client is detached from ctx,
+// so a Client built inside a request-scoped context keeps refreshing its token
+// after that request ends.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -280,7 +288,7 @@ func mapCredential(header, token string) (auth.Credential, error) {
 	// Rejecting an unusable name here keeps the failure at the cause: net/http
 	// would otherwise accept the credential and abort the eventual request.
 	if !validHeaderFieldName(header) {
-		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", header)
+		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", truncateForError(header))
 	}
 	key := auth.APIKeyCredential{Name: header, Value: token}
 	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
@@ -344,10 +352,13 @@ func validHeaderFieldName(s string) bool {
 	return true
 }
 
+// maxErrorBody caps service-controlled text carried into an error.
+const maxErrorBody = 1024
+
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
 // doesn't bloat the returned error.
 func truncateForError(s string) string {
-	const max = 1024
+	const max = maxErrorBody
 	if len(s) <= max {
 		return s
 	}

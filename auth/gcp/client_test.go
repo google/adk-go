@@ -51,6 +51,7 @@ func TestRetrieveCredential(t *testing.T) {
 		wantConsent [2]string // expect *auth.ConsentRequiredError {authURI, nonce}
 		wantErrIs   error     // expect errors.Is(err, target)
 		wantErrText string    // expect err to contain this substring
+		pollTimeout time.Duration
 	}{
 		// Agent Identity: synchronous "result" oneof.
 		{
@@ -124,13 +125,36 @@ func TestRetrieveCredential(t *testing.T) {
 			bodies:      []string{`{"done":true}`},
 			wantErrText: "no credential",
 		},
+		// The two services deliberately disagree on an unrecognised 200: Agent
+		// Identity's result is a closed oneof, so an unknown arm can only be a
+		// mismatch worth failing on...
+		{
+			name:        "agent identity unrecognized result fails fast",
+			resource:    authProviderResource,
+			bodies:      []string{`{}`},
+			wantErrText: "empty result",
+			wantCalls:   1,
+		},
+		// ...whereas a connector operation that is merely not done yet is normal,
+		// so an unrecognised one keeps being polled until the timeout.
+		{
+			name:        "connector unrecognized operation polls to timeout",
+			resource:    connectorResource,
+			bodies:      []string{`{}`},
+			wantErrIs:   ErrPollTimeout,
+			pollTimeout: 30 * time.Millisecond,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, calls := sequenceServer(tc.bodies...)
 			defer srv.Close()
 
-			cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+			c := newTestClient(t, srv)
+			if tc.pollTimeout > 0 {
+				c.pollTimeout = tc.pollTimeout
+			}
+			cred, err := c.RetrieveCredential(t.Context(),
 				Request{Resource: tc.resource, UserID: "u"})
 
 			switch {
@@ -304,6 +328,23 @@ func TestNewClient(t *testing.T) {
 			t.Errorf("initialBackoff = %v, want %v", c.initialBackoff, defaultInitialBackoff)
 		}
 	})
+	t.Run("nil config uses defaults", func(t *testing.T) {
+		// The nil-Config path the exported doc promises; it takes the ADC branch.
+		fakeADC(t)
+		c, err := NewClient(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if c.httpClient == nil {
+			t.Error("httpClient = nil, want an ADC-backed client")
+		}
+		if c.agentIdentityURL != defaultAgentIdentityURL || c.connectorURL != defaultConnectorURL {
+			t.Errorf("endpoints = %q / %q, want the defaults", c.agentIdentityURL, c.connectorURL)
+		}
+		if c.pollTimeout != defaultPollTimeout {
+			t.Errorf("pollTimeout = %v, want %v", c.pollTimeout, defaultPollTimeout)
+		}
+	})
 	t.Run("trims endpoint trailing slash", func(t *testing.T) {
 		c, err := NewClient(t.Context(), &Config{
 			HTTPClient:            http.DefaultClient,
@@ -366,19 +407,44 @@ func TestMapCredential(t *testing.T) {
 
 // TestRetrieveContextCanceledWhilePending verifies that canceling the context
 // aborts a pending poll promptly (no hang) and surfaces context.Canceled.
+// The rejected header name is service-controlled and reaches the error by a
+// third path, separate from a response body and an operation message.
+func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
+	_, err := mapCredential(strings.Repeat("x", 900_000)+": Token", "SECRET-TOKEN")
+	if err == nil {
+		t.Fatal("mapCredential() = nil error, want error")
+	}
+	if len(err.Error()) > 2*maxErrorBody {
+		t.Errorf("error is %d bytes, want the header name capped to %d", len(err.Error()), maxErrorBody)
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN") {
+		t.Error("error carries the token")
+	}
+}
+
 func TestRetrieveContextCanceledWhilePending(t *testing.T) {
 	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	c.initialBackoff = 50 * time.Millisecond // park in the poll wait, then cancel
+	// A backoff far longer than the window asserted below. Without the ctx arm of
+	// the poll wait, cancellation is only noticed on the next request, so the
+	// outcome still holds and only the promptness — the point here — is lost.
+	c.pollTimeout = time.Minute
+	c.initialBackoff = 30 * time.Second
 
 	ctx, cancel := context.WithCancel(t.Context())
-	time.AfterFunc(10*time.Millisecond, cancel)
+	time.AfterFunc(20*time.Millisecond, cancel)
 
+	start := time.Now()
 	_, err := c.RetrieveCredential(ctx, Request{Resource: authProviderResource, UserID: "u"})
+	elapsed := time.Since(start)
+
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RetrieveCredential() error = %v, want context.Canceled", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("returned after %v, want promptly after cancellation (backoff was %v)", elapsed, c.initialBackoff)
 	}
 }
 
@@ -548,6 +614,27 @@ func TestDoPostOversizeKeepsStatus(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusBadGateway {
 		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
+	}
+	// Pin the truncation, not just the helper: without it the whole 1 MiB page
+	// rides along in the error.
+	if len(apiErr.Body) > maxErrorBody+len("...") {
+		t.Errorf("Body = %d bytes, want it capped to %d", len(apiErr.Body), maxErrorBody)
+	}
+}
+
+// A service-controlled operation message must be capped like any response body;
+// it reaches the error by a different path than doPost's body.
+func TestRetrieveConnectorErrorMessageIsCapped(t *testing.T) {
+	srv, _ := sequenceServer(`{"error":{"code":7,"message":"` + strings.Repeat("x", 900_000) + `"}}`)
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want error")
+	}
+	if len(err.Error()) > 2*maxErrorBody {
+		t.Errorf("error is %d bytes, want the message capped to %d", len(err.Error()), maxErrorBody)
 	}
 }
 
