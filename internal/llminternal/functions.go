@@ -24,6 +24,17 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
+// IsReservedToolName reports whether name is a function call name that the
+// flow dispatches itself. A tool advertising one of these names would be
+// invoked in place of the framework's own handling of the call.
+func IsReservedToolName(name string) bool {
+	switch name {
+	case requestEUCFunctionCallName, toolconfirmation.FunctionCallName, transferAgentName:
+		return true
+	}
+	return false
+}
+
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
 // NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,
