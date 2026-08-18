@@ -117,7 +117,6 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}
 	}
 
-	// TODO: add auth
 	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
