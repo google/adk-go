@@ -219,10 +219,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// update the in-memory session
-	if err := sess.appendEvent(event); err != nil {
+	processedEvent, err := sess.appendEvent(event)
+	if err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	// eventCopy is built from processedEvent (temp: keys already stripped),
+	// not event, so the canonical stored_session record matches what
+	// sess.appendEvent already persisted locally.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -231,7 +235,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		Branch:         event.Branch,
 		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
-			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			StateDelta:                 maps.Clone(processedEvent.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
 			TransferToAgent:            event.Actions.TransferToAgent,
@@ -349,22 +353,22 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-func (s *session) appendEvent(event *Event) error {
+func (s *session) appendEvent(event *Event) (*Event, error) {
 	if event.Partial {
-		return nil
+		return event, nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := updateSessionState(s, event); err != nil {
-		return fmt.Errorf("error on appendEvent: %w", err)
+		return nil, fmt.Errorf("error on appendEvent: %w", err)
 	}
 	processedEvent := trimTempDeltaState(event)
 
 	s.events = append(s.events, processedEvent)
 	s.updatedAt = event.Timestamp
-	return nil
+	return processedEvent, nil
 }
 
 type events []*Event
