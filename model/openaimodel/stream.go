@@ -103,9 +103,11 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		responseReasoningTextDone,
 		responseReasoningSummaryTextDone,
 		responseCompleted,
+		responseIncomplete,
 		responseInProgress,
 		responseOutputItemDone:
-		// These are informational events that don't directly translate to a new part.
+		// Informational events with no part of their own. generateStream reads
+		// the finish reason off the terminal ones directly.
 		return nil, nil
 	default:
 		// We ignore any other unknown event types.
@@ -168,6 +170,12 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 	}, nil
 }
 
+// singlePartResponse wraps one streamed part as a genai response.
+//
+// The candidate deliberately carries no finish reason: the aggregator treats any
+// non-empty one as terminal, and genai.FinishReasonUnspecified is the non-empty
+// string "FINISH_REASON_UNSPECIFIED", so setting it marks every delta the end of
+// the turn. generateStream reports the real reason on the final response.
 func singlePartResponse(part *genai.Part) *genai.GenerateContentResponse {
 	if part == nil {
 		return nil
@@ -179,7 +187,6 @@ func singlePartResponse(part *genai.Part) *genai.GenerateContentResponse {
 					Role:  string(genai.RoleModel),
 					Parts: []*genai.Part{part},
 				},
-				FinishReason: genai.FinishReasonUnspecified,
 			},
 		},
 	}
