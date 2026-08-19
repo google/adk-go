@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -39,6 +40,7 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -52,6 +54,7 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 		SessionID: sessionID.ID,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while listing artifacts", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -67,6 +70,7 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -99,6 +103,7 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while loading artifact", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -110,6 +115,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -145,6 +151,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while loading artifact at version", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -156,6 +163,7 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -175,6 +183,7 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		FileName:  artifactName,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while deleting artifact", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}

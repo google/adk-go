@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -42,6 +43,7 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -50,12 +52,14 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	if req.ContentLength > 0 {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
 		if err != nil {
+			slog.ErrorContext(req.Context(), "Error while parsing body", slog.Any("err", err))
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while creating session", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -86,6 +90,7 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -100,6 +105,7 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 		SessionID: sessionID.ID,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while deleting session", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -111,6 +117,7 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -124,11 +131,13 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 		SessionID: sessionID.ID,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	session, err := models.FromSession(storedSession.Session)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while converting session to wire format", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -140,6 +149,7 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -149,12 +159,14 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		UserID:  sessionID.UserID,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while listing sessions", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	for _, session := range resp.Sessions {
 		respSession, err := models.FromSession(session)
 		if err != nil {
+			slog.ErrorContext(req.Context(), "Error while converting session to wire format", slog.Any("err", err))
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return
 		}
