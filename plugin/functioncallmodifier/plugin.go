@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/v2/plugin"
 )
 
+// FunctionCallModifierConfig configures a FunctionCallModifierPlugin.
 type FunctionCallModifierConfig struct {
 	Predicate           func(toolName string) bool
 	Args                map[string]*genai.Schema

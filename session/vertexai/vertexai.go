@@ -31,6 +31,7 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
+// VertexAIServiceConfig configures a Vertex AI-backed session service.
 type VertexAIServiceConfig struct {
 	// ProjectID with VertexAI API enabled.
 	ProjectID string

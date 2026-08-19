@@ -106,10 +106,22 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return
 		}
 
+		agentName := ctx.Agent().Name()
+
 		// TODO could we skip events for >= confirmationEventIndex
 		for k := len(events) - 2; k >= 0; k-- {
 			event := events[k]
-			// Find the system generated FunctionCall event requesting the tool confirmation
+			// Find the system generated FunctionCall event requesting the tool confirmation.
+			//
+			// Only this agent can ask this agent's user for confirmation. Function call
+			// parts also reach the session from other places, notably an A2A peer
+			// response converted into a model-role event: honouring a confirmation
+			// request from such an event would let the peer choose which local tool
+			// runs, and with what arguments, bypassing the human-in-the-loop gate
+			// entirely. Skip any event not authored by this agent.
+			if event.Author != agentName {
+				continue
+			}
 			calls := utils.FunctionCalls(event.Content)
 			if len(calls) == 0 {
 				continue

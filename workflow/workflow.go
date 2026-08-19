@@ -77,6 +77,7 @@ func matchRoute(routeValue string, event *session.Event) bool {
 // StringRoute is a route defined by a string value.
 type StringRoute string
 
+// Matches reports whether event was routed to this string value.
 func (r StringRoute) Matches(event *session.Event) bool {
 	return matchRoute(string(r), event)
 }
@@ -84,6 +85,8 @@ func (r StringRoute) Matches(event *session.Event) bool {
 // IntRoute is a route defined by an integer value.
 type IntRoute int
 
+// Matches reports whether event was routed to this integer value, compared by
+// its decimal string form.
 func (r IntRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
@@ -91,6 +94,8 @@ func (r IntRoute) Matches(event *session.Event) bool {
 // BoolRoute is a route defined by a boolean value.
 type BoolRoute bool
 
+// Matches reports whether event was routed to this boolean value, compared by
+// its "true"/"false" string form.
 func (r BoolRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
@@ -98,6 +103,7 @@ func (r BoolRoute) Matches(event *session.Event) bool {
 // MultiRoute matches any value within a specified list of allowed routes.
 type MultiRoute[T comparable] []T
 
+// Matches reports whether event was routed to any of the values in this list.
 func (r MultiRoute[T]) Matches(event *session.Event) bool {
 	for _, route := range r {
 		if matchRoute(fmt.Sprint(route), event) {
