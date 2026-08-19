@@ -100,8 +100,22 @@ var (
 	}
 )
 
+// maxConsecutiveThoughtOnlyTurns bounds how many thought-only ("thinking")
+// turns in a row the flow accepts before giving up, so the model is re-called
+// at most maxConsecutiveThoughtOnlyTurns-1 times waiting for an answer. A model
+// that keeps emitting thoughts without ever surfacing an answer would otherwise
+// spin forever, appending an event per turn and re-sending an ever-growing
+// history. Any turn that is not a final response resets the count.
+//
+// This is a safety net against a degenerate model, not a tuning knob: the bound
+// is set well above the number of consecutive thinking turns a model is expected
+// to need, so reaching it should be rare enough to warrant the log below. It is
+// a var rather than a const only so tests can exercise the boundary.
+var maxConsecutiveThoughtOnlyTurns = 3
+
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		thoughtOnlyTurns := 0
 		for {
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
@@ -115,10 +129,24 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			// A thought-only ("thinking") turn reports as final but has no
-			// answer; don't stop on it — call the model again.
-			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
+			if lastEvent == nil {
 				return
+			}
+			if lastEvent.IsFinalResponse() {
+				// A thought-only ("thinking") turn reports as final but has no
+				// answer; don't stop on it — call the model again. Give up once
+				// the model has produced only thoughts too many times in a row,
+				// leaving the last thinking event as the result.
+				if !isThoughtOnlyTurn(lastEvent) {
+					return
+				}
+				thoughtOnlyTurns++
+				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
+					log.Printf("adk: model produced %d consecutive thought-only turns without an answer; giving up and returning the last thinking event\n", thoughtOnlyTurns)
+					return
+				}
+			} else {
+				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
 				// We may have reached max token limit during streaming mode.

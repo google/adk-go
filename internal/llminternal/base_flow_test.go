@@ -15,13 +15,16 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
@@ -769,5 +772,141 @@ func TestIsThoughtOnlyTurn(t *testing.T) {
 				t.Errorf("isThoughtOnlyTurn = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// alwaysThinkingModel always returns a completed thought-only ("thinking")
+// turn and never surfaces an answer. Real models can get stuck in this state,
+// so the flow must not call the model forever waiting for an answer.
+type alwaysThinkingModel struct{ calls int }
+
+func (m *alwaysThinkingModel) Name() string { return "always-thinking" }
+
+func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: "thinking", Thought: true}},
+			},
+		}, nil)
+	}
+}
+
+func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
+	m := &alwaysThinkingModel{}
+	f := &Flow{Model: m}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		},
+	)
+
+	// Bound the consumer so a regression fails the test instead of hanging it.
+	const safetyLimit = 50
+	events := 0
+	for _, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events++
+		if events > safetyLimit {
+			break
+		}
+	}
+
+	if events > safetyLimit {
+		t.Fatalf("Run() did not terminate on repeated thought-only turns: yielded >%d events, model called %d times", safetyLimit, m.calls)
+	}
+	if m.calls != maxConsecutiveThoughtOnlyTurns {
+		t.Errorf("model called %d times, want %d (maxConsecutiveThoughtOnlyTurns)", m.calls, maxConsecutiveThoughtOnlyTurns)
+	}
+	if events != maxConsecutiveThoughtOnlyTurns {
+		t.Errorf("Run() yielded %d events, want %d (one per thought-only turn)", events, maxConsecutiveThoughtOnlyTurns)
+	}
+}
+
+// scriptedThinkingModel replays a fixed sequence of turns and then keeps
+// repeating the final one, so a test can interleave thought-only turns with a
+// turn that is not a final response.
+type scriptedThinkingModel struct {
+	model.LLM
+	turns []*model.LLMResponse
+	calls int
+}
+
+func (m *scriptedThinkingModel) Name() string { return "scripted-thinking" }
+
+func (m *scriptedThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		i := m.calls
+		m.calls++
+		if i >= len(m.turns) {
+			i = len(m.turns) - 1
+		}
+		yield(m.turns[i], nil)
+	}
+}
+
+func thoughtTurn() *model.LLMResponse {
+	return &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{Text: "thinking", Thought: true}},
+	}}
+}
+
+// TestRun_ThoughtOnlyTurnCountResets pins the reset in Flow.Run: the cap counts
+// *consecutive* thought-only turns, so a turn that is not a final response
+// (here a function call) must clear the count. Without the reset the cap
+// becomes cumulative and the run stops after maxConsecutiveThoughtOnlyTurns
+// thought-only turns in total rather than in a row.
+func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
+	const toolName = "noop"
+	// Two thoughts, a function call (not a final response, so it resets the
+	// count), then thoughts forever.
+	m := &scriptedThinkingModel{turns: []*model.LLMResponse{
+		thoughtTurn(),
+		thoughtTurn(),
+		{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: toolName, Args: map[string]any{}}}},
+		}},
+		thoughtTurn(),
+	}}
+	f := &Flow{
+		Model: m,
+		Tools: []tool.Tool{&mockFunctionTool{name: toolName}},
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		},
+	)
+
+	const safetyLimit = 50
+	events := 0
+	for _, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events++
+		if events > safetyLimit {
+			break
+		}
+	}
+	if events > safetyLimit {
+		t.Fatalf("Run() did not terminate: yielded >%d events, model called %d times", safetyLimit, m.calls)
+	}
+
+	// 2 thought-only turns, then the function call resets the count, then a
+	// further maxConsecutiveThoughtOnlyTurns thought-only turns.
+	want := 2 + 1 + maxConsecutiveThoughtOnlyTurns
+	if m.calls != want {
+		t.Errorf("model called %d times, want %d; the consecutive-turn count did not reset on the non-final turn", m.calls, want)
 	}
 }
