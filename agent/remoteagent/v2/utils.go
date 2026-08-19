@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -137,27 +138,29 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 	}
 
 	parts := make([]*genai.Part, 0, len(agentEvent.Content.Parts)+1)
-	parts = append(parts, &genai.Part{Text: "For context:"})
+	parts = append(parts, &genai.Part{Text: llminternal.OtherAgentContextPreamble})
 	for _, part := range agentEvent.Content.Parts {
 		if part.Thought {
 			continue
 		}
 		if part.Text != "" {
-			text := fmt.Sprintf("[%s] said: %s", agentEvent.Author, part.Text)
+			text := fmt.Sprintf("[%s] said:\n%s", agentEvent.Author, llminternal.QuoteUntrusted(part.Text))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else if part.FunctionCall != nil {
 			call := part.FunctionCall
-			text := fmt.Sprintf("[%s] called tool %s with parameters: %v", agentEvent.Author, call.Name, call.Args)
+			text := fmt.Sprintf("[%s] called tool %s with parameters:\n%s",
+				agentEvent.Author, llminternal.ElideQuoteMarkers(call.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", call.Args)))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else if part.FunctionResponse != nil {
 			resp := part.FunctionResponse
-			text := fmt.Sprintf("[%s] %s tool returned result: %v", agentEvent.Author, resp.Name, resp.Response)
+			text := fmt.Sprintf("[%s] %s tool returned result:\n%s",
+				agentEvent.Author, llminternal.ElideQuoteMarkers(resp.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", resp.Response)))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else {
 			parts = append(parts, part)
 		}
 	}
-	if len(parts) > 1 { // not only "For context:" part
+	if len(parts) > 1 { // not only the preamble part
 		event.Content = genai.NewContentFromParts(parts, genai.RoleUser)
 	}
 	return event
