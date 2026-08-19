@@ -577,7 +577,7 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] said:\n%s", ev.Author, quoteUntrusted(p.Text)),
+				Text: fmt.Sprintf("[%s] said:\n%s", ev.Author, QuoteUntrusted(p.Text)),
 			})
 		case p.FunctionCall != nil:
 			// The tool name is model-chosen too, so it is elided but left
@@ -585,12 +585,12 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			// would obscure which tool ran.
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] called tool `%s` with parameters:\n%s",
-					ev.Author, elideQuoteMarkers(p.FunctionCall.Name), quoteUntrusted(stringify(p.FunctionCall.Args))),
+					ev.Author, ElideQuoteMarkers(p.FunctionCall.Name), QuoteUntrusted(stringify(p.FunctionCall.Args))),
 			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] `%s` tool returned result:\n%s",
-					ev.Author, elideQuoteMarkers(p.FunctionResponse.Name), quoteUntrusted(stringify(p.FunctionResponse.Response))),
+					ev.Author, ElideQuoteMarkers(p.FunctionResponse.Name), QuoteUntrusted(stringify(p.FunctionResponse.Response))),
 			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
