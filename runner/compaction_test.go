@@ -962,6 +962,395 @@ func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
 
 // usageModel replies with a canned answer and reports a fixed prompt token
 // count, so tail-retention compaction can be driven deterministically.
+type usageModel struct {
+	mu           sync.Mutex
+	prompts      [][]*genai.Content
+	promptTokens int32
+}
+
+func (m *usageModel) Name() string { return "usage" }
+
+func (m *usageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.prompts = append(m.prompts, req.Contents)
+	n := len(m.prompts)
+	tokens := m.promptTokens
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText(fmt.Sprintf("answer %d", n), "model"),
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: tokens},
+		}, nil)
+	}
+}
+
+func (m *usageModel) lastPrompt() []*genai.Content {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.prompts) == 0 {
+		return nil
+	}
+	return m.prompts[len(m.prompts)-1]
+}
+
+func TestRunnerTailRetentionCompactsMidInvocation(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Every model call reports a prompt well past the threshold, so compaction
+	// fires as soon as there are more events than the retained tail.
+	m := &usageModel{promptTokens: 5000}
+	summarizer := &recordingSummarizer{summary: "TAIL-SUMMARY"}
+	// Retention 1, because the question that opens the turn being answered is
+	// held back on top of the retained tail rather than counting towards it.
+	// At retention 2 the three events of this fixture are all spoken for.
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         summarizer,
+	})
+
+	// First turn: no prior usage metadata and only the user event exists when
+	// the processor runs, so nothing to compact.
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+	if got := summarizer.calls(); got != 0 {
+		t.Fatalf("summarizer ran %d times on the first turn, want 0", got)
+	}
+
+	// Second turn: history now holds q1/answer 1/q2 plus a reported token
+	// count, so the processor compacts before the model call.
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}))
+	if got := summarizer.calls(); got == 0 {
+		t.Fatal("summarizer never ran on the second turn, want tail-retention compaction")
+	}
+
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got == 0 {
+		t.Fatal("no compaction event was persisted")
+	}
+
+	// The compaction landed before contents were built, so this very turn's
+	// prompt already carries the summary instead of the compacted turn.
+	prompt := promptText(m.lastPrompt())
+	if !strings.Contains(prompt, "TAIL-SUMMARY") {
+		t.Errorf("prompt does not contain the summary:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "q1") {
+		t.Errorf("prompt still contains the compacted turn q1:\n%s", prompt)
+	}
+}
+
+func TestRunnerTailRetentionRespectsThreshold(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Reported prompts stay well under the threshold, so nothing compacts no
+	// matter how many turns accumulate.
+	m := &usageModel{promptTokens: 10}
+	summarizer := &recordingSummarizer{summary: "unused"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         summarizer,
+	})
+
+	for range 5 {
+		drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q", genai.RoleUser), agent.RunConfig{}))
+	}
+
+	if got := summarizer.calls(); got != 0 {
+		t.Errorf("summarizer ran %d times below the token threshold, want 0", got)
+	}
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got != 0 {
+		t.Errorf("session holds %d compaction events below the threshold, want 0", got)
+	}
+}
+
+// TestRunnerTailRetentionFailureDoesNotAbortTheTurn checks that a mid-turn
+// compaction failure degrades to a larger prompt rather than killing the turn.
+//
+// Tail retention runs before a model call, inside an invocation whose tools may
+// already have run and committed their side effects. Aborting there costs the
+// user an answer, leaves the side effects standing, and orphans any summary
+// already written, all to report that an optimisation did not happen. The
+// threshold sits well below the real context limit, so the call usually still
+// succeeds; when it does not, the provider's own error says more.
+func TestRunnerTailRetentionFailureDoesNotAbortTheTurn(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	m := &usageModel{promptTokens: 5000}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         failingSummarizer{},
+	})
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+
+	// The second turn trips the threshold and the summarizer fails.
+	var gotErr error
+	events := 0
+	for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+		events++
+	}
+	if gotErr != nil {
+		t.Errorf("a failed mid-turn compaction aborted the turn: %v", gotErr)
+	}
+	if events == 0 {
+		t.Error("the turn produced no events, so the user got no answer")
+	}
+	// Nothing was recorded, so the next turn tries again rather than believing
+	// history was compacted.
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got != 0 {
+		t.Errorf("stored %d compaction events despite the summarizer failing", got)
+	}
+}
+
+func TestRunnerBothStrategiesCoexist(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Both triggers are armed: tail retention fires mid-turn on the reported
+	// token count, sliding window fires after every completed turn. A turn
+	// compacted mid-flight is not compacted again when it ends, so this
+	// exercises the hand-off between the two.
+	m := &usageModel{promptTokens: 5000}
+	summarizer := &recordingSummarizer{summary: "SUMMARY"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 2,
+		CompactionInterval: 1,
+		Summarizer:         summarizer,
+	})
+
+	for i := range 4 {
+		drain(t, r.Run(t.Context(), userID, sessionID,
+			genai.NewContentFromText(fmt.Sprintf("q%d", i), genai.RoleUser), agent.RunConfig{}))
+	}
+
+	sess := getSession(t, svc, userID, sessionID)
+	if got := len(compactionEventsIn(sess)); got == 0 {
+		t.Fatal("no compaction events were produced with both strategies enabled")
+	}
+
+	// Whatever mix of summaries accumulated, the prompt must stay coherent:
+	// every surviving compaction range is honoured and nothing is duplicated.
+	var events []*session.Event
+	for ev := range sess.Events().All() {
+		events = append(events, ev)
+	}
+	applied := compactioninternal.Apply(events)
+
+	seen := make(map[string]bool)
+	for _, ev := range applied {
+		if ev.ID == "" {
+			continue
+		}
+		if seen[ev.ID] {
+			t.Errorf("event %q appears twice in the compacted prompt", ev.ID)
+		}
+		seen[ev.ID] = true
+	}
+	if len(applied) >= len(events) {
+		t.Errorf("compaction did not shrink history: %d events in, %d out", len(events), len(applied))
+	}
+
+	// The newest summary must not be subsumed, or the prompt would lose it.
+	if latest := compactioninternal.LatestCompactionEvent(events); latest == nil {
+		t.Error("no surviving compaction event; every summary was subsumed")
+	}
+}
+
+// cancelingSummarizer fails with an error that wraps context.Canceled, which is
+// what a summarizer whose own context died looks like.
+type cancelingSummarizer struct{}
+
+func (s *cancelingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, fmt.Errorf("summarizer model call failed: %w", context.Canceled)
+}
+
+// TestTailRetentionCancelledSummarizerLeavesTheTurnIntact covers the case that
+// used to produce the worst possible outcome.
+//
+// A summarizer failing on a cancelled context yielded an error whose chain
+// contained context.Canceled, and the workflow scheduler drops those, so the
+// turn ended with no answer, no events and no error either. Mid-turn compaction
+// failures are no longer yielded at all, so the turn simply runs on.
+func TestTailRetentionCancelledSummarizerLeavesTheTurnIntact(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+
+	m := &usageModel{promptTokens: 5000}
+	r, _ := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     100,
+		EventRetentionSize: 1,
+		Summarizer:         &cancelingSummarizer{},
+	})
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+
+	var gotErr error
+	events := 0
+	for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+		events++
+	}
+	if gotErr != nil {
+		t.Errorf("unexpected error from the turn: %v", gotErr)
+	}
+	if events == 0 {
+		t.Fatal("the turn produced no events and no error, which is the empty-turn outcome this guards against")
+	}
+}
+
+// TestTailRetentionStandsDownTheSlidingWindow checks that a turn compacted
+// mid-flight is not summarized a second time the moment it ends.
+//
+// The two strategies are independent triggers on the same history. Without a
+// hand-off, a turn that crossed the token threshold pays for a second model
+// call to re-summarize what was just summarized, and leaves two ranges over
+// overlapping spans. The reference implementation avoids this by evaluating
+// both in one place and returning early; here the mid-turn pass records that it
+// ran and the post-invocation pass stands down.
+func TestTailRetentionStandsDownTheSlidingWindow(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+
+	// Tuned so both strategies want to fire on the same turn, which is the only
+	// arrangement that exercises the hand-off. Interval 2 keeps the sliding
+	// window quiet on turn 1 so history can accumulate; by turn 2 there are
+	// three events, which is more than the retained tail, so tail retention
+	// fires mid-turn, and two completed invocations, so the sliding window
+	// would fire the moment the turn ends.
+	m := &usageModel{promptTokens: 5000}
+	summarizer := &recordingSummarizer{summary: "SUMMARY"}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 2,
+		CompactionInterval: 2,
+		Summarizer:         summarizer,
+	})
+
+	perTurn := make([]int, 0, 2)
+	prev := 0
+	for i := range 2 {
+		drain(t, r.Run(t.Context(), userID, sessionID,
+			genai.NewContentFromText(fmt.Sprintf("q%d", i), genai.RoleUser), agent.RunConfig{}))
+		perTurn = append(perTurn, summarizer.calls()-prev)
+		prev = summarizer.calls()
+	}
+
+	// Turn 1 compacts nothing. Turn 2 compacts exactly once: tail retention
+	// mid-flight, and then the sliding window stands down.
+	if perTurn[0] != 0 || perTurn[1] != 1 {
+		t.Errorf("summarizer calls per turn = %v, want [0 1]: the second turn was compacted twice", perTurn)
+	}
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got != 1 {
+		t.Errorf("stored %d compaction events, want 1", got)
+	}
+}
+
+// toolLoopModel calls a tool repeatedly, then answers, always reporting the
+// same prompt size. It stands in for a long tool loop whose retained tail alone
+// already exceeds the threshold, so compacting cannot bring the prompt down.
+type toolLoopModel struct {
+	mu     sync.Mutex
+	calls  int
+	rounds int
+	tokens int32
+}
+
+func (m *toolLoopModel) Name() string { return "tool-loop" }
+
+func (m *toolLoopModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: m.tokens}
+		if n <= m.rounds {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("c%d", n), Name: "ping"}},
+				}},
+				UsageMetadata: usage,
+			}, nil)
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", "model"), UsageMetadata: usage}, nil)
+	}
+}
+
+// TestTailRetentionStopsWhenItIsNotHelping checks that compaction gives up
+// inside a turn once it stops reducing the prompt.
+//
+// The threshold is crossed before every model call in a tool loop. If the
+// retained tail alone already exceeds it, compacting summarizes a little more
+// each round and leaves the prompt exactly as far over, so every round pays for
+// a summarizer call that changes nothing.
+func TestTailRetentionStopsWhenItIsNotHelping(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+
+	ping, err := functiontool.New(functiontool.Config{Name: "ping", Description: "returns pong"},
+		func(_ agent.Context, _ struct{}) (string, error) { return "pong", nil })
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+
+	m := &toolLoopModel{rounds: 6, tokens: 5000}
+	root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: m, Tools: []tool.Tool{ping}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	summarizer := &recordingSummarizer{summary: "SUMMARY"}
+	r, err := New(Config{
+		AppName:           "compaction_app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		EventsCompactionConfig: &compaction.Config{
+			TokenThreshold:     1000,
+			EventRetentionSize: 2,
+			Summarizer:         summarizer,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}))
+
+	// One attempt is right: it is worth trying once. Repeating is not, because
+	// the reported prompt never falls.
+	if got := summarizer.calls(); got > 1 {
+		t.Errorf("summarizer ran %d times in one turn while the prompt never shrank, want at most 1", got)
+	}
+	if m.calls < 3 {
+		t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", m.calls)
+	}
+}
+
+// TestRunnerDefaultSummarizerIsBounded pins that the summarizer the runner
+// installs cannot hold a turn open indefinitely.
+//
+// Compaction runs inside the run loop, and the post-invocation pass runs from a
+// defer, so a provider that never answers parks the turn behind it. The
+// Timeout field's own documentation says it is worth setting, and the one
+// summarizer an application did not configure was the one without it.
 func TestRunnerDefaultSummarizerIsBounded(t *testing.T) {
 	const userID, sessionID = "u", "s"
 
@@ -1041,6 +1430,120 @@ func (m *hangingSummarizerModel) GenerateContent(ctx context.Context, _ *model.L
 //
 // A bound is the whole claim the package documentation makes for this strategy,
 // so it is asserted directly rather than inferred from a compaction happening.
+func TestTailRetentionKeepsThePromptBounded(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Reports a count derived from the prompt it was given, the way a real
+	// model does. A fixed count would make the progress gate correctly conclude
+	// that compaction never helps and latch off, which is a different test.
+	m := &proportionalUsageModel{}
+	// A summary the size a real one is, roughly 500 characters, rather than a
+	// short marker. Size is what makes this test load-bearing: the failure it
+	// guards against is one summary per pass surviving into the prompt instead
+	// of each superseding the last, and with a seven-character summary sixty
+	// turns of that is still a small prompt, so the assertion below passes
+	// while the property is broken. At this length the same defect measured
+	// 24,991 characters against 551.
+	summaryText := strings.Repeat("summary text ", 40)
+	r, _ := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     200,
+		EventRetentionSize: 2,
+		Summarizer:         &recordingSummarizer{summary: summaryText},
+	})
+
+	var early, late int
+	const rounds = 60
+	for i := range rounds {
+		drain(t, r.Run(t.Context(), userID, sessionID,
+			genai.NewContentFromText(fmt.Sprintf("question %d", i), genai.RoleUser), agent.RunConfig{}))
+
+		size := 0
+		for _, c := range m.lastPrompt() {
+			for _, p := range c.Parts {
+				size += len(p.Text)
+			}
+		}
+		switch i {
+		case rounds / 3:
+			early = size
+		case rounds - 1:
+			late = size
+		}
+	}
+
+	// Some slack, because a rolling summary and its raw tail vary in length
+	// from turn to turn. What must not happen is growth proportional to the
+	// number of turns.
+	if late > early*2 {
+		t.Errorf("prompt grew from %d characters at turn %d to %d at turn %d: tail retention is not bounding it",
+			early, rounds/3, late, rounds-1)
+	}
+
+	// The mechanism, stated separately from the symptom. A rolling summary is
+	// supposed to replace the one it was built from, so however many passes
+	// ran, one summary reaches the model. Counting them says which way a size
+	// regression went, and catches the accumulation before it is large enough
+	// to move the total.
+	summaries := 0
+	for _, c := range m.lastPrompt() {
+		for _, p := range c.Parts {
+			if strings.Contains(p.Text, summaryText) {
+				summaries++
+			}
+		}
+	}
+	if summaries > 1 {
+		t.Errorf("final prompt carries %d summaries, want 1: each pass is adding a summary rather than superseding the last", summaries)
+	}
+}
+
+// proportionalUsageModel reports a prompt token count derived from the prompt it
+// received, so compaction visibly shrinks the next reading.
+type proportionalUsageModel struct {
+	mu      sync.Mutex
+	prompts [][]*genai.Content
+}
+
+func (m *proportionalUsageModel) Name() string { return "proportional" }
+
+func (m *proportionalUsageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.prompts = append(m.prompts, req.Contents)
+	n := len(m.prompts)
+	m.mu.Unlock()
+
+	chars := 0
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			chars += len(p.Text)
+		}
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText(fmt.Sprintf("answer %d", n), "model"),
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: int32(chars)},
+		}, nil)
+	}
+}
+
+func (m *proportionalUsageModel) lastPrompt() []*genai.Content {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.prompts) == 0 {
+		return nil
+	}
+	return m.prompts[len(m.prompts)-1]
+}
+
+// TestPluginCannotSmuggleAFunctionCallIntoASummary pins that a plugin's
+// replacement summary is filtered like a summarizer's.
+//
+// A plugin may see and rewrite a summary before it is stored, which is the
+// point of routing it through the pipeline. Its replacement went to the session
+// unexamined, so content carrying a text part and a FunctionCall reached a real
+// model prompt as an unpaired call, which is exactly what the filter on the
+// summarizer path exists to stop.
 func TestPluginCannotSmuggleAFunctionCallIntoASummary(t *testing.T) {
 	t.Parallel()
 
