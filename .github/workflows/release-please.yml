@@ -59,6 +59,9 @@ permissions:
 
 jobs:
   release-please:
+    # Forks inherit this workflow but must never cut a release from it; without
+    # the guard every fork gets a failing run on each push to main.
+    if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
     permissions:
       contents: write        # create the release branch, the tag and the release
