@@ -83,7 +83,7 @@ commits since the last release and keeps a single open release PR titled
 
 - rewrites the annotated `const Version` line,
 - regenerates `CHANGELOG.md`,
-- updates `.release-please-manifest.json`.
+- updates `.github/.release-please-manifest.json`.
 
 Review and merge it like any other PR. Merging tags the merge commit `vX.Y.Z`
 and publishes the GitHub release, so the tag can only ever land on a commit
