@@ -1,0 +1,55 @@
+# Release Please keeps the version constant, the changelog and the release tag
+# in sync, without anything ever pushing straight to main.
+#
+# On every push to main it reads the conventional commits since the last release
+# and maintains a single open "release PR" that bumps
+# internal/version/version.go (the constant line carries an
+# x-release-please-version annotation, rewritten by the generic updater),
+# regenerates CHANGELOG.md and updates .release-please-manifest.json. A
+# maintainer reviews and merges that PR like any other; merging it tags the merge
+# commit vX.Y.Z and publishes the GitHub release.
+#
+# Two things this needs before it works:
+#
+#  1. Settings -> Actions -> General -> "Allow GitHub Actions to create and
+#     approve pull requests" must be enabled, or the action cannot open the PR.
+#
+#  2. RELEASE_PLEASE_TOKEN must be a GitHub App installation token or a PAT.
+#     A pull request opened with the built-in GITHUB_TOKEN does not trigger other
+#     workflows, so go.yml and apidiff.yml would not run on the release PR and
+#     the bump would land unverified. adk-python hits the same constraint and
+#     solves it the same way (its RELEASE_PAT).
+#
+# Only the core module is configured here. Submodules such as
+# plugin/agentanalytics version independently and carry no version constant; to
+# release one through this workflow, add it to release-please-config.json as its
+# own package with "tag-separator": "/" so the tag reads
+# plugin/agentanalytics/vX.Y.Z as Go requires.
+name: Release Please
+
+on:
+  push:
+    branches: [ "main" ]
+
+  workflow_dispatch:
+
+# Serialize: two runs racing on the same release PR would fight over its branch.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release branch, the tag and the release
+      pull-requests: write   # open and update the release PR
+    steps:
+      - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5  # v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

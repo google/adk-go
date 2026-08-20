@@ -70,6 +70,41 @@ git switch -c my-fix origin/v1
 - **Version Coupling**: Each submodule's `go.mod` will specify the minimum version of `google.golang.org/adk/v2` it depends on. Submodules can be released independently of the core module and each other.
 - **go.work Impact**: `go.work` is for local development only and does not affect how modules are versioned, tagged, or fetched by consumers.
 
+### Cutting a core release
+
+The core module reports its own version from `const Version` in
+`internal/version/version.go`, and that value must match the release tag. It is
+maintained by [Release Please](https://github.com/googleapis/release-please), so
+**do not edit it by hand**.
+
+On every push to `main`, the `release-please` workflow reads the conventional
+commits since the last release and keeps a single open release PR titled
+`chore(main): release X.Y.Z`. That PR:
+
+- rewrites the annotated `const Version` line,
+- regenerates `CHANGELOG.md`,
+- updates `.release-please-manifest.json`.
+
+Review and merge it like any other PR. Merging tags the merge commit `vX.Y.Z`
+and publishes the GitHub release, so the tag can only ever land on a commit
+whose constant already matches. Nothing is pushed directly to `main`, so no
+branch-protection bypass is required.
+
+Two things to keep in mind:
+
+- **Commit messages decide the version.** Only conventional-commit subjects are
+  counted: `feat:` bumps the minor, `fix:`/`perf:` bump the patch, and anything
+  unprefixed is ignored entirely — it will not appear in the changelog and will
+  not trigger a release.
+- **Major releases stay manual.** A `feat!:` or `BREAKING CHANGE:` commit makes
+  Release Please propose `v3.0.0`, but a Go major bump also requires moving the
+  module path to `/v3` across every import, which it cannot do. Follow the RC
+  flow in the release playbook instead, and correct the proposed version before
+  merging.
+
+Submodules (for example `plugin/agentanalytics`) version independently and have
+no version constant; they are not covered by this workflow.
+
 ## Before you begin
 
 ### Sign our Contributor License Agreement
