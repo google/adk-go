@@ -16,6 +16,7 @@ package sessiontestsuite
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -451,6 +452,226 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("compaction_record_round_trips", func(t *testing.T) {
+			// A context-compaction summary carries its content only on
+			// Actions.Compaction: LLMResponse.Content is nil and there is no
+			// state or artifact delta. A backend that persists events by
+			// looking only at content or deltas drops it silently, and the
+			// session comes back with no summary and no record that compaction
+			// ran, so the same range is summarized and billed again on every
+			// later trigger.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			// Nanosecond precision on purpose. A millisecond-truncated fixture
+			// cannot tell a backend that keeps the record faithfully from one
+			// that rounds it, and rounding here is not cosmetic: a reference
+			// that stops matching its event is read as no hole at all, so a
+			// summary that never saw that event covers it and it is dropped
+			// from every later prompt.
+			start := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+			end := start.Add(5*time.Second + 987*time.Nanosecond)
+			event := &session.Event{
+				ID:           "compaction_event",
+				Author:       "user",
+				InvocationID: "inv-compaction",
+				Actions: session.EventActions{
+					Compaction: &session.EventCompaction{
+						StartTimestamp:   start,
+						EndTimestamp:     end,
+						CompactedContent: genai.NewContentFromText("summary of earlier turns", "model"),
+						ExcludedEvents: []session.EventRef{
+							{InvocationID: "inv-1", Timestamp: start},
+							{InvocationID: "inv-2", Timestamp: end},
+						},
+					},
+				},
+			}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 1 {
+				t.Fatalf("Expected 1 event, got %d", len(snap.Events))
+			}
+			c := snap.Events[0].Actions.Compaction
+			if c == nil {
+				t.Fatal("Actions.Compaction was not persisted, so the summary is unrecoverable")
+			}
+			if !c.StartTimestamp.Equal(start) || !c.EndTimestamp.Equal(end) {
+				t.Errorf("compaction range = [%v, %v], want [%v, %v]", c.StartTimestamp, c.EndTimestamp, start, end)
+			}
+			if got, want := textOf(c.CompactedContent), "summary of earlier turns"; got != want {
+				t.Errorf("compacted content = %q, want %q", got, want)
+			}
+			// The covered set is what prompt assembly deletes on. A backend
+			// that drops it leaves a record whose range still spans the covered
+			// turns, so the summary silently widens to everything in between.
+			want := []session.EventRef{
+				{InvocationID: "inv-1", Timestamp: start},
+				{InvocationID: "inv-2", Timestamp: end},
+			}
+			if diff := cmp.Diff(want, c.ExcludedEvents); diff != "" {
+				t.Errorf("excluded events mismatch (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run("a_hole_still_names_its_event_after_a_round_trip", func(t *testing.T) {
+			// The previous case checks the record survives. This checks the
+			// record and the events still agree about which event is which,
+			// which is a separate property and the one that loses conversation
+			// when it fails.
+			//
+			// A hole names an event by invocation and timestamp. The reference
+			// is written from an event the caller read back, and matched later
+			// against that same event read back again. A backend that keeps
+			// event timestamps and record payloads in different precision
+			// domains breaks the match, and a hole that stops matching is read
+			// as no hole at all: the summary covers an event it never saw, and
+			// that turn is gone from every later prompt.
+			//
+			// What this catches is divergence, not rounding. A backend that
+			// rounds the event and every reference derived from it to the same
+			// resolution stays consistent and passes, whatever that resolution
+			// is. A backend that keeps the two in different precision domains,
+			// or that rounds the event on read while the record keeps what the
+			// client wrote, does not.
+			//
+			// Compaction itself compares at microsecond granularity, which is
+			// what the assertion below mirrors.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			turn := &session.Event{Author: "user", InvocationID: "inv-hole", Timestamp: time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)}
+			if err := s.AppendEvent(ctx, created.Session, turn); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			// The reference is built from the event as stored, which is what
+			// window selection sees.
+			readBack := func() []*session.Event {
+				t.Helper()
+				got, err := s.Get(ctx, &session.GetRequest{AppName: testAppName, UserID: "user1", SessionID: created.Session.ID()})
+				if err != nil {
+					t.Fatalf("Get() error = %v", err)
+				}
+				return Snapshot(got.Session).Events
+			}
+
+			stored := readBack()
+			if len(stored) != 1 {
+				t.Fatalf("stored %d events, want 1", len(stored))
+			}
+			ref := session.EventRef{InvocationID: stored[0].InvocationID, Timestamp: stored[0].Timestamp}
+
+			record := &session.Event{
+				Author:       "user",
+				InvocationID: "inv-summary",
+				Actions: session.EventActions{
+					Compaction: &session.EventCompaction{
+						StartTimestamp:   ref.Timestamp.Add(-time.Hour),
+						EndTimestamp:     ref.Timestamp.Add(time.Hour),
+						CompactedContent: genai.NewContentFromText("summary", "model"),
+						ExcludedEvents:   []session.EventRef{ref},
+					},
+				},
+			}
+			if err := s.AppendEvent(ctx, created.Session, record); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			after := readBack()
+			var event *session.Event
+			var rng *session.EventCompaction
+			for _, ev := range after {
+				if ev.Actions.Compaction != nil {
+					rng = ev.Actions.Compaction
+					continue
+				}
+				if ev.InvocationID == "inv-hole" {
+					event = ev
+				}
+			}
+			if event == nil || rng == nil || len(rng.ExcludedEvents) != 1 {
+				t.Fatalf("expected the turn and a record naming one hole, got event=%v record=%v", event, rng)
+			}
+			got := rng.ExcludedEvents[0]
+			if got.InvocationID != event.InvocationID ||
+				!got.Timestamp.Truncate(time.Microsecond).Equal(event.Timestamp.Truncate(time.Microsecond)) {
+				t.Errorf("the hole no longer names its event after a round trip:\n  hole  = %s @ %v\n  event = %s @ %v",
+					got.InvocationID, got.Timestamp, event.InvocationID, event.Timestamp)
+			}
+		})
+
+		t.Run("a_missing_event_id_is_assigned", func(t *testing.T) {
+			// An event built as a struct literal by an agent or a tool never
+			// passes through session.NewEvent, so it arrives with no ID. Two
+			// such events are indistinguishable to anything that identifies
+			// events by ID, and a stored event that cannot be named cannot be
+			// referred to by a compaction record either.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			for range 2 {
+				event := &session.Event{Author: "user", InvocationID: "inv1"}
+				if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+					t.Fatalf("AppendEvent() error = %v", err)
+				}
+				if event.ID == "" {
+					t.Error("AppendEvent left the event without an ID")
+				}
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 2 {
+				t.Fatalf("stored %d events, want 2", len(snap.Events))
+			}
+			seen := map[string]bool{}
+			for i, ev := range snap.Events {
+				if ev.ID == "" {
+					t.Errorf("stored event %d has no ID", i)
+					continue
+				}
+				if seen[ev.ID] {
+					t.Errorf("stored event %d reuses ID %q", i, ev.ID)
+				}
+				seen[ev.ID] = true
+			}
+		})
+
 		t.Run("partial_events_are_not_persisted", func(t *testing.T) {
 			s := setup(t)
 			ctx := t.Context()
@@ -750,3 +971,17 @@ func (m *mockSession) UserID() string            { return m.userID }
 func (m *mockSession) State() session.State      { return nil }
 func (m *mockSession) Events() session.Events    { return nil }
 func (m *mockSession) LastUpdateTime() time.Time { return time.Now() }
+
+// textOf concatenates the text parts of c.
+func textOf(c *genai.Content) string {
+	if c == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range c.Parts {
+		if p != nil {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}

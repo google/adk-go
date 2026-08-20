@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"slices"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
@@ -210,6 +212,13 @@ type RequestInput struct {
 // Note: when multiple agents participate in one invocation, there could be
 // multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
+	// A compaction event is bookkeeping rather than conversation: it carries a
+	// record and no content of its own. It satisfies every clause below, so
+	// without this a streaming client deciding what to show a user would surface
+	// an empty final response every time compaction ran.
+	if e.Actions.Compaction != nil {
+		return false
+	}
 	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
@@ -250,6 +259,108 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+
+	// Compaction, when non-nil, marks this event as a context-compaction
+	// summary standing in for a contiguous range of earlier events.
+	//
+	// The framework writes this field and prompt assembly reads it. Setting it
+	// from a tool handler or a callback has no effect: it is cleared wherever
+	// caller-supplied actions are copied onto an event. A record is not a
+	// request but an instruction to drop the events it names and show its own
+	// content in their place, which is not a decision the code running inside a
+	// turn gets to make about the conversation it is running in.
+	Compaction *EventCompaction `json:"compaction,omitempty"`
+}
+
+// EventCompaction records that a contiguous range of session [Event]s has been
+// replaced by a single piece of CompactedContent, typically a model-generated
+// summary.
+//
+// An EventCompaction is attached to a new [Event] through
+// [EventActions.Compaction]; the events it covers are left untouched in the
+// session. When the next LLM prompt is built, the contents processor uses the
+// range to skip the covered events and inserts CompactedContent in their place.
+//
+// Both bounds are inclusive, so an event whose timestamp ties EndTimestamp
+// counts as covered. Producers must therefore keep EndTimestamp strictly below
+// the timestamp of the oldest event they intend to leave un-compacted.
+type EventCompaction struct {
+	// StartTimestamp is the timestamp of the earliest covered event (inclusive).
+	StartTimestamp time.Time `json:"startTimestamp"`
+	// EndTimestamp is the timestamp of the latest covered event (inclusive).
+	// It is never before StartTimestamp.
+	EndTimestamp time.Time `json:"endTimestamp"`
+	// CompactedContent is the content that replaces the covered events in the
+	// prompt.
+	CompactedContent *genai.Content `json:"compactedContent"`
+
+	// ExcludedEvents are the events inside the range above that this summary
+	// does NOT stand in for. Everything else in the range is covered.
+	//
+	// The range alone was not enough. Choosing a window filters events out of
+	// the middle of its own span, by branch, by isolation scope and by what a
+	// retained tail holds back, so an interval covering the ends also covered
+	// the gaps. An event in a gap was dropped from every later prompt having
+	// been summarized by nothing, and its content was simply lost.
+	//
+	// Recording the holes rather than the membership keeps this bounded. Holes
+	// are rare, none at all in a single-agent conversation, so this is normally
+	// empty where a membership list would carry one entry per event of the
+	// conversation, for ever, recopied onto every rolling summary.
+	//
+	// It is keyed on the invocation and timestamp rather than the event ID
+	// because event IDs do not survive every storage backend: the Vertex AI
+	// service replaces them with a server resource name on read.
+	//
+	// Imprecision here is not symmetric. A key matching too much leaves an
+	// extra event raw beside a summary of it, which is visible and recoverable.
+	// A key that fails to match does not fall back to anything: coverage is the
+	// range minus the exclusions, so the event it was protecting becomes
+	// covered by a summary that never described it, and is dropped from every
+	// later prompt. Producers must therefore err towards naming a hole too
+	// broadly, and a backend that does not round-trip these timestamps exactly
+	// will silently delete conversation.
+	ExcludedEvents []EventRef `json:"excludedEvents,omitempty"`
+}
+
+// clone returns a deep copy, or nil for a nil receiver.
+//
+// A stored compaction decides which events every future prompt drops, so of all
+// the fields on [EventActions] it is the one a producer must not be able to
+// edit after the append. Sharing the pointer let a caller move EndTimestamp
+// afterwards and silently change what history the agent sees, and tripped the
+// race detector on the way.
+func (c *EventCompaction) clone() *EventCompaction {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.ExcludedEvents = slices.Clone(c.ExcludedEvents)
+	if c.CompactedContent != nil {
+		content := *c.CompactedContent
+		content.Parts = slices.Clone(c.CompactedContent.Parts)
+		for i, p := range content.Parts {
+			if p == nil {
+				continue
+			}
+			part := *p
+			content.Parts[i] = &part
+		}
+		out.CompactedContent = &content
+	}
+	return &out
+}
+
+// EventRef identifies a stored event by fields that survive a storage round
+// trip, for a record that has to refer to an event it does not contain.
+//
+// Not the event ID, which one backend reassigns on read. The pair is not
+// guaranteed unique: two events of one invocation can share a timestamp, and a
+// reference then names both. Callers must therefore only use this where naming
+// one event too many is the harmless direction.
+type EventRef struct {
+	InvocationID string    `json:"invocationId"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // Prefixes for defining session's state scopes

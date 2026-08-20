@@ -327,6 +327,13 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, matching the
+	// in-memory service. An event built as a struct literal by an agent or a
+	// tool never passes through session.NewEvent, and anything that identifies
+	// events by ID cannot tell two ID-less events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
 	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)

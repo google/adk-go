@@ -312,7 +312,13 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.NodeInfo != nil ||
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
-		len(event.Routes) > 0
+		len(event.Routes) > 0 ||
+		// A context-compaction summary lives entirely on Actions.Compaction:
+		// its Content is nil and it has no state or artifact delta, so without
+		// raw_event nothing about it reaches the backend. On reload the session
+		// would hold neither the summary nor any record that compaction ran,
+		// and the same range would be summarized again on every trigger.
+		event.Actions.Compaction != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

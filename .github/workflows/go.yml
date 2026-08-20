@@ -10,7 +10,10 @@ on:
     branches: [ "main", "v1" ]
 
   pull_request:
-    branches: [ "main", "v1" ]
+    # Stacked PRs target the branch below them rather than main, so limiting
+    # this to main and v1 meant no build, test or lint job ever ran against a
+    # stack. A red linter survived a whole review round that way.
+    branches: [ "main", "v1", "baptmont/**" ]
 
   workflow_dispatch:
 

@@ -169,6 +169,9 @@ func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, e
 
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Actions = *eventActions
+		// Compaction is the framework's to write, not the tool's: see
+		// session.EventActions.Compaction.
+		event.Actions.Compaction = nil
 		event.Output = toolOutput
 
 		// If output is a string, set it as content for convenience (similar to FunctionNode).

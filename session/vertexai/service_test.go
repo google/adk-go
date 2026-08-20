@@ -16,6 +16,7 @@ package vertexai
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,14 @@ func emptyService(t *testing.T, name string, offline bool) (session.Service, map
 		var rawTeardown func()
 		rawOpts, rawTeardown, err = setupReplay(t, replayFile)
 		if err != nil {
+			// A shared-suite case that this backend has no recording for yet.
+			// Skipping loudly beats failing the build, but note that the case
+			// is genuinely not covered here until someone regenerates: the
+			// compaction persistence gap this suite now checks for went
+			// unnoticed precisely because nothing asserted on it.
+			if errors.Is(err, os.ErrNotExist) {
+				t.Skipf("no replay recording at testdata/%s. Regenerate with: UPDATE_REPLAYS=true go test ./session/vertexai/...", replayFile)
+			}
 			t.Fatalf("Failed to setup replay: %v", err)
 		}
 		opts = rawOpts
