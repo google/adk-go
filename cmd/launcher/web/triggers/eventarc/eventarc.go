@@ -112,14 +112,18 @@ func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.
 		MaxConcurrentRuns: e.config.triggerMaxRuns,
 	}
 
-	controller := triggers.NewEventarcController(
+	controller, err := triggers.NewEventarcControllerWithOptions(
 		config.SessionService,
 		config.AgentLoader,
 		config.MemoryService,
 		config.ArtifactService,
 		config.PluginConfig,
 		triggerConfig,
+		triggers.WithEventsCompactionConfig(config.EventsCompactionConfig),
 	)
+	if err != nil {
+		return err
+	}
 
 	subrouter := router
 	if e.config.pathPrefix != "" && e.config.pathPrefix != "/" {

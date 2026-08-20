@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
@@ -42,11 +44,50 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+
+	eventsCompactionConfig *compaction.Config
+}
+
+// RuntimeAPIOption configures optional [RuntimeAPIController] behaviour.
+//
+// The constructor takes its required dependencies positionally; anything
+// optional is supplied here instead, so new capabilities do not keep widening
+// an already long signature or break existing callers.
+type RuntimeAPIOption func(*RuntimeAPIController)
+
+// WithEventsCompactionConfig enables context compaction for the runners this
+// controller creates, so older session events are summarized and prompts stay
+// small as a conversation grows. See [compaction.Config].
+func WithEventsCompactionConfig(cfg *compaction.Config) RuntimeAPIOption {
+	return func(c *RuntimeAPIController) {
+		c.eventsCompactionConfig = cfg
+	}
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
+//
+// The signature is fixed. Adding a variadic parameter here would change the
+// function's type, which breaks any caller that referenced it as a value even
+// though every ordinary call site still compiles, and these constructors are in
+// a released API. Use [NewRuntimeAPIControllerWithOptions] to pass options.
 func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
+	return NewRuntimeAPIControllerWithOptions(sessionService, memoryService, agentLoader, artifactService, sseTimeout, pluginConfig, autoCreateSession)
+}
+
+// NewRuntimeAPIControllerWithOptions is [NewRuntimeAPIController] with optional
+// settings, such as [WithEventsCompactionConfig].
+func NewRuntimeAPIControllerWithOptions(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool, opts ...RuntimeAPIOption) *RuntimeAPIController {
+	c := &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
+	for _, opt := range opts {
+		// A nil option is a caller mistake, not a reason to panic during
+		// construction: options are commonly built by a helper that returns nil
+		// when it has nothing to apply.
+		if opt == nil {
+			continue
+		}
+		opt(c)
+	}
+	return c
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -88,6 +129,14 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so failing
+			// the request would discard work the caller asked for and paid for
+			// in order to report that a later prompt will be larger.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
 		}
 		events = append(events, event)
@@ -142,6 +191,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
+			// Bookkeeping, not the turn: see the RunHandler comment. Streaming
+			// an error event here would tell a client its answer failed after
+			// it has already received it.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
@@ -212,13 +268,14 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}
 
 	r, err := runner.New(runner.Config{
-		AppName:           req.AppName,
-		Agent:             curAgent,
-		SessionService:    c.sessionService,
-		MemoryService:     c.memoryService,
-		ArtifactService:   c.artifactService,
-		PluginConfig:      c.pluginConfig,
-		AutoCreateSession: c.autoCreateSession,
+		AppName:                req.AppName,
+		Agent:                  curAgent,
+		SessionService:         c.sessionService,
+		MemoryService:          c.memoryService,
+		ArtifactService:        c.artifactService,
+		PluginConfig:           c.pluginConfig,
+		EventsCompactionConfig: c.eventsCompactionConfig,
+		AutoCreateSession:      c.autoCreateSession,
 	},
 	)
 	if err != nil {

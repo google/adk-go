@@ -28,7 +28,10 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/agentengine/controllers"
 	"google.golang.org/adk/v2/server/agentengine/controllers/method"
 	"google.golang.org/adk/v2/server/agentengine/internal/routers"
@@ -37,6 +40,30 @@ import (
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
 // Handles both streaming and non-streaming versions
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
+	// Validated here rather than left to the first request. A compaction config
+	// is rejected inside runner.New, which the request handlers call, so an
+	// invalid one would otherwise start cleanly and then fail every request.
+	//
+	// Ask the config to check itself rather than reaching for the one field
+	// that needs checking today, so a check added to Config.Validate later
+	// reaches this surface too instead of being one this copy quietly misses.
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	// Shape-only validation is not enough. A config can be internally
+	// consistent and still be unservable, and the case operators actually hit
+	// is the plainest one: no Summarizer, over a root agent with no model to
+	// default to. Config.Validate accepts that because it cannot see the agent,
+	// so this surface used to start healthy and then fail every request.
+	if err := compactionvalidate.AgainstRootAgent(config.EventsCompactionConfig, rootAgentOf(config.AgentLoader), runner.Config{
+		SessionService:  config.SessionService,
+		MemoryService:   config.MemoryService,
+		ArtifactService: config.ArtifactService,
+		PluginConfig:    config.PluginConfig,
+	}); err != nil {
+		return nil, err
+	}
+
 	router := mux.NewRouter().StrictSlash(true)
 
 	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
@@ -113,4 +140,12 @@ func ListClassMethods() ([]*structpb.Struct, error) {
 		result = append(result, m)
 	}
 	return result, nil
+}
+
+// rootAgentOf returns the loader's root agent, or nil when there is no loader.
+func rootAgentOf(l agent.Loader) agent.Agent {
+	if l == nil {
+		return nil
+	}
+	return l.RootAgent()
 }

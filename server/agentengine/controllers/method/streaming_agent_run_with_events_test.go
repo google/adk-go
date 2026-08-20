@@ -17,7 +17,9 @@ package method
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -30,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type agentSpaceStreamResponse struct {
@@ -353,5 +356,83 @@ func TestStreamingAgentRunWithEventsHandlerMetadata(t *testing.T) {
 		return k == "description"
 	})); diff != "" {
 		t.Errorf("Metadata() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// failingSummarizer reports a compaction failure the way a summarizer whose
+// model call was rejected does.
+type failingSummarizer struct{}
+
+func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, errors.New("the summarizer model refused the request")
+}
+
+// TestStreamJSONL_CompactionFailureDoesNotFailTheTurn pins that Agent Engine
+// treats a compaction failure the way the other three serving surfaces do.
+//
+// Compaction runs after the agent has answered and after its events are
+// persisted. Emitting the error and closing the stream told a client that its
+// request had failed when it had already received the response, and the only
+// thing that actually went wrong is that a later prompt will be larger. REST,
+// the triggers and A2A all log and carry on; this surface was the outlier.
+func TestStreamJSONL_CompactionFailureDoesNotFailTheTurn(t *testing.T) {
+	const (
+		appName           = "app"
+		userID            = "test-user@example.com"
+		externalSessionID = "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890"
+	)
+
+	a, err := llmagent.New(llmagent.Config{
+		Name: "Echo",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(cc agent.Context) (*genai.Content, error) {
+				return cc.UserContent(), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	config := &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(a),
+		SessionService: session.InMemoryService(),
+		EventsCompactionConfig: &compaction.Config{
+			CompactionInterval: 1,
+			Summarizer:         failingSummarizer{},
+		},
+	}
+	h := NewStreamingAgentRunWithEventsHandler(config, appName, "streaming_agent_run_with_events", "async_stream")
+
+	requestJSON := `{"message":{"role":"user","parts":[{"text":"Please"}]},"session_id":"` + externalSessionID + `","user_id":"` + userID + `"}`
+	payload, err := json.Marshal(models.StreamingAgentRunWithEventsRequest{
+		ClassMethod: "streaming_agent_run_with_events",
+		Input: models.StreamingAgentRunWithEventsInput{
+			RequestJSON: requestJSON,
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+
+	w := newStringWriter()
+	if err := h.streamJSONL(t.Context(), w, payload); err != nil {
+		t.Fatalf("streamJSONL() failed: %v", err)
+	}
+
+	out := w.sb.String()
+	if strings.Contains(out, "summarizer model refused") {
+		t.Errorf("a compaction failure was reported to the client:\n%s", out)
+	}
+	var got agentSpaceStreamResponse
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal() failed: %v\n%s", err, out)
+	}
+	if len(got.Events) != 1 {
+		t.Fatalf("len(Events) = %d, want the agent's answer to survive the compaction failure", len(got.Events))
+	}
+	wantContent := genai.NewContentFromText("Please", genai.RoleUser)
+	if diff := cmp.Diff(wantContent, got.Events[0].Content); diff != "" {
+		t.Errorf("event content mismatch (-want +got):\n%s", diff)
 	}
 }

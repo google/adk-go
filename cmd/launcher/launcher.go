@@ -17,6 +17,7 @@ package launcher
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
@@ -25,8 +26,25 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/telemetry"
 )
+
+// Validate reports a Config that cannot work, before anything starts serving.
+//
+// The compaction config is validated inside runner.New, and a runner is built
+// per request, so without a check here an unusable setting produces a process
+// that starts cleanly and then fails every request with an error naming nothing
+// the operator can act on.
+func (c *Config) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if err := c.EventsCompactionConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	return nil
+}
 
 // Launcher is the main interface for running an ADK application.
 // It is responsible for parsing command-line arguments and executing the
@@ -63,4 +81,21 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+
+	// EventsCompactionConfig enables context compaction for the sessions the
+	// runners created here drive, replacing older events with summaries. Nil,
+	// the default, disables compaction.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and only when the sliding
+	// window is off: with both enabled the sliding window consumes the events
+	// tail retention would summarize and it never fires. Enable one. See
+	// [compaction.Config].
+	//
+	// This setting is process-wide. One launcher can serve many applications
+	// through its agent loader, and they all get this config or none of them
+	// do, including the same Summarizer instance and so the same model. If
+	// different applications need different compaction, or must not share a
+	// summarizer, run them separately.
+	EventsCompactionConfig *compaction.Config
 }

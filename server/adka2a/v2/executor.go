@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // BeforeExecuteCallback is the callback which will be called before an execution is started.
@@ -343,6 +344,13 @@ func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProces
 	meta := processor.meta
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
+			// A compaction failure is bookkeeping, not the task. The agent has
+			// already answered and its events are persisted, so failing the
+			// task would report work as lost that the caller has in hand.
+			if errors.Is(adkErr, compaction.ErrCompaction) {
+				log.Warn(ctx, "context compaction failed", "error", adkErr)
+				continue
+			}
 			event := processor.makeTaskFailedEvent(ctx, fmt.Errorf("agent run failed: %w", adkErr), nil)
 			e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), event, adkErr)
 			return

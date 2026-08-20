@@ -33,6 +33,9 @@ type uniLauncher struct {
 
 // Execute implements launcher.Launcher. Parses args and runs the chosen launcher. Returns error if there are non-parsed arguments.
 func (l *uniLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	return l.ParseAndRun(ctx, config, args, ErrorOnUnparsedArgs)
 }
 

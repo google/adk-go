@@ -16,12 +16,15 @@ package triggers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,11 +32,15 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 var defaultTriggerConfig = triggers.TriggerConfig{
@@ -178,4 +185,131 @@ func createMockAgent(t *testing.T, results []error, runCount *int, expectedAttri
 		t.Fatalf("agent.New failed: %v", err)
 	}
 	return testAgent
+}
+
+// failingSummarizer stands in for a summarizer outage.
+type failingSummarizer struct{}
+
+func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, errors.New("summarizer unavailable")
+}
+
+// TestPubSubTriggerSurvivesACompactionFailure pins that a compaction failure
+// does not fail a delivery the agent already handled.
+//
+// Compaction is bookkeeping that runs after the agent has answered and after
+// its events are persisted. Reporting it as a failed delivery makes Pub/Sub
+// push read the 500 as a NACK, so the message is redelivered and the agent
+// runs again, repeating work that already succeeded.
+func TestPubSubTriggerSurvivesACompactionFailure(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+
+	apiController, err := triggers.NewPubSubControllerWithOptions(
+		sessionService, agent.NewSingleLoader(testAgent), nil, nil,
+		runner.PluginConfig{}, defaultTriggerConfig,
+		triggers.WithEventsCompactionConfig(&compaction.Config{
+			CompactionInterval: 1,
+			Summarizer:         failingSummarizer{},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewPubSubControllerWithOptions() error = %v", err)
+	}
+
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent")))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+
+	apiController.PubSubTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d: the agent answered, so the delivery succeeded. Body: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if runCount != 1 {
+		t.Errorf("agent ran %d times, want 1: a NACKed delivery is retried and repeats work already done", runCount)
+	}
+}
+
+// countingSummarizer records that compaction actually reached the summarizer.
+type countingSummarizer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return genai.NewContentFromText("a summary", genai.RoleModel), nil, nil
+}
+
+func (c *countingSummarizer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestPubSubTriggerActuallyRunsCompaction pins that the config this surface
+// accepts reaches a runner and does something.
+//
+// The existing tests on this surface assert that a compaction failure is
+// tolerated, which a surface that never runs compaction at all satisfies just
+// as well. Deleting the line that puts EventsCompactionConfig into the runner
+// config left the whole suite green. Counting summarizer calls is the
+// difference between "compaction ran and its failure was tolerated" and
+// "compaction never ran".
+func TestPubSubTriggerActuallyRunsCompaction(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	summarizer := &countingSummarizer{}
+
+	apiController, err := triggers.NewPubSubControllerWithOptions(
+		sessionService, agent.NewSingleLoader(testAgent), nil, nil,
+		runner.PluginConfig{}, defaultTriggerConfig,
+		triggers.WithEventsCompactionConfig(&compaction.Config{
+			CompactionInterval: 1,
+			Summarizer:         summarizer,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewPubSubControllerWithOptions() error = %v", err)
+	}
+
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent")))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+	apiController.PubSubTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if got := summarizer.count(); got == 0 {
+		t.Error("the summarizer was never called, so this surface accepts a compaction config and does nothing with it")
+	}
 }

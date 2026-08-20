@@ -25,16 +25,43 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/routers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
+
+// validateCompactionAgainstAgents reports whether the compaction config can
+// actually serve every app this server knows about.
+func validateCompactionAgainstAgents(cfg ServerConfig) error {
+	return compactionvalidate.AgainstAgents(cfg.EventsCompactionConfig, cfg.AgentLoader, runner.Config{
+		SessionService:  cfg.SessionService,
+		MemoryService:   cfg.MemoryService,
+		ArtifactService: cfg.ArtifactService,
+		PluginConfig:    cfg.PluginConfig,
+	})
+}
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
+	// Validated here rather than left to the first request. A compaction config
+	// is rejected inside runner.New, which this server calls per request, so an
+	// invalid one would otherwise start cleanly and then fail every request
+	// with a 500 that names nothing the operator can act on.
+	//
+	// Against the agents, not just the shape. Validate() only checks the config
+	// on its own, and the failure operators actually hit is a config with no
+	// Summarizer over a root agent that is not an LLM agent, which is perfectly
+	// well-shaped and 500s every request. Building a runner is the same code
+	// path the request takes, so this cannot drift from it.
+	if err := validateCompactionAgainstAgents(cfg); err != nil {
+		return nil, err
+	}
+
 	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
 		TraceCapacity: cfg.DebugConfig.TraceCapacity,
 	})
@@ -47,7 +74,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithOptions(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false, controllers.WithEventsCompactionConfig(cfg.EventsCompactionConfig))),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
@@ -68,6 +95,23 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
+
+	// EventsCompactionConfig enables context compaction for the sessions the
+	// runners created here drive, replacing older events with summaries. Nil,
+	// the default, disables compaction.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and only when the sliding
+	// window is off: with both enabled the sliding window consumes the events
+	// tail retention would summarize and it never fires. Enable one. See
+	// [compaction.Config].
+	//
+	// This setting is server-wide. One server can serve many applications
+	// through its agent loader, and they all get this config or none of them
+	// do, including the same Summarizer instance and so the same model. If
+	// different applications need different compaction, or must not share a
+	// summarizer, run them on separate servers.
+	EventsCompactionConfig *compaction.Config
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.

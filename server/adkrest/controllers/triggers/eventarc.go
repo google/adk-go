@@ -37,18 +37,44 @@ type EventarcController struct {
 }
 
 // NewEventarcController creates a new EventarcController.
+// The signature is fixed. Adding a variadic parameter here would change the
+// function's type, which breaks any caller that referenced it as a value, and
+// these constructors are in a released API. Use
+// [NewEventarcControllerWithOptions] to pass options.
 func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
-	return &EventarcController{
-		runner: &RetriableRunner{
-			sessionService:  sessionService,
-			agentLoader:     agentLoader,
-			memoryService:   memoryService,
-			artifactService: artifactService,
-			pluginConfig:    pluginConfig,
-			triggerConfig:   triggerConfig,
-		},
-		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+	// No options, so nothing that can be rejected. The error return exists for
+	// the WithOptions form, which can be handed a configuration that cannot
+	// serve the apps behind this controller.
+	c, _ := NewEventarcControllerWithOptions(sessionService, agentLoader, memoryService, artifactService, pluginConfig, triggerConfig)
+	return c
+}
+
+// NewEventarcControllerWithOptions is [NewEventarcController] with optional settings,
+// such as [WithEventsCompactionConfig].
+func NewEventarcControllerWithOptions(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) (*EventarcController, error) {
+	retriable := &RetriableRunner{
+		sessionService:  sessionService,
+		agentLoader:     agentLoader,
+		memoryService:   memoryService,
+		artifactService: artifactService,
+		pluginConfig:    pluginConfig,
+		triggerConfig:   triggerConfig,
 	}
+	for _, opt := range opts {
+		// See NewRuntimeAPIController: a nil option is skipped rather than
+		// dereferenced.
+		if opt == nil {
+			continue
+		}
+		opt(retriable)
+	}
+	if err := retriable.validateCompaction(); err != nil {
+		return nil, err
+	}
+	return &EventarcController{
+		runner:    retriable,
+		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+	}, nil
 }
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.

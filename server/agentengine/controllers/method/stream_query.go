@@ -17,6 +17,7 @@ package method
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/server/agentengine/internal/helper"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type streamQueryHandler struct {
@@ -98,6 +100,16 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	for event, err := range events {
 		log.Printf("Processing event: %+v err: %+v\n", event, err)
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so emitting
+			// an error and closing the stream would tell the client its request
+			// failed after it has received the response, in order to report
+			// that a later prompt will be larger. The other three serving
+			// surfaces log and carry on, and this one was the outlier.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("agentengine: %v", err)
+				continue
+			}
 			log.Printf("error in events: %v\n", err)
 			e := helper.EmitJSONError(rw, err)
 			if e != nil {
@@ -191,13 +203,14 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 	rootAgent := config.AgentLoader.RootAgent()
 
 	r, err := runner.New(runner.Config{
-		AppName:           s.agentEngineID,
-		Agent:             rootAgent,
-		SessionService:    config.SessionService,
-		MemoryService:     config.MemoryService,
-		ArtifactService:   config.ArtifactService,
-		PluginConfig:      config.PluginConfig,
-		AutoCreateSession: true,
+		AppName:                s.agentEngineID,
+		Agent:                  rootAgent,
+		SessionService:         config.SessionService,
+		MemoryService:          config.MemoryService,
+		ArtifactService:        config.ArtifactService,
+		PluginConfig:           config.PluginConfig,
+		EventsCompactionConfig: config.EventsCompactionConfig,
+		AutoCreateSession:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner: %v", err)

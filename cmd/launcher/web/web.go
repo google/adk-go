@@ -56,6 +56,9 @@ type webLauncher struct {
 
 // Execute implements launcher.Launcher.
 func (w *webLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	remainingArgs, err := w.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)
