@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
@@ -153,17 +155,31 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *lo
 	otelLogger.Emit(ctx, record)
 }
 
+// GenAISystemAttr returns the gen_ai.system attribute for a backend, and
+// whether this repo can name one.
+//
+// The single definition, so telemetry that reports a provider agrees with
+// itself. It reports false for a provider it cannot identify, since naming the
+// wrong one is worse than saying nothing.
+//
 // Ref: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/registry/attributes/gen-ai.md#gen-ai-system well-known values.
+func GenAISystemAttr(variant genai.Backend) (attribute.KeyValue, bool) {
+	switch variant {
+	case genai.BackendVertexAI:
+		return semconv.GenAISystemGCPVertexAI, true
+	case genai.BackendGeminiAPI:
+		return semconv.GenAISystemGCPGemini, true
+	}
+	return attribute.KeyValue{}, false
+}
+
 func variantToGenAISystem(variant genai.Backend) *log.KeyValue {
-	if variant == genai.BackendVertexAI {
-		val := log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI)
-		return &val
+	attr, ok := GenAISystemAttr(variant)
+	if !ok {
+		return nil
 	}
-	if variant == genai.BackendGeminiAPI {
-		val := log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini)
-		return &val
-	}
-	return nil
+	val := log.KeyValueFromAttribute(attr)
+	return &val
 }
 
 // extractSystemMessage extracts the system message from the request config and concatenates it into a single string.

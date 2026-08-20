@@ -757,3 +757,10 @@ func (w *wrappedEvents) At(i int) *session.Event {
 		return nil
 	}
 }
+
+// Unwrap returns the session this one decorates.
+//
+// The seed a wrappedSession adds is a prompt-assembly convenience, not durable
+// conversation. Anything that has to write to the session, or reason about what
+// is actually stored, needs the session underneath.
+func (w *wrappedSession) Unwrap() session.Session { return w.Session }

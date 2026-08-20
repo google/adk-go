@@ -26,9 +26,11 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
@@ -39,6 +41,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // Config is used to create a [Runner].
@@ -56,6 +59,17 @@ type Config struct {
 	PluginConfig PluginConfig
 	// optional
 	AutoCreateSession bool
+
+	// EventsCompactionConfig enables context compaction for the sessions this
+	// runner drives: older events are periodically summarized so prompts stay
+	// small as a conversation grows. Nil, the default, disables compaction.
+	//
+	// When the config names no Summarizer, the runner installs a
+	// [compaction.LLMSummarizer] over the root agent's model, which then has to
+	// be an LLM agent.
+	//
+	// optional
+	EventsCompactionConfig *compaction.Config
 }
 
 type PluginConfig struct {
@@ -109,6 +123,11 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
+	compactionConfig, err := resolveCompactionConfig(cfg.EventsCompactionConfig, cfg.Agent)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -118,7 +137,60 @@ func New(cfg Config) (*Runner, error) {
 		parents:           parents,
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
+		compactionConfig:  compactionConfig,
 	}, nil
+}
+
+// defaultSummarizerTimeout bounds the summarization call the runner installs
+// when an application enables compaction without naming a Summarizer. A var so
+// a test can shorten it rather than waiting a minute to prove the bound exists.
+var defaultSummarizerTimeout = 60 * time.Second
+
+// resolveCompactionConfig validates cfg and fills in the default summarizer.
+//
+// Resolving at construction time means a misconfigured runner fails fast at
+// New, rather than silently skipping compaction turns later, or blowing up
+// mid-conversation the first time a compaction triggers.
+func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*compaction.Config, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	// Copy so the caller's config is not mutated by the summarizer default.
+	resolved := *cfg
+	if resolved.Summarizer != nil {
+		return &resolved, nil
+	}
+
+	llmAgent, ok := rootAgent.(llminternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("EventsCompactionConfig needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
+	}
+	m := llminternal.Reveal(llmAgent).Model
+	if m == nil {
+		return nil, fmt.Errorf("EventsCompactionConfig needs a Summarizer: root agent %q has no model", rootAgent.Name())
+	}
+	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
+		Model: m,
+		// Safety settings and output limits the application configured govern
+		// the summarization call too, rather than it silently falling back to
+		// provider defaults for the one call that sees the whole transcript.
+		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
+		// A bound on the one call the application did not ask for. Compaction
+		// runs inside the run loop, and the post-invocation pass runs from a
+		// defer, so a provider that never answers holds the turn open with
+		// nothing to show for it. Compaction is an optimisation, so giving up
+		// on it is the cheap outcome. An application that wants a different
+		// bound supplies its own Summarizer.
+		Timeout: defaultSummarizerTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the default compaction summarizer: %w", err)
+	}
+	resolved.Summarizer = summarizer
+	return &resolved, nil
 }
 
 // NewInMemory creates a [Runner] backed entirely by in-memory session,
@@ -150,6 +222,218 @@ type Runner struct {
 	parents           parentmap.Map
 	pluginManager     *plugininternal.PluginManager
 	autoCreateSession bool
+
+	// compactionConfig is nil when compaction is disabled. Otherwise it is a
+	// validated copy of Config.EventsCompactionConfig with the summarizer
+	// resolved.
+	compactionConfig *compaction.Config
+}
+
+// invocationIDOf returns the invocation an InvocationContext names, or "".
+func invocationIDOf(ictx agent.InvocationContext) string {
+	if ictx == nil {
+		return ""
+	}
+	return ictx.InvocationID()
+}
+
+// compactAfterInvocation runs post-invocation sliding-window compaction and
+// persists the summary, if one was produced.
+//
+// It runs once an invocation has finished and every event it produced has been
+// appended, so the compactor sees a complete turn.
+//
+// A failure is returned rather than swallowed. The turn's own events are
+// already committed, so the caller keeps everything the agent produced, and the
+// error reports only that history did not shrink. Hiding that would let a
+// session grow unbounded, and the first visible symptom would be prompts
+// failing against the model's context limit, far from the cause.
+//
+// The summary itself is deliberately not yielded to the caller. It is
+// bookkeeping for the next prompt, not part of the conversation.
+func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session, ictx agent.InvocationContext) error {
+	if !compactioninternal.HasSlidingWindow(r.compactionConfig) {
+		return nil
+	}
+	// Tail retention may already have compacted this turn from inside the
+	// invocation. Summarizing again the moment it ends would pay for a second
+	// model call to re-summarize what was just summarized, and would leave two
+	// ranges over the same span. The reference implementation reaches the same
+	// outcome by evaluating both strategies in one place and returning early.
+	if compactionctx.FromContext(ctx).AlreadyCompacted() {
+		return nil
+	}
+	// Compaction is an optimisation, so a cancelled or expired run should not
+	// spend a model call on it, nor write a summary the caller never waited
+	// for.
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	// Re-read rather than reusing the session handle the invocation began with.
+	// That handle is a snapshot taken before the turn ran, so a concurrent
+	// invocation on the same session may have appended events it cannot see.
+	// Summarizing against it would record a range covering those events without
+	// having summarized them, and prompt assembly would then drop them: a lost
+	// update rather than a data race, so -race stays clean while conversation
+	// goes missing.
+	current, err := r.reloadSession(ctx, storedSession)
+	if err != nil {
+		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
+	}
+
+	summary, finish, err := compactioninternal.SlidingWindow(ctx, r.compactionConfig, current, invocationIDOf(ictx))
+	if err != nil {
+		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
+	}
+	if summary == nil {
+		return nil
+	}
+
+	// Summarizing takes a model call, which is long enough for another
+	// invocation to append inside the range just chosen. Re-read once more and
+	// abandon the summary if anything landed inside it. Skipping costs one
+	// wasted call, where recording it would silently drop those turns from
+	// every later prompt.
+	if ctx.Err() != nil {
+		finish(nil, "the run ended before the summary could be stored")
+		return nil
+	}
+	// raced re-reads the session and reports whether anything landed inside the
+	// range since the summary was chosen. It runs twice: here, so a doomed
+	// summary does not cost a plugin pass, and again immediately before the
+	// append.
+	//
+	// Once is not enough because a plugin runs in between and that is arbitrary
+	// code. Anything appended while it runs falls inside the recorded range and
+	// is named by nothing, so prompt assembly drops it. This does not need a
+	// hostile plugin or even a concurrent invocation to reach: an event carries
+	// the timestamp it was created at rather than the one it was stored at, so
+	// parallel tool responses and sub-agent events funnelled through a channel
+	// are routinely created before the range ends and appended after it.
+	raced := func() (bool, error) {
+		latest, err := r.reloadSession(ctx, storedSession)
+		if err != nil {
+			return false, err
+		}
+		return compactioninternal.RangeRaced(latest, current, summary), nil
+	}
+	discardRaced := func() {
+		finish(nil, "another compaction covering the same events landed while summarizing")
+		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
+	}
+
+	lost, err := raced()
+	if err != nil {
+		finish(err, "")
+		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
+	}
+	if lost {
+		discardRaced()
+		return nil
+	}
+
+	// Plugins see the summary before it is stored, like every other event the
+	// runner persists.
+	//
+	// The reference implementation reaches the same place from the other
+	// direction: its sliding window yields the event and lets the runner append
+	// it, so that persistence stays at the runtime's synchronisation point.
+	// Appending straight from the compactor skipped the one hook that lets a
+	// plugin see, rewrite or reject what goes into a session, and a summary is
+	// exactly the kind of derived content a redaction plugin would care about.
+	if ictx != nil && r.pluginManager != nil {
+		modified, err := r.pluginManager.RunOnEventCallback(ictx, summary)
+		if err != nil {
+			finish(err, "")
+			return fmt.Errorf("%w: plugin rejected the summary event: %w", compaction.ErrCompaction, err)
+		}
+		if modified != nil {
+			// Re-checked, because a replacement did not go through the builder
+			// that filters a summarizer's output. A plugin is trusted to see
+			// and rewrite a summary, not to put a function call into the next
+			// prompt.
+			if !compactioninternal.SanitizeSummary(modified) {
+				finish(nil, "a plugin left the summary with nothing usable in it")
+				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it")
+				return nil
+			}
+			summary = modified
+		}
+	}
+
+	// The plugin pass above is the widest part of the window, so the check is
+	// repeated now that it has run. What remains between here and the append is
+	// not closed: shutting that too needs the append itself to be conditional
+	// on a session version, which the session.Service interface has no way to
+	// express.
+	lost, err = raced()
+	if err != nil {
+		finish(err, "")
+		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
+	}
+	if lost {
+		discardRaced()
+		return nil
+	}
+
+	if err := r.sessionService.AppendEvent(ctx, current, summary); err != nil {
+		finish(err, "")
+		return fmt.Errorf("%w: failed to append the summary event: %w", compaction.ErrCompaction, err)
+	}
+	finish(nil, "")
+	return nil
+}
+
+// fromPlugin returns the event a plugin gave back, with the compaction record
+// the framework put on the original rather than any the plugin supplied.
+//
+// A compaction record is not content. It says which stored events every later
+// prompt drops and what stands in for them, so planting one erases history and
+// substitutes text of the planter's choosing, and the substituted text is not
+// filtered the way a summary is. session.EventActions.Compaction says the
+// framework writes this field, and for tools and callbacks that is enforced:
+// agent.eventActionsFrom, the tool path in base_flow, and workflow.ToolNode all
+// clear it. Plugins were the one hook where a returned event was persisted as
+// given.
+//
+// The record is restored rather than cleared, because an ordinary event should
+// carry none and a summary carries the real one. Both cases are then the same
+// rule: whatever the framework decided, not whatever came back.
+//
+// The post-invocation summary path does not use this. A plugin is invited to
+// rewrite a summary there, and SanitizeSummary re-checks the result.
+func fromPlugin(original, modified *session.Event) *session.Event {
+	if modified == nil || modified == original {
+		return original
+	}
+	modified.Actions.Compaction = original.Actions.Compaction
+	return modified
+}
+
+// compactionRuntime returns the runtime that the request processors read off
+// the context, both to gate prompt assembly on compaction being configured and
+// to run intra-invocation compaction. It is nil when compaction is disabled for
+// this runner.
+func (r *Runner) compactionRuntime() *compactionctx.Runtime {
+	return compactionctx.New(r.compactionConfig, r.sessionService)
+}
+
+// reloadSession re-fetches a session so compaction works against current state
+// rather than the snapshot the invocation began with.
+func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.Session, error) {
+	resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   s.AppName(),
+		UserID:    s.UserID(),
+		SessionID: s.ID(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-read the session: %w", err)
+	}
+	if resp == nil || resp.Session == nil {
+		return nil, fmt.Errorf("session %q disappeared while compacting", s.ID())
+	}
+	return resp.Session, nil
 }
 
 func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
@@ -183,6 +467,20 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
+		// An invocation that ended in an error is not a finished turn and must
+		// not be summarized: the window would hold a question with no answer,
+		// and that summary is stored permanently and degrades every later
+		// prompt. Observing it here, rather than at each error site, means no
+		// path can forget to.
+		invocationFailed := false
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil {
+				invocationFailed = true
+			}
+			return emit(ev, err)
+		}
+
 		options := runOptions{}
 		for _, opt := range opts {
 			opt(&options)
@@ -254,6 +552,33 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+
+		// Compaction has to happen however iteration ends. Breaking out of the
+		// range loop on the terminal event is the ordinary streaming idiom, and
+		// what the A2A executor does, so a hook placed only after the loop
+		// would never run for those callers and compaction would silently never
+		// happen. Deferring makes it unconditional.
+		//
+		// On an early exit the error cannot be yielded, because yield must not
+		// be called once it has returned false, so it is logged instead.
+		// Assigned once the invocation context exists, below. The compaction
+		// hook runs from a defer, so it reads whatever this holds by then.
+		var invocationCtx agent.InvocationContext
+
+		compacted := false
+		compactOnce := func() error {
+			if compacted || invocationFailed {
+				return nil
+			}
+			compacted = true
+			return r.compactAfterInvocation(ctx, storedSession, invocationCtx)
+		}
+		defer func() {
+			if err := compactOnce(); err != nil {
+				log.Printf("adk: %v", err)
+			}
+		}()
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
@@ -284,6 +609,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			RunConfig:    &cfg,
 			InvocationID: resolveInvocationID(storedSession, msg),
 		})
+		invocationCtx = ic
 		ctx := agent.NewContext(ic)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
@@ -337,9 +663,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
+				event = fromPlugin(event, modifiedEvent)
 			}
 
 			// only commit non-partial event to a session service
@@ -353,6 +677,17 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+		}
+
+		// Compact once the invocation is done and every event it produced has
+		// been persisted. Never mid-invocation: that is tail retention's job.
+		//
+		// compactOnce is idempotent because the deferred call above also runs
+		// it. Reaching it here means the consumer drained the stream, so a
+		// failure can still be reported.
+		if err := compactOnce(); err != nil {
+			yield(nil, err)
+			return
 		}
 	}
 }
@@ -443,6 +778,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		Live:          &cfg,
 	})
 	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	// Deliberately no compactionctx here: context compaction does not apply to
+	// live runs. A live session streams over a persistent connection instead of
+	// re-sending assembled history each turn, so replacing older events with a
+	// summary would not shrink anything.
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {
@@ -531,9 +870,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
+				event = fromPlugin(event, modifiedEvent)
 			}
 
 			// Chronological event buffering logic for Live streaming.
