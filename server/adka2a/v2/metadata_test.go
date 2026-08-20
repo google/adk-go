@@ -30,12 +30,9 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 		name    string
 		event   *session.Event
 		a2aMeta map[string]any
-		// wantAfterProcessA2AMeta is the event processA2AMeta should produce
-		// from a2aMeta, if different from event. processA2AMeta never
-		// restores TransferToAgent from peer-supplied metadata (see
-		// TransferToAgentFromMeta), so it's asymmetric with setActionsMeta
-		// (the outgoing direction, tested against event/a2aMeta directly)
-		// whenever TransferToAgent is set.
+		// wantAfterProcessA2AMeta overrides event for the processA2AMeta
+		// direction. Needed only when TransferToAgent is set, since that's
+		// never restored from peer metadata (see toEventActions).
 		wantAfterProcessA2AMeta *session.Event
 	}{
 		{

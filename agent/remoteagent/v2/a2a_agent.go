@@ -283,15 +283,9 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
 			}
 
-			// ToSessionEvent/ToSessionEventWithParts never restore
-			// transfer_to_agent from the remote peer's metadata, since a
-			// malicious or compromised peer could otherwise redirect
-			// execution to an agent of its own choosing within the local
-			// agent tree. If this deployment has explicitly opted in via
-			// AllowTransferToAgent (i.e. the remote agent is fully
-			// trusted), restore it here instead, after conversion, so the
-			// no-breaking-change conversion API doesn't need to know about
-			// this trust decision at all.
+			// See toEventActions: TransferToAgent is restored here, after
+			// conversion, only when the caller has opted in via
+			// AllowTransferToAgent.
 			if err == nil && event != nil && a2aEvent != nil && cfg.AllowTransferToAgent {
 				if transferToAgent, ok := adka2a.TransferToAgentFromMeta(a2aEvent.Meta()); ok {
 					event.Actions.TransferToAgent = transferToAgent
