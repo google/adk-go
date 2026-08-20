@@ -1406,6 +1406,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDelta(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	// TODO add similar logic for state
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
@@ -1414,6 +1417,23 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// mergeArtifactDelta merges src into dst, keeping the highest version for each
+// artifact name. Artifact versions are monotonically increasing per file, so the
+// larger value is always the more recent write. Merging by max rather than
+// last-write-wins means a parallel tool call that saved an older version cannot
+// mask a newer one recorded by a sibling call in the same turn.
+func mergeArtifactDelta(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		dst = make(map[string]int64, len(src))
+	}
+	for name, version := range src {
+		if existing, ok := dst[name]; !ok || version > existing {
+			dst[name] = version
+		}
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {

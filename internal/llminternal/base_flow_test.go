@@ -813,3 +813,70 @@ func TestCallLLMStreamingModeWithoutContextRunConfig(t *testing.T) {
 		t.Errorf("GenerateContent received stream=%v, want true for SSE streaming mode", m.stream)
 	}
 }
+
+func TestMergeEventActionsArtifactDelta(t *testing.T) {
+	tests := []struct {
+		name  string
+		base  *session.EventActions
+		other *session.EventActions
+		want  map[string]int64
+	}{
+		{
+			name:  "base has no artifact delta",
+			base:  &session.EventActions{},
+			other: &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 1}},
+			want:  map[string]int64{"a.txt": 1},
+		},
+		{
+			name:  "disjoint artifacts are both preserved",
+			base:  &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 1}},
+			other: &session.EventActions{ArtifactDelta: map[string]int64{"b.txt": 4}},
+			want:  map[string]int64{"a.txt": 1, "b.txt": 4},
+		},
+		{
+			name:  "same artifact keeps the higher version",
+			base:  &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 3}},
+			other: &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 2}},
+			want:  map[string]int64{"a.txt": 3},
+		},
+		{
+			name:  "same artifact takes a newer version from other",
+			base:  &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 1}},
+			other: &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 5}},
+			want:  map[string]int64{"a.txt": 5},
+		},
+		{
+			name:  "nil other leaves base untouched",
+			base:  &session.EventActions{ArtifactDelta: map[string]int64{"a.txt": 2}},
+			other: nil,
+			want:  map[string]int64{"a.txt": 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeEventActions(tt.base, tt.other)
+			if diff := cmp.Diff(tt.want, got.ArtifactDelta); diff != "" {
+				t.Errorf("mergeEventActions() ArtifactDelta mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMergeParallelFunctionResponseEventsArtifactDelta reproduces issue #493:
+// when several tool calls in one turn each save an artifact, every delta must
+// survive the merge, not just the first.
+func TestMergeParallelFunctionResponseEventsArtifactDelta(t *testing.T) {
+	base := &session.EventActions{ArtifactDelta: map[string]int64{"first.txt": 1}}
+	for _, other := range []*session.EventActions{
+		{ArtifactDelta: map[string]int64{"second.txt": 1}},
+		{ArtifactDelta: map[string]int64{"third.txt": 1}},
+		{ArtifactDelta: map[string]int64{"first.txt": 3}},
+	} {
+		base = mergeEventActions(base, other)
+	}
+	want := map[string]int64{"first.txt": 3, "second.txt": 1, "third.txt": 1}
+	if diff := cmp.Diff(want, base.ArtifactDelta); diff != "" {
+		t.Errorf("merged ArtifactDelta mismatch (-want +got):\n%s", diff)
+	}
+}
