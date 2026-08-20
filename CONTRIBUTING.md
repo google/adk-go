@@ -102,6 +102,13 @@ Two things to keep in mind:
   flow in the release playbook instead, and correct the proposed version before
   merging.
 
+The `v1` maintenance line works the same way, from its own config and manifest
+(`.github/release-please-config-v1.json` and
+`.github/.release-please-manifest-v1.json`), so the two lines advance
+independently. The workflow picks the pair from the branch it runs on. Note that
+`v1` is documented as patch-only, but that is a review convention rather than a
+setting: a `feat:` landing on `v1` would still produce a minor bump.
+
 Submodules (for example `plugin/agentanalytics`) version independently and have
 no version constant; they are not covered by this workflow.
 

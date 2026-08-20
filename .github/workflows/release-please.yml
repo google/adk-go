@@ -1,15 +1,25 @@
 # Release Please keeps the version constant, the changelog and the release tag
-# in sync, without anything ever pushing straight to main.
+# in sync, without anything ever pushing straight to a release branch.
 #
-# On every push to main it reads the conventional commits since the last release
-# and maintains a single open "release PR" that bumps
+# On every push to a release line it reads the conventional commits since the
+# last release and maintains a single open "release PR" that bumps
 # internal/version/version.go (the constant line carries an
 # x-release-please-version annotation, rewritten by the generic updater),
-# regenerates CHANGELOG.md and updates .release-please-manifest.json. A
-# maintainer reviews and merges that PR like any other; merging it tags the merge
-# commit vX.Y.Z and publishes the GitHub release.
+# regenerates CHANGELOG.md and updates the manifest. A maintainer reviews and
+# merges that PR like any other; merging it tags the merge commit vX.Y.Z and
+# publishes the GitHub release.
 #
-# Two things this needs before it works:
+# Both release lines are served by this one workflow, each with its own config
+# and manifest so their versions advance independently:
+#
+#   main -> .github/release-please-config.json     + .release-please-manifest.json
+#   v1   -> .github/release-please-config-v1.json  + .release-please-manifest-v1.json
+#
+# Release Please reads the config, the manifest and the commits from the branch
+# it is releasing, so both files and this workflow have to exist on `v1` as well
+# as on `main`. Porting them is a separate PR against `v1`.
+#
+# Three things this needs before it works:
 #
 #  1. Settings -> Actions -> General -> "Allow GitHub Actions to create and
 #     approve pull requests" must be enabled, or the action cannot open the PR.
@@ -20,22 +30,28 @@
 #     the bump would land unverified. adk-python hits the same constraint and
 #     solves it the same way (its RELEASE_PAT).
 #
-# Only the core module is configured here. Submodules such as
-# plugin/agentanalytics version independently and carry no version constant; to
-# release one through this workflow, add it to .github/release-please-config.json
-# as its own package with "tag-separator": "/" so the tag reads
-# plugin/agentanalytics/vX.Y.Z as Go requires.
+#  3. The v1 line is documented as patch-only. That policy is not encoded here,
+#     because a `feat:` on v1 would still produce a minor; add
+#     "versioning-strategy": "always-bump-patch" to the v1 config if it should be
+#     enforced rather than reviewed.
+#
+# Only the core module is configured. Submodules such as plugin/agentanalytics
+# version independently and carry no version constant; to release one through
+# this workflow, add it to the config as its own package with
+# "tag-separator": "/" so the tag reads plugin/agentanalytics/vX.Y.Z as Go
+# requires.
 name: Release Please
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "v1" ]
 
   workflow_dispatch:
 
-# Serialize: two runs racing on the same release PR would fight over its branch.
+# Serialize per release line: two runs racing on the same release PR would fight
+# over its branch, while main and v1 must not block each other.
 concurrency:
-  group: release-please
+  group: release-please-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -48,8 +64,25 @@ jobs:
       contents: write        # create the release branch, the tag and the release
       pull-requests: write   # open and update the release PR
     steps:
+      - name: Select the config for this release line
+        id: line
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = "v1" ]; then
+            echo "config=.github/release-please-config-v1.json" >> "$GITHUB_OUTPUT"
+            echo "manifest=.github/.release-please-manifest-v1.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "config=.github/release-please-config.json" >> "$GITHUB_OUTPUT"
+            echo "manifest=.github/.release-please-manifest.json" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5  # v4
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          config-file: .github/release-please-config.json
-          manifest-file: .github/.release-please-manifest.json
+          config-file: ${{ steps.line.outputs.config }}
+          manifest-file: ${{ steps.line.outputs.manifest }}
+          # Release the branch the run was triggered on, rather than the
+          # repository default, so a v1 run cannot open a PR against main.
+          target-branch: ${{ github.ref_name }}
