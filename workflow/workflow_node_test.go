@@ -344,9 +344,10 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	cancel()
 	wg.Wait()
 
-	// Assert: run finished without error (cancellation is handled gracefully) and context was cancelled.
-	if runErr != nil {
-		t.Errorf("expected no error on cancellation, got %v", runErr)
+	// Assert: external cancellation is surfaced to the caller and the
+	// underlying context was cancelled.
+	if !errors.Is(runErr, context.Canceled) {
+		t.Errorf("expected context.Canceled on cancellation, got %v", runErr)
 	}
 	if !errors.Is(baseCtx.Err(), context.Canceled) {
 		t.Errorf("expected baseCtx.Err() to be context.Canceled, got %v", baseCtx.Err())

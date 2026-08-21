@@ -23,8 +23,10 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -244,6 +246,92 @@ func TestA2AInputRequired(t *testing.T) {
 				t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
 			}
 		})
+	}
+}
+
+// assertADKExtensionMeta fails unless meta carries the ADK A2A extension key.
+func assertADKExtensionMeta(t *testing.T, subject string, meta map[string]any) {
+	t.Helper()
+	got, ok := meta[adka2a.ADKExtensionURI]
+	if !ok {
+		t.Errorf("%s: metadata is missing key %q, got keys %v", subject, adka2a.ADKExtensionURI, slices.Sorted(maps.Keys(meta)))
+		return
+	}
+	if got != true {
+		t.Errorf("%s: metadata[%q] = %v, want true", subject, adka2a.ADKExtensionURI, got)
+	}
+}
+
+// The ADK A2A extension tells clients that a response spreads content across
+// task artifacts and the status message, the latter carrying long-running
+// function calls. A client that doesn't see it may read artifacts exclusively
+// and miss the long-running call of an input-required task, which is what makes
+// an ADK Python client synthesize a mock function call in its place.
+// See https://github.com/google/adk-go/issues/913.
+//
+// Clients read the extension off a2a.Task.Metadata, so the assertions here are
+// on round-tripped tasks rather than on the events the executor emits: only
+// task status update metadata is merged into the task by a2a.
+func TestA2ATaskCarriesADKExtensionMeta(t *testing.T) {
+	t.Parallel()
+
+	inputRequestingAgent := newInputRequestingAgent(t, "agent-b", newLongRunningTool(t))
+	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun))
+	defer server.Close()
+	client := newA2AClient(t, server)
+
+	msg1 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Perform important task!"))
+	task1 := mustSendMessage(t, client, msg1)
+	if task1.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("client.SendMessage(Initial) result state = %q, want %q", task1.Status.State, a2a.TaskStateInputRequired)
+	}
+	// The regressing case: the long-running call lives in the status message,
+	// while the artifacts hold the model's text.
+	assertADKExtensionMeta(t, "input-required task", task1.Metadata)
+
+	toolCall, pendingResponse := findLongRunningCall(t, toGenaiParts(t, task1.Status.Message.Parts))
+	approval := createLongRunningToolApproval(t, pendingResponse)
+	msg2 := a2a.NewMessageForTask(a2a.MessageRoleUser, task1,
+		a2a.NewTextPart("LGTM"),
+		toA2AParts(t, []*genai.Part{approval}, []string{toolCall.ID})[0],
+	)
+	task2 := mustSendMessage(t, client, msg2)
+	if task2.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("client.SendMessage(Approval) result state = %q, want %q", task2.Status.State, a2a.TaskStateCompleted)
+	}
+	// The extension describes every response, not just input-required ones, and
+	// it has to survive the follow-up turn that resolves the task.
+	assertADKExtensionMeta(t, "completed task", task2.Metadata)
+}
+
+// A streaming client re-reads the extension from the task it aggregates as each
+// item arrives, and a2a only merges task status update metadata into that task.
+// Marking the final update alone would leave everything before it, up to and
+// including the switch to input-required, read the legacy way.
+func TestA2ATaskCarriesADKExtensionMetaWhenStreaming(t *testing.T) {
+	t.Parallel()
+
+	inputRequestingAgent := newInputRequestingAgent(t, "agent-b", newLongRunningTool(t))
+	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun))
+	defer server.Close()
+	client := newA2AClient(t, server)
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Perform important task!"))
+	statusUpdates := 0
+	for event, err := range client.SendStreamingMessage(t.Context(), &a2a.SendMessageRequest{Message: msg}) {
+		if err != nil {
+			t.Fatalf("client.SendStreamingMessage() error = %v", err)
+		}
+		switch v := event.(type) {
+		case *a2a.Task:
+			assertADKExtensionMeta(t, "submitted task", v.Metadata)
+		case *a2a.TaskStatusUpdateEvent:
+			statusUpdates++
+			assertADKExtensionMeta(t, fmt.Sprintf("status update %d (%s)", statusUpdates, v.Status.State), v.Metadata)
+		}
+	}
+	if statusUpdates == 0 {
+		t.Fatal("client.SendStreamingMessage() produced no task status updates, want at least one")
 	}
 }
 

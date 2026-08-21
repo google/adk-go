@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package session provides types to manage user sessions and their states.
 package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
+	"math"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -95,11 +99,11 @@ type Event struct {
 	model.LLMResponse
 
 	// Set by storage
-	ID        string
-	Timestamp time.Time
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
 
 	// Set by agent.Context implementation.
-	InvocationID string
+	InvocationID string `json:"invocationId"`
 	// The branch of the event.
 	//
 	// The format is like agent_1.agent_2.agent_3, where agent_1 is
@@ -107,23 +111,23 @@ type Event struct {
 	//
 	// Branch is used when multiple sub-agent shouldn't see their peer agents'
 	// conversation history.
-	Branch string
+	Branch string `json:"branch,omitempty"`
 	// IsolationScope, when set, restricts which agent contexts include this
 	// event in LLM prompt history: an event is visible only when
 	// event.IsolationScope equals the agent's isolation scope (exact match;
 	// empty sees only empty). Empty for non-scoped events.
 	IsolationScope string `json:"isolationScope,omitempty"`
 	// Author is the name of the event's author
-	Author string
+	Author string `json:"author"`
 
 	// The actions taken by the agent.
-	Actions EventActions
+	Actions EventActions `json:"actions"`
 	// Set of IDs of the long running function calls.
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
-	LongRunningToolIDs []string
+	LongRunningToolIDs []string `json:"longRunningToolIds,omitempty"`
 	// Routing information for workflow execution
-	Routes []string
+	Routes []string `json:"routes,omitempty"`
 	// RequestedInput, when non-nil, signals that the workflow node
 	// emitting this event is asking for human input and is about to
 	// pause. The workflow scheduler observes this field at event
@@ -132,10 +136,10 @@ type Event struct {
 	// the same field to render the prompt.
 	//
 	// At most one event per node activation may carry this field.
-	RequestedInput *RequestInput
+	RequestedInput *RequestInput `json:"requestedInput,omitempty"`
 
 	// Output is the generic data output from a workflow node.
-	Output any
+	Output any `json:"output,omitempty"`
 
 	// NodeInfo carries workflow-node metadata for events emitted
 	// inside a workflow. Nil for non-workflow events.
@@ -210,7 +214,7 @@ type RequestInput struct {
 // Note: when multiple agents participate in one invocation, there could be
 // multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
-	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
+	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
 
@@ -235,21 +239,66 @@ func NewEvent(ctx context.Context, invocationID string) *Event {
 // EventActions represent the actions attached to an event.
 type EventActions struct {
 	// Set by agent.Context implementation.
-	StateDelta map[string]any
+	StateDelta map[string]any `json:"stateDelta"`
 
 	// Indicates that the event is updating an artifact. key is the filename,
 	// value is the version.
-	ArtifactDelta map[string]int64
+	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
-	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation
+	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.
-	SkipSummarization bool
+	SkipSummarization bool `json:"skipSummarization,omitempty"`
 	// If set, the event transfers to the specified agent.
-	TransferToAgent string
+	TransferToAgent string `json:"transferToAgent,omitempty"`
 	// The agent is escalating to a higher level agent.
-	Escalate bool
+	Escalate bool `json:"escalate,omitempty"`
+}
+
+// MarshalJSON omits StateDelta and ArtifactDelta when they are nil and writes
+// an empty object when they are allocated but empty.
+//
+// The two cases have to stay distinguishable, and neither `omitempty` nor a
+// plain tag manages it. A map tagged `omitempty` is dropped whenever its
+// length is zero, which loses the difference: NewEvent allocates both maps and
+// callers write into them without a nil check, so an allocated-but-empty map
+// that decodes back as nil panics on the first write. Leaving the tag bare
+// keeps the difference but encodes a nil map as `null`, which adk-python
+// rejects -- both fields are non-Optional dicts there, so the whole
+// EventActions fails to validate ("Input should be an object", type=dict_type)
+// and takes the event with it.
+//
+// Omitting the key is the third option and the only one that satisfies both:
+// adk-python fills an absent key from the field's default factory, and Go
+// decodes it back to nil, so nil stays nil and empty stays empty in either
+// runtime. The shadowing pointer fields below express that -- `omitempty` on a
+// pointer keys off the pointer being nil, not the length of what it points to.
+func (a EventActions) MarshalJSON() ([]byte, error) {
+	// alias strips this method, so json does not recurse into it. The two
+	// pointer fields sit at depth 0 and shadow the promoted ones at depth 1,
+	// which is how encoding/json resolves a name collision; embedding rather
+	// than restating the struct keeps fields added upstream from being
+	// silently dropped here.
+	type alias EventActions
+	return json.Marshal(struct {
+		alias
+		StateDelta    *map[string]any   `json:"stateDelta,omitempty"`
+		ArtifactDelta *map[string]int64 `json:"artifactDelta,omitempty"`
+	}{
+		alias:         alias(a),
+		StateDelta:    nilOrRef(a.StateDelta),
+		ArtifactDelta: nilOrRef(a.ArtifactDelta),
+	})
+}
+
+// nilOrRef returns nil for a nil map and a pointer to m otherwise, turning
+// "is this map allocated" into something `omitempty` can act on.
+func nilOrRef[M ~map[K]V, K comparable, V any](m M) *M {
+	if m == nil {
+		return nil
+	}
+	return &m
 }
 
 // Prefixes for defining session's state scopes
@@ -302,4 +351,90 @@ func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	}
 	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
 	return lastPart.CodeExecutionResult != nil
+}
+
+// Bounds on a decoded numeric event timestamp, in microseconds: years 1 and
+// 9999. Wide enough for any real event time, narrow enough that a value in the
+// wrong unit falls outside.
+const (
+	minTimestampMicros = -62135596800 * 1e6
+	maxTimestampMicros = 253402300799 * 1e6
+)
+
+// UnmarshalJSON decodes an Event, accepting the timestamp either as an RFC
+// 3339 string (this package's own encoding) or as a JSON number of epoch
+// seconds. The numeric form is what adk-python emits, since its Event
+// timestamp is a float; without this an Event serialized by another ADK
+// runtime fails to decode part-way through, leaving the fields after the
+// timestamp unset.
+//
+// Numeric timestamps are resolved to microseconds, matching the resolution of
+// Python's datetime. float64 cannot represent epoch seconds to nanosecond
+// precision, so a finer value would only encode rounding noise.
+func (e *Event) UnmarshalJSON(b []byte) error {
+	if err := e.unmarshalJSON(b); err != nil {
+		return err
+	}
+	// adk-python's node_info field is not Optional, and it dumps with
+	// exclude_none, so every event it writes carries a nodeInfo object even
+	// for non-workflow events. Decoding that yields a non-nil pointer to an
+	// empty NodeInfo, which contradicts the documented invariant above that a
+	// nil NodeInfo means the event did not come from a workflow -- readers
+	// test the pointer, not its contents. An all-zero NodeInfo carries no
+	// information, so it is indistinguishable from absent.
+	if ni := e.NodeInfo; ni != nil && ni.Path == "" && !ni.MessageAsOutput && len(ni.OutputFor) == 0 {
+		e.NodeInfo = nil
+	}
+	return nil
+}
+
+func (e *Event) unmarshalJSON(b []byte) error {
+	type alias Event // strips methods, so json does not recurse into this one
+
+	// Fast path: a timestamp this package wrote decodes directly, so reading
+	// back our own events does not pay for the retry below. An event sourced
+	// from adk-python carries a numeric timestamp and always takes the retry,
+	// so this is a fast path for one writer, not for every read.
+	before := *e
+	if err := json.Unmarshal(b, (*alias)(e)); err == nil {
+		return nil
+	}
+
+	// Something did not decode. Retry with the timestamp held back, since that
+	// is the field that legitimately differs between ADK runtimes. Restore the
+	// original value first: the failed attempt may have partly overwritten it,
+	// and decoding into an already-populated Event leaves absent fields alone.
+	*e = before
+	aux := struct {
+		Timestamp json.RawMessage `json:"timestamp"`
+		*alias
+	}{alias: (*alias)(e)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if len(aux.Timestamp) == 0 || string(aux.Timestamp) == "null" {
+		return nil
+	}
+	if aux.Timestamp[0] == '"' {
+		if err := e.Timestamp.UnmarshalJSON(aux.Timestamp); err != nil {
+			return fmt.Errorf("session: decoding event timestamp %s: %w", aux.Timestamp, err)
+		}
+		return nil
+	}
+	var secs float64
+	if err := json.Unmarshal(aux.Timestamp, &secs); err != nil {
+		return fmt.Errorf("session: decoding event timestamp %s: %w", aux.Timestamp, err)
+	}
+	micros := math.Round(secs * 1e6)
+	// Reject anything outside the calendar. Two things land here: a float64 too
+	// large for an int64, whose conversion is implementation-defined and
+	// saturates silently while losing the sign; and a value in the wrong unit,
+	// where epoch milliseconds read as seconds gives a decodable, wrong-looking
+	// instant tens of thousands of years out. Both are better as errors than as
+	// an event that sorts into the far future.
+	if math.IsNaN(micros) || micros < minTimestampMicros || micros > maxTimestampMicros {
+		return fmt.Errorf("session: event timestamp %s is not a plausible date", aux.Timestamp)
+	}
+	e.Timestamp = time.UnixMicro(int64(micros)).UTC()
+	return nil
 }
