@@ -772,3 +772,61 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 		t.Errorf("status multiset = {Error:%d, Unset:%d}, want {Error:1, Unset:1}", errCount, unsetCount)
 	}
 }
+
+func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
+	const nItems = 5
+	var started int32
+
+	wrapped := NewFunctionNode("slow_or_fail", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			return 0, errors.New("error 0")
+		}
+		atomic.AddInt32(&started, 1)
+		time.Sleep(50 * time.Millisecond)
+		return input, nil
+	}, defaultNodeConfig)
+
+	// maxConcurrency=1 forces every item after the first to wait on the
+	// dispatch loop's semaphore, which is exactly the path where fail-fast
+	// cancellation must reach still-undispatched items.
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockCtx := newMockCtx(t)
+	exCtx := agent.NewContext(mockCtx)
+	input := []any{0, 1, 2, 3, 4}
+
+	var gotErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, err := range pw.Run(exCtx, input) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for execution to complete")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotErr.Error() != "error 0" {
+		t.Errorf("expected error 'error 0', got %v", gotErr)
+	}
+
+	// The item at index 0 fails immediately, before any other item has a
+	// chance to run under maxConcurrency=1. Fail-fast cancellation should
+	// stop the remaining items from ever being dispatched, so well under
+	// nItems-1 of them should have started.
+	if got := atomic.LoadInt32(&started); got >= nItems-1 {
+		t.Errorf("started = %d, want well under %d (fail-fast should stop dispatch of items still waiting on the semaphore)", got, nItems-1)
+	}
+}
