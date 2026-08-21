@@ -1,15 +1,15 @@
 # Agent Registry examples
 
-Runnable samples for the **Google Cloud Agent Registry** client (`google.golang.org/adk/v2/agentregistry`) — a governed catalog of A2A agents, MCP servers, and model endpoints. One sample browses the catalog; the other builds an agent out of what it finds.
+Runnable samples for the **Google Cloud Agent Registry** client (`google.golang.org/adk/v2/agentregistry`) — a governed catalog of A2A agents, MCP servers, and model endpoints. One browses the catalog, one builds an agent out of what it finds, one publishes an agent and reaches it back through the catalog.
 
 Every example has its own README with a Mermaid diagram, a goal, run instructions, and an example session.
 
 ## Prerequisites
 
-Both samples talk to the real `agentregistry.googleapis.com`. You need:
+All three samples talk to the real `agentregistry.googleapis.com`. You need:
 
 - a project with the Agent Registry API enabled,
-- `roles/agentregistry.viewer` on it (reading is enough here — without it every call fails with `403 PERMISSION_DENIED`),
+- `roles/agentregistry.viewer` on it — enough for `discover` and `bind`; `a2a` also registers a `Service`, so it needs create and delete permission on top. Without the read role every call fails with `403 PERMISSION_DENIED`,
 - Application Default Credentials.
 
 ```bash
@@ -41,7 +41,7 @@ denied on resource '//agentregistry.googleapis.com/projects/some-other-project/l
 Grant roles/agentregistry.viewer on this project, or point GOOGLE_CLOUD_PROJECT at one where you have it.
 ```
 
-The message names the exact permission and resource; either grant it or set `GOOGLE_CLOUD_PROJECT` for the run. Both samples condense the API's error envelope like this by unwrapping `*agentregistry.APIError` — see `explain` in either `main.go`.
+The message names the exact permission and resource; either grant it or set `GOOGLE_CLOUD_PROJECT` for the run. All three samples condense the API's error envelope like this by unwrapping `*agentregistry.APIError` — see `explain` in any `main.go`.
 
 ## Examples
 
@@ -49,8 +49,9 @@ The message names the exact permission and resource; either grant it or set `GOO
 |---|---|---|
 | [`discover`](./discover) | Browse the catalog: `AllAgents` / `AllMCPServers` / `AllEndpoints` with a server-side filter and automatic paging | No |
 | [`bind`](./bind) | Bind an agent to a *capability*: find the MCP server that declares the tool you need, then `MCPToolset` it | Yes |
+| [`a2a`](./a2a) | Publish an agent of your own, resolve it back with `RemoteAgent`, and talk to it over A2A | No |
 
-Start with `discover` to see what your project has; `bind` then needs no resource names at all.
+Start with `discover` to see what your project has; `bind` then needs no resource names at all. `a2a` is the only one that registers anything, and it is the only place `RemoteAgent` is exercised.
 
 ## How the pieces fit
 
@@ -76,25 +77,9 @@ The dotted line is the point of the whole thing: **the registry is a catalog, ne
 
 ## Registering your own agent
 
-The registry's write surface is the `Service` resource. You create a `Service`; the registry *projects* read-only `Agent` and `McpServer` resources from it — those are what the client reads, and they carry generated IDs like `agentregistry-00000000-0000-0000-630f-070a9d06e171`, not the ID you chose. Get the projected name from `services describe`:
+The registry's write surface is the `Service` resource. You create a `Service`; the registry *projects* read-only `Agent` and `McpServer` resources from it — those are what the client reads, and they carry generated IDs like `agentregistry-00000000-0000-0000-630f-070a9d06e171`, not the ID you chose, so read the projected name back with `services describe --format='value(registryResource)'`.
 
-```bash
-gcloud agent-registry services create my-agent \
-  --location=global --project=$GOOGLE_CLOUD_PROJECT --billing-project=$GOOGLE_CLOUD_PROJECT \
-  --display-name="My Agent" \
-  --agent-spec-type=a2a-agent-card \
-  --agent-spec-content="$(cat agent-card.json)"
-
-gcloud agent-registry services describe my-agent \
-  --location=global --project=$GOOGLE_CLOUD_PROJECT --billing-project=$GOOGLE_CLOUD_PROJECT \
-  --format='value(registryResource)'
-```
-
-Three traps worth knowing before you spend an afternoon on them:
-
-- **Use `--agent-spec-type=a2a-agent-card`, not `no-spec`.** `a2a-agent-card` embeds the card `RemoteAgent` reads. `no-spec` leaves the record with neither a card nor an `A2A_AGENT` protocol, so resolution falls through to the protocol lookup and fails with `A2A connection URI not found`.
-- **The card's `skills` must be non-empty**, each with `id`/`name`/`description`/`tags`, or the create call is rejected.
-- **The card's `protocolBinding` must match how your server actually serves** — `HTTP+JSON` for `a2asrv.NewRESTHandler`, `JSONRPC` for `a2asrv.NewJSONRPCHandler`. A mismatch only shows up as an empty reply at the first message. (The registry stores the binding as `HTTP_JSON`; the client maps that to A2A's `HTTP+JSON`. Both spellings are correct in their own domain.)
+The [`a2a`](./a2a) sample walks the whole loop with a working card, and its notes cover the traps that cost the most time: `a2a-agent-card` versus `no-spec`, the non-empty `skills` requirement, and keeping the card's `protocolBinding` in step with the handler you serve. Registering is also the one thing here that needs more than the viewer role.
 
 ## Core concepts at a glance
 
