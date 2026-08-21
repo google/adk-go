@@ -54,6 +54,9 @@ type Config struct {
 // Client is a client for the Google Cloud Agent Registry.
 type Client struct {
 	requester requester
+	// httpClient is the client used for registry calls; the factory helpers
+	// reuse it for egress to *.googleapis.com endpoints (parity with adk-python).
+	httpClient *http.Client
 }
 
 // New creates a [Client]. By default it authenticates to
@@ -106,6 +109,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 			basePath:    fmt.Sprintf("projects/%s/locations/%s", cfg.ProjectID, cfg.Location),
 			userProject: quotaProject,
 		},
+		httpClient: httpClient,
 	}, nil
 }
 

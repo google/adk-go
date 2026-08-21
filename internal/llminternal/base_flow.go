@@ -370,6 +370,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			eventsChan := make(chan *session.Event)
+			// Producers must guard sends with connCtx: once a reconnect (or any
+			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
+			// what unblocks them (issue #1152).
 			errChan := make(chan error)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
@@ -377,6 +380,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err)
 					sess.pushError(err)
+					// cleanup, not a bare return: genai dials the live socket
+					// with a context-less websocket.DefaultDialer.Dial, and
+					// nothing in the SDK watches a context, so only an explicit
+					// Close releases it. Returning without cleanup strands the
+					// connection for the life of the process.
+					cleanup()
 					return
 				}
 			}
@@ -386,7 +395,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
-						errChan <- err
+						select {
+						case errChan <- err:
+						case <-connCtx.Done():
+						}
 						return
 					}
 					if resp != nil {
@@ -427,7 +439,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -436,7 +451,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -525,6 +543,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						break // Break the select
 					}
 					sess.pushError(err)
+					cleanup()
+					return
+				case <-sess.done:
 					cleanup()
 					return
 				case <-ctx.Done():
@@ -778,7 +799,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		// Streaming mode comes from the invocation context's RunConfig rather than
+		// the runconfig context value: agent.Run() may be invoked directly (outside
+		// the runner), in which case no runconfig is stored in the Go context and
+		// runconfig.FromContext returns nil (issue #586).
+		useStream := false
+		if rc := ctx.RunConfig(); rc != nil {
+			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {

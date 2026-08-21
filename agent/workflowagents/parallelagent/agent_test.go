@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,6 +234,112 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 				},
 			}, nil)
 		}
+	}
+}
+
+// TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop verifies that when the
+// consumer stops early, Run does not return until every sub-agent goroutine has
+// finished its deferred teardown. Otherwise teardown can outlive the run and
+// touch an already-ended context.
+func TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	const numSubAgents = 3
+	// Each sub-agent teardown announces it began (buffered so it never blocks) and
+	// then blocks on releaseTeardown, so the test can prove Run waits for teardown
+	// without relying on wall-clock timing.
+	teardownStarted := make(chan struct{}, numSubAgents)
+	releaseTeardown := make(chan struct{})
+	var teardownFinished atomic.Int32
+
+	var subAgents []agent.Agent
+	for i := 1; i <= numSubAgents; i++ {
+		subAgents = append(subAgents, must(agent.New(agent.Config{
+			Name: fmt.Sprintf("sub%d", i),
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					defer func() {
+						teardownStarted <- struct{}{}
+						<-releaseTeardown
+						teardownFinished.Add(1)
+					}()
+					for {
+						if !yield(&session.Event{
+							LLMResponse: model.LLMResponse{
+								Content: genai.NewContentFromText(fmt.Sprintf("hello %d", i), genai.RoleModel),
+							},
+						}, nil) {
+							return
+						}
+					}
+				}
+			},
+		})))
+	}
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "test_agent",
+			SubAgents: subAgents,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentRunner, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             parallelAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runReturned := make(chan struct{})
+	go func() {
+		defer close(runReturned)
+		for _, err := range agentRunner.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Errorf("Run() yielded error: %v", err)
+			}
+			break // stop after the first event
+		}
+	}()
+
+	// Always release gated teardowns so no goroutine is left blocked, even if an
+	// assertion fails. Safe to call twice (same goroutine as the explicit release).
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(releaseTeardown)
+		}
+	}
+	defer release()
+
+	// Every sub-agent must reach teardown once the consumer stops early.
+	for range numSubAgents {
+		select {
+		case <-teardownStarted:
+		case <-runReturned:
+			t.Fatal("Run returned before all sub-agent teardowns started")
+		}
+	}
+
+	// Teardowns are now gated; Run must still be blocked waiting for them.
+	select {
+	case <-runReturned:
+		t.Fatal("Run returned while sub-agent teardowns were still in progress")
+	default:
+	}
+
+	release()
+	<-runReturned
+
+	if got := teardownFinished.Load(); got != numSubAgents {
+		t.Errorf("teardownFinished = %d, want %d", got, numSubAgents)
 	}
 }
 

@@ -41,8 +41,8 @@ func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return s.impl.RunLive(ctx)
 }
 
-// Use the SequentialAgent when you want the execution to occur in a fixed,
-// strict order.
+// New creates a SequentialAgent, which runs its sub-agents in a fixed, strict
+// order. Use it when you want the execution to occur sequentially.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
