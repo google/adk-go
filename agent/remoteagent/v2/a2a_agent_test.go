@@ -1435,3 +1435,68 @@ func TestRemoteAgent_PartConverter(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteAgent_AfterCallbackInvokedOnAggregatedEvent(t *testing.T) {
+	// Regression: AfterA2ARequestCallbacks must be invoked on the aggregated non-partial event
+	// synthesized from partial artifact chunks, not only on the individual chunk events.
+	var cbInvocations int
+	var sawNonPartialContent []string
+
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				artifactEvent := a2a.NewArtifactEvent(execCtx, a2a.NewTextPart("Hel"))
+				for _, ev := range []a2a.Event{
+					a2a.NewSubmittedTask(execCtx, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))),
+					artifactEvent,
+					a2a.NewArtifactUpdateEvent(execCtx, artifactEvent.Artifact.ID, a2a.NewTextPart("lo")),
+					a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil),
+				} {
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	}
+
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
+	}
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		AfterRequestCallbacks: []AfterA2ARequestCallback{
+			func(ctx agent.CallbackContext, req *a2a.SendMessageRequest, result *session.Event, err error) (*session.Event, error) {
+				cbInvocations++
+				if !result.Partial && !result.TurnComplete && result.Content != nil {
+					for _, p := range result.Content.Parts {
+						sawNonPartialContent = append(sawNonPartialContent, p.Text)
+					}
+				}
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("remoteagent.NewA2A() error = %v", err)
+	}
+
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	if _, err = runAndCollect(ictx, remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	// Expect 4 callback invocations: "Hel" (partial), "lo" (partial), aggregated "Hello" (non-partial), terminal.
+	if cbInvocations != 4 {
+		t.Errorf("callback invoked %d times, want 4", cbInvocations)
+	}
+	// The synthesized aggregated event must be received by the callback.
+	if diff := cmp.Diff([]string{"Hello"}, sawNonPartialContent); diff != "" {
+		t.Errorf("non-partial content seen by callback (-want +got):\n%s", diff)
+	}
+}
