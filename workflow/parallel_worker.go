@@ -112,16 +112,23 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			if sem != nil {
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
+				case <-workerCtx.Done():
 					wg.Done()
 					continue
+				}
+				select {
+				case <-workerCtx.Done():
+					<-sem
+					wg.Done()
+					continue
+				default:
 				}
 			}
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
 
 			itemCtx := workerCtx.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &itemBranch}})
-			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
+			go n.runWorker(itemCtx, i, item, sem, resCh, &wg, cancelFunc)
 		}
 
 		// Goroutine to close channel when all workers are done
@@ -166,7 +173,7 @@ type workerResult struct {
 	err   error
 }
 
-func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
+func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup, cancelFunc func()) {
 	defer wg.Done()
 	defer func() {
 		if sem != nil {
@@ -201,6 +208,7 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 		}
 
 		// Cannot retry or exhausted attempts
+		cancelFunc()
 		resCh <- workerResult{index: idx, err: runErr}
 		return
 	}
