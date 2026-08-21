@@ -16,6 +16,13 @@ Development happens on `main`, the 2.x line. `v1` is the maintenance branch for
 1.x; target it only for fixes that must ship to 1.x. See
 [Branches](CONTRIBUTING.md#branches).
 
+## Skills
+
+See [AI-assisted development](CONTRIBUTING.md#ai-assisted-development) in
+`CONTRIBUTING.md` for what this repo ships. The rule for agents: task-specific
+instructions live in `.agents/skills/<name>/SKILL.md`, and you read the matching
+one before starting that kind of work.
+
 ## Setup & core commands
 
 This repo is multi-module: the root module `google.golang.org/adk/v2` plus
