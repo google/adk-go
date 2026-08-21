@@ -189,16 +189,15 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		contents = append(contents, content)
 	}
 
-	// For scoped agents (task / single_turn), prepend a synthetic user
-	// content built from the originating FC's args. The FC lives in an
-	// UNSCOPED parent event (e.g. the coordinator's task-delegation FC)
-	// which the strict isolation filter above just excluded, so we
-	// re-derive it directly from the (pre-filter) events slice we were
-	// handed. This becomes the agent's first turn: "your task is X"
-	// instead of starting cold from the system instruction only.
-	if isolationScope != "" {
-		if leading := buildTaskInputUserContent(events, isolationScope, isSingleTurn, userContent); leading != nil {
-			contents = append([]*genai.Content{leading}, contents...)
+	// For scoped agents (task / single_turn) or single_turn agents with UserContent,
+	// prepend a synthetic user content built from the originating FC's args or UserContent.
+	// This becomes the agent's first turn: "your task is X" instead of starting cold
+	// from the system instruction only.
+	if isolationScope != "" || (isSingleTurn && userContent != nil && len(userContent.Parts) > 0) {
+		if len(contents) == 0 || contents[0].Role != genai.RoleUser {
+			if leading := buildTaskInputUserContent(events, isolationScope, isSingleTurn, userContent); leading != nil {
+				contents = append([]*genai.Content{leading}, contents...)
+			}
 		}
 	}
 	return contents, nil
@@ -533,6 +532,9 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		if branch != "" && event.Branch != branch {
+			continue
+		}
 		// Events from a sibling branch are not part of this agent's
 		// current turn. In parallel delegations, a sibling may append its
 		// response after this agent's user input; treating that response as
@@ -546,17 +548,72 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if event.IsolationScope != isolationScope {
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
+		if isTurnStartEvent(agentName, event) {
 			return buildContentsDefault(agentName, branch, isolationScope, events[i:], isSingleTurn, userContent)
 		}
 	}
-	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
-	// but that may be a bug.
+	if userContent != nil && len(userContent.Parts) > 0 {
+		startIdx := 0
+		for i := len(events) - 1; i >= 0; i-- {
+			e := events[i]
+			if (branch != "" && e.Branch != branch) || (isolationScope != "" && e.IsolationScope != isolationScope) || (e.Author == "user" && !hasFunctionResponse(e)) || isOtherAgentReply(agentName, e) {
+				startIdx = i + 1
+				break
+			}
+		}
+		var branchEvents []*session.Event
+		if startIdx < len(events) {
+			for _, e := range events[startIdx:] {
+				if branch != "" && e.Branch != branch {
+					continue
+				}
+				if isolationScope != "" && e.IsolationScope != isolationScope {
+					continue
+				}
+				branchEvents = append(branchEvents, e)
+			}
+		}
+		return buildContentsDefault(agentName, branch, isolationScope, branchEvents, isSingleTurn, userContent)
+	}
 	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
 }
 
+func isTurnStartEvent(agentName string, ev *session.Event) bool {
+	if hasFunctionResponse(ev) {
+		return false
+	}
+	if ev.Author == "user" {
+		return true
+	}
+	return isOtherAgentReply(agentName, ev)
+}
+
+func hasFunctionResponse(ev *session.Event) bool {
+	content := utils.Content(ev)
+	if content == nil {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
-	return ev.Author != currentAgentName && ev.Author != "user"
+	if ev.Author == currentAgentName || ev.Author == "user" {
+		return false
+	}
+	content := utils.Content(ev)
+	if content != nil {
+		for _, p := range content.Parts {
+			if p != nil && p.FunctionCall != nil && p.FunctionCall.Name == currentAgentName {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ConvertForeignEvent converts an event authored by another agent as
@@ -635,7 +692,7 @@ func shouldExcludeEvent(ev *session.Event) bool {
 }
 
 // SingleTurnNudge is appended as a second user-content text part for
-// single_turn agents.
+// single_turn agents when derived from task-delegation FC args without explicit UserContent.
 const SingleTurnNudge = "Important: You will not receive any user replies or clarifications." +
 	" Complete the task using only the information provided above."
 
@@ -654,51 +711,45 @@ const SingleTurnNudge = "Important: You will not receive any user replies or cla
 // back to userContent (set on the InvocationContext by the wrapper to
 // the rendered node input). Returns nil if neither source yields
 // content.
-//
-// When isSingleTurn is true, appends singleTurnNudge as an additional
-// user-content text part.
 func buildTaskInputUserContent(events []*session.Event, isolationScope string, isSingleTurn bool, userContent *genai.Content) *genai.Content {
-	if isolationScope == "" {
-		return nil
+	if userContent != nil && len(userContent.Parts) > 0 {
+		parts := make([]*genai.Part, 0, len(userContent.Parts))
+		parts = append(parts, userContent.Parts...)
+		return &genai.Content{Role: genai.RoleUser, Parts: parts}
 	}
-	for _, ev := range events {
-		content := utils.Content(ev)
-		if content == nil || len(content.Parts) == 0 {
-			continue
-		}
-		for _, p := range content.Parts {
-			if p == nil || p.FunctionCall == nil {
+
+	if isolationScope != "" {
+		for _, ev := range events {
+			content := utils.Content(ev)
+			if content == nil || len(content.Parts) == 0 {
 				continue
 			}
-			fc := p.FunctionCall
-			if fc.ID != isolationScope || len(fc.Args) == 0 {
-				continue
+			for _, p := range content.Parts {
+				if p == nil || p.FunctionCall == nil {
+					continue
+				}
+				fc := p.FunctionCall
+				if fc.ID != isolationScope || len(fc.Args) == 0 {
+					continue
+				}
+				// Render args as JSON — the same shape an LLM would emit.
+				text, err := json.Marshal(fc.Args)
+				var argText string
+				if err != nil {
+					argText = fmt.Sprint(fc.Args)
+				} else {
+					argText = string(text)
+				}
+				parts := []*genai.Part{{Text: argText}}
+				if isSingleTurn {
+					parts = append(parts, &genai.Part{Text: SingleTurnNudge})
+				}
+				return &genai.Content{Role: genai.RoleUser, Parts: parts}
 			}
-			// Render args as JSON — the same shape an LLM would emit.
-			text, err := json.Marshal(fc.Args)
-			var argText string
-			if err != nil {
-				argText = fmt.Sprint(fc.Args)
-			} else {
-				argText = string(text)
-			}
-			parts := []*genai.Part{{Text: argText}}
-			if isSingleTurn {
-				parts = append(parts, &genai.Part{Text: SingleTurnNudge})
-			}
-			return &genai.Content{Role: genai.RoleUser, Parts: parts}
 		}
 	}
 
-	if userContent == nil || len(userContent.Parts) == 0 {
-		return nil
-	}
-	parts := make([]*genai.Part, 0, len(userContent.Parts)+1)
-	parts = append(parts, userContent.Parts...)
-	if isSingleTurn {
-		parts = append(parts, &genai.Part{Text: SingleTurnNudge})
-	}
-	return &genai.Content{Role: genai.RoleUser, Parts: parts}
+	return nil
 }
 
 func cloneEvent(e *session.Event) *session.Event {
