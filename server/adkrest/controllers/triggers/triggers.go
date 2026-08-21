@@ -50,6 +50,12 @@ type RetriableRunner struct {
 
 // RunAgent runs the agent for the given message and returns the resulting events.
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
+	userID = strings.ReplaceAll(strings.Trim(userID, "/"), "/", "--")
+
+	if userID == "" {
+		return nil, fmt.Errorf("user id cannot be empty")
+	}
+
 	// Each retry = new session
 	sessReq := &session.CreateRequest{
 		AppName: appName,
