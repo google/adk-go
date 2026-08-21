@@ -616,3 +616,40 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildOpenAIParams_AssistantOutputText(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("hello", genai.RoleUser),
+			genai.NewContentFromText("hi there!", genai.RoleModel),
+			genai.NewContentFromText("how are you?", genai.RoleUser),
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	// Item 0: user (message)
+	if items[0].OfMessage == nil {
+		t.Fatalf("item 0 should be OfMessage")
+	}
+	// Item 1: assistant (output message with output_text)
+	if items[1].OfOutputMessage == nil {
+		t.Fatalf("item 1 (assistant turn) should be OfOutputMessage, got %+v", items[1])
+	}
+	outParts := items[1].OfOutputMessage.Content
+	if len(outParts) != 1 || outParts[0].OfOutputText == nil {
+		t.Fatalf("unexpected assistant output content: %+v", outParts)
+	}
+	if got, want := outParts[0].OfOutputText.Text, "hi there!"; got != want {
+		t.Fatalf("assistant text mismatch got=%q want=%q", got, want)
+	}
+	// Item 2: user (message)
+	if items[2].OfMessage == nil {
+		t.Fatalf("item 2 should be OfMessage")
+	}
+}
