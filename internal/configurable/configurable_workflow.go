@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -200,14 +199,16 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 	isYAML := strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml")
 
 	if isYAML {
-		targetPath := ref
-		if !filepath.IsAbs(ref) {
-			targetPath = filepath.Join(filepath.Dir(parentPath), ref)
-		}
+		// Containment is checked here, before the file is read and before the
+		// node cache is consulted, so a reference escaping the parent config's
+		// directory never reaches os.ReadFile. The FunctionNode, JoinNode and
+		// ToolNode branches of resolveNodeFromYAML all return before its
+		// fall-through call to ResolveAgentReference, so this is their only
+		// containment check.
 		var err error
-		absPath, err = filepath.Abs(targetPath)
+		absPath, err = resolveContainedConfigPath(parentPath, ref)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+			return nil, err
 		}
 		cacheKey = absPath
 	} else {
