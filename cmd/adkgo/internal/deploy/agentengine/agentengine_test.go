@@ -40,6 +40,8 @@ func TestGoVersionFromModFile(t *testing.T) {
 			want: "1.26.5",
 		},
 		{"no go directive", "module x\n", ""},
+		{"strips trailing line comment", "module x\n\ngo 1.26.5 // pinned by platform team\n", "1.26.5"},
+		{"rejects malformed version", "module x\n\ngo 1abc\n", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,5 +81,18 @@ func TestPrepareDockerfile_UsesGoModVersion(t *testing.T) {
 	}
 	if strings.Contains(string(content), "golang:1.25") {
 		t.Errorf("Dockerfile still hardcodes golang:1.25:\n%s", content)
+	}
+	if !strings.Contains(string(content), "ENV GOTOOLCHAIN=auto") {
+		t.Errorf("Dockerfile is missing the GOTOOLCHAIN=auto safety net:\n%s", content)
+	}
+}
+
+// TestDefaultBuilderGoVersionIsNotPinned guards that the last-resort tag stays a
+// rolling tag. A pinned version here would silently rot exactly like the
+// hardcoded tag this change removed, so it must never be reintroduced.
+func TestDefaultBuilderGoVersionIsNotPinned(t *testing.T) {
+	if isGoVersion(defaultBuilderGoVersion) {
+		t.Errorf("defaultBuilderGoVersion = %q pins a version; use a rolling tag such as %q",
+			defaultBuilderGoVersion, "latest")
 	}
 }
