@@ -61,6 +61,12 @@ type Config struct {
 	// Injected logger.
 	Logger Logger
 
+	// GCS bucket name for offloading large text/binary content
+	GCSBucketName string
+
+	// BigQuery connection ID for ObjectRef secure external access (location.connection_id)
+	ConnectionID string
+
 	// Retry configuration for appending rows.
 	RetryConfig RetryConfig
 }
@@ -86,5 +92,7 @@ func DefaultConfig() Config {
 			MaxDelay:     10 * time.Second,
 			Multiplier:   2.0,
 		},
+		GCSBucketName: "",
+		ConnectionID:  "",
 	}
 }
