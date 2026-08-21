@@ -15,6 +15,7 @@
 package database
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,60 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	if ev.IsolationScope != "task-1" {
 		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
+	}
+}
+
+// TestDatabaseService_AppendEvent_StaleErrorFormatsTimestamps guards that the
+// stale-session error renders human-readable wall-clock timestamps rather than
+// ~1970 dates. The values compared are UnixMicro() microseconds, so formatting
+// them via time.Unix(0, x) (whose second arg is nanoseconds) is off by 1000x
+// and collapses every real timestamp to 1970-01-2x. See issue #1170.
+func TestDatabaseService_AppendEvent_StaleErrorFormatsTimestamps(t *testing.T) {
+	s := emptyService(t)
+
+	t0 := time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC)
+	createCtx := platform.WithTimeProvider(t.Context(), func() time.Time { return t0 })
+
+	created, err := s.Create(createCtx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A second, independent handle on the same session — still pinned at t0.
+	got, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	staleHandle := got.Session
+
+	// Advance the stored session past t0 by appending through the fresh handle.
+	t1 := time.Date(2026, time.July, 17, 11, 0, 0, 0, time.UTC)
+	if err := s.AppendEvent(t.Context(), created.Session, &session.Event{ID: "e1", Author: "agent", Timestamp: t1}); err != nil {
+		t.Fatalf("AppendEvent (fresh handle): %v", err)
+	}
+
+	// Appending through the stale handle (updatedAt == t0 < stored t1) must fail.
+	err = s.AppendEvent(t.Context(), staleHandle, &session.Event{ID: "e2", Author: "agent", Timestamp: t1})
+	if err == nil {
+		t.Fatal("AppendEvent through stale handle: got nil error, want stale session error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "stale session error") {
+		t.Fatalf("error = %q, want a stale session error", msg)
+	}
+	if strings.Contains(msg, "1970") {
+		t.Errorf("stale error still renders a 1970 timestamp (UnixMicro passed to time.Unix nsec arg): %q", msg)
+	}
+	// Mirror the exact formatting the code uses (UnixMicro -> local time ->
+	// RFC3339Nano) so the assertion is timezone-independent. The request side
+	// is the stale handle's t0; the database side is the advanced t1.
+	wantRequest := time.UnixMicro(t0.UnixMicro()).Format(time.RFC3339Nano)
+	wantDatabase := time.UnixMicro(t1.UnixMicro()).Format(time.RFC3339Nano)
+	if !strings.Contains(msg, wantRequest) {
+		t.Errorf("stale error missing request timestamp %q: %q", wantRequest, msg)
+	}
+	if !strings.Contains(msg, wantDatabase) {
+		t.Errorf("stale error missing database timestamp %q: %q", wantDatabase, msg)
 	}
 }
 
