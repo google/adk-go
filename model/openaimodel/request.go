@@ -159,6 +159,28 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 	if err != nil {
 		return nil, err
 	}
+	if msgRole == responses.EasyInputMessageRoleAssistant {
+		var content strings.Builder
+		for _, txt := range texts {
+			if strings.TrimSpace(txt) == "" {
+				continue
+			}
+			if content.Len() > 0 {
+				content.WriteByte('\n')
+			}
+			content.WriteString(txt)
+		}
+		if content.Len() == 0 {
+			return nil, nil
+		}
+		return &responses.EasyInputMessageParam{
+			Role: msgRole,
+			Type: responses.EasyInputMessageTypeMessage,
+			Content: responses.EasyInputMessageContentUnionParam{
+				OfString: param.NewOpt(content.String()),
+			},
+		}, nil
+	}
 	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
 	for _, txt := range texts {
 		if strings.TrimSpace(txt) == "" {
