@@ -163,6 +163,105 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 	}
 }
 
+func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
+	newEvent := func(id, text string) *session.Event {
+		return &session.Event{
+			ID:     id,
+			Author: "user1",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText(text, genai.RoleUser),
+			},
+		}
+	}
+
+	t.Run("events become searchable", func(t *testing.T) {
+		s := memory.InMemoryService()
+		err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+			AppName:   "app1",
+			UserID:    "user1",
+			SessionID: "sess1",
+			Events:    []*session.Event{newEvent("event1", "The quick brown fox")},
+		})
+		if err != nil {
+			t.Fatalf("AddEventsToMemory() error = %v", err)
+		}
+
+		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "fox"})
+		if err != nil {
+			t.Fatalf("SearchMemory() error = %v", err)
+		}
+		if len(got.Memories) != 1 || got.Memories[0].ID != "event1" {
+			t.Errorf("SearchMemory() = %+v, want a single match for event1", got.Memories)
+		}
+	})
+
+	t.Run("repeated calls with overlapping events are deduped by ID", func(t *testing.T) {
+		s := memory.InMemoryService()
+		req := &memory.AddEventsToMemoryRequest{
+			AppName:   "app1",
+			UserID:    "user1",
+			SessionID: "sess1",
+			Events:    []*session.Event{newEvent("event1", "The quick brown fox")},
+		}
+		if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+			t.Fatalf("AddEventsToMemory() [1] error = %v", err)
+		}
+		req.Events = []*session.Event{newEvent("event1", "The quick brown fox"), newEvent("event2", "jumps over the lazy dog")}
+		if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+			t.Fatalf("AddEventsToMemory() [2] error = %v", err)
+		}
+
+		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "fox dog"})
+		if err != nil {
+			t.Fatalf("SearchMemory() error = %v", err)
+		}
+		if len(got.Memories) != 2 {
+			t.Errorf("SearchMemory() = %+v, want 2 deduped memories", got.Memories)
+		}
+	})
+
+	t.Run("does not affect other sessions or users", func(t *testing.T) {
+		s := memory.InMemoryService()
+		if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+			AppName:   "app1",
+			UserID:    "user1",
+			SessionID: "sess1",
+			Events:    []*session.Event{newEvent("event1", "unique-marker-word")},
+		}); err != nil {
+			t.Fatalf("AddEventsToMemory() error = %v", err)
+		}
+
+		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app1", UserID: "user2", Query: "unique-marker-word"})
+		if err != nil {
+			t.Fatalf("SearchMemory() error = %v", err)
+		}
+		if len(got.Memories) != 0 {
+			t.Errorf("SearchMemory() leaked across users, got %+v", got.Memories)
+		}
+	})
+
+	t.Run("events without content are ignored", func(t *testing.T) {
+		s := memory.InMemoryService()
+		err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+			AppName:   "app1",
+			UserID:    "user1",
+			SessionID: "sess1",
+			Events:    []*session.Event{{ID: "event1", Author: "user1"}},
+		})
+		if err != nil {
+			t.Fatalf("AddEventsToMemory() error = %v", err)
+		}
+
+		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "anything"})
+		if err != nil {
+			t.Fatalf("SearchMemory() error = %v", err)
+		}
+		if len(got.Memories) != 0 {
+			t.Errorf("SearchMemory() = %+v, want no memories for a contentless event", got.Memories)
+		}
+	})
+}
+
 func makeSession(t *testing.T, appName, userID, sessionID string, events []*session.Event) session.Session {
 	t.Helper()
 
