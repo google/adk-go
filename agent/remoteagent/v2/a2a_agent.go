@@ -129,6 +129,22 @@ type A2AConfig struct {
 	// callbacks will be skipped.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
+	// AllowTransferToAgent controls whether a transfer_to_agent value set by
+	// the remote A2A peer in its response metadata is honored by the local
+	// orchestrator.
+	//
+	// TransferToAgent drives which agent runs next within the caller's own
+	// configured multi-agent tree, so accepting it from a remote peer lets
+	// that peer redirect the local orchestrator's control flow. This
+	// defaults to false (the peer-supplied value is redacted) so that
+	// connecting to an agent you do not fully trust is safe by default. Set
+	// this to true only for closed, trusted deployments that rely on the
+	// remote peer being able to select the next local agent.
+	//
+	// This is applied uniformly after conversion, whether the default
+	// converter or a custom Converter is used.
+	AllowTransferToAgent bool
+
 	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
 	// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
 	// nil returns are considered intentionally dropped parts.
@@ -265,6 +281,15 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				event, err = cfg.Converter(ctx, req, a2aEvent, a2aErr)
 			} else {
 				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
+			}
+
+			// See toEventActions: TransferToAgent is restored here, after
+			// conversion, only when the caller has opted in via
+			// AllowTransferToAgent.
+			if err == nil && event != nil && a2aEvent != nil && cfg.AllowTransferToAgent {
+				if transferToAgent, ok := adka2a.TransferToAgentFromMeta(a2aEvent.Meta()); ok {
+					event.Actions.TransferToAgent = transferToAgent
+				}
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
