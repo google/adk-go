@@ -787,29 +787,57 @@ func (m *recordStreamModel) GenerateContent(_ context.Context, _ *model.LLMReque
 	return func(func(*model.LLMResponse, error) bool) {}
 }
 
-// TestCallLLMStreamingModeWithoutContextRunConfig guards against the nil pointer
-// dereference in callLLM when the run config is not present in the Go context
-// (issue #586). agent.Run() can be invoked directly, bypassing the runner, so
-// runconfig.FromContext returns nil; the streaming mode must instead be read
-// from the invocation context's RunConfig().
-func TestCallLLMStreamingModeWithoutContextRunConfig(t *testing.T) {
-	m := &recordStreamModel{}
-	f := &Flow{Model: m}
-
-	// No runconfig is stored in the Go context (as when the runner is bypassed),
-	// but the invocation context carries an SSE RunConfig.
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
-	})
-
-	req := &model.LLMRequest{}
-	for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
-		if err != nil {
-			t.Fatalf("callLLM() error = %v, want nil", err)
-		}
+// TestCallLLMStreamingModeFromRunConfig pins how callLLM derives the streaming
+// flag, including the nil case (issue #586).
+//
+// None of these store a runconfig in the Go context, as when agent.Run() is
+// invoked directly and the runner is bypassed, so runconfig.FromContext would
+// return nil; the streaming mode is read from the invocation context instead.
+// The nil RunConfig case is not hypothetical: RunLive builds its invocation
+// context without one, so that branch is reachable in production and has to
+// resolve to false rather than panic.
+func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		runConfig *agent.RunConfig
+		want      bool
+	}{
+		{
+			name:      "SSE streams",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			want:      true,
+		},
+		{
+			name:      "none does not stream",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+			want:      false,
+		},
+		{
+			name:      "nil run config does not stream",
+			runConfig: nil,
+			want:      false,
+		},
 	}
 
-	if !m.stream {
-		t.Errorf("GenerateContent received stream=%v, want true for SSE streaming mode", m.stream)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &recordStreamModel{}
+			f := &Flow{Model: m}
+
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				RunConfig: tc.runConfig,
+			})
+
+			req := &model.LLMRequest{}
+			for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() error = %v, want nil", err)
+				}
+			}
+
+			if m.stream != tc.want {
+				t.Errorf("GenerateContent received stream=%v, want %v", m.stream, tc.want)
+			}
+		})
 	}
 }
