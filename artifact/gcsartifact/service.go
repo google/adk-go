@@ -298,7 +298,7 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 	// Check if the blob exists before trying to read it
 	attrs, err := blob.attrs(ctx)
 	if err != nil {
-		if err == storage.ErrObjectNotExist {
+		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
 		}
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
@@ -474,7 +474,7 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 
 	attrs, err := blob.attrs(ctx)
 	if err != nil {
-		if err == storage.ErrObjectNotExist {
+		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
 		}
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
