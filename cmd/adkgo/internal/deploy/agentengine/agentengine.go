@@ -150,6 +150,17 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
 
+			// Both values are embedded in a Dockerfile RUN (shell-form)
+			// instruction, so they need the stricter shell-safe allowlist,
+			// not just the quote/newline blocklist used where a value only
+			// reaches a non-shell-form context (COPY path, CMD exec array).
+			if err := util.ValidateShellArgSafe(f.build.execFile, "entry point"); err != nil {
+				return err
+			}
+			if err := util.ValidateShellArgSafe(f.source.origEntryPointPath, "--entry_point_path"); err != nil {
+				return err
+			}
+
 			dateTimeString := time.Now().Format(time.RFC3339)
 			f.agentEngine.displayName = f.agentEngine.name
 			if f.agentEngine.displayName == "" {
