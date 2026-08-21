@@ -373,40 +373,72 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-// ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
+// resolveConfigReference turns a config-supplied reference into an absolute path
+// that is guaranteed to sit inside the referencing config's own directory.
+//
+// Absolute references are rejected outright, and a relative one must resolve
+// inside the parent directory. Both sides are made absolute before comparing,
+// and symlinks are resolved where the paths exist, so a symlink inside the agent
+// directory cannot be used to escape it. Where a path does not exist the lexical
+// path is used, so a missing file still reports as not found rather than as a
+// traversal.
+//
+// Every place that loads a nested YAML config from a reference must route
+// through here: the check is the trust boundary between the config being loaded
+// and the rest of the filesystem, and a second copy of it is a second place to
+// forget.
+func resolveConfigReference(parentPath, refPath string) (string, error) {
 	if refPath == "" {
-		return nil, fmt.Errorf("agent reference path cannot be empty")
+		return "", fmt.Errorf("config reference path cannot be empty")
 	}
 
-	if filepath.IsAbs(refPath) {
-		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
+	// IsAbs alone is not enough on Windows: a drive-relative reference such as
+	// `C:node.yaml` is not absolute, yet it escapes the parent directory by
+	// resolving against the current directory of that drive. VolumeName covers
+	// that and UNC paths, and is always empty on Unix.
+	if filepath.IsAbs(refPath) || filepath.VolumeName(refPath) != "" {
+		return "", fmt.Errorf("absolute paths are not allowed in config references: %s", refPath)
 	}
 
-	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
-
-	absPath, err := filepath.Abs(targetPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
-	}
-
-	// Prevent path traversal outside the parent agent's directory. Both sides are
-	// made absolute before comparing, and symlinks are resolved where the paths
-	// exist, so a symlink inside the agent directory cannot be used to escape it.
 	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
+		return "", fmt.Errorf("failed to resolve agent directory: %w", err)
 	}
+	// Resolve the parent directory BEFORE joining, so that both sides of the
+	// containment check are rooted in the same real path. Resolving only one
+	// side would reject a legitimate reference whenever the parent directory is
+	// reached through a symlink and the target does not exist yet — the target
+	// has no symlinks to resolve, so it would keep the unresolved spelling and
+	// fail the prefix test.
 	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
 		parentDir = resolved
 	}
+
+	// parentDir is absolute and Join cleans the result, so this is the absolute,
+	// lexically-normalized target path.
+	absPath := filepath.Join(parentDir, refPath)
+
+	// Resolve the target too, so a symlink inside the agent directory cannot be
+	// used to escape it. Where the target does not exist there is nothing to
+	// resolve and the lexical path stands, so a missing file reports as not found
+	// rather than as a traversal.
 	checkPath := absPath
 	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
 		checkPath = resolved
 	}
 	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
-		return nil, fmt.Errorf(
-			"path traversal detected: config_path %q resolves outside agent directory", refPath)
+		return "", fmt.Errorf(
+			"path traversal detected: config reference %q resolves outside agent directory", refPath)
+	}
+
+	return absPath, nil
+}
+
+// ResolveAgentReference builds an agent from a reference config.
+func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(parentPath, refPath)
+	if err != nil {
+		return nil, err
 	}
 
 	registryMu.RLock()
