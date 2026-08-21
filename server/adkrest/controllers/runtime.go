@@ -61,6 +61,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	}
 	var events []models.Event
 	for _, event := range sessionEvents {
+		if event == nil {
+			continue
+		}
 		events = append(events, models.FromSessionEvent(*event))
 	}
 	EncodeJSONResponse(events, http.StatusOK, rw)
@@ -378,6 +381,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			log.Printf("RunLive failed: %v\n", err)
 			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 			break
+		}
+		if event == nil {
+			continue
 		}
 
 		err = ws.WriteJSON(models.FromSessionEvent(*event))

@@ -638,3 +638,55 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 		})
 	}
 }
+
+func TestRunner_Run_GuardsNilEvents(t *testing.T) {
+	ctx := t.Context()
+	appName, userID, sessionID := "testApp", "user1", "sess1"
+	sessionService := session.InMemoryService()
+
+	testAgent, err := agent.New(agent.Config{
+		Name: "nil_event_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if !yield(nil, nil) {
+					return
+				}
+				ev := session.NewEvent(context.Background(), "inv1")
+				ev.Author = "agent"
+				ev.LLMResponse.Content = &genai.Content{Parts: []*genai.Part{{Text: "ok"}}}
+				if !yield(ev, nil) {
+					return
+				}
+				_ = yield(nil, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:           appName,
+		Agent:             testAgent,
+		SessionService:    sessionService,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	var events []*session.Event
+	for ev, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 non-nil event, got %d", len(events))
+	}
+}
