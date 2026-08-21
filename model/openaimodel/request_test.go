@@ -56,6 +56,40 @@ func TestBuildOpenAIParams_Text(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAIParams_AssistantHistory(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("first question", genai.RoleUser),
+			{
+				Role: string(genai.RoleModel),
+				Parts: []*genai.Part{
+					{Text: "first"},
+					{Text: "answer"},
+				},
+			},
+			genai.NewContentFromText("follow-up question", genai.RoleUser),
+		},
+	}
+	params, err := buildOpenAIParams("gpt-4o-mini", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 3 || items[1].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	message := items[1].OfMessage
+	if got, want := message.Role, responses.EasyInputMessageRoleAssistant; got != want {
+		t.Fatalf("assistant role got=%q want=%q", got, want)
+	}
+	if got, want := message.Content.OfString.Value, "first\nanswer"; got != want {
+		t.Fatalf("assistant content got=%q want=%q", got, want)
+	}
+	if !param.IsOmitted(message.Content.OfInputItemContentList) {
+		t.Fatalf("assistant content must be a string: %+v", message.Content)
+	}
+}
+
 func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
