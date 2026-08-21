@@ -175,7 +175,7 @@ func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
 }
 
 func TestAgentSessionLifecycle(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	testSessionService = session.InMemoryService()
 
 	// Setup Fake LLM
@@ -633,7 +633,7 @@ func TestToolCallbacksAgent(t *testing.T) {
 
 			// Check state for log activity
 			if len(tc.wantStateKeys) > 0 {
-				currentSession, err := service.Get(context.Background(), &session.GetRequest{
+				currentSession, err := service.Get(t.Context(), &session.GetRequest{
 					AppName:   "test_app",
 					UserID:    "test_user",
 					SessionID: sessionID,

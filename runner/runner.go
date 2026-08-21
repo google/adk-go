@@ -58,11 +58,14 @@ type Config struct {
 	AutoCreateSession bool
 }
 
+// PluginConfig configures the plugins a [Runner] applies and how long it waits
+// for them to close.
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
 }
 
+// RunOption customizes a single run invocation.
 type RunOption func(*runOptions)
 
 type runOptions struct {
@@ -119,6 +122,22 @@ func New(cfg Config) (*Runner, error) {
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
 	}, nil
+}
+
+// NewInMemory creates a [Runner] backed entirely by in-memory session,
+// artifact, and memory services, with session auto-creation enabled. It mirrors
+// adk-python's InMemoryRunner and is intended for local development and tests,
+// not production. Use [New] when you need to supply your own services or
+// plugins.
+func NewInMemory(appName string, a agent.Agent) (*Runner, error) {
+	return New(Config{
+		AppName:           appName,
+		Agent:             a,
+		SessionService:    session.InMemoryService(),
+		ArtifactService:   artifact.InMemoryService(),
+		MemoryService:     memory.InMemoryService(),
+		AutoCreateSession: true,
+	})
 }
 
 // Runner manages the execution of the agent within a session, handling message
@@ -399,6 +418,8 @@ func (s *closedLiveSession) Close() error {
 	return nil
 }
 
+// RunLive starts a live, bidirectional agent session, returning the session
+// and a stream of events from the agents.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	options := runOptions{}
 	for _, opt := range opts {

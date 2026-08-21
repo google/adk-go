@@ -23,13 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -446,7 +442,7 @@ func runNode(
 	defer wg.Done()
 
 	span, ctx := startNodeSpan(ctx, n)
-	defer span.End()
+	defer span.end()
 
 	// completion holds the final completionItem. It is sent in the
 	// outer defer so panic recovery, normal exit, and cancellation
@@ -456,14 +452,7 @@ func runNode(
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
 		}
-		// ErrNodeWaitingForOutput is a pause, not a failure: don't mark
-		// the span as errored.
-		if completion.err != nil &&
-			!errors.Is(completion.err, context.Canceled) &&
-			!errors.Is(completion.err, ErrNodeWaitingForOutput) {
-			span.RecordError(completion.err)
-			span.SetStatus(codes.Error, completion.err.Error())
-		}
+		span.recordError(completion.err, nil)
 		out <- completion
 	}()
 
@@ -509,6 +498,23 @@ func runNode(
 	}
 }
 
+// echoesCancellation reports whether err is the dying invocation
+// context reflected back by a node rather than a failure the node
+// determined for itself. runNode sets completion.err to ctx.Err() when
+// a node returns because its context died, so the echo takes three
+// shapes: the parent's own error (context.DeadlineExceeded for a
+// request timeout), its cause (set via context.WithCancelCause), or a
+// plain context.Canceled from the per-node cancel that cancelAll fires
+// in response — a node can observe that before the parent's deadline.
+//
+// Only meaningful once s.parentCtx has failed; context.Cause returns
+// nil for a live context and errors.Is(err, nil) is never true.
+func (s *scheduler) echoesCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, s.parentCtx.Err()) ||
+		errors.Is(err, context.Cause(s.parentCtx))
+}
+
 // cancelAll cancels every running task. Idempotent: cancelled
 // goroutines may still push events that already left the producer
 // before observing ctx.Done(); the consumer continues draining
@@ -546,6 +552,7 @@ func (s *scheduler) cancelAll() {
 // node-side accumulators.
 func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	var pendingErr error  // first non-nil node error; surfaced after drain
+	var cancelErr error   // cause of an external cancellation; surfaced only when no node reported an error
 	draining := false     // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
 	consumerGone := false // true once the caller broke the range loop; no further yield is allowed
 
@@ -556,11 +563,24 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 		select {
 		case item = <-s.eventQueue:
 		case <-doneChan:
+			doneChan = nil // Disable this case so we don't busy loop
+		}
+
+		// Cancellation of the invocation context is external to the
+		// scheduler: cancelAll only cancels the per-node contexts, so
+		// parentCtx stays live through sibling cancellation. Record the
+		// cause and start draining here rather than in the doneChan case
+		// alone, because a ready doneChan does not have to win the select
+		// — a queued completion can be picked ahead of it, and the loop
+		// can exit before it is ever selected (e.g. cancelAll stops the
+		// last pending retry timer). Either way the run must not report
+		// success.
+		if cancelErr == nil && s.parentCtx.Err() != nil {
+			cancelErr = context.Cause(s.parentCtx)
 			if !draining {
 				draining = true
 				s.cancelAll()
 			}
-			doneChan = nil // Disable this case so we don't busy loop
 		}
 
 		switch it := item.(type) {
@@ -605,8 +625,16 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	// Surface the first error to the caller — but not if the caller
 	// already broke the range loop, since yielding after a false return
 	// panics the iterator.
-	if pendingErr != nil && !consumerGone {
-		yield(nil, pendingErr)
+	//
+	// A node's own error outranks the cancellation cause: when a caller
+	// cancels because a node failed, "context canceled" alone would hide
+	// the reason the run stopped.
+	runErr := pendingErr
+	if runErr == nil {
+		runErr = cancelErr
+	}
+	if runErr != nil && !consumerGone {
+		yield(nil, runErr)
 		return
 	}
 
@@ -794,6 +822,27 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	delete(s.runsByName, it.nodeName)
 	delete(s.runCancels, it.nodeName)
 
+	// A dead invocation context means the cancellation came from outside
+	// the scheduler, so this completion is not the benign sibling
+	// cancellation handled below — cancelAll never touches parentCtx.
+	// Classified before the retry block: ShouldRetry's default predicate
+	// does not exclude cancellation, and re-running a node under a dead
+	// context only re-fails.
+	//
+	// run surfaces the cancellation cause on its own, so a node that has
+	// nothing of its own to report returns nil here. One that failed for
+	// its own reason keeps that error, which says more than "cancelled".
+	if s.parentCtx.Err() != nil {
+		if it.err != nil && !s.echoesCancellation(it.err) {
+			ns.Status = NodeFailed
+			return it.err
+		}
+		// Matches adk-python, which marks every task it reaps during
+		// shutdown CANCELLED regardless of who cancelled it
+		// (_workflow.py _cleanup_all_tasks, run from a finally).
+		ns.Status = NodeCancelled
+		return nil
+	}
 	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled
 		return nil // sibling cancellation; not the original error
@@ -1059,19 +1108,4 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 		branches = append(branches, br)
 	}
 	return branches
-}
-
-func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
-	if n == Start {
-		// Don't create span for the Start node.
-		return noop.Span{}, ctx
-	}
-	if n.Config().EmitsOwnSpan {
-		// The node body starts its own span (e.g. an LlmAgent node's
-		// wrapped agent emits invoke_agent); don't add an invoke_node
-		// wrapper around it.
-		return noop.Span{}, ctx
-	}
-	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
-	return span, ctx.WithAgentContext(spanCtx)
 }

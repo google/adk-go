@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -177,6 +178,79 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 	))
 	if id, _ := findLongRunningInterrupt(turn2); id != "" {
 		t.Errorf("turn 2 produced a fresh interrupt instead of resuming; id=%q", id)
+	}
+}
+
+// TestRunner_NestedWorkflowAgentUnderLlmAgent_Resume verifies that a
+// WorkflowAgent dynamically reached through an LlmAgent transfer sees the
+// resume FunctionResponse on the follow-up turn. Without that response in
+// ctx.UserContent, workflowAgent.detectResume treats the turn as fresh and
+// restarts from START.
+func TestRunner_NestedWorkflowAgentUnderLlmAgent_Resume(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+
+	const interruptID = "sub_approval"
+	asker := newHitlAsker("asker", interruptID, true /*rerunOnResume*/)
+
+	var handlerInput atomic.Value
+	handler := workflow.NewFunctionNode(
+		"handler",
+		func(ctx agent.Context, input string) (string, error) {
+			handlerInput.Store(input)
+			return "handled:" + input, nil
+		},
+		workflow.NodeConfig{},
+	)
+
+	subAgent, err := workflowagent.New(workflowagent.Config{
+		Name:  "subagent",
+		Edges: workflow.Chain(workflow.Start, asker, handler),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+
+	model := &scriptedModel{responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "subagent"}, "model"),
+		genai.NewContentFromText("done", "model"),
+	}}
+	orchestrator, err := llmagent.New(llmagent.Config{
+		Name:      "orchestrator",
+		Model:     model,
+		SubAgents: []agent.Agent{subAgent},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+
+	r := newNodeTestRunner(t, orchestrator, svc)
+
+	turn1 := drainRunner(t, r.Run(
+		ctx,
+		nodeTestUser,
+		nodeTestSession,
+		userText("ask the subagent"),
+		agent.RunConfig{},
+	))
+	callID, callName := findLongRunningInterrupt(turn1)
+	if callID != interruptID {
+		t.Fatalf("turn 1 interrupt ID = %q, want %q; events:\n%s", callID, interruptID, debugEvents(turn1))
+	}
+
+	turn2 := drainRunner(t, r.Run(
+		ctx,
+		nodeTestUser,
+		nodeTestSession,
+		resumeContent(callID, callName, "approve"),
+		agent.RunConfig{},
+	))
+	if id, _ := findLongRunningInterrupt(turn2); id != "" {
+		t.Errorf("sub-agent restarted with fresh interrupt %q on turn 2 instead of resuming; events:\n%s", id, debugEvents(turn2))
+	}
+	if got, want := handlerInput.Load(), "approve"; got != want {
+		t.Errorf("handler input = %v, want %q", got, want)
 	}
 }
 

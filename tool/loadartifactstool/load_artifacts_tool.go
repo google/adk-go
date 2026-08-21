@@ -26,10 +26,10 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
@@ -173,9 +173,21 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	if !ok {
 		return nil
 	}
-	artifactNames, ok := artifactNamesRaw.([]string)
-	if !ok {
-		return fmt.Errorf("invalid artifact names type: %T, expected []string", artifactNamesRaw)
+	var artifactNames []string
+	switch names := artifactNamesRaw.(type) {
+	case []string:
+		artifactNames = names
+	case []any:
+		artifactNames = make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			artifactNames[i] = s
+		}
+	default:
+		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
 	}
 	if len(artifactNames) == 0 {
 		return nil
