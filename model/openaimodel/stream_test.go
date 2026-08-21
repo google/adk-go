@@ -17,6 +17,8 @@ package openaimodel
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -135,5 +137,55 @@ func TestStreamTranslator_FunctionCall_MissingDoneName(t *testing.T) {
 	}
 	if part.FunctionCall.ID != "call_real" {
 		t.Fatalf("call ID mismatch, got %q, want %q", part.FunctionCall.ID, "call_real")
+	}
+}
+
+func TestStreamTranslator_ResponseFailed(t *testing.T) {
+	tr := newStreamTranslator()
+	event := decodeEvent(t, `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"the model failed to generate a response"}}}`)
+	resp, err := tr.process(event)
+	if resp != nil {
+		t.Errorf("process() = %+v, want nil alongside the error", resp)
+	}
+	if !errors.Is(err, ErrResponseFailed) {
+		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
+	}
+	if want := "the model failed to generate a response (server_error)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("process() err = %q, want it to mention %q", err, want)
+	}
+}
+
+// TestResponseFailed_PathsAgree pins the invariant the fix exists for: the same
+// server failure must read the same whether it arrived on the blocking path or
+// as a streamed "response.failed" event. Asserting the two error texts against
+// each other, rather than each against its own literal, is what keeps them from
+// drifting apart again.
+func TestResponseFailed_PathsAgree(t *testing.T) {
+	tests := []struct {
+		name    string
+		errJSON string
+	}{
+		{name: "message and code", errJSON: `,"error":{"code":"server_error","message":"upstream exploded"}`},
+		{name: "message only", errJSON: `,"error":{"message":"upstream exploded"}`},
+		{name: "code only", errJSON: `,"error":{"code":"rate_limit_exceeded"}`},
+		{name: "no error object", errJSON: ``},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := decodeEvent(t, `{"type":"response.failed","response":{"status":"failed"`+tc.errJSON+`}}`)
+			failed := event.AsResponseFailed()
+
+			_, streamErr := newStreamTranslator().process(event)
+			_, blockErr := convertResponse(&failed.Response)
+
+			for path, err := range map[string]error{"stream": streamErr, "blocking": blockErr} {
+				if !errors.Is(err, ErrResponseFailed) {
+					t.Fatalf("%s path err = %v, want errors.Is(err, ErrResponseFailed)", path, err)
+				}
+			}
+			if streamErr.Error() != blockErr.Error() {
+				t.Errorf("paths disagree:\n stream   = %q\n blocking = %q", streamErr, blockErr)
+			}
+		})
 	}
 }

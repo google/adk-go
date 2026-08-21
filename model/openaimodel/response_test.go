@@ -83,6 +83,84 @@ func TestConvertResponse_NoOutput(t *testing.T) {
 	}
 }
 
+func TestConvertResponse_FailedStatus(t *testing.T) {
+	output := []responses.ResponseOutputItemUnion{
+		{
+			Type: "message",
+			Content: []responses.ResponseOutputMessageContentUnion{
+				{Type: "output_text", Text: "half an answer"},
+			},
+		},
+	}
+	// The error text is compared in full: a partially rendered detail, such as
+	// the empty "()" left by a missing code, only shows up in an exact match.
+	tests := []struct {
+		name    string
+		resp    *responses.Response
+		wantErr string
+	}{
+		{
+			name: "no output",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "the model failed to generate a response",
+				},
+			},
+			wantErr: "openai: response failed: the model failed to generate a response (server_error)",
+		},
+		{
+			name: "partial output",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Output: output,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "the model failed to generate a response",
+				},
+			},
+			wantErr: "openai: response failed: the model failed to generate a response (server_error)",
+		},
+		{
+			name: "message only",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Message: "upstream exploded"},
+			},
+			wantErr: "openai: response failed: upstream exploded",
+		},
+		{
+			name: "code only",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: "rate_limit_exceeded"},
+			},
+			wantErr: "openai: response failed: rate_limit_exceeded",
+		},
+		{
+			name: "no error object",
+			resp: &responses.Response{Status: responses.ResponseStatusFailed},
+			// The bare sentinel, with nothing appended to it.
+			wantErr: "openai: response failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertResponse(tc.resp)
+			if got != nil {
+				t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
+			}
+			if !errors.Is(err, ErrResponseFailed) {
+				t.Fatalf("error = %v, want errors.Is(err, ErrResponseFailed)", err)
+			}
+			if got := err.Error(); got != tc.wantErr {
+				t.Errorf("error = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestConvertResponse_Logprobs(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -480,6 +558,46 @@ func TestFinishReason(t *testing.T) {
 			t.Errorf("finishReason(nil) = %v, want Unspecified", got)
 		}
 	})
+}
+
+// TestFinishReason_Status covers the statuses that carry no incomplete reason,
+// where the status is the only thing saying whether the turn ended cleanly.
+func TestFinishReason_Status(t *testing.T) {
+	tests := []struct {
+		status responses.ResponseStatus
+		reason string
+		want   genai.FinishReason
+	}{
+		{status: responses.ResponseStatusCompleted, want: genai.FinishReasonStop},
+		// An absent status: a hand-built response, or a provider that omits the
+		// field. It has always read as a clean stop and must keep doing so.
+		{status: "", want: genai.FinishReasonStop},
+		// "failed" is unreachable in practice — convertResponse returns early
+		// on it, as TestConvertResponse_FailedStatus pins — so this row only
+		// guards the fallback, should finishReason ever be called directly.
+		{status: responses.ResponseStatusFailed, want: genai.FinishReasonOther},
+		{status: responses.ResponseStatusCancelled, want: genai.FinishReasonOther},
+		{status: responses.ResponseStatusIncomplete, want: genai.FinishReasonOther},
+		{status: responses.ResponseStatusInProgress, want: genai.FinishReasonOther},
+		{status: responses.ResponseStatusQueued, want: genai.FinishReasonOther},
+		// A reason, where there is one, is more specific than the status.
+		{
+			status: responses.ResponseStatusIncomplete,
+			reason: "max_output_tokens",
+			want:   genai.FinishReasonMaxTokens,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.status)+"/"+tc.reason, func(t *testing.T) {
+			resp := &responses.Response{
+				Status:            tc.status,
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: tc.reason},
+			}
+			if got := finishReason(resp); got != tc.want {
+				t.Errorf("finishReason(status %q, reason %q) = %v, want %v", tc.status, tc.reason, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestConvertOutputItems(t *testing.T) {

@@ -68,6 +68,64 @@ func TestModel_Generate(t *testing.T) {
 	}
 }
 
+// TestModel_Generate_FailedStatus pins the blocking path to the streamed one: a
+// server-side failure arrives as HTTP 200 with status "failed", so nothing but
+// the status distinguishes it from a normal turn.
+func TestModel_Generate_FailedStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no output",
+			body: `{"id":"resp_123","model":"test-model","status":"failed","error":{"code":"server_error","message":"upstream exploded"},"output":[]}`,
+		},
+		{
+			name: "partial output",
+			body: `{"id":"resp_123","model":"test-model","status":"failed","error":{"code":"server_error","message":"upstream exploded"},"output":[{"type":"message","content":[{"type":"output_text","text":"half an "}]}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := fmt.Fprint(w, tc.body); err != nil {
+					t.Errorf("failed to write mock response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			ctx := t.Context()
+			llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+				APIKey:     "test",
+				BaseURL:    server.URL + "/v1",
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
+			}
+
+			var gotErr error
+			for resp, err := range llm.GenerateContent(ctx, req, false) {
+				if err != nil {
+					gotErr = err
+					continue
+				}
+				t.Errorf("GenerateContent() yielded %+v, want only an error", resp)
+			}
+			if !errors.Is(gotErr, ErrResponseFailed) {
+				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, ErrResponseFailed)", gotErr)
+			}
+			if want := "upstream exploded"; !strings.Contains(gotErr.Error(), want) {
+				t.Errorf("GenerateContent() err = %q, want it to mention %q", gotErr, want)
+			}
+		})
+	}
+}
+
 func TestModel_GenerateStream_Metadata(t *testing.T) {
 	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {

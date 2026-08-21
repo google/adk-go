@@ -46,6 +46,9 @@ var (
 	ErrEmptyResponse = errors.New("openai: empty response")
 	// ErrNoOutputItems is returned when the response contains no output items.
 	ErrNoOutputItems = errors.New("openai: response included no output items")
+	// ErrResponseFailed is returned when the server reports the response itself
+	// as failed, whatever output it came with.
+	ErrResponseFailed = errors.New("openai: response failed")
 	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
 	ErrUnsupportedMessageContentType = errors.New("openai: unsupported message content type")
 	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
