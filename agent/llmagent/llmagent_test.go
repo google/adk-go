@@ -45,7 +45,7 @@ const (
 	message   = "Handle the requests as specified in the System Instruction."
 )
 
-//go:generate go test -httprecord=Test
+//go:generate go test -httprecord=^testdata[/\\]Test(FunctionTool|LLMAgent|ToolCallback).*\.httprr$
 
 func TestLLMAgent(t *testing.T) {
 	errNoNetwork := errors.New("no network")

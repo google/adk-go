@@ -296,6 +296,51 @@ func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *tes
 	}
 }
 
+func TestContentsRequestProcessor_IncludeContentsNone_IgnoresSiblingBranchPivot(t *testing.T) {
+	t.Parallel()
+
+	const branch = "coordinator.translator_es"
+	events := []*session.Event{
+		{
+			Author: "user",
+			Branch: branch,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("good morning", genai.RoleUser),
+			},
+		},
+		{
+			Author: "translator_fr",
+			Branch: "coordinator.translator_fr",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("Bonjour", genai.RoleModel),
+			},
+		},
+	}
+
+	a := utils.Must(llmagent.New(llmagent.Config{
+		Name:            "translator_es",
+		Model:           &testModel{},
+		Mode:            llmagent.ModeSingleTurn,
+		IncludeContents: "none",
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   a,
+		Branch:  branch,
+		Session: &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+
+	want := []*genai.Content{genai.NewContentFromText("good morning", genai.RoleUser)}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
 // verifies that the contents from the different scope are not included
 // in the content for LLM.
