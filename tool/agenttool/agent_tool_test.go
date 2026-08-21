@@ -263,47 +263,43 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 }
 
 func TestAgentTool_Run_SkipSummarization(t *testing.T) {
-	testLLM := &testutil.MockModel{
-		Responses: []*genai.Content{
-			genai.NewContentFromText("test response", genai.RoleModel),
-		},
-	}
-	agent := createAgentWithModel(t, nil, nil, testLLM)
-	toolCtx := createToolContext(t, agent)
-
-	// Test with skipSummarization = true
-	agentToolSkip := agenttool.New(agent, &agenttool.Config{SkipSummarization: true})
-	actions := toolCtx.Actions()
-	toolImpl, ok := agentToolSkip.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("agentToolSkip does not implement FunctionTool")
-	}
-	_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
-	if err != nil {
-		t.Fatalf("Run() with skipSummarization=true failed unexpectedly: %v", err)
-	}
-	if !actions.SkipSummarization {
-		t.Errorf("SkipSummarization flag not set when AgentTool was created with skipSummarization=true")
+	tests := []struct {
+		name              string
+		skipSummarization bool
+	}{
+		{name: "skip_summarization_true", skipSummarization: true},
+		{name: "skip_summarization_false", skipSummarization: false},
 	}
 
-	// Test with skipSummarization = false
-	agentToolNoSkip := agenttool.New(agent, &agenttool.Config{SkipSummarization: false})
-	toolImpl, ok = agentToolNoSkip.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("agentToolNoSkip does not implement FunctionTool")
-	}
-	actions.SkipSummarization = false // Reset
-	// Reset mock for the second call
-	testLLM.Responses = []*genai.Content{
-		genai.NewContentFromText("test response", genai.RoleModel),
-	}
-	testLLM.Requests = nil
-	_, err = toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
-	if err != nil {
-		t.Fatalf("Run() with skipSummarization=false failed unexpectedly: %v", err)
-	}
-	if actions.SkipSummarization {
-		t.Errorf("SkipSummarization flag was set when AgentTool was created with skipSummarization=false")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testLLM := &testutil.MockModel{
+				Responses: []*genai.Content{
+					genai.NewContentFromText("test response", genai.RoleModel),
+				},
+			}
+			ag := createAgentWithModel(t, nil, nil, testLLM)
+			toolCtx := createToolContext(t, ag)
+
+			agentTool := agenttool.New(ag, &agenttool.Config{SkipSummarization: tt.skipSummarization})
+			toolImpl, ok := agentTool.(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+			if err != nil {
+				t.Fatalf("Run() failed unexpectedly: %v", err)
+			}
+
+			// SkipSummarization must never be propagated to the parent tool context.
+			// Doing so causes IsFinalResponse() to return true on the function response
+			// event, which terminates the parent agent loop before it can process the
+			// sub-agent result.
+			if toolCtx.Actions().SkipSummarization {
+				t.Errorf("SkipSummarization was propagated to parent tool context (skipSummarization=%v), want false", tt.skipSummarization)
+			}
+		})
 	}
 }
 
