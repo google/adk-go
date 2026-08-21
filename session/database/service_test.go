@@ -159,6 +159,65 @@ func emptyService(t *testing.T) *databaseService {
 	return dbservice
 }
 
+// TestDatabaseService_StateTablesPopulateUpdateTime guards against writing a
+// zero update_time to the app_states/user_states tables. MySQL rejects the zero
+// value under strict mode (NO_ZERO_DATE), which surfaces as Error 1292 whenever
+// app- or user-scoped state is persisted. The update_time columns are maintained
+// on insert and update, mirroring adk-python's auto-updated ORM columns.
+func TestDatabaseService_StateTablesPopulateUpdateTime(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	createResp, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app1",
+		UserID:  "user1",
+		State: map[string]any{
+			"app:config": "v1",
+			"user:pref":  "x",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// After Create with app-/user-scoped initial state, both rows must carry a
+	// real update_time.
+	var appState storageAppState
+	if err := s.db.First(&appState, "app_name = ?", "app1").Error; err != nil {
+		t.Fatalf("failed to load app state: %v", err)
+	}
+	if appState.UpdateTime.IsZero() {
+		t.Errorf("storageAppState.UpdateTime is zero after Create; want it populated")
+	}
+
+	var userState storageUserState
+	if err := s.db.First(&userState, "app_name = ? AND user_id = ?", "app1", "user1").Error; err != nil {
+		t.Fatalf("failed to load user state: %v", err)
+	}
+	if userState.UpdateTime.IsZero() {
+		t.Errorf("storageUserState.UpdateTime is zero after Create; want it populated")
+	}
+
+	// Appending an event that carries a state delta must refresh the row's time.
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"user:pref": "y"},
+		},
+	}
+	if err := s.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if err := s.db.First(&userState, "app_name = ? AND user_id = ?", "app1", "user1").Error; err != nil {
+		t.Fatalf("failed to reload user state after AppendEvent: %v", err)
+	}
+	if userState.UpdateTime.IsZero() {
+		t.Errorf("storageUserState.UpdateTime is zero after AppendEvent; want it refreshed")
+	}
+}
+
 func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) {
 	ctx := t.Context()
 	s := emptyService(t)
