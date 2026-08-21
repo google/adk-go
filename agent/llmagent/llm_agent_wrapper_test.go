@@ -379,6 +379,40 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 	})
 }
 
+// TestRunLLMAgentAsNode_SingleTurn_NodeInputNotPersisted asserts the single_turn
+// node-input contract: transient node inputs are passed via UserContent and
+// never written to the underlying session history.
+func TestRunLLMAgentAsNode_SingleTurn_NodeInputNotPersisted(t *testing.T) {
+	t.Parallel()
+
+	svc := session.InMemoryService()
+	createResp, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+
+	a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      createResp.Session,
+		InvocationID: "inv-test",
+	})
+	ctx := agent.NewContext(ic)
+	baseEventsLen := createResp.Session.Events().Len()
+
+	for _, err := range llmagent.RunLLMAgentAsNode(a, ctx, "transient node input") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := createResp.Session.Events().Len(); got != baseEventsLen {
+		t.Errorf("underlying session length = %d, want %d; node input must not persist", got, baseEventsLen)
+	}
+}
+
 func TestProcessLLMAgentOutput(t *testing.T) {
 	t.Parallel()
 
