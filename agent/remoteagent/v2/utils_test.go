@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
@@ -66,6 +67,22 @@ func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 		event.Content = genai.NewContentFromParts(parts, role)
 	}
 	return event
+}
+
+func otherAgentPreamblePart() *genai.Part {
+	return genai.NewPartFromText(llminternal.OtherAgentContextPreamble)
+}
+
+func otherAgentPart(attribution, payload string) *genai.Part {
+	return genai.NewPartFromText(attribution + "\n" + llminternal.QuoteUntrusted(payload))
+}
+
+func otherAgentPreambleA2APart() *a2a.Part {
+	return a2a.NewTextPart(llminternal.OtherAgentContextPreamble)
+}
+
+func otherAgentA2APart(attribution, payload string) *a2a.Part {
+	return a2a.NewTextPart(attribution + "\n" + llminternal.QuoteUntrusted(payload))
 }
 
 func TestGetUserFunctionCallAt(t *testing.T) {
@@ -179,8 +196,8 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 				newEventFromParts("user", &genai.Part{Text: "bar"}),
 			},
 			wantParts: []*a2a.Part{
-				a2a.NewTextPart("For context:"),
-				a2a.NewTextPart("[another-agent] said: foo"),
+				otherAgentPreambleA2APart(),
+				otherAgentA2APart("[another-agent] said:", "foo"),
 				a2a.NewTextPart("bar"),
 			},
 		},
@@ -247,8 +264,8 @@ func TestPresentAsUserMessage(t *testing.T) {
 			input: newEventFromParts("some agent", genai.NewPartFromText("hello")),
 			want: newEventFromParts(
 				"user",
-				genai.NewPartFromText("For context:"),
-				genai.NewPartFromText("[some agent] said: hello"),
+				otherAgentPreamblePart(),
+				otherAgentPart("[some agent] said:", "hello"),
 			),
 		},
 		{
@@ -256,8 +273,8 @@ func TestPresentAsUserMessage(t *testing.T) {
 			input: newEventFromParts("some agent", genai.NewPartFromFunctionCall("get_weather", map[string]any{"city": "Warsaw"})),
 			want: newEventFromParts(
 				"user",
-				genai.NewPartFromText("For context:"),
-				genai.NewPartFromText(fmt.Sprintf("[some agent] called tool get_weather with parameters: %v", map[string]any{"city": "Warsaw"})),
+				otherAgentPreamblePart(),
+				otherAgentPart("[some agent] called tool get_weather with parameters:", fmt.Sprintf("%v", map[string]any{"city": "Warsaw"})),
 			),
 		},
 		{
@@ -265,8 +282,8 @@ func TestPresentAsUserMessage(t *testing.T) {
 			input: newEventFromParts("some agent", genai.NewPartFromFunctionResponse("get_weather", map[string]any{"temp": "1C"})),
 			want: newEventFromParts(
 				"user",
-				genai.NewPartFromText("For context:"),
-				genai.NewPartFromText(fmt.Sprintf("[some agent] get_weather tool returned result: %v", map[string]any{"temp": "1C"})),
+				otherAgentPreamblePart(),
+				otherAgentPart("[some agent] get_weather tool returned result:", fmt.Sprintf("%v", map[string]any{"temp": "1C"})),
 			),
 		},
 		{
@@ -279,7 +296,7 @@ func TestPresentAsUserMessage(t *testing.T) {
 			),
 			want: newEventFromParts(
 				"user",
-				genai.NewPartFromText("For context:"),
+				otherAgentPreamblePart(),
 				genai.NewPartFromFile(genai.File{Name: "cat.png"}),
 				genai.NewPartFromExecutableCode("print('hello, world!')", genai.LanguagePython),
 				genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "hello, world!"),
@@ -295,8 +312,8 @@ func TestPresentAsUserMessage(t *testing.T) {
 			input: newEventFromParts("some agent", &genai.Part{Text: "thinking...", Thought: true}, genai.NewPartFromText("done")),
 			want: newEventFromParts(
 				"user",
-				genai.NewPartFromText("For context:"),
-				genai.NewPartFromText("[some agent] said: done"),
+				otherAgentPreamblePart(),
+				otherAgentPart("[some agent] said:", "done"),
 			),
 		},
 	}

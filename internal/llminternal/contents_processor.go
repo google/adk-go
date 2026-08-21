@@ -564,6 +564,12 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // This is to provide another aget's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
+//
+// The relayed text is attacker-reachable: whoever talks to the other agent
+// steers what it says, and its tool results carry whatever the tool read.
+// Each relayed text payload is therefore fenced (see fencing.go), and the
+// leading part states that fenced content is data, so a payload has to be
+// believed rather than merely obeyed.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -572,21 +578,26 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 
 	converted := &genai.Content{
 		Role:  "user",
-		Parts: []*genai.Part{{Text: "For context:"}},
+		Parts: []*genai.Part{{Text: OtherAgentContextPreamble}},
 	}
 	for _, p := range content.Parts {
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
+				Text: fmt.Sprintf("[%s] said:\n%s", ev.Author, QuoteUntrusted(p.Text)),
 			})
 		case p.FunctionCall != nil:
+			// The tool name is model-chosen too, so it is elided but left
+			// unfenced: it reads as part of the sentence and a fence there
+			// would obscure which tool ran.
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool `%s` with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
+				Text: fmt.Sprintf("[%s] called tool `%s` with parameters:\n%s",
+					ev.Author, ElideQuoteMarkers(p.FunctionCall.Name), QuoteUntrusted(stringify(p.FunctionCall.Args))),
 			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] `%s` tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
+				Text: fmt.Sprintf("[%s] `%s` tool returned result:\n%s",
+					ev.Author, ElideQuoteMarkers(p.FunctionResponse.Name), QuoteUntrusted(stringify(p.FunctionResponse.Response))),
 			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
