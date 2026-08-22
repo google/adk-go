@@ -137,18 +137,11 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 			}
 		}
 
-		errMsg := "Tool execution failed."
-		if details.Len() > 0 {
-			errMsg += " Details: " + details.String()
-		}
-
-		return nil, errors.New(errMsg)
+		return nil, &ToolError{Details: details.String(), Meta: serverMeta(res.Meta)}
 	}
 
 	if res.StructuredContent != nil {
-		return map[string]any{
-			"output": res.StructuredContent,
-		}, nil
+		return functionResponse(res, res.StructuredContent), nil
 	}
 
 	textResponse := strings.Builder{}
@@ -168,9 +161,83 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		return nil, errors.New("no text content in tool response")
 	}
 
-	return map[string]any{
-		"output": textResponse.String(),
-	}, nil
+	return functionResponse(res, textResponse.String()), nil
+}
+
+// ToolError reports a tool result that the MCP server marked as an error.
+// Callers reach it with errors.As to read the metadata the server attached to
+// the failed call, which a plain error message cannot carry.
+type ToolError struct {
+	// Details is the text content of the error result, empty when the server
+	// sent none.
+	Details string
+
+	// Meta holds the metadata the server attached to the result, without keys
+	// in prefixes the MCP protocol reserves for itself. It is nil when the
+	// server attached no metadata of its own.
+	Meta map[string]any
+}
+
+// Error implements error.
+func (e *ToolError) Error() string {
+	if e.Details == "" {
+		return "Tool execution failed."
+	}
+	return "Tool execution failed. Details: " + e.Details
+}
+
+// functionResponse builds the function response map for a tool result.
+// The map is the function response returned to the model, so anything placed
+// in it reaches the LLM and is persisted to session and traces, in addition to
+// being available to callbacks and the embedding application.
+//
+// Server metadata from the result's _meta field is preserved under the "_meta"
+// key, minus keys in prefixes the MCP protocol reserves for itself. The key is
+// absent when the server attached no metadata of its own.
+func functionResponse(res *mcp.CallToolResult, output any) map[string]any {
+	response := map[string]any{
+		"output": output,
+	}
+	if meta := serverMeta(res.Meta); len(meta) > 0 {
+		response["_meta"] = meta
+	}
+	return response
+}
+
+// serverMeta returns the entries of meta that the server itself attached,
+// dropping keys reserved by the protocol. It returns nil when no entry
+// qualifies.
+func serverMeta(meta mcp.Meta) map[string]any {
+	var serverKeys map[string]any
+	for key, value := range meta {
+		if isReservedMetaKey(key) {
+			continue
+		}
+		if serverKeys == nil {
+			serverKeys = make(map[string]any, len(meta))
+		}
+		serverKeys[key] = value
+	}
+	return serverKeys
+}
+
+// isReservedMetaKey reports whether an MCP _meta key belongs to the protocol
+// rather than to the server. A key is reserved when the second label of its
+// prefix (the part before the final slash) is "modelcontextprotocol" or "mcp".
+func isReservedMetaKey(key string) bool {
+	slash := strings.LastIndex(key, "/")
+	if slash < 0 {
+		return false
+	}
+	labels := strings.Split(key[:slash], ".")
+	if len(labels) < 2 {
+		return false
+	}
+	switch labels[1] {
+	case "modelcontextprotocol", "mcp":
+		return true
+	}
+	return false
 }
 
 var (
