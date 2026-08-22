@@ -53,7 +53,7 @@ func (o connectorOperation) result(resource string) (outcome, error) {
 		if o.Response == nil {
 			return nil, fmt.Errorf("gcp: connector operation done but returned no credential for %q", resource)
 		}
-		return credOutcome{header: o.Response.Header, token: o.Response.Token}, nil
+		return credOutcome{header: o.Response.Header, token: o.Response.Token, expiresAt: parseExpireTime(o.Response.ExpireTime)}, nil
 	}
 	if md := o.Metadata; md != nil {
 		switch {
