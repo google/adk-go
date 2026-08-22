@@ -105,7 +105,11 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
-			filtered = append(filtered, ConvertForeignEvent(ev))
+			// ConvertForeignEvent returns nil to signal the foreign event
+			// should be dropped (e.g. a thought-only turn).
+			if converted := ConvertForeignEvent(ev); converted != nil {
+				filtered = append(filtered, converted)
+			}
 		} else {
 			filtered = append(filtered, ev)
 		}
@@ -575,6 +579,12 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		// Never replay another agent's private reasoning into the current
+		// agent's context. Matches adk-python's _present_other_agent_message,
+		// which drops thought parts as the first step of its per-part loop.
+		if p.Thought {
+			continue
+		}
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
@@ -591,6 +601,13 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}
+	}
+
+	// If only the "For context:" header remains (e.g. a thought-only foreign
+	// turn), drop the event entirely rather than emitting a bare header, as
+	// adk-python's _present_other_agent_message returns None in this case.
+	if len(converted.Parts) == 1 {
+		return nil
 	}
 
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.
