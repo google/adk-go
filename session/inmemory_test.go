@@ -15,12 +15,16 @@
 package session_test
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -232,5 +236,47 @@ func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+
+	got, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.Session.Events().Len() != 1 {
+		t.Fatalf("Get returned %d events, want 1", got.Session.Events().Len())
+	}
+	persisted := got.Session.Events().At(0)
+	if _, exists := persisted.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("expected temp:k1 stripped from persisted session event, got: %v", persisted.Actions.StateDelta)
+	}
+}
+
+func BenchmarkInMemoryService_AppendEvent(b *testing.B) {
+	ctx := b.Context()
+	service := session.InMemoryService()
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "bench", UserID: "user"})
+	if err != nil {
+		b.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+	event := &session.Event{
+		ID:        "event",
+		Timestamp: time.Now(),
+		Author:    "agent",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: "hello"}}},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		event.ID = "event-" + strconv.Itoa(i)
+		if err := service.AppendEvent(ctx, sess, event); err != nil {
+			b.Fatalf("AppendEvent: %v", err)
+		}
 	}
 }
