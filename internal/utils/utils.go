@@ -16,6 +16,7 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"google.golang.org/genai"
@@ -101,6 +102,45 @@ func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 		}
 	}
 	return ret
+}
+
+// UnwrapResponse extracts the original value from a FunctionResponse payload.
+// A sole single-key wrapper — {"result": v} (adk-python and the web frontend),
+// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with string values
+// JSON-parsed when possible; anything else, including a multi-key map such as
+// a tool confirmation's {"confirmed": b, "payload": v}, passes through whole.
+// Mirrors adk-python _unwrap_response, extended with the adk-go keys for
+// cross-runtime sessions.
+//
+// The workflow engine's three resume paths — the inbound turn in runner and in
+// workflowagent, and the replay from session history — all decode through here,
+// so a reply read back from history yields the same value as the same reply
+// taken from the inbound turn. Tool confirmation is decoded separately, by
+// llminternal's confirmation request processor, which produces the Confirmed
+// flag the tool layer enforces; that decision must not be routed through here,
+// since this function has no notion of it.
+func UnwrapResponse(data map[string]any) any {
+	if data == nil {
+		return nil // untyped nil, not a nil map: callers compare against nil
+	}
+	if len(data) != 1 {
+		return data
+	}
+	for _, key := range []string{"result", "response", "payload"} {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		if s, isStr := v.(string); isStr {
+			var parsed any
+			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+				return parsed
+			}
+			return s
+		}
+		return v
+	}
+	return data
 }
 
 // TextParts extracts all Text parts from the content.

@@ -16,7 +16,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -289,7 +288,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 			out = map[string]any{}
 		}
 		// Opaque payload; Workflow.Resume validates against any schema.
-		out[fr.ID] = decodeResumeResponse(fr)
+		out[fr.ID] = utils.UnwrapResponse(fr.Response)
 	}
 	return out
 }
@@ -319,29 +318,6 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 		delete(open, id)
 	}
 	return open
-}
-
-// decodeResumeResponse extracts the user payload from a function
-// response, accepting {"response": v}, {"payload": v}, or the raw map. A
-// string under "response" is JSON-parsed when possible.
-func decodeResumeResponse(fr *genai.FunctionResponse) any {
-	if fr.Response == nil {
-		return nil
-	}
-	if raw, ok := fr.Response["response"]; ok {
-		if s, isStr := raw.(string); isStr {
-			var decoded any
-			if err := json.Unmarshal([]byte(s), &decoded); err == nil {
-				return decoded
-			}
-			return s
-		}
-		return raw
-	}
-	if payload, ok := fr.Response["payload"]; ok {
-		return payload
-	}
-	return fr.Response
 }
 
 // waitingInterruptIDs returns the set of interrupt IDs for every node

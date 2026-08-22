@@ -240,6 +240,23 @@ func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
 	return c.invocationContext.ResumedInput(interruptID)
 }
 
+// IsResumeActivation reports whether this context belongs to an activation
+// started to resume a paused node: the workflow engine injects the resolved
+// interrupt responses only then. A later activation of the same node that the
+// scheduler starts afresh (loop-back edge, retry) reports false.
+//
+// It is inherited rather than per-node: a child delegated via RunNode and a
+// ParallelWorker item both run under the resumed ancestor's context and report
+// true, though they are themselves fresh activations. So this answers "is a
+// resume in progress here", not "is THIS activation the resumed one" — for the
+// latter, also establish that the pause was raised under this activation, as
+// workflow.AgentNode does before dropping its input.
+//
+// Not on [Context] — read it through an optional-interface assertion.
+func (c *commonContext) IsResumeActivation() bool {
+	return c.resumeInputs != nil
+}
+
 // RunConfig implements [InvocationContext].
 func (c *commonContext) RunConfig() *RunConfig {
 	return c.invocationContext.RunConfig()

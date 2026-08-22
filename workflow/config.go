@@ -62,7 +62,9 @@ type NodeConfig struct {
 	// &true re-runs the interrupted node from scratch on resume
 	// (re-entry mode), &false routes the resume payload to the
 	// node's successor as input (handoff mode), and nil defers to
-	// the engine. The engine currently treats nil as handoff.
+	// the node kind. NewDynamicNode, and NewAgentNode over an
+	// LlmAgent, default nil to &true; every other kind leaves it
+	// nil, which the engine treats as handoff.
 	RerunOnResume *bool
 
 	// WaitForOutput, when true, parks the parent (ErrNodeInterrupted) to

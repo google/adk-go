@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -170,7 +171,7 @@ func TestWorkflowAgent(t *testing.T) {
 	}
 }
 
-func TestDecodeWorkflowInputResponse(t *testing.T) {
+func TestUnwrapResumeResponse(t *testing.T) {
 	tests := []struct {
 		name string
 		fr   *genai.FunctionResponse
@@ -219,14 +220,44 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 			want: map[string]any{"k": "v"},
 		},
 		{
-			name: "PriorityOrder_ResponseWinsOverPayload",
+			// A multi-key map is the caller's own shape, not a wrapper:
+			// unwrapping one key would drop the rest.
+			name: "MultiKey_ReturnsRawMap",
 			fr: &genai.FunctionResponse{
 				Response: map[string]any{
 					"response": `"from-response"`,
 					"payload":  "from-payload",
 				},
 			},
-			want: "from-response",
+			want: map[string]any{
+				"response": `"from-response"`,
+				"payload":  "from-payload",
+			},
+		},
+		{
+			// Tool confirmation's wire shape: unwrapping "payload" would
+			// drop the confirmed flag, making a rejection look like an
+			// approval to a handoff successor.
+			name: "ToolConfirmation_KeepsConfirmedFlag",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{
+					"confirmed": false,
+					"payload":   map[string]any{"daysApproved": float64(0)},
+				},
+			},
+			want: map[string]any{
+				"confirmed": false,
+				"payload":   map[string]any{"daysApproved": float64(0)},
+			},
+		},
+		{
+			// adk-python _wrap_response and the web frontend wrap a scalar
+			// reply as {"result": v}.
+			name: "ResultShape_PythonAndWebFrontend",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"result": "approve"},
+			},
+			want: "approve",
 		},
 		{
 			name: "Fallback_NeitherKey_ReturnsRawMap",
@@ -244,9 +275,9 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeWorkflowInputResponse(tc.fr)
+			got := utils.UnwrapResponse(tc.fr.Response)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("decodeWorkflowInputResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
+				t.Errorf("UnwrapResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
 			}
 		})
 	}

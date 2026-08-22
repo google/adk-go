@@ -146,6 +146,13 @@ func (w *Workflow) Resume(
 			if !answeredNow && len(freshMatched) == 0 {
 				continue
 			}
+			// The node already ran on these answers; this turn replays
+			// them. Skipping keeps a re-entry node as idempotent as a
+			// handoff one — without it, ResumedInputs (which history
+			// never un-answers) re-fires the node on every later turn.
+			if ns.reentryConsumed && len(freshMatched) == 0 {
+				continue
+			}
 
 			reenter := false
 			if r := node.Config().RerunOnResume; r != nil && *r {
