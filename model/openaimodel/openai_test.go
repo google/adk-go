@@ -17,10 +17,12 @@ package openaimodel
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -143,11 +145,31 @@ const (
 	evMaxTokens = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"max_output_tokens"}}}`
 	evFiltered  = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"content_filter"}}}`
 	evFailed    = `{"type":"response.failed","response":{"id":"resp_1","model":"stream-model","error":{"message":"upstream exploded"}}}`
+	evError     = `{"type":"error","message":"stream blew up"}`
+	evReasoning = `{"type":"response.reasoning_text.delta","delta":"thinking"}`
+	// A terminal event omitting the response object the schema marks required.
+	evBareCompleted = `{"type":"response.completed"}`
+	// Arguments the SSE decoder cannot finish reading, so the stream itself
+	// fails rather than an event in it.
+	evTruncated = `{"type":"response.output_text.delta","delta":`
+	// A call the aggregator drops for want of a name, no
+	// "response.output_item.added" having introduced the item.
+	evArgsDoneUnnamed = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{\"city\":\"SF\"}"}`
 
 	// The blocking-mode body carrying exactly the output evCompleted does, so
 	// the two paths can be compared on the same model output.
 	bodyCompleted = `{"id":"resp_1","model":"stream-model","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[{"type":"message","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5,"top_logprobs":[{"token":"hello","logprob":-0.5}]}]}]}]}`
+	// The blocking-mode bodies for the streams asserted on above.
+	bodyFiltered = `{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}`
+	bodyToolCall = `{"id":"resp_1","model":"stream-model","output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"}]}`
 )
+
+// incompleteEvent builds a "response.incomplete" whose response carries the
+// given fields ahead of the model's partial output.
+func incompleteEvent(fields string) string {
+	return `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model",` + fields +
+		`"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`
+}
 
 // runStream drives the model over a synthetic SSE stream and collects everything
 // it emits, so a test can assert on the shape of the whole turn.
@@ -301,6 +323,14 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			wantFinishReason: genai.FinishReasonMaxTokens,
 			wantModelVersion: "stream-model",
 		},
+		{
+			// Nor must a stray "created", whose response has no reason of its
+			// own and would otherwise read as a clean stop.
+			name:             "trailing response.created does not reopen the turn",
+			events:           []string{evCreated, evDelta1, evDelta2, evMaxTokens, evCreated},
+			wantFinishReason: genai.FinishReasonMaxTokens,
+			wantModelVersion: "stream-model",
+		},
 	}
 
 	for _, tc := range tests {
@@ -325,6 +355,574 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestModel_GenerateStream_IncompleteWithoutReason pins that an event whose
+// name declares the turn incomplete never closes it as a clean stop. openai-go
+// marks incomplete_details required but not its reason, so every shape below is
+// schema-legal.
+func TestModel_GenerateStream_IncompleteWithoutReason(t *testing.T) {
+	tests := []struct {
+		name             string
+		fields           string
+		wantMessage      string
+		wantFinishReason genai.FinishReason
+	}{
+		{
+			name:             "empty incomplete_details",
+			fields:           `"status":"incomplete","incomplete_details":{},`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			name:             "incomplete_details omitted",
+			fields:           `"status":"incomplete",`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			name:             "incomplete_details null",
+			fields:           `"status":"incomplete","incomplete_details":null,`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			name:             "reason empty",
+			fields:           `"status":"incomplete","incomplete_details":{"reason":""},`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			// Neither a status nor a reason: only the event's own name is left
+			// to say the turn was cut short.
+			name:             "status omitted too",
+			fields:           ``,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			// No status, but an incomplete_details object the provider did
+			// send — the one shape the blocking path can read too.
+			name:             "empty incomplete_details, no status",
+			fields:           `"incomplete_details":{},`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "incomplete",
+		},
+		{
+			// An unmapped reason still flattens to OTHER, leaving the
+			// provider's wording the only account of what happened.
+			name:             "unrecognized reason",
+			fields:           `"status":"incomplete","incomplete_details":{"reason":"something_new"},`,
+			wantFinishReason: genai.FinishReasonOther,
+			wantMessage:      "something_new",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, evCreated, evDelta1, evDelta2, incompleteEvent(tc.fields))
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			if final.FinishReason != tc.wantFinishReason {
+				t.Errorf("final FinishReason = %q, want %q", final.FinishReason, tc.wantFinishReason)
+			}
+			assertFinishSignal(t, final, tc.wantMessage)
+		})
+	}
+}
+
+// TestIncompleteWithoutReason_MatchesBlocking pins that the two paths agree on a
+// truncated turn wherever the payload itself carries the news. Only a payload
+// reporting nothing at all can differ, since there only streaming has the
+// event's name to read.
+func TestIncompleteWithoutReason_MatchesBlocking(t *testing.T) {
+	tests := []struct {
+		name        string
+		fields      string
+		want        genai.FinishReason
+		wantMessage string
+	}{
+		{name: "status incomplete", fields: `"status":"incomplete",`, want: genai.FinishReasonOther, wantMessage: "incomplete"},
+		{name: "empty incomplete_details", fields: `"incomplete_details":{},`, want: genai.FinishReasonOther, wantMessage: "incomplete"},
+		{name: "empty reason", fields: `"incomplete_details":{"reason":""},`, want: genai.FinishReasonOther, wantMessage: "incomplete"},
+		{name: "a mapped reason", fields: `"incomplete_details":{"reason":"max_output_tokens"},`, want: genai.FinishReasonMaxTokens},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := incompleteEvent(tc.fields)
+			streamed, err := runStream(t, evCreated, evDelta1, evDelta2, event)
+			if err != nil {
+				t.Fatalf("streaming err = %v", err)
+			}
+			// incompleteEvent wraps exactly this body.
+			body := strings.TrimSuffix(strings.TrimPrefix(event, `{"type":"response.incomplete","response":`), `}`)
+			blocking, err := runBlocking(t, body)
+			if err != nil {
+				t.Fatalf("blocking err = %v", err)
+			}
+			if len(blocking) != 1 {
+				t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+			}
+			for name, got := range map[string]*model.LLMResponse{
+				"streamed": assertTurnShape(t, streamed),
+				"blocking": blocking[0],
+			} {
+				if got.FinishReason != tc.want {
+					t.Errorf("%s FinishReason = %q, want %q", name, got.FinishReason, tc.want)
+				}
+				// The wording has to match too, not just the reason.
+				if msg, _ := got.CustomMetadata[FinishMessageKey].(string); msg != tc.wantMessage {
+					t.Errorf("%s CustomMetadata[%q] = %q, want %q", name, FinishMessageKey, msg, tc.wantMessage)
+				}
+			}
+		})
+	}
+}
+
+// assertFinishSignal pins where a turn that ended badly but still carries an
+// answer says why: as metadata, never in the error fields, which tool/agenttool
+// and server/adka2a both read as a failed turn.
+func assertFinishSignal(t *testing.T, resp *model.LLMResponse, wantMessage string) {
+	t.Helper()
+	if !carriesContent(resp) {
+		t.Fatal("response carries no content, so this is not the case being asserted")
+	}
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
+		t.Errorf("response has ErrorCode %q / ErrorMessage %q, want both empty on a turn that carries an answer",
+			resp.ErrorCode, resp.ErrorMessage)
+	}
+	got, _ := resp.CustomMetadata[FinishMessageKey].(string)
+	if got != wantMessage {
+		t.Errorf("CustomMetadata[%q] = %q, want %q", FinishMessageKey, got, wantMessage)
+	}
+}
+
+// TestBlockedTurnSurfacesBlockReason pins that a content-filtered turn reaches
+// the caller with something to gate on: metadata beside a SAFETY finish reason
+// when it still carries an answer, and ErrorCode — where model/gemini reports a
+// blocked prompt — when it does not.
+func TestBlockedTurnSurfacesBlockReason(t *testing.T) {
+	t.Run("with an answer to read", func(t *testing.T) {
+		streamed, err := runStream(t, evCreated, evDelta1, evDelta2, evFiltered)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		blocking, err := runBlocking(t, bodyFiltered)
+		if err != nil {
+			t.Fatalf("blocking err = %v", err)
+		}
+		if len(blocking) != 1 {
+			t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+		}
+		for name, got := range map[string]*model.LLMResponse{
+			"streamed": assertTurnShape(t, streamed),
+			"blocking": blocking[0],
+		} {
+			t.Run(name, func(t *testing.T) {
+				if got.FinishReason != genai.FinishReasonSafety {
+					t.Errorf("FinishReason = %q, want %q", got.FinishReason, genai.FinishReasonSafety)
+				}
+				assertFinishSignal(t, got, "content_filter")
+			})
+		}
+	})
+
+	t.Run("with nothing to read", func(t *testing.T) {
+		// The deltas produce a call the aggregator drops, so the turn is
+		// blocked with no content at all — the case ErrorCode is for.
+		got, err := runStream(t, evCreated, evArgsDoneUnnamed, evFiltered)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		final := assertTurnShape(t, got)
+		if carriesContent(final) {
+			t.Fatalf("final carries content %+v, so this is not the case being asserted", final.Content)
+		}
+		if final.FinishReason != genai.FinishReasonSafety {
+			t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonSafety)
+		}
+		if want := string(genai.BlockedReasonSafety); final.ErrorCode != want {
+			t.Errorf("final ErrorCode = %q, want %q", final.ErrorCode, want)
+		}
+		if want := "content_filter"; final.ErrorMessage != want {
+			t.Errorf("final ErrorMessage = %q, want %q", final.ErrorMessage, want)
+		}
+	})
+}
+
+// TestModel_GenerateStream_LogprobsDescribeTheAnswer pins that logprobs are only
+// reported against the text they belong to. A streamed turn takes its content
+// from the deltas and its logprobs from the terminal event, which a provider
+// may restate differently.
+func TestModel_GenerateStream_LogprobsDescribeTheAnswer(t *testing.T) {
+	tests := []struct {
+		name         string
+		events       []string
+		wantText     string
+		wantLogprobs bool
+	}{
+		{
+			name:     "deltas stop short of the terminal output",
+			events:   []string{evCreated, evDelta1, evCompleted},
+			wantText: "hel",
+		},
+		{
+			name:     "delta arrives after the terminal output and disagrees",
+			events:   []string{evCreated, evCompleted, `{"type":"response.output_text.delta","delta":"other"}`},
+			wantText: "other",
+		},
+		{
+			// Reasoning is not part of the answer the logprobs describe.
+			name:         "thoughts do not count against the answer",
+			events:       []string{evCreated, evReasoning, evDelta1, evDelta2, evCompleted},
+			wantText:     "thinkinghello",
+			wantLogprobs: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, tc.events...)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			if text := allText(final.Content); text != tc.wantText {
+				t.Errorf("final text = %q, want %q", text, tc.wantText)
+			}
+			if gotLogprobs := final.LogprobsResult != nil; gotLogprobs != tc.wantLogprobs {
+				t.Errorf("final LogprobsResult = %+v, want any = %v: they describe %q",
+					final.LogprobsResult, tc.wantLogprobs, "hello")
+			}
+		})
+	}
+}
+
+// TestModel_GenerateStream_TerminalEventWithoutResponse pins that an event
+// omitting the response object the schema marks required does not close the
+// turn. AsResponse* discards its unmarshal error and returns a zero value, so
+// latching one would lose what a later, well-formed event reports.
+func TestModel_GenerateStream_TerminalEventWithoutResponse(t *testing.T) {
+	t.Run("a well-formed event later in the turn still wins", func(t *testing.T) {
+		got, err := runStream(t, evCreated, evDelta1, evDelta2, evBareCompleted, evCompleted)
+		if err != nil {
+			t.Fatalf("GenerateContent() stream err = %v", err)
+		}
+		final := assertTurnShape(t, got)
+		if final.ModelVersion != "stream-model" {
+			t.Errorf("final ModelVersion = %q, want %q", final.ModelVersion, "stream-model")
+		}
+		if final.UsageMetadata == nil || final.UsageMetadata.TotalTokenCount != 7 {
+			t.Errorf("final UsageMetadata = %+v, want the terminal event's 7 total tokens", final.UsageMetadata)
+		}
+		if final.FinishReason != genai.FinishReasonStop {
+			t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonStop)
+		}
+	})
+
+	t.Run("alone it says nothing about why the turn ended", func(t *testing.T) {
+		got, err := runStream(t, evCreated, evDelta1, evDelta2, evBareCompleted)
+		if err != nil {
+			t.Fatalf("GenerateContent() stream err = %v", err)
+		}
+		final := assertTurnShape(t, got)
+		if final.FinishReason != genai.FinishReasonUnspecified {
+			t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonUnspecified)
+		}
+		if final.UsageMetadata != nil {
+			t.Errorf("final UsageMetadata = %+v, want nil", final.UsageMetadata)
+		}
+	})
+}
+
+// TestModel_GenerateStream_EmptyAggregateUsesTerminalEvent pins that a turn the
+// aggregator emptied is rebuilt from the terminal event rather than closed as a
+// clean stop with nothing in it: a streamed function call with no name is
+// dropped in aggregation, and blocking returns it for the same body.
+func TestModel_GenerateStream_EmptyAggregateUsesTerminalEvent(t *testing.T) {
+	t.Run("a tool call", func(t *testing.T) {
+		const evCompletedToolCall = `{"type":"response.completed","response":` + bodyToolCall + `}`
+		streamed, err := runStream(t, evCreated, evArgsDoneUnnamed, evCompletedToolCall)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		blocking, err := runBlocking(t, bodyToolCall)
+		if err != nil {
+			t.Fatalf("blocking err = %v", err)
+		}
+		if len(blocking) != 1 {
+			t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+		}
+		want := []*genai.FunctionCall{{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}}}
+		if diff := cmp.Diff(want, functionCalls(blocking[0])); diff != "" {
+			t.Fatalf("blocking function calls mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, streamed))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// Text has no adoption path of its own, so a provider that batches its
+	// whole message onto the terminal event relies on the rebuild.
+	t.Run("a whole message the deltas never carried", func(t *testing.T) {
+		streamed, err := runStream(t, evCreated, evArgsDoneUnnamed, evCompleted)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		final := assertTurnShape(t, streamed)
+		if text := allText(final.Content); text != "hello" {
+			t.Errorf("streamed text = %q, want the terminal event's %q", text, "hello")
+		}
+		if final.LogprobsResult == nil {
+			t.Error("streamed LogprobsResult = nil, want the terminal event's logprobs for that text")
+		}
+	})
+}
+
+// TestModel_GenerateStream_CreatedOnly pins what a stream that announces a
+// response and then produces nothing yields: no turn at all. Blocking fails
+// with ErrNoOutputItems on the same body, an asymmetry this test records rather
+// than endorses.
+func TestModel_GenerateStream_CreatedOnly(t *testing.T) {
+	got, err := runStream(t, evCreated)
+	if err != nil {
+		t.Fatalf("GenerateContent() stream err = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("stream emitted %d responses, want none", len(got))
+	}
+	if _, err := runBlocking(t, `{"id":"resp_1","model":"stream-model"}`); !errors.Is(err, ErrNoOutputItems) {
+		t.Errorf("blocking err = %v, want %v", err, ErrNoOutputItems)
+	}
+}
+
+// closeSpy counts Close calls on the response bodies it sees, so a test can
+// observe whether the upstream stream was torn down.
+type closeSpy struct {
+	base   http.RoundTripper
+	closed atomic.Int64
+}
+
+func (s *closeSpy) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := s.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = spyBody{ReadCloser: resp.Body, spy: s}
+	return resp, nil
+}
+
+type spyBody struct {
+	io.ReadCloser
+	spy *closeSpy
+}
+
+func (b spyBody) Close() error {
+	b.spy.closed.Add(1)
+	return b.ReadCloser.Close()
+}
+
+// TestModel_GenerateStream_StopsWhenTheConsumerStops pins the iter.Seq2
+// contract: a consumer that breaks out of the range loop ends the sequence and
+// the upstream stream is closed. The language enforces the first half; the
+// deferred stream.Close is ours, and leaks a connection per abandoned turn.
+func TestModel_GenerateStream_StopsWhenTheConsumerStops(t *testing.T) {
+	// The handler blocks after the first delta, so a consumer that breaks does
+	// so mid-turn with the response still open.
+	release := make(chan struct{})
+	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, evt := range []string{evCreated, evDelta1} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", evt)
+		}
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client := server.Client()
+	spy := &closeSpy{base: client.Transport}
+	client.Transport = spy
+
+	ctx := t.Context()
+	llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+		APIKey:     "test",
+		BaseURL:    server.URL + "/v1",
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatalf("NewModel() err = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
+	}
+	var got int
+	for resp, err := range llm.GenerateContent(ctx, req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent() stream err = %v", err)
+		}
+		got++
+		if resp.TurnComplete {
+			t.Fatal("turn completed before the consumer stopped, so the break is untested")
+		}
+		break
+	}
+	if got != 1 {
+		t.Fatalf("consumer saw %d responses before breaking, want 1", got)
+	}
+	if n := spy.closed.Load(); n != 1 {
+		t.Errorf("upstream body closed %d times after the consumer broke, want 1", n)
+	}
+}
+
+// TestModel_GenerateStream_OutputlessTerminalEventKeepsTheReason pins that a
+// turn the aggregator emptied still reports why it ended when the terminal
+// event has nothing to rebuild from — the shape a truncated turn arrives in.
+func TestModel_GenerateStream_OutputlessTerminalEventKeepsTheReason(t *testing.T) {
+	// evArgsDoneUnnamed is dropped in aggregation, so the turn exists but holds
+	// nothing; evMaxTokens carries no output.
+	got, err := runStream(t, evCreated, evArgsDoneUnnamed, evMaxTokens)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	final := assertTurnShape(t, got)
+	if final.FinishReason != genai.FinishReasonMaxTokens {
+		t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonMaxTokens)
+	}
+
+	// With nothing in the aggregator either, there is no turn to report and the
+	// call fails the way blocking does on the same body.
+	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, ErrNoOutputItems) {
+		t.Errorf("streaming err = %v, want %v", err, ErrNoOutputItems)
+	}
+}
+
+// TestModel_GenerateStream_TerminalEventWithEmptyResponse pins that an event
+// carrying an empty response object is no more terminal than one omitting it:
+// both decode to the same zero value.
+func TestModel_GenerateStream_TerminalEventWithEmptyResponse(t *testing.T) {
+	const evEmptyResponse = `{"type":"response.completed","response":{}}`
+	got, err := runStream(t, evCreated, evDelta1, evDelta2, evEmptyResponse, evCompleted)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	final := assertTurnShape(t, got)
+	if final.ModelVersion != "stream-model" {
+		t.Errorf("final ModelVersion = %q, want %q", final.ModelVersion, "stream-model")
+	}
+	if final.UsageMetadata == nil || final.UsageMetadata.TotalTokenCount != 7 {
+		t.Errorf("final UsageMetadata = %+v, want the well-formed event's 7 total tokens", final.UsageMetadata)
+	}
+}
+
+// TestModel_GenerateStream_AdoptsTerminalToolCalls pins that a tool call the
+// terminal event carries reaches the caller even when the deltas already built
+// the turn's text. Losing it makes a turn that called a tool read as a plain
+// answer.
+func TestModel_GenerateStream_AdoptsTerminalToolCalls(t *testing.T) {
+	const bodyTextAndCall = `{"id":"resp_1","model":"stream-model","output":[` +
+		`{"type":"message","content":[{"type":"output_text","text":"hello"}]},` +
+		`{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"}]}`
+	const evTextAndCall = `{"type":"response.completed","response":` + bodyTextAndCall + `}`
+
+	streamed, err := runStream(t, evCreated, evDelta1, evDelta2, evArgsDoneUnnamed, evTextAndCall)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	blocking, err := runBlocking(t, bodyTextAndCall)
+	if err != nil {
+		t.Fatalf("blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	final := assertTurnShape(t, streamed)
+	if text := allText(final.Content); text != "hello" {
+		t.Errorf("streamed text = %q, want the deltas' %q", text, "hello")
+	}
+	want := []*genai.FunctionCall{{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}}}
+	if diff := cmp.Diff(want, functionCalls(blocking[0])); diff != "" {
+		t.Fatalf("blocking function calls mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(want, functionCalls(final)); diff != "" {
+		t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+	}
+
+	t.Run("a call the deltas already carry is not duplicated", func(t *testing.T) {
+		const evNamedArgsDone = `{"type":"response.output_item.added","item":{"id":"item_1","type":"function_call","name":"get_weather","call_id":"call_1"}}`
+		got, err := runStream(t, evCreated, evNamedArgsDone, evArgsDoneUnnamed, evTextAndCall)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("unusable arguments fail the call as they do unstreamed", func(t *testing.T) {
+		const bodyBadArgs = `{"id":"resp_1","model":"stream-model","output":[` +
+			`{"type":"message","content":[{"type":"output_text","text":"hello"}]},` +
+			`{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{"}]}`
+		_, err := runStream(t, evCreated, evDelta1, evDelta2, `{"type":"response.completed","response":`+bodyBadArgs+`}`)
+		if !errors.Is(err, ErrFunctionCallArgs) {
+			t.Errorf("streaming err = %v, want %v", err, ErrFunctionCallArgs)
+		}
+		if _, err := runBlocking(t, bodyBadArgs); !errors.Is(err, ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, ErrFunctionCallArgs)
+		}
+	})
+}
+
+// TestModel_GenerateStream_RefusalLogprobsMatchBlocking pins that a refusal
+// counts towards the answer the logprobs describe: convertOutputItems turns one
+// into a text part like any other, so skipping it would have the two paths
+// disagree over whether the logprobs match.
+func TestModel_GenerateStream_RefusalLogprobsMatchBlocking(t *testing.T) {
+	const bodyRefusal = `{"id":"resp_1","model":"stream-model","output":[{"type":"message","content":[` +
+		`{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5}]},` +
+		`{"type":"refusal","refusal":"I cannot"}]}]}`
+
+	streamed, err := runStream(t, evCreated, `{"type":"response.completed","response":`+bodyRefusal+`}`)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	blocking, err := runBlocking(t, bodyRefusal)
+	if err != nil {
+		t.Fatalf("blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	for name, got := range map[string]*model.LLMResponse{
+		"streamed": assertTurnShape(t, streamed),
+		"blocking": blocking[0],
+	} {
+		if text := allText(got.Content); text != "helloI cannot" {
+			t.Errorf("%s text = %q, want %q", name, text, "helloI cannot")
+		}
+		if got.LogprobsResult == nil {
+			t.Errorf("%s LogprobsResult = nil, want the logprobs for the text it carries", name)
+		}
+	}
+}
+
+func functionCalls(resp *model.LLMResponse) []*genai.FunctionCall {
+	if resp == nil || resp.Content == nil {
+		return nil
+	}
+	var calls []*genai.FunctionCall
+	for _, part := range resp.Content.Parts {
+		if part.FunctionCall != nil {
+			calls = append(calls, part.FunctionCall)
+		}
+	}
+	return calls
 }
 
 // TestModel_GenerateStream_MatchesBlocking pins the parity the bug cost: one
@@ -390,20 +988,52 @@ func TestModel_GenerateStream_NoOutputItems(t *testing.T) {
 	}
 }
 
-// TestModel_GenerateStream_Failed pins that a stream that errors out ends the
-// turn with that error, never with a response claiming the turn completed.
-func TestModel_GenerateStream_Failed(t *testing.T) {
-	got, err := runStream(t, evCreated, evDelta1, evFailed)
-	if err == nil {
-		t.Fatal("streaming err = nil, want the upstream failure")
+// TestModel_GenerateStream_ErrorsEndTheTurn pins that every way a stream can go
+// wrong ends the turn with that error rather than a response claiming the turn
+// completed — one case per source of error the streaming path has.
+func TestModel_GenerateStream_ErrorsEndTheTurn(t *testing.T) {
+	tests := []struct {
+		name    string
+		events  []string
+		wantErr string
+	}{
+		{
+			name:    "response.failed",
+			events:  []string{evCreated, evDelta1, evFailed},
+			wantErr: "upstream exploded",
+		},
+		{
+			name:    "error event",
+			events:  []string{evCreated, evDelta1, evError},
+			wantErr: "stream blew up",
+		},
+		{
+			name:    "translator rejects the event",
+			events:  []string{evCreated, `{"type":"response.function_call_arguments.done","item_id":"i1","name":"f","arguments":"{"}`},
+			wantErr: "parse streamed function args",
+		},
+		{
+			name:    "the stream itself fails",
+			events:  []string{evCreated, evDelta1, evTruncated},
+			wantErr: "unexpected end of JSON input",
+		},
 	}
-	if !strings.Contains(err.Error(), "upstream exploded") {
-		t.Errorf("streaming err = %v, want it to name the upstream failure", err)
-	}
-	for i, resp := range got {
-		if resp.TurnComplete {
-			t.Errorf("response %d has TurnComplete = true, want the error to end the turn", i)
-		}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, tc.events...)
+			if err == nil {
+				t.Fatalf("streaming err = nil, want one naming %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("streaming err = %v, want it to name %q", err, tc.wantErr)
+			}
+			for i, resp := range got {
+				if resp.TurnComplete {
+					t.Errorf("response %d has TurnComplete = true, want the error to end the turn", i)
+				}
+			}
+		})
 	}
 }
 
