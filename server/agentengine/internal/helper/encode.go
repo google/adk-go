@@ -15,6 +15,7 @@
 package helper
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"reflect"
@@ -120,6 +121,9 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
+		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())
