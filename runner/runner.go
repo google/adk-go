@@ -210,15 +210,25 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
+			// An LlmAgent root must be a chat agent, and an unset Mode
+			// defaults to chat. The default is resolved per call and declared
+			// on the context rather than written into the agent, which
+			// agenttool and the servers share across concurrent Runs (see
+			// llminternal.WithDefaultMode, issue #1137). Without the
+			// declaration the node runtime would apply its own single_turn
+			// default to an unset root. The root resolves from State alone
+			// instead of through State.ResolveMode so that a declaration made
+			// further out for an agent of this name cannot redirect a root and
+			// then fail the chat check below.
+			mode := llmInternalState.Mode
+			if mode == llminternal.ModeUnset {
+				mode = llminternal.ModeChat
 			}
-
-			if llmInternalState.Mode != llminternal.ModeChat {
-				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+			if mode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), mode))
 				return
 			}
+			ctx = llminternal.WithDefaultMode(ctx, r.rootAgent.Name(), mode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {

@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -35,6 +37,52 @@ const (
 	ModeTask       Mode = "task"
 	ModeSingleTurn Mode = "single_turn"
 )
+
+type defaultModeKey struct{}
+
+// defaultMode is the delegation mode to assume for one named agent whose
+// State.Mode is ModeUnset.
+type defaultMode struct {
+	agent string
+	mode  Mode
+}
+
+// WithDefaultMode returns ctx carrying mode as the delegation mode to assume
+// for the agent named agentName when its own Mode is unset.
+//
+// Such a default depends on the agent's role in one particular call: the
+// runner's root agent must be a chat agent, an agent wrapped as a workflow node
+// defaults to single_turn. State, meanwhile, is shared by every concurrent
+// invocation of that agent, so writing the default into it is a data race
+// (issue #1137) — the role travels with the call instead. The declaration
+// covers that one agent, not the agents it dispatches: whoever dispatches them
+// declares their role.
+func WithDefaultMode(ctx context.Context, agentName string, mode Mode) context.Context {
+	return context.WithValue(ctx, defaultModeKey{}, defaultMode{agent: agentName, mode: mode})
+}
+
+// defaultModeFromContext returns the mode WithDefaultMode declared for
+// agentName, or ModeUnset if ctx declares none for it.
+func defaultModeFromContext(ctx context.Context, agentName string) Mode {
+	d, _ := ctx.Value(defaultModeKey{}).(defaultMode)
+	if d.agent != agentName {
+		return ModeUnset
+	}
+	return d.mode
+}
+
+// ResolveMode returns the delegation mode to run the agent named agentName
+// under, in precedence order: its configured Mode, the default its caller
+// declared on ctx, then fallback. It never writes to s.
+func (s *State) ResolveMode(ctx context.Context, agentName string, fallback Mode) Mode {
+	if s.Mode != ModeUnset {
+		return s.Mode
+	}
+	if mode := defaultModeFromContext(ctx, agentName); mode != ModeUnset {
+		return mode
+	}
+	return fallback
+}
 
 type State struct {
 	Model model.LLM

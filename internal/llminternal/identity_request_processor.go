@@ -32,7 +32,9 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if llmAgent == nil {
 			return // do nothing.
 		}
-		if llmAgent.internal().Mode == ModeSingleTurn {
+		// The mode is resolved per call, never read out of shared State (see
+		// WithDefaultMode, issue #1137).
+		if llmAgent.internal().ResolveMode(ctx, ctx.Agent().Name(), ModeUnset) == ModeSingleTurn {
 			return
 		}
 

@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"iter"
 	"slices"
@@ -83,7 +84,7 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
+		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parents[agent.Name()], targets)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -105,8 +106,8 @@ type TransferToAgentTool struct {
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool.
-func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
-	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
+func NewTransferToAgentTool(ctx context.Context, curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(ctx, curAgent, parent, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +223,8 @@ func transferTargets(curAgent, parent agent.Agent) []agent.Agent {
 
 // isUntransferableMode skips the agents which have different delegation
 // mechanism (e.g. task & single_turn agents are handled by llmagent
-// wrapper code).
+// wrapper code). It reads Mode directly: a default declared on the context
+// describes the agent being run, not its peers.
 func isUntransferableMode(a agent.Agent) bool {
 	llmA := asLLMAgent(a)
 	if llmA == nil {
@@ -306,12 +308,13 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
+func instructionsForTransferToAgent(ctx context.Context, curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
 	cur := asLLMAgent(curAgent)
 	// Suppress transfer instructions for task / single_turn agents:
 	// they reach their callees via FC delegation (TaskAgentTool /
-	// SingleTurnTool), not via transfer.
-	switch cur.internal().Mode {
+	// SingleTurnTool), not via transfer. The mode is resolved per call, never
+	// read out of shared State (see WithDefaultMode, issue #1137).
+	switch cur.internal().ResolveMode(ctx, curAgent.Name(), ModeUnset) {
 	case ModeTask, ModeSingleTurn:
 		return "", nil
 	}

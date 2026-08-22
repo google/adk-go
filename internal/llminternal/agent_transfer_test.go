@@ -627,3 +627,81 @@ func stringify(v any) string {
 	s, _ := json.Marshal(v)
 	return string(s)
 }
+
+// TestAgentTransferRequestProcessor_UnsetModeFromContext covers an LlmAgent
+// wrapped as a workflow node: its Mode stays unset (nothing writes the shared
+// agent state at run time, issue #1137), so the processor has to resolve the
+// single_turn default its caller declared and build the same request an
+// explicitly single_turn agent gets.
+func TestAgentTransferRequestProcessor_UnsetModeFromContext(t *testing.T) {
+	llm := &struct{ model.LLM }{}
+
+	// process runs the processor over a "Current" agent in the given mode,
+	// optionally with the single_turn default workflow.AgentNode declares, and
+	// returns the request it built and Current's Mode afterwards.
+	process := func(t *testing.T, mode llmagent.Mode, declareSingleTurn bool) (*model.LLMRequest, llminternal.Mode) {
+		t.Helper()
+		sub := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "Sub",
+			Model: llm,
+			Mode:  llmagent.ModeChat,
+		}))
+		// No parent: this is the shape of an agent handed to
+		// workflow.NewAgentNode rather than used as a sub-agent.
+		cur := utils.Must(llmagent.New(llmagent.Config{
+			Name:      "Current",
+			Model:     llm,
+			Mode:      mode,
+			SubAgents: []agent.Agent{sub},
+		}))
+		parents, err := parentmap.New(cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := parentmap.ToContext(t.Context(), parents)
+		if declareSingleTurn {
+			ctx = llminternal.WithDefaultMode(ctx, cur.Name(), llminternal.ModeSingleTurn)
+		}
+		req := &model.LLMRequest{}
+		for ev, err := range llminternal.AgentTransferRequestProcessor(
+			icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: cur}),
+			req, &llminternal.Flow{}) {
+			if ev != nil {
+				t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
+			}
+			if err != nil {
+				t.Fatalf("AgentTransferRequestProcessor failed: %v", err)
+			}
+		}
+		return req, llminternal.Reveal(cur.(llminternal.Agent)).Mode
+	}
+
+	got, gotMode := process(t, llmagent.ModeUnset, true)
+	want, _ := process(t, llmagent.ModeSingleTurn, false)
+
+	// The whole request, not just its instruction text: the processor also
+	// appends the transfer tool and its function declaration, so suppressed
+	// prose alone would not prove the resolved agent is treated as single_turn.
+	if diff := cmp.Diff(stringify(want.Config), stringify(got.Config)); diff != "" {
+		t.Errorf("Config differs from an explicitly single_turn agent's (-want +got):\n%s", diff)
+	}
+	if len(toolNames(want)) == 0 {
+		t.Fatal("baseline single_turn request carried no tools; the tool comparison below would pass vacuously")
+	}
+	if diff := cmp.Diff(toolNames(want), toolNames(got)); diff != "" {
+		t.Errorf("tools differ from an explicitly single_turn agent's (-want +got):\n%s", diff)
+	}
+	if gotMode != llminternal.ModeUnset {
+		t.Errorf("Current Mode = %q, want unchanged %q (issue #1137)", gotMode, llminternal.ModeUnset)
+	}
+}
+
+// toolNames returns the names of the tools appended to req, sorted.
+func toolNames(req *model.LLMRequest) []string {
+	var names []string
+	for name := range req.Tools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}

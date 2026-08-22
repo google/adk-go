@@ -15,7 +15,11 @@
 package agenttool_test
 
 import (
+	"context"
+	"fmt"
+	"iter"
 	"log"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,11 +28,14 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 )
 
@@ -364,4 +371,137 @@ func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 	})
 
 	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
+}
+
+// concurrentModel replays scripted turns in order, repeating the last one once
+// the script runs out. Parallel function-call dispatch calls one model from
+// several goroutines, so the cursor is mutex-guarded (testutil.MockModel is
+// not safe for that).
+type concurrentModel struct {
+	mu    sync.Mutex
+	turns []*genai.Content
+	next  int
+}
+
+func (m *concurrentModel) Name() string { return "concurrent-mock" }
+
+func (m *concurrentModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	turn := m.turns[min(m.next, len(m.turns)-1)]
+	m.next++
+	m.mu.Unlock()
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: turn}, nil)
+	}
+}
+
+// TestAgentTool_ParallelDispatch_SharedStateNotWritten is the regression test
+// for the agenttool path of issue #1137: one model turn emits several calls to
+// the same agent tool, the flow dispatches them on separate goroutines, and
+// every dispatch builds a fresh Runner over the one shared sub-agent. Any
+// run-time write to that agent's state races between the dispatches, and a
+// torn read of State.Mode segfaults instead of merely tripping the detector.
+//
+// The Mode assertion fails deterministically without -race, so it pins the
+// invariant — shared agent state is never written at run time — rather than
+// the absence of a race report.
+func TestAgentTool_ParallelDispatch_SharedStateNotWritten(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		mode llmagent.Mode
+		// calls is the number of parallel calls to the agent tool in one
+		// coordinator turn.
+		calls int
+	}{
+		{name: "unset mode, two calls", mode: llmagent.ModeUnset, calls: 2},
+		{name: "unset mode, eight calls", mode: llmagent.ModeUnset, calls: 8},
+		// An explicitly-configured mode was never written to, so this row
+		// passes with or without the fix; it is here to exercise the fan-out
+		// under -race.
+		{name: "explicit chat mode, eight calls", mode: llmagent.ModeChat, calls: 8},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const workerName = "worker"
+			worker, err := llmagent.New(llmagent.Config{
+				Name:        workerName,
+				Description: "Resolves one descriptor.",
+				Model: &concurrentModel{turns: []*genai.Content{
+					genai.NewContentFromText("resolved", genai.RoleModel),
+				}},
+				Mode: tc.mode,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker) failed: %v", err)
+			}
+
+			parts := make([]*genai.Part, tc.calls)
+			for i := range parts {
+				parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{
+					ID:   fmt.Sprintf("call-%d", i),
+					Name: workerName,
+					Args: map[string]any{"request": fmt.Sprintf("descriptor %d", i)},
+				}}
+			}
+			coordinator, err := llmagent.New(llmagent.Config{
+				Name: "coordinator",
+				Model: &concurrentModel{turns: []*genai.Content{
+					{Role: genai.RoleModel, Parts: parts},
+					genai.NewContentFromText("all resolved", genai.RoleModel),
+				}},
+				Tools: []tool.Tool{agenttool.New(worker, nil)},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator) failed: %v", err)
+			}
+
+			sessionService := session.InMemoryService()
+			created, err := sessionService.Create(t.Context(), &session.CreateRequest{
+				AppName: "race-repro", UserID: "user",
+			})
+			if err != nil {
+				t.Fatalf("session Create() failed: %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName: "race-repro", Agent: coordinator, SessionService: sessionService,
+			})
+			if err != nil {
+				t.Fatalf("runner.New() failed: %v", err)
+			}
+
+			gotResponses := map[string]bool{}
+			for event, err := range r.Run(t.Context(), created.Session.UserID(), created.Session.ID(),
+				genai.NewContentFromText("resolve these", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run() failed unexpectedly: %v", err)
+				}
+				if event == nil || event.Content == nil {
+					continue
+				}
+				for _, part := range event.Content.Parts {
+					if part != nil && part.FunctionResponse != nil {
+						gotResponses[part.FunctionResponse.ID] = true
+					}
+				}
+			}
+
+			// Every parallel call was dispatched: the fan-out really happened.
+			for i := range tc.calls {
+				if id := fmt.Sprintf("call-%d", i); !gotResponses[id] {
+					t.Errorf("no FunctionResponse for %s; got responses for %v", id, gotResponses)
+				}
+			}
+
+			// The shared sub-agent's mode is still what it was configured
+			// with: no dispatch wrote it (issue #1137).
+			if got, want := llminternal.Reveal(worker.(llminternal.Agent)).Mode, llminternal.Mode(tc.mode); got != want {
+				t.Errorf("worker Mode after run = %q, want unchanged %q: shared agent state was written at run time (issue #1137)", got, want)
+			}
+		})
+	}
 }

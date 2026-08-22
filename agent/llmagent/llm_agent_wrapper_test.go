@@ -18,6 +18,7 @@ import (
 	"context"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +27,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -165,6 +168,9 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 // script, subsequent calls yield a terminal "done" text — this lets
 // the runner's outer turn loop exit cleanly without hanging.
 type scriptedLLM struct {
+	// mu guards callIdx: parallel function-call dispatch drives one agent's
+	// model from several goroutines at once.
+	mu       sync.Mutex
 	turns    []*model.LLMResponse
 	callIdx  int
 	doneText string // override for the post-script fallback
@@ -173,8 +179,10 @@ type scriptedLLM struct {
 func (s *scriptedLLM) Name() string { return "scripted-mock" }
 
 func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	s.mu.Lock()
 	idx := s.callIdx
 	s.callIdx++
+	s.mu.Unlock()
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if idx < len(s.turns) {
 			yield(s.turns[idx], nil)
@@ -1159,5 +1167,203 @@ func fcContent(id, name string, args map[string]any) *genai.Content {
 		Parts: []*genai.Part{{
 			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
 		}},
+	}
+}
+
+// =============================================================================
+// Parallel single_turn dispatch (issue #1137)
+// =============================================================================
+
+// TestParallelSingleTurnDispatch_SharedStateNotWritten is the
+// regression test for issue #1137: a chat coordinator dispatches the
+// same single_turn sub-agent twice via parallel function calls in one
+// model turn. Each dispatch used to write the shared agent state
+// (IncludeContents), a data race between the two dispatch goroutines.
+//
+// The IncludeContents assertion fails deterministically even without
+// -race: it pins the invariant that shared state is never written at
+// run time, not merely the absence of a race report.
+func TestParallelSingleTurnDispatch_SharedStateNotWritten(t *testing.T) {
+	t.Parallel()
+
+	const workerName = "worker"
+	worker, err := llmagent.New(llmagent.Config{
+		Name:        workerName,
+		Description: "Handles one delegated task.",
+		Model: &scriptedLLM{turns: []*model.LLMResponse{{
+			Content: genai.NewContentFromText("task done", genai.RoleModel),
+		}}},
+		Mode: llmagent.ModeSingleTurn,
+		// IncludeContents deliberately left unset ("").
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	coordLLM := &scriptedLLM{turns: []*model.LLMResponse{
+		{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call-a", Name: workerName, Args: map[string]any{"request": "do task A"}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call-b", Name: workerName, Args: map[string]any{"request": "do task B"}}},
+		}}},
+		{Content: genai.NewContentFromText("all done", genai.RoleModel)},
+	}}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Model:     coordLLM,
+		SubAgents: []agent.Agent{worker},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	svc := session.InMemoryService()
+	if _, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	}); err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	r, err := runner.New(runner.Config{Agent: coord, SessionService: svc, AppName: "app"})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	gotFRs := map[string]bool{}
+	for ev, err := range r.Run(t.Context(), "u", "s",
+		genai.NewContentFromText("fan out", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run: %v", err)
+		}
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p != nil && p.FunctionResponse != nil {
+				gotFRs[p.FunctionResponse.ID] = true
+			}
+		}
+	}
+
+	// 1. Both dispatches produced a result — fan-out actually happened.
+	for _, id := range []string{"call-a", "call-b"} {
+		if !gotFRs[id] {
+			t.Errorf("expected a FunctionResponse for %s; got FRs for %v", id, gotFRs)
+		}
+	}
+
+	// 2. The shared agent state was never written at run time: the
+	// worker's IncludeContents is still its configured value (unset)
+	// and its Mode is still the configured single_turn.
+	workerState := llminternal.Reveal(worker.(llminternal.Agent))
+	if got := workerState.IncludeContents; got != "" {
+		t.Errorf("worker IncludeContents = %q after run, want unchanged %q (shared state written at run time, issue #1137)", got, "")
+	}
+	if got := workerState.Mode; got != llminternal.ModeSingleTurn {
+		t.Errorf("worker Mode = %q after run, want unchanged %q (shared state written at run time, issue #1137)", got, llminternal.ModeSingleTurn)
+	}
+}
+
+// TestModeDefaultIsResolvedPerCall pins how an unset Mode is resolved
+// (issue #1137): from the default the caller declares on the context — the
+// runner declares chat for its root agent, the node runtime single_turn — and
+// never by writing it into the shared agent state. PrepareLLMAgentInput seeds
+// input for a single_turn agent only, so it reports which mode was resolved.
+func TestModeDefaultIsResolvedPerCall(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		mode llmagent.Mode
+		// declared is the default the caller puts on the context;
+		// ModeUnset means it declares none, as a direct caller does.
+		declared llminternal.Mode
+		wantSeed bool
+	}{
+		{name: "unset mode, no declared default, defaults to single_turn", wantSeed: true},
+		{name: "unset mode, node runtime declares single_turn", declared: llminternal.ModeSingleTurn, wantSeed: true},
+		{name: "unset mode, runner declares chat for its root", declared: llminternal.ModeChat, wantSeed: false},
+		{name: "explicit single_turn outranks a declared chat", mode: llmagent.ModeSingleTurn, declared: llminternal.ModeChat, wantSeed: true},
+		{name: "explicit chat outranks a declared single_turn", mode: llmagent.ModeChat, declared: llminternal.ModeSingleTurn, wantSeed: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := makeLLMAgent(t, "x", withMode(tc.mode))
+			ctx := t.Context()
+			if tc.declared != llminternal.ModeUnset {
+				ctx = llminternal.WithDefaultMode(ctx, a.Name(), tc.declared)
+			}
+			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Agent:        a,
+				InvocationID: "inv-test",
+			})
+
+			seed := llmagent.PrepareLLMAgentInput(a, agent.NewContext(ic), "hello")
+			if gotSeed := seed != nil; gotSeed != tc.wantSeed {
+				t.Errorf("PrepareLLMAgentInput seeded = %v, want %v (resolved mode is wrong)", gotSeed, tc.wantSeed)
+			}
+			if got := llminternal.Reveal(a.(llminternal.Agent)).Mode; got != llminternal.Mode(tc.mode) {
+				t.Errorf("agent Mode = %q, want unchanged %q: shared agent state was written at run time (issue #1137)", got, tc.mode)
+			}
+		})
+	}
+}
+
+// TestUnsetModeRoot_RunsAsChatWithoutWriting pins the runner half of the
+// resolution rule (issue #1137): a root agent with an unset Mode runs as a chat
+// agent — its second turn still sees the first one — and the run leaves its Mode
+// unset. Before, the runner stored the chat default in the shared agent state,
+// which raced with every concurrent Run over the same agent.
+func TestUnsetModeRoot_RunsAsChatWithoutWriting(t *testing.T) {
+	t.Parallel()
+
+	m := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromText("ok", genai.RoleModel),
+		genai.NewContentFromText("ok", genai.RoleModel),
+	}}
+	root, err := llmagent.New(llmagent.Config{
+		Name:        "root",
+		Description: "test agent",
+		Model:       m,
+		// Mode deliberately left unset.
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	if _, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	}); err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	r, err := runner.New(runner.Config{Agent: root, SessionService: svc, AppName: "app"})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	for _, text := range []string{"first", "second"} {
+		for _, err := range r.Run(t.Context(), "u", "s",
+			genai.NewContentFromText(text, genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run(%q): %v", text, err)
+			}
+		}
+	}
+
+	// A chat agent carries history: the second turn's request holds the first
+	// turn as well. A single_turn agent would send the current turn only.
+	counts := make([]int, 0, len(m.Requests))
+	for _, req := range m.Requests {
+		counts = append(counts, len(req.Contents))
+	}
+	if len(counts) != 2 {
+		t.Fatalf("model was called %d times (contents per turn %v), want 2", len(counts), counts)
+	}
+	if counts[1] <= counts[0] {
+		t.Errorf("contents per turn = %v, want the second turn to carry more than the first (chat keeps history)", counts)
+	}
+	if got := llminternal.Reveal(root.(llminternal.Agent)).Mode; got != llminternal.ModeUnset {
+		t.Errorf("root Mode after two runs = %q, want unchanged %q: shared agent state was written at run time (issue #1137)", got, llminternal.ModeUnset)
 	}
 }

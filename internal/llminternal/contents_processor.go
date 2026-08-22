@@ -43,8 +43,12 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // In python, no error is yielded.
 		}
 		state := llmAgent.internal()
+		// Both the mode and the "single_turn means no history" rule are derived
+		// here rather than read out of State, which the agent wrapper used to
+		// write on every dispatch (see WithDefaultMode, issue #1137).
+		isSingleTurn := state.ResolveMode(ctx, ctx.Agent().Name(), ModeUnset) == ModeSingleTurn
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
+		if state.IncludeContents == "none" || isSingleTurn {
 			// Include current turn context only (no conversation history)
 			fn = buildContentsCurrentTurnContextOnly
 		}
@@ -54,7 +58,6 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		isSingleTurn := state.Mode == ModeSingleTurn
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)

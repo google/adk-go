@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
@@ -1413,5 +1414,67 @@ func TestThoughtOnlyTurnDoesNotEndInvocation(t *testing.T) {
 	}
 	if !strings.Contains(got.String(), "the answer") {
 		t.Errorf("surfaced text = %q, want it to contain %q", got.String(), "the answer")
+	}
+}
+
+// TestSubAgentMode_ConstructionOrder pins the sub-agent mode and the delegation
+// tool a parent installs for it, in both construction orders.
+// workflow.NewAgentNode no longer stamps single_turn on the agent it wraps —
+// that write raced concurrent dispatch of the same agent (issue #1137) — so
+// llmagent.New's own default decides in either order: an unset sub-agent is
+// chat, and a chat sub-agent gets no delegation tool. On main, wrapping before
+// building the parent left the sub-agent single_turn and the parent installed a
+// SingleTurnTool for it, while wrapping afterwards did not; the two orders
+// disagreed. Callers who want the single_turn tool set Config.Mode.
+func TestSubAgentMode_ConstructionOrder(t *testing.T) {
+	llm := &struct{ model.LLM }{}
+
+	for _, tc := range []struct {
+		name string
+		// subMode is the sub-agent's configured Config.Mode.
+		subMode llmagent.Mode
+		// wrapFirst wraps the sub-agent as a workflow node before its parent
+		// is built rather than after.
+		wrapFirst bool
+		wantMode  llminternal.Mode
+		wantTools []string
+	}{
+		{name: "unset, wrapped as a node first", wrapFirst: true, wantMode: llminternal.ModeChat},
+		{name: "unset, wrapped as a node after the parent", wantMode: llminternal.ModeChat},
+		{name: "single_turn, wrapped as a node first", subMode: llmagent.ModeSingleTurn, wrapFirst: true, wantMode: llminternal.ModeSingleTurn, wantTools: []string{"sub"}},
+		{name: "single_turn, wrapped as a node after the parent", subMode: llmagent.ModeSingleTurn, wantMode: llminternal.ModeSingleTurn, wantTools: []string{"sub"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: llm, Mode: tc.subMode})
+			if err != nil {
+				t.Fatalf("llmagent.New(sub) error = %v", err)
+			}
+			wrapAsNode := func() {
+				if _, err := workflow.NewAgentNode(sub, workflow.NodeConfig{}); err != nil {
+					t.Fatalf("workflow.NewAgentNode() error = %v", err)
+				}
+			}
+			if tc.wrapFirst {
+				wrapAsNode()
+			}
+			parent, err := llmagent.New(llmagent.Config{Name: "parent", Model: llm, SubAgents: []agent.Agent{sub}})
+			if err != nil {
+				t.Fatalf("llmagent.New(parent) error = %v", err)
+			}
+			if !tc.wrapFirst {
+				wrapAsNode()
+			}
+
+			if got := llminternal.Reveal(sub.(llminternal.Agent)).Mode; got != tc.wantMode {
+				t.Errorf("sub-agent Mode = %q, want %q", got, tc.wantMode)
+			}
+			var gotTools []string
+			for _, tl := range llminternal.Reveal(parent.(llminternal.Agent)).Tools {
+				gotTools = append(gotTools, tl.Name())
+			}
+			if diff := cmp.Diff(tc.wantTools, gotTools); diff != "" {
+				t.Errorf("parent tools mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

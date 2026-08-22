@@ -39,8 +39,9 @@ import (
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
 // Per-mode behaviour:
 //
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
-//     agent with a single user-content event derived from nodeInput,
+//   - single_turn: the contents processor derives IncludeContents=none
+//     from the mode (nothing is written to the agent), and the wrapper
+//     seeds the agent with a single user-content event from nodeInput,
 //     drives one Agent.Run, post-processes the model reply into the
 //     terminal Output, then returns.
 //   - task: the wrapper drives Agent.Run and watches for the
@@ -70,20 +71,19 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 		state := llminternal.Reveal(llmA)
 
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-		switch state.Mode {
+		// Resolve the mode without writing it back: State is shared by every
+		// concurrent dispatch of this agent (see llminternal.WithDefaultMode,
+		// issue #1137). An unset Mode takes the default its caller declared,
+		// else single_turn per llmagent.Config.Mode.
+		mode := state.ResolveMode(ctx, a.Name(), llminternal.ModeSingleTurn)
+		switch mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q only supports task, single_turn, and chat mode, got %q",
-				a.Name(), state.Mode))
+				a.Name(), mode))
 			return
 		}
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
@@ -95,7 +95,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     carry one,
 		//   - relies on the embedded InvocationContext for everything
 		//     else (memory, run config, etc.).
-		switch state.Mode {
+		switch mode {
 		case llminternal.ModeChat:
 			runChat(a, ctx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
@@ -107,7 +107,10 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
 				sess = newWrappedSession(sess, seed)
 			}
-			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			// The resolved mode is declared for this agent so the request
+			// processors (contents, identity, agent transfer) resolve the
+			// same value from an unset State.Mode.
+			ic := icontext.NewInvocationContext(llminternal.WithDefaultMode(ctx, a.Name(), mode), icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
 				Memory:         ctx.Memory(),
 				Session:        sess,
@@ -118,7 +121,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
-			if state.Mode == llminternal.ModeSingleTurn {
+			if mode == llminternal.ModeSingleTurn {
 				runSingleTurn(a, ic, yield)
 			} else {
 				runTask(a, ic, yield)
@@ -128,7 +131,9 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 }
 
 // PrepareLLMAgentInput returns the seeded user-role event for the
-// single_turn agent's first turn.
+// single_turn agent's first turn. An agent whose Mode is unset counts as
+// single_turn unless ctx declares another default (see
+// llmagent.Config.Mode); nothing is written to the agent.
 func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil
@@ -137,7 +142,7 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if !ok || llmA == nil {
 		return nil
 	}
-	if llminternal.Reveal(llmA).Mode != llminternal.ModeSingleTurn {
+	if llminternal.Reveal(llmA).ResolveMode(ctx, a.Name(), llminternal.ModeSingleTurn) != llminternal.ModeSingleTurn {
 		return nil
 	}
 	content := nodeInputToContent(nodeInput)

@@ -50,13 +50,6 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-	}
-
 	// The wrapped agent's Run already emits an invoke_agent span, so
 	// the scheduler must not add a redundant invoke_node wrapper —
 	// whether this node is activated by a static edge or delegated to

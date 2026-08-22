@@ -17,8 +17,10 @@ package runner_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/genai"
@@ -26,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -896,4 +899,275 @@ func sessionOutputs(sess session.Session) []any {
 		}
 	}
 	return outs
+}
+
+// TestRunner_RootMode covers how the runner settles the root agent's delegation
+// mode (issue #1137). An unset Mode counts as chat, a non-chat root is
+// rejected, an agent that was also wrapped as a workflow node is still a valid
+// root (wrapping no longer stamps single_turn on it), and no run writes the
+// agent's mode.
+func TestRunner_RootMode(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		mode llmagent.Mode
+		// wrapAsNode wraps the agent in a workflow node before the run, the
+		// way a graph or a task delegation would.
+		wrapAsNode bool
+		// wantErr is matched against the error from Run; empty means the run
+		// must succeed.
+		wantErr string
+	}{
+		{name: "unset mode defaults to chat", mode: llmagent.ModeUnset},
+		{name: "explicit chat mode", mode: llmagent.ModeChat},
+		{name: "unset mode after being wrapped as a workflow node", mode: llmagent.ModeUnset, wrapAsNode: true},
+		{name: "task mode is rejected", mode: llmagent.ModeTask, wantErr: "must be a chat LlmAgent"},
+		{name: "single_turn mode is rejected", mode: llmagent.ModeSingleTurn, wantErr: "must be a chat LlmAgent"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+
+			m := &scriptedModel{responses: []*genai.Content{
+				genai.NewContentFromText("hello there", "model"),
+			}}
+			a, err := llmagent.New(llmagent.Config{Name: "root", Model: m, Mode: tc.mode})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			if tc.wrapAsNode {
+				if _, err := workflow.NewAgentNode(a, workflow.NodeConfig{}); err != nil {
+					t.Fatalf("workflow.NewAgentNode() error = %v", err)
+				}
+			}
+
+			var gotErr error
+			var gotText string
+			for ev, err := range newNodeTestRunner(t, a, svc).Run(
+				ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}) {
+				if err != nil {
+					gotErr = err
+					break
+				}
+				if ev != nil && ev.LLMResponse.Content != nil {
+					for _, p := range ev.LLMResponse.Content.Parts {
+						gotText += p.Text
+					}
+				}
+			}
+
+			switch {
+			case tc.wantErr != "":
+				if gotErr == nil {
+					t.Fatalf("Run() error = nil, want one containing %q", tc.wantErr)
+				}
+				if !strings.Contains(gotErr.Error(), tc.wantErr) {
+					t.Errorf("Run() error = %q, want it to contain %q", gotErr, tc.wantErr)
+				}
+			default:
+				if gotErr != nil {
+					t.Fatalf("Run() error = %v, want nil", gotErr)
+				}
+				if !strings.Contains(gotText, "hello there") {
+					t.Errorf("Run() text = %q, want it to contain the model reply", gotText)
+				}
+			}
+
+			// The run left the agent's mode alone, whatever it was.
+			if got := llminternal.Reveal(a.(llminternal.Agent)).Mode; got != llminternal.Mode(tc.mode) {
+				t.Errorf("root Mode after Run = %q, want unchanged %q (issue #1137)", got, tc.mode)
+			}
+		})
+	}
+}
+
+// concurrentModel is a model.LLM that can be driven from several goroutines at
+// once (scriptedModel's call counter cannot). It answers every call with the
+// same text and records, per request, how many contents the request carried,
+// keyed by the request's last user text.
+type concurrentModel struct {
+	mu       sync.Mutex
+	contents map[string]int
+}
+
+func (m *concurrentModel) Name() string { return "concurrent" }
+
+func (m *concurrentModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	var last string
+	for _, c := range req.Contents {
+		if c == nil || c.Role != genai.RoleUser {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.Text != "" {
+				last = p.Text
+			}
+		}
+	}
+	m.mu.Lock()
+	if m.contents == nil {
+		m.contents = map[string]int{}
+	}
+	m.contents[last] = len(req.Contents)
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("hello there", genai.RoleModel)}, nil)
+	}
+}
+
+// TestRunner_ConcurrentRootRuns runs one root agent whose Mode is unset from
+// several goroutines at once, the shape every server that builds a Runner per
+// request over a shared agent has (server/adkrest/controllers/runtime.go:213
+// over agent/loader.go:53). The chat default is resolved per call, so the runs
+// must not write the agent's Mode and must not race on it (issue #1137).
+func TestRunner_ConcurrentRootRuns(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	// Mode deliberately unset: the runner defaults it to chat per call.
+	a, err := llmagent.New(llmagent.Config{Name: "root", Model: &concurrentModel{}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r := newNodeTestRunner(t, a, svc)
+
+	const runs = 8
+	errs := make([]error, runs)
+	var wg sync.WaitGroup
+	for i := range runs {
+		sessionID := fmt.Sprintf("s%d", i)
+		if _, err := svc.Create(ctx, &session.CreateRequest{
+			AppName: nodeTestApp, UserID: nodeTestUser, SessionID: sessionID,
+		}); err != nil {
+			t.Fatalf("sessionService.Create() error = %v", err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, err := range r.Run(ctx, nodeTestUser, sessionID, userText("hi"), agent.RunConfig{}) {
+				if err != nil {
+					errs[i] = err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Run() %d error = %v, want nil", i, err)
+		}
+	}
+	if got := llminternal.Reveal(a.(llminternal.Agent)).Mode; got != llminternal.ModeUnset {
+		t.Errorf("root Mode after %d concurrent runs = %q, want unchanged %q (issue #1137)", runs, got, llminternal.ModeUnset)
+	}
+}
+
+// TestRunner_SameAgentAsRootAndNodeConcurrently runs one agent whose Mode is
+// unset in both of its roles at the same time: as a Runner's root, which must
+// see the conversation history a chat agent sees, and as a workflow node, which
+// must see the current turn only. Resolving the default per call is what allows
+// the two roles to disagree; storing it on the agent — whether by a plain write
+// or once under a sync.Once — would give whichever role won the race to both.
+func TestRunner_SameAgentAsRootAndNodeConcurrently(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	m := &concurrentModel{}
+	a, err := llmagent.New(llmagent.Config{Name: "worker", Model: m})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode() error = %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: workflow.Chain(workflow.Start, node),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+
+	// Both sessions carry the same earlier exchange, so the two roles differ
+	// only in how much of it reaches the model.
+	seed := func(sessionID string) {
+		t.Helper()
+		created, err := svc.Create(ctx, &session.CreateRequest{
+			AppName: nodeTestApp, UserID: nodeTestUser, SessionID: sessionID,
+		})
+		if err != nil {
+			t.Fatalf("sessionService.Create() error = %v", err)
+		}
+		for i, c := range []*genai.Content{userText("earlier question"), genai.NewContentFromText("earlier answer", genai.RoleModel)} {
+			author := "worker" // the agent, for a model-role event
+			if c.Role == genai.RoleUser {
+				author = "user"
+			}
+			ev := &session.Event{
+				ID:          fmt.Sprintf("%s_seed_%d", sessionID, i),
+				Author:      author,
+				LLMResponse: model.LLMResponse{Content: c},
+			}
+			if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+				t.Fatalf("sessionService.AppendEvent() error = %v", err)
+			}
+		}
+	}
+	seed("as-root")
+	seed("as-node")
+
+	// Both runners are built up front: only the Run calls belong in goroutines.
+	run := func(r *runner.Runner, sessionID, text string) error {
+		for _, err := range r.Run(ctx, nodeTestUser, sessionID, userText(text), agent.RunConfig{}) {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, tc := range []struct {
+		runner    *runner.Runner
+		sessionID string
+		text      string
+	}{
+		{runner: newNodeTestRunner(t, a, svc), sessionID: "as-root", text: "as chat root"},
+		{runner: newNodeTestRunner(t, wf, svc), sessionID: "as-node", text: "as workflow node"},
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = run(tc.runner, tc.sessionID, tc.text)
+		}()
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if got := m.contents["as chat root"]; got < 3 {
+		t.Errorf("chat root request carried %d contents, want the history too (>= 3): %v", got, m.contents)
+	}
+	if got := m.contents["as workflow node"]; got != 1 {
+		t.Errorf("single_turn node request carried %d contents, want the current turn only (1): %v", got, m.contents)
+	}
+	if got := llminternal.Reveal(a.(llminternal.Agent)).Mode; got != llminternal.ModeUnset {
+		t.Errorf("Mode after both roles ran = %q, want unchanged %q (issue #1137)", got, llminternal.ModeUnset)
+	}
 }

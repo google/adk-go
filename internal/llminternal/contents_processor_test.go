@@ -111,8 +111,15 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	testCases := []struct {
 		name            string
 		includeContents llmagent.IncludeContents
-		events          []*session.Event
-		want            []*genai.Content
+		mode            llmagent.Mode // zero value == unset
+		// declaredMode is a mode default the caller declares on the context for
+		// an agent whose own Mode is unset, as the node runtime and the runner
+		// do; declaredFor names the agent it is declared for, defaulting to the
+		// agent under test.
+		declaredMode llmagent.Mode
+		declaredFor  string
+		events       []*session.Event
+		want         []*genai.Content
 	}{
 		{
 			name:            "empty",
@@ -147,6 +154,63 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 			includeContents: "none",
 			events:          helloAndGoodBye,
 			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// single_turn implies "none": the rule the contents processor
+			// derives from the mode at read time, replacing the run-time
+			// write removed in issue #1137.
+			name:            "helloAndGoodBye",
+			includeContents: "",
+			mode:            llmagent.ModeSingleTurn,
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// A single_turn agent gets the current turn only whatever
+			// IncludeContents says, which is what the agent wrapper used
+			// to achieve by overwriting IncludeContents on dispatch.
+			name:            "helloAndGoodBye",
+			includeContents: "default",
+			mode:            llmagent.ModeSingleTurn,
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			name:            "helloAndGoodBye",
+			includeContents: "none",
+			mode:            llmagent.ModeSingleTurn,
+			events:          helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// A caller-declared single_turn default counts the same as a
+			// configured one: this is how a node-wrapped agent gets the rule
+			// now that nothing writes its Mode.
+			name:         "helloAndGoodBye",
+			declaredMode: llmagent.ModeSingleTurn,
+			events:       helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("good bye", "user"),
+			},
+		},
+		{
+			// A default declared for a different agent does not apply. The
+			// declaration reaches every agent dispatched below the one it was
+			// made for, and those keep their own behavior (issue #1137).
+			name:         "helloAndGoodBye",
+			declaredMode: llmagent.ModeSingleTurn,
+			declaredFor:  "someOtherAgent",
+			events:       helloAndGoodBye,
+			want: []*genai.Content{
+				genai.NewContentFromText("hello", "user"),
 				genai.NewContentFromText("good bye", "user"),
 			},
 		},
@@ -218,14 +282,24 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name+"/include_contents="+string(tc.includeContents), func(t *testing.T) {
+		t.Run(tc.name+"/include_contents="+string(tc.includeContents)+"/mode="+string(tc.mode)+
+			"/declared="+string(tc.declaredMode)+tc.declaredFor, func(t *testing.T) {
 			testAgent := utils.Must(llmagent.New(llmagent.Config{
 				Name:            agentName,
 				Model:           testModel,
 				IncludeContents: tc.includeContents,
+				Mode:            tc.mode,
 			}))
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			base := context.Context(t.Context())
+			if tc.declaredMode != llmagent.ModeUnset {
+				declaredFor := tc.declaredFor
+				if declaredFor == "" {
+					declaredFor = agentName
+				}
+				base = llminternal.WithDefaultMode(base, declaredFor, tc.declaredMode)
+			}
+			ctx := icontext.NewInvocationContext(base, icontext.InvocationContextParams{
 				Agent: testAgent,
 				Session: &fakeSession{
 					events: tc.events,

@@ -303,6 +303,9 @@ type Config struct {
 	DisallowTransferToPeers bool
 
 	// Whether to include contents (conversation history) in the model request.
+	//
+	// A single_turn agent never gets conversation history regardless of this
+	// value; see Mode.
 	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
@@ -346,7 +349,10 @@ type Config struct {
 	//   ModeTask: Task agent that chats with the user to accomplish a task.
 	//   ModeSingleTurn: Agents that complete a task without chatting with the user.
 	//
-	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
+	// Default value is ModeChat as a sub-agent or as a runner's root agent,
+	// ModeSingleTurn as a node in a workflow. The default is resolved per call
+	// and never written back to the agent, so an agent left on ModeUnset stays
+	// on it and can be run in either role.
 	Mode Mode
 }
 

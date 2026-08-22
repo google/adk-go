@@ -36,6 +36,9 @@ func TestIdentityRequestProcessor(t *testing.T) {
 		wantContains   []string
 		wantNotContain []string
 		wantNoSI       bool
+		// declaredMode is the mode default the caller declares on the context
+		// for an agent whose own Mode is unset, as the node runtime does.
+		declaredMode Mode
 	}{
 		{
 			name: "InjectsNameOnly",
@@ -121,6 +124,21 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			wantNoSI: true,
 		},
 		{
+			// A node-wrapped agent keeps Mode unset (nothing writes shared
+			// agent state at run time, issue #1137), so the suppression has to
+			// follow the default its caller declared.
+			name: "SkipsWhenCallerDeclaresSingleTurnMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "node_agent",
+					Description: "A single-shot worker.",
+				})),
+				s: &State{},
+			},
+			declaredMode: ModeSingleTurn,
+			wantNoSI:     true,
+		},
+		{
 			name: "EmittedForChatMode",
 			agent: &mockLLMAgent{
 				Agent: utils.Must(agent.New(agent.Config{Name: "chat_agent"})),
@@ -155,7 +173,11 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				}
 			}
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			base := t.Context()
+			if tt.declaredMode != ModeUnset {
+				base = WithDefaultMode(base, tt.agent.Name(), tt.declaredMode)
+			}
+			ctx := icontext.NewInvocationContext(base, icontext.InvocationContextParams{
 				Agent: tt.agent,
 			})
 
