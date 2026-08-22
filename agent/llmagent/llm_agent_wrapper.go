@@ -70,9 +70,10 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 		state := llminternal.Reveal(llmA)
 
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
+		// Resolve the run mode (and the single_turn IncludeContents default)
+		// exactly once; parallel dispatch of the same sub-agent must not race
+		// on these shared-state writes (google/adk-go#1137).
+		state.ResolveMode(llminternal.ModeSingleTurn)
 		switch state.Mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
@@ -81,9 +82,6 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			return
 		}
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
