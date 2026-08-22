@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,6 +89,15 @@ func TestConvertTools(t *testing.T) {
 			}
 			if len(tools) > 0 && (tools[0].OfFunction == nil || tools[0].OfFunction.Name != "fn1") {
 				t.Fatalf("unexpected tool: %+v", tools[0])
+			}
+			for i, tool := range tools {
+				if tool.OfFunction == nil {
+					t.Errorf("tool %d is not a function tool: %+v", i, tool)
+					continue
+				}
+				if !tool.OfFunction.Strict.Valid() || tool.OfFunction.Strict.Value {
+					t.Errorf("tool %d Strict = %+v, want an explicit false", i, tool.OfFunction.Strict)
+				}
 			}
 		})
 	}
@@ -195,6 +205,114 @@ func TestConvertFunctionDeclaration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestConvertFunctionDeclarationPinsStrictOff covers every parameter path,
+// because the Responses API decides the validation mode from the schema shape
+// when strict is absent. Pinning it makes the mode independent of the schema.
+func TestConvertFunctionDeclarationPinsStrictOff(t *testing.T) {
+	tests := []struct {
+		name string
+		decl *genai.FunctionDeclaration
+	}{
+		{
+			name: "no parameters",
+			decl: &genai.FunctionDeclaration{Name: "fn"},
+		},
+		{
+			name: "genai schema parameters",
+			decl: &genai.FunctionDeclaration{
+				Name: "fn",
+				Parameters: &genai.Schema{
+					Type:       genai.TypeObject,
+					Properties: map[string]*genai.Schema{"city": {Type: genai.TypeString}},
+					Required:   []string{"city"},
+				},
+			},
+		},
+		{
+			// A hand-written schema can be strict-compatible, which is exactly
+			// the case where an absent strict flag would flip the API into
+			// strict mode without the caller asking for it.
+			name: "strict-compatible ParametersJsonSchema",
+			decl: &genai.FunctionDeclaration{
+				Name: "fn",
+				ParametersJsonSchema: map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{"city": map[string]any{"type": "string"}},
+					"required":             []any{"city"},
+					"additionalProperties": false,
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fn, err := convertFunctionDeclaration(tc.decl)
+			if err != nil {
+				t.Fatalf("convertFunctionDeclaration() error = %v", err)
+			}
+			if !fn.Strict.Valid() {
+				t.Fatal("Strict is unset; the Responses API would choose the validation mode from the schema shape")
+			}
+			if fn.Strict.Value {
+				t.Errorf("Strict = true, want false")
+			}
+		})
+	}
+}
+
+// TestConvertFunctionDeclarationMarshalsStrict guards the wire format. Strict is
+// tagged omitzero, so leaving it at its zero value drops the key from the
+// payload entirely rather than sending false.
+func TestConvertFunctionDeclarationMarshalsStrict(t *testing.T) {
+	fn, err := convertFunctionDeclaration(&genai.FunctionDeclaration{Name: "fn"})
+	if err != nil {
+		t.Fatalf("convertFunctionDeclaration() error = %v", err)
+	}
+	data, err := json.Marshal(fn)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	strict, ok := payload["strict"]
+	if !ok {
+		t.Fatalf("strict missing from payload %s", data)
+	}
+	if strict != false {
+		t.Errorf("strict = %v, want false", strict)
+	}
+}
+
+// TestConvertFunctionDeclarationKeepsOptionalParameters pins the constraint that
+// rules out simply reusing enforceStrictOpenAISchema here: it rewrites required
+// to list every property, which would make optional tool arguments mandatory.
+func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
+	fn, err := convertFunctionDeclaration(&genai.FunctionDeclaration{
+		Name: "fn",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"city":  {Type: genai.TypeString},
+				"units": {Type: genai.TypeString},
+			},
+			Required: []string{"city"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convertFunctionDeclaration() error = %v", err)
+	}
+	want := []any{"city"}
+	if got := fn.Parameters["required"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("required = %v, want %v", got, want)
+	}
+	if _, ok := fn.Parameters["additionalProperties"]; ok {
+		t.Errorf("additionalProperties was injected into %v", fn.Parameters)
 	}
 }
 
