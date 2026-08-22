@@ -18,16 +18,43 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// Identity is the read-only identity of an ADK invocation: the acting user, app
+// name, and session a call belongs to. It is recovered from a plain
+// context.Context via [IdentityFromContext].
+type Identity struct {
+	UserID    string
+	AppName   string
+	SessionID string
+}
+
+// IdentityFromContext returns the ADK invocation [Identity] carried by ctx, if
+// present.
+//
+// ADK contexts embed context.Context and register their identity under a private
+// key, so code that only holds a context.Context — for example an
+// http.RoundTripper running deep beneath a tool call, past intermediaries that
+// wrap the context — can recover the acting identity without threading a typed
+// context through every layer.
+//
+// It returns (zero, false) for a context that does not descend from an ADK
+// context (a non-agent caller).
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
+	return id, ok
+}
 
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
@@ -342,6 +369,33 @@ func (c *commonContext) SessionID() string {
 
 func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
+}
+
+// Value implements context.Context. For the ADK self key it returns this
+// invocation's [Identity] (so [IdentityFromContext] can recover it from a
+// derived context); every other key delegates to the embedded context,
+// preserving existing behavior. A context without a usable session also
+// delegates, so a wrapped ADK context can still supply the identity and Value
+// never panics.
+func (c *commonContext) Value(key any) any {
+	if key == adkcontext.IdentityKey && c.hasSession() {
+		return Identity{UserID: c.UserID(), AppName: c.AppName(), SessionID: c.SessionID()}
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+// hasSession reports whether an identity can be read off this context. The
+// reflect check rejects a typed-nil Session, which survives != nil and then
+// panics on use.
+func (c *commonContext) hasSession() bool {
+	if c.invocationContext == nil {
+		return false
+	}
+	s := c.invocationContext.Session()
+	return s != nil && !reflect.ValueOf(s).IsNil()
 }
 
 var (
