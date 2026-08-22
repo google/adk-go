@@ -796,3 +796,146 @@ func TestNewToolSet_RequireConfirmationProvider_Validation(t *testing.T) {
 		})
 	}
 }
+
+// metaCapture records the `_meta` an MCP server received on a tool call.
+type metaCapture struct {
+	called bool
+	meta   map[string]any
+}
+
+// startMetaEchoServer runs an in-memory MCP server with a single tool that
+// records the `_meta` of each call, and returns a toolset wired to it.
+func startMetaEchoServer(t *testing.T, provider mcptoolset.MetadataProvider) (tool.Toolset, *metaCapture) {
+	t.Helper()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	got := &metaCapture{}
+	server := mcp.NewServer(&mcp.Implementation{Name: "meta_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server,
+		&mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"},
+		func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+			got.called = true
+			got.meta = req.Params.Meta
+			return nil, Output{WeatherSummary: "sunny"}, nil
+		})
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect() err = %v", err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:        clientTransport,
+		MetadataProvider: provider,
+	})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() err = %v", err)
+	}
+	return ts, got
+}
+
+// runSingleTool invokes the toolset's only tool with a fixed argument.
+func runSingleTool(t *testing.T, ts tool.Toolset) (map[string]any, error) {
+	t.Helper()
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools() err = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+	}
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+	}
+	return fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"})
+}
+
+func TestMetadataProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider mcptoolset.MetadataProvider
+		wantMeta map[string]any
+	}{
+		{
+			name: "provider metadata reaches the server",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{"trace_id": "abc-123", "tenant": "acme"}, nil
+			},
+			wantMeta: map[string]any{"trace_id": "abc-123", "tenant": "acme"},
+		},
+		{
+			name:     "no provider configured sends no metadata",
+			provider: nil,
+			wantMeta: nil,
+		},
+		{
+			name: "provider returning nil sends no metadata",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return nil, nil
+			},
+			wantMeta: nil,
+		},
+		{
+			name: "provider returning an empty map sends no metadata",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{}, nil
+			},
+			wantMeta: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, got := startMetaEchoServer(t, tc.provider)
+			if _, err := runSingleTool(t, ts); err != nil {
+				t.Fatalf("Run() err = %v, want nil", err)
+			}
+			if !got.called {
+				t.Fatal("the MCP tool was never invoked")
+			}
+			if diff := cmp.Diff(tc.wantMeta, got.meta); diff != "" {
+				t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMetadataProviderError checks that a provider failure aborts the call
+// rather than silently sending the tool request without its metadata, which
+// would defeat the point for auth- or tenant-scoped metadata.
+func TestMetadataProviderError(t *testing.T) {
+	wantErr := errors.New("no trace id in context")
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		return nil, wantErr
+	})
+
+	_, err := runSingleTool(t, ts)
+	if err == nil {
+		t.Fatal("Run() err = nil, want the provider error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("Run() err = %v, want it to wrap %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "get_weather") {
+		t.Errorf("Run() err = %q, want it to name the tool", err)
+	}
+	if got.called {
+		t.Error("the MCP tool ran despite the metadata provider failing")
+	}
+}
+
+// TestMetadataProviderReceivesToolContext checks the provider is handed the
+// live invocation's context, which is what makes the metadata request-scoped.
+func TestMetadataProviderReceivesToolContext(t *testing.T) {
+	var gotInvocationID string
+	ts, _ := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		gotInvocationID = ctx.InvocationID()
+		return nil, nil
+	})
+	if _, err := runSingleTool(t, ts); err != nil {
+		t.Fatalf("Run() err = %v", err)
+	}
+	if gotInvocationID == "" {
+		t.Error("provider received a context with no invocation ID")
+	}
+}
