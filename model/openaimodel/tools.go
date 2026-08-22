@@ -67,6 +67,16 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // converts it into an OpenAI-specific responses.FunctionToolParam. We handle
 // the function's name, description, and importantly, convert its parameters
 // from a generic schema format to a map[string]any that the OpenAI API expects.
+//
+// Strict parameter validation is pinned off so the mode does not depend on the
+// caller's schema. Left unset, the Responses API normalizes the parameters into
+// strict mode when it can and silently falls back when it cannot, reporting the
+// mode it chose on the response tool, which this package does not surface. That
+// makes the pin a real change for tools whose schema already qualified, as
+// functiontool.New produces unless the argument struct uses omitempty or
+// omitzero; pinning it on instead is the breaking direction, because strict
+// requires every property in required, so an optional argument would have to be
+// declared nullable ("type": ["string", "null"]) and listed there anyway.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
@@ -97,6 +107,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		Name:       fn.Name,
 		Type:       constant.Function("function"),
 		Parameters: paramsMap,
+		Strict:     param.NewOpt(false),
 	}
 	if fn.Description != "" {
 		fnParam.Description = param.NewOpt(fn.Description)

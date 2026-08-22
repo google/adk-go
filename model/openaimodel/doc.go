@@ -21,6 +21,14 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// Function tools are declared with strict parameter validation disabled, and
+// that is not configurable, so tool call arguments are best effort rather than
+// guaranteed to match the declared parameter schema: validate them in the tool.
+// Optional arguments stay optional as a result, but a tool whose parameters
+// already met the strict requirements, as functiontool.New produces unless the
+// argument struct uses omitempty or omitzero, was previously upgraded to strict
+// mode by the API and no longer is.
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()
