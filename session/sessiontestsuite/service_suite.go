@@ -18,6 +18,7 @@ package sessiontestsuite
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -671,11 +672,130 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 				t.Errorf("Event mismatch (-want +got):\n%s", diff)
 			}
 		})
+
+		// Concurrent agents (parallelagent, the workflow scheduler) share one
+		// session.Session: sub-agent goroutines read Events() to build their LLM
+		// request while the runner goroutine appends events produced by a
+		// sibling. A Session implementation must therefore guard its event slice.
+		// Run under -race, as CI does.
+		t.Run("concurrent_reads_during_append", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			curSession := created.Session
+
+			const appends = 30
+			// Readers run until the writer is done rather than for a fixed
+			// count: an append may hit a real backend and take orders of
+			// magnitude longer than a read, and readers that finish early
+			// would leave most of the writes unobserved.
+			done := make(chan struct{})
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Writer: the runner goroutine committing events.
+			go func() {
+				defer wg.Done()
+				defer close(done)
+				for i := range appends {
+					err := s.AppendEvent(ctx, curSession, &session.Event{
+						ID:           "event" + strconv.Itoa(i),
+						Author:       "user",
+						InvocationID: "inv1",
+					})
+					if err != nil {
+						t.Errorf("AppendEvent() error = %v", err)
+						return
+					}
+				}
+			}()
+
+			// Reader: a sibling sub-agent goroutine walking the history.
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+
+					_ = curSession.LastUpdateTime()
+
+					if st := curSession.State(); st != nil {
+						for range st.All() {
+						}
+					}
+
+					evs := curSession.Events()
+					if evs == nil {
+						continue
+					}
+					for e := range evs.All() {
+						if e == nil {
+							t.Errorf("Events().All() yielded a nil event")
+							return
+						}
+					}
+				}
+			}()
+
+			wg.Wait()
+		})
 	})
 
 	t.Run("StateManagement", func(t *testing.T) {
 		ctx := t.Context()
 		appName := testAppName
+
+		// A session may allocate its state map lazily, so State() must return a
+		// live view of the session rather than a snapshot of whatever map
+		// existed at call time. A handle taken before the first state delta has
+		// to observe that delta, and must still be writable.
+		t.Run("state_handle_stays_attached", func(t *testing.T) {
+			s := setup(t)
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1"})
+			if err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			curSession := created.Session
+
+			// Taken before any state exists.
+			handle := curSession.State()
+			if handle == nil {
+				t.Fatal("State() returned nil")
+			}
+
+			if err := s.AppendEvent(ctx, curSession, &session.Event{
+				ID:           "event1",
+				Author:       "user",
+				InvocationID: "inv1",
+				Actions:      session.EventActions{StateDelta: map[string]any{"k1": "v1"}},
+			}); err != nil {
+				t.Fatalf("AppendEvent failed: %v", err)
+			}
+
+			got, err := handle.Get("k1")
+			if err != nil {
+				t.Errorf("pre-append State() handle lost track of the session: Get(k1) error = %v", err)
+			} else if got != "v1" {
+				t.Errorf("pre-append State() handle Get(k1) = %v, want v1", got)
+			}
+
+			// Must not panic on a lazily-allocated map.
+			if err := handle.Set("k2", "v2"); err != nil {
+				t.Fatalf("pre-append State() handle Set() error = %v", err)
+			}
+			if got, err := curSession.State().Get("k2"); err != nil || got != "v2" {
+				t.Errorf("write through pre-append handle not visible: Get(k2) = %v, %v; want v2, nil", got, err)
+			}
+		})
 
 		t.Run("app_state_is_shared", func(t *testing.T) {
 			s := setup(t)
