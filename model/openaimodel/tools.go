@@ -67,6 +67,20 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // converts it into an OpenAI-specific responses.FunctionToolParam. We handle
 // the function's name, description, and importantly, convert its parameters
 // from a generic schema format to a map[string]any that the OpenAI API expects.
+//
+// Strict parameter validation is pinned off so the mode does not depend on the
+// caller's schema. Left unset, the API picks it from the schema shape, reports
+// the choice only on the response tool, which this package discards, and does
+// not merely accept or reject: given additionalProperties:false with only some
+// properties in required, it rewrites required to name them all and runs strict,
+// forcing a value into an argument the caller made optional.
+//
+// Pinning on is the breaking direction. Strict needs every property in
+// required, so an optional one must be nullable ("type": ["string", "null"]):
+// functiontool.New emits that for pointer fields, but omitempty and omitzero
+// fields are left out of required, and genai.Schema emits "nullable": true,
+// which strict rejects. Strict also demands additionalProperties:false on every
+// object; a map-typed field emits a schema there.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
@@ -97,6 +111,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		Name:       fn.Name,
 		Type:       constant.Function("function"),
 		Parameters: paramsMap,
+		Strict:     param.NewOpt(false),
 	}
 	if fn.Description != "" {
 		fnParam.Description = param.NewOpt(fn.Description)
