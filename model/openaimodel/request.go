@@ -50,6 +50,12 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 		return responses.ResponseNewParams{}, err
 	}
 	if len(input) == 0 {
+		if len(req.Contents) > 0 {
+			// Conversion emptied a non-empty request; don't report it as a
+			// caller who sent nothing.
+			return responses.ResponseNewParams{}, fmt.Errorf(
+				"%w: every part was replayed reasoning or carried nothing to send", ErrNoContents)
+		}
 		return responses.ResponseNewParams{}, ErrNoContents
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{
@@ -122,13 +128,18 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 		}
 		curRole = genai.Role(content.Role)
 		for _, part := range content.Parts {
-			switch {
-			case part == nil:
+			if part == nil {
 				continue
-			case part.Text != "":
+			}
+			// Text and call/response are read independently because one part
+			// can carry both: choosing between them would either put reasoning
+			// on the wire or strand the call's response in callTracker.
+			if part.Text != "" && !part.Thought {
 				textParts = append(textParts, part.Text)
+			}
+			switch {
 			case part.FunctionCall != nil:
-				// If we encounter a function call, we first flush any accumulated text.
+				// Flush first so buffered text keeps its place ahead of the call.
 				if err := flushText(); err != nil {
 					return nil, err
 				}
@@ -147,7 +158,8 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 					return nil, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			default:
+			case part.Text == "" && !replayedReasoning(part):
+				// Nothing buffered and nothing substantive here.
 				return nil, fmt.Errorf("openai: unsupported content part %T", part)
 			}
 		}
@@ -158,6 +170,35 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 	}
 
 	return items, nil
+}
+
+// replayedReasoning reports whether part is reasoning carried over from an
+// earlier turn that carries nothing else, so dropping it loses nothing.
+//
+// The Responses API takes reasoning back only as an input item referencing the
+// id of the item that produced it, and ADK carries no such ids; sent as
+// ordinary assistant text it becomes words the model appears to have said.
+//
+// Whether to send a part's text is decided by part.Thought alone: a part can
+// carry both reasoning text and a call, and the call must survive.
+func replayedReasoning(part *genai.Part) bool {
+	if part == nil {
+		return false
+	}
+	// A signature can arrive on a part of its own with the marker unset; there
+	// is nowhere to put it in a Responses request either way.
+	if !part.Thought && len(part.ThoughtSignature) == 0 {
+		return false
+	}
+	// Text on a part not marked as a thought is an answer, signature or not.
+	if part.Text != "" && !part.Thought {
+		return false
+	}
+	// Marking media or a call as a thought must not make it vanish; those go on
+	// to be converted, or rejected as unsupported, on their merits.
+	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		part.InlineData == nil && part.FileData == nil &&
+		part.ExecutableCode == nil && part.CodeExecutionResult == nil
 }
 
 // newMessage builds an easy input message for an already-normalized role.

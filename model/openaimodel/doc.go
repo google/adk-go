@@ -21,6 +21,13 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// Model reasoning is reported to the caller as thought parts, but it is not
+// sent back on a later turn: the Responses API accepts reasoning only as an
+// input item referencing the id of the item that produced it, and ADK does not
+// carry those ids. Reasoning therefore informs the turn that produced it and no
+// other; a caller that needs a conclusion to survive should have the model
+// state it in the answer.
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()
