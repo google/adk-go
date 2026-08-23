@@ -407,6 +407,204 @@ func TestApplyGenerationConfig(t *testing.T) {
 	}
 }
 
+// Each case sets exactly one previously-dropped field and expects the request
+// to fail naming it.
+func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"HTTPOptions", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{}}},
+		{"Seed", &genai.GenerateContentConfig{Seed: genai.Ptr(int32(7))}},
+		{"RoutingConfig", &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}},
+		{"ModelSelectionConfig", &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}},
+		{"CachedContent", &genai.GenerateContentConfig{CachedContent: "cached"}},
+		{"ResponseModalities", &genai.GenerateContentConfig{ResponseModalities: []string{"AUDIO"}}},
+		{"MediaResolution", &genai.GenerateContentConfig{MediaResolution: genai.MediaResolutionLow}},
+		{"SpeechConfig", &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}},
+		{"AudioTimestamp", &genai.GenerateContentConfig{AudioTimestamp: true}},
+		{"ImageConfig", &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}},
+		{"EnableEnhancedCivicAnswers", &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}},
+		{"ModelArmorConfig", &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}},
+		{"ServiceTier", &genai.GenerateContentConfig{ServiceTier: genai.ServiceTierFlex}},
+		{"AudioTranscriptionConfig", &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
+			}
+		})
+	}
+}
+
+// ThinkingConfig is honoured rather than rejected, matching adk-python's
+// mapping onto effort-based reasoning.
+func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+		want     shared.ReasoningEffort
+	}{
+		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningEffortMinimal},
+		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningEffortLow},
+		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningEffortMedium},
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningEffortHigh},
+		// Explicitly unspecified is distinct from unset, and resolves to medium.
+		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningEffortMedium},
+		// Responses has no token budget, so only zero/non-zero survives.
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningEffortMinimal},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningEffortMedium},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-1))}, shared.ReasoningEffortMedium},
+		// A level wins over a budget, and IncludeThoughts does not affect either.
+		{"level wins over budget", &genai.ThinkingConfig{
+			ThinkingLevel:   genai.ThinkingLevelLow,
+			ThinkingBudget:  genai.Ptr(int32(0)),
+			IncludeThoughts: true,
+		}, shared.ReasoningEffortLow},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			want := shared.ReasoningParam{Effort: tc.want, Summary: shared.ReasoningSummaryConcise}
+			if !reflect.DeepEqual(params.Reasoning, want) {
+				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, want)
+			}
+		})
+	}
+}
+
+// A ThinkingConfig carrying neither knob cannot be mapped onto an effort, and
+// adk-python raises here rather than guess.
+func TestApplyGenerationConfigRejectsEmptyThinkingConfig(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "ThinkingConfig") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingConfig", err)
+	}
+}
+
+// Reasoning stays unset when the caller asks for nothing, so non-reasoning
+// models are not sent a reasoning block they would reject.
+func TestApplyGenerationConfigOmitsReasoningByDefault(t *testing.T) {
+	params := &responses.ResponseNewParams{}
+	if err := applyGenerationConfig(params, &genai.GenerateContentConfig{}); err != nil {
+		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+		t.Errorf("params.Reasoning = %+v, want zero", params.Reasoning)
+	}
+}
+
+// Logprobs is translated only alongside ResponseLogprobs; alone it reached
+// neither the params nor the wire.
+func TestApplyGenerationConfigRejectsOrphanLogprobs(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		Logprobs: genai.Ptr(int32(5)),
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "Logprobs") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name Logprobs", err)
+	}
+}
+
+// Presence, not value: an off value still means the caller expected the knob to
+// be wired up. Sniffing for no-op values would need re-deciding per new field.
+func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		EnableEnhancedCivicAnswers: genai.Ptr(false),
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "EnableEnhancedCivicAnswers") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name EnableEnhancedCivicAnswers", err)
+	}
+}
+
+// The named errors are checked before the sentinel, so code matching on them
+// keeps working when a caller sets both.
+func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
+	topK := float32(5)
+	cfg := &genai.GenerateContentConfig{
+		TopK: &topK,
+		Seed: genai.Ptr(int32(7)),
+	}
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg)
+	if !errors.Is(err, ErrTopKNotSupported) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrTopKNotSupported)
+	}
+}
+
+// Guards against the bug returning as genai grows fields: every exported field
+// must be translated, covered by a named error, or in unsupportedConfigFields.
+// When this fails, add the new field to whichever of the three it belongs in —
+// not to this test alone, which would only re-hide the drop.
+func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
+	// Fields applyGenerationConfig, convertTools or convertToolChoice translate.
+	translated := map[string]bool{
+		"SystemInstruction":  true,
+		"Temperature":        true,
+		"TopP":               true,
+		"MaxOutputTokens":    true,
+		"ResponseLogprobs":   true,
+		"Logprobs":           true,
+		"ResponseMIMEType":   true,
+		"ResponseSchema":     true,
+		"ResponseJsonSchema": true,
+		"ThinkingConfig":     true,
+		"Tools":              true,
+		"ToolConfig":         true,
+	}
+	// Fields rejected with their own error, predating ErrUnsupportedConfigField.
+	namedError := map[string]bool{
+		"TopK":             true,
+		"StopSequences":    true,
+		"CandidateCount":   true,
+		"FrequencyPenalty": true,
+		"PresencePenalty":  true,
+		"Labels":           true,
+		"SafetySettings":   true,
+	}
+	rejected := make(map[string]bool, len(unsupportedConfigFields))
+	for _, field := range unsupportedConfigFields {
+		rejected[field.name] = true
+	}
+
+	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
+	for i := range cfgType.NumField() {
+		name := cfgType.Field(i).Name
+		if cfgType.Field(i).PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		if !translated[name] && !namedError[name] && !rejected[name] {
+			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
+		}
+	}
+
+	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
+	for name := range rejected {
+		if _, ok := cfgType.FieldByName(name); !ok {
+			t.Errorf("unsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
+		}
+	}
+}
+
 func TestFlattenContentText(t *testing.T) {
 	tests := []struct {
 		name    string

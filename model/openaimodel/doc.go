@@ -21,6 +21,21 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// Every top-level field of genai.GenerateContentConfig is either translated to
+// the Responses API or rejected with an error; none is dropped in silence. The
+// long-standing rejections (TopK, StopSequences, multiple candidates, the
+// penalties, Labels, SafetySettings) keep their own errors, and the rest return
+// ErrUnsupportedConfigField naming the field.
+//
+// ThinkingConfig is translated to the Responses API's effort-based reasoning,
+// as adk-python does: ThinkingLevel maps to the matching effort, and a token
+// budget collapses to minimal effort when zero and medium otherwise, since
+// Responses has no budget knob.
+//
+// The guarantee stops at the top level: within Tools, ToolConfig, ThinkingConfig
+// and the schema types, the parts this package does not read are still dropped
+// quietly.
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()

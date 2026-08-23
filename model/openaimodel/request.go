@@ -344,6 +344,10 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		}
 		// Responses returns logprobs only when explicitly included.
 		params.Include = append(params.Include, responses.ResponseIncludableMessageOutputTextLogprobs)
+	} else if cfg.Logprobs != nil {
+		// Logprobs only sizes the list ResponseLogprobs asks for, so alone it
+		// reaches neither params nor the wire.
+		return fmt.Errorf("%w: Logprobs without ResponseLogprobs", ErrUnsupportedConfigField)
 	}
 	if cfg.SystemInstruction != nil {
 		inst, err := flattenContentText(cfg.SystemInstruction)
@@ -382,6 +386,72 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	}
 	if cfg.SafetySettings != nil {
 		return ErrSafetySettingsNotSupported
+	}
+	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
+		return err
+	}
+	// Last, so the named errors above win when a caller sets both.
+	return rejectUnsupportedConfigFields(cfg)
+}
+
+// applyThinkingConfig maps genai's thinking config onto effort-based reasoning,
+// as adk-python does. Responses has no token-budget knob, so only a budget's
+// zero/non-zero distinction survives. IncludeThoughts is not read.
+func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	var effort shared.ReasoningEffort
+	switch {
+	case cfg.ThinkingLevel == genai.ThinkingLevelUnspecified:
+		// Explicit "unspecified" is distinct from unset, and still asks to think.
+		effort = shared.ReasoningEffortMedium
+	case cfg.ThinkingLevel != "":
+		effort = shared.ReasoningEffort(strings.ToLower(string(cfg.ThinkingLevel)))
+	case cfg.ThinkingBudget == nil:
+		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel or ThinkingBudget", ErrUnsupportedConfigField)
+	case *cfg.ThinkingBudget == 0:
+		effort = shared.ReasoningEffortMinimal
+	default:
+		effort = shared.ReasoningEffortMedium
+	}
+	params.Reasoning = shared.ReasoningParam{Effort: effort, Summary: shared.ReasoningSummaryConcise}
+	return nil
+}
+
+// unsupportedConfigFields lists the GenerateContentConfig fields this package
+// cannot translate, each with a predicate reporting whether the caller set it.
+// Presence, not value: setting a knob at all means the caller expected an effect.
+// ServiceTier could be honoured (openai-go has service_tier) and is left for a
+// separate change; HTTPOptions is transport, taken from ClientConfig instead.
+var unsupportedConfigFields = []struct {
+	name  string
+	isSet func(*genai.GenerateContentConfig) bool
+}{
+	{"HTTPOptions", func(c *genai.GenerateContentConfig) bool { return c.HTTPOptions != nil }},
+	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
+	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
+	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
+	{"CachedContent", func(c *genai.GenerateContentConfig) bool { return c.CachedContent != "" }},
+	{"ResponseModalities", func(c *genai.GenerateContentConfig) bool { return len(c.ResponseModalities) > 0 }},
+	{"MediaResolution", func(c *genai.GenerateContentConfig) bool { return c.MediaResolution != "" }},
+	{"SpeechConfig", func(c *genai.GenerateContentConfig) bool { return c.SpeechConfig != nil }},
+	{"AudioTimestamp", func(c *genai.GenerateContentConfig) bool { return c.AudioTimestamp }},
+	{"ImageConfig", func(c *genai.GenerateContentConfig) bool { return c.ImageConfig != nil }},
+	{"EnableEnhancedCivicAnswers", func(c *genai.GenerateContentConfig) bool {
+		return c.EnableEnhancedCivicAnswers != nil
+	}},
+	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
+	{"ServiceTier", func(c *genai.GenerateContentConfig) bool { return c.ServiceTier != "" }},
+	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+}
+
+// rejectUnsupportedConfigFields reports the first unsupported field the caller set.
+func rejectUnsupportedConfigFields(cfg *genai.GenerateContentConfig) error {
+	for _, field := range unsupportedConfigFields {
+		if field.isSet(cfg) {
+			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.name)
+		}
 	}
 	return nil
 }
