@@ -45,6 +45,8 @@ type triggerConfigFlags struct {
 
 type cloudRunServiceFlags struct {
 	serviceName     string
+	serviceAccount  string
+	secretName      string
 	serverPort      int
 	a2aAgentCardURL string
 	a2a             bool // enable a2a or not
@@ -89,7 +91,12 @@ var cloudrunCmd = &cobra.Command{
 	Short: "Deploys the application to cloudrun.",
 	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable containing Web UI static files.
 	Service on Cloudrun is created using this information. 
-	Local proxy adding authentication is started. 
+	Local proxy adding authentication is started.
+
+	Prerequisites:
+	- When secret_name is set (default: "GOOGLE_API_KEY"), a secret with this name must exist in Secret Manager in the target project,
+	  and the runtime service account must have the 'roles/secretmanager.secretAccessor' role. Set --secret_name="" to disable Secret Manager mounting.
+	- To specify a custom runtime service account, use --service_account <email>.
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return flags.deployOnCloudRun()
@@ -103,6 +110,8 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.region, "region", "r", "", "GCP Region")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "project_name", "p", "", "GCP Project Name")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceName, "service_name", "s", "", "Cloud Run Service name")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceAccount, "service_account", "A", "", "Runtime service account for the Cloud Run service")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.secretName, "secret_name", "GOOGLE_API_KEY", "Secret Manager secret name mounted as GOOGLE_API_KEY (leave empty to skip Secret Manager mount)")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
@@ -246,19 +255,32 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 		})
 }
 
+// buildDeployParams constructs the arguments slice for 'gcloud run deploy'
+func (f *deployCloudRunFlags) buildDeployParams() []string {
+	params := []string{
+		"run", "deploy", f.cloudRun.serviceName,
+		"--source", ".",
+		"--region", f.gcloud.region,
+		"--project", f.gcloud.projectName,
+		"--ingress", "all",
+		"--no-allow-unauthenticated",
+	}
+
+	if f.cloudRun.secretName != "" {
+		params = append(params, fmt.Sprintf("--set-secrets=GOOGLE_API_KEY=%s:latest", f.cloudRun.secretName))
+	}
+	if f.cloudRun.serviceAccount != "" {
+		params = append(params, "--service-account", f.cloudRun.serviceAccount)
+	}
+
+	return params
+}
+
 // gcloudDeployToCloudRun invokes gcloud to deploy source on CloudRun
 func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 	return util.LogStartStop("Deploying to Cloud Run",
 		func(p util.Printer) error {
-			params := []string{
-				"run", "deploy", f.cloudRun.serviceName,
-				"--source", ".",
-				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
-				"--region", f.gcloud.region,
-				"--project", f.gcloud.projectName,
-				"--ingress", "all",
-				"--no-allow-unauthenticated",
-			}
+			params := f.buildDeployParams()
 
 			cmd := exec.Command("gcloud", params...)
 
