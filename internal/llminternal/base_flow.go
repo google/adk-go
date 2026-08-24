@@ -107,11 +107,12 @@ var (
 // spin forever, appending an event per turn and re-sending an ever-growing
 // history. Any turn that is not a final response resets the count.
 //
-// This is a safety net against a degenerate model, not a tuning knob: the bound
-// is set well above the number of consecutive thinking turns a model is expected
-// to need, so reaching it should be rare enough to warrant the log below. It is
-// a var rather than a const only so tests can exercise the boundary.
-var maxConsecutiveThoughtOnlyTurns = 3
+// This is a safety net against a degenerate model, not a tuning knob: it is
+// deliberately not configurable, because a caller has no basis for choosing a
+// value. It is set high on purpose. A bound that is too low never requests an
+// answer the model was about to give, which is worse than a few wasted calls
+// before a degenerate model is cut off.
+const maxConsecutiveThoughtOnlyTurns = 10
 
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -142,7 +143,8 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				thoughtOnlyTurns++
 				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
-					log.Printf("adk: model produced %d consecutive thought-only turns without an answer; giving up and returning the last thinking event\n", thoughtOnlyTurns)
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
 					return
 				}
 			} else {

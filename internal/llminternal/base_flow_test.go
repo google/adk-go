@@ -17,6 +17,7 @@ package llminternal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"testing"
 
@@ -860,10 +861,12 @@ func (m *alwaysThinkingModel) Name() string { return "always-thinking" }
 func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
+		// Number each thought so a test can tell which turn's event the flow
+		// left as the result.
 		yield(&model.LLMResponse{
 			Content: &genai.Content{
 				Role:  "model",
-				Parts: []*genai.Part{{Text: "thinking", Thought: true}},
+				Parts: []*genai.Part{{Text: fmt.Sprintf("thinking %d", m.calls), Thought: true}},
 			},
 		}, nil)
 	}
@@ -883,11 +886,13 @@ func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
 	// Bound the consumer so a regression fails the test instead of hanging it.
 	const safetyLimit = 50
 	events := 0
-	for _, err := range f.Run(ctx) {
+	var lastEvent *session.Event
+	for ev, err := range f.Run(ctx) {
 		if err != nil {
 			t.Fatalf("Run() yielded error: %v", err)
 		}
 		events++
+		lastEvent = ev
 		if events > safetyLimit {
 			break
 		}
@@ -902,13 +907,23 @@ func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
 	if events != maxConsecutiveThoughtOnlyTurns {
 		t.Errorf("Run() yielded %d events, want %d (one per thought-only turn)", events, maxConsecutiveThoughtOnlyTurns)
 	}
+
+	// Giving up leaves the last thinking event as the result. The literal
+	// "thinking 10" pins both that promise and the value of the bound: it is
+	// the tenth turn's thought, so an off-by-one or a changed bound fails here.
+	if lastEvent == nil || lastEvent.LLMResponse.Content == nil {
+		t.Fatalf("Run() left no content as the result: %#v", lastEvent)
+	}
+	wantParts := []*genai.Part{{Text: "thinking 10", Thought: true}}
+	if diff := cmp.Diff(wantParts, lastEvent.LLMResponse.Content.Parts); diff != "" {
+		t.Errorf("last event parts mismatch (-want +got):\n%s", diff)
+	}
 }
 
 // scriptedThinkingModel replays a fixed sequence of turns and then keeps
 // repeating the final one, so a test can interleave thought-only turns with a
 // turn that is not a final response.
 type scriptedThinkingModel struct {
-	model.LLM
 	turns []*model.LLMResponse
 	calls int
 }
