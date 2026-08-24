@@ -16,13 +16,18 @@ package configurable
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-const traversalError = "path traversal detected"
+// isContainmentRejection reports whether err is the containment check refusing a
+// reference, as opposed to a later failure to load the config that it names.
+// Asserting on the sentinels keeps these tests independent of the message text.
+func isContainmentRejection(err error) bool {
+	return errors.Is(err, errConfigReferenceNotLocal) || errors.Is(err, errConfigReferenceSymlink)
+}
 
 // newAgentDir lays out an agent directory with a sibling config, a file outside
 // the directory, and a symlink inside the directory pointing at that outside
@@ -67,22 +72,22 @@ func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		refPath string
-		wantErr string
+		wantErr error
 	}{
 		{
 			name:    "absolute path",
 			refPath: filepath.Join(string(os.PathSeparator), "etc", "passwd"),
-			wantErr: "absolute paths are not allowed",
+			wantErr: errConfigReferenceNotLocal,
 		},
 		{
 			name:    "parent traversal",
 			refPath: filepath.Join("..", "..", "outside.yaml"),
-			wantErr: traversalError,
+			wantErr: errConfigReferenceNotLocal,
 		},
 		{
 			name:    "symlink escaping the agent directory",
 			refPath: "link.yaml",
-			wantErr: traversalError,
+			wantErr: errConfigReferenceSymlink,
 		},
 	}
 
@@ -91,11 +96,8 @@ func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
 			// The reference must be rejected by the containment check itself, not
 			// merely fail later while the config is being loaded.
 			_, err := ResolveAgentReference(context.Background(), parentPath, tc.refPath)
-			if err == nil {
-				t.Fatalf("ResolveAgentReference(_, %q, %q) succeeded, want error containing %q", parentPath, tc.refPath, tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want error containing %q", parentPath, tc.refPath, err, tc.wantErr)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want %v", parentPath, tc.refPath, err, tc.wantErr)
 			}
 		})
 	}
@@ -109,8 +111,8 @@ func TestResolveAgentReferenceAllowsPathsInsideAgentDir(t *testing.T) {
 	_, parentPath := newAgentDir(t)
 
 	_, err := ResolveAgentReference(context.Background(), parentPath, "sub_agent.yaml")
-	if err != nil && strings.Contains(err.Error(), traversalError) {
-		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no traversal rejection", parentPath, "sub_agent.yaml", err)
+	if isContainmentRejection(err) {
+		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no containment rejection", parentPath, "sub_agent.yaml", err)
 	}
 }
 
@@ -133,9 +135,8 @@ func TestResolveAgentReferenceRelativeParentPath(t *testing.T) {
 		}
 	})
 
-	if _, err := ResolveAgentReference(context.Background(), "root_agent.yaml", "sub_agent.yaml"); err != nil &&
-		strings.Contains(err.Error(), traversalError) {
-		t.Errorf("ResolveAgentReference with a relative parent path = %v, want no traversal rejection", err)
+	if _, err := ResolveAgentReference(context.Background(), "root_agent.yaml", "sub_agent.yaml"); isContainmentRejection(err) {
+		t.Errorf("ResolveAgentReference with a relative parent path = %v, want no containment rejection", err)
 	}
 
 	if _, err := ResolveAgentReference(context.Background(), "root_agent.yaml", filepath.Join("..", "..", "outside.yaml")); err == nil {
@@ -169,9 +170,8 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 	}
 
 	parentPath := filepath.Join(alias, "root_agent.yaml")
-	if _, err := ResolveAgentReference(context.Background(), parentPath, "missing.yaml"); err != nil &&
-		strings.Contains(err.Error(), traversalError) {
-		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no traversal rejection", parentPath, "missing.yaml", err)
+	if _, err := ResolveAgentReference(context.Background(), parentPath, "missing.yaml"); isContainmentRejection(err) {
+		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no containment rejection", parentPath, "missing.yaml", err)
 	}
 
 	// The symlinked parent must not weaken the check itself.
@@ -182,9 +182,11 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 
 // TestResolveConfigReferenceRejectsVolumeQualifiedRefs covers references that
 // carry a volume name. On Windows a drive-relative reference such as
-// `C:node.yaml` is not absolute yet still escapes the parent directory, so
-// IsAbs alone is not a sufficient guard. filepath.VolumeName is empty on Unix,
-// where these are ordinary (if odd) relative file names.
+// `C:node.yaml` is not absolute yet still escapes the parent directory, by
+// resolving against the current directory of that drive; filepath.IsLocal is
+// what rules it out. VolumeName is empty on Unix, where these three are
+// ordinary (if odd) relative file names and are correctly accepted, so the
+// assertion only applies where the platform gives them a volume.
 func TestResolveConfigReferenceRejectsVolumeQualifiedRefs(t *testing.T) {
 	_, parentPath := newAgentDir(t)
 

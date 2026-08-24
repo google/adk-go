@@ -16,11 +16,11 @@ package configurable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -646,22 +646,22 @@ func TestWorkflowNodeReferenceRejectsEscapingPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		ref     string
-		wantErr string
+		wantErr error
 	}{
 		{
 			name:    "absolute path",
 			ref:     filepath.Join(base, "outside.yaml"),
-			wantErr: "absolute paths are not allowed",
+			wantErr: errConfigReferenceNotLocal,
 		},
 		{
 			name:    "parent traversal",
 			ref:     filepath.Join("..", "..", "outside.yaml"),
-			wantErr: traversalError,
+			wantErr: errConfigReferenceNotLocal,
 		},
 		{
 			name:    "symlink escaping the workflow directory",
 			ref:     "link.yaml",
-			wantErr: traversalError,
+			wantErr: errConfigReferenceSymlink,
 		},
 	}
 
@@ -674,11 +674,8 @@ func TestWorkflowNodeReferenceRejectsEscapingPath(t *testing.T) {
 			// The reference must be rejected by the containment check itself, not
 			// merely fail later while the node config is being loaded.
 			_, err := FromConfig(context.Background(), workflowPath)
-			if err == nil {
-				t.Fatalf("FromConfig(_, %q) with node ref %q succeeded, want error containing %q", workflowPath, tc.ref, tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("FromConfig(_, %q) with node ref %q = %v, want error containing %q", workflowPath, tc.ref, err, tc.wantErr)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("FromConfig(_, %q) with node ref %q = %v, want %v", workflowPath, tc.ref, err, tc.wantErr)
 			}
 		})
 	}
@@ -731,11 +728,7 @@ func TestWorkflowNodeReferenceCacheDoesNotBypassCheck(t *testing.T) {
 	escaping := filepath.Join("..", "agents", "root", "nodes", "join.yaml")
 	escapingPath := writeWorkflow(t, otherDir, "wf_cache_escape", escaping)
 
-	_, err := FromConfig(context.Background(), escapingPath)
-	if err == nil {
-		t.Fatalf("FromConfig(_, %q) with cached node ref %q succeeded, want rejection", escapingPath, escaping)
-	}
-	if !strings.Contains(err.Error(), traversalError) {
-		t.Errorf("FromConfig(_, %q) = %v, want error containing %q", escapingPath, err, traversalError)
+	if _, err := FromConfig(context.Background(), escapingPath); !errors.Is(err, errConfigReferenceNotLocal) {
+		t.Errorf("FromConfig(_, %q) with cached node ref %q = %v, want %v", escapingPath, escaping, err, errConfigReferenceNotLocal)
 	}
 }
