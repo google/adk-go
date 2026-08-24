@@ -6,6 +6,12 @@ on:
 
   workflow_dispatch:
 
+# Every job here only reads the repository: it checks out, tests and runs
+# govulncheck. Declaring that once at the top keeps each job from inheriting the
+# broader default token, which on a scheduled run is write-capable.
+permissions:
+  contents: read
+
 jobs:
   discover:
     runs-on: ubuntu-latest
