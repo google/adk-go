@@ -768,7 +768,8 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
-	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
+	firstUpdate := testutil.AwaitValue(t, statusUpdateEventChan, "first status update")
+	taskID := firstUpdate.TaskInfo().TaskID
 	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *legacyA2A.Task, 1)
 	wg.Add(1)
@@ -798,14 +799,9 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 
 	// Check subagent task got cancelled when the parent task was cancelled.
 	// Subagent cleanup fires twice: once for cancelation, once for execution.
-	// A generous per-wait deadline avoids flaking under CPU contention.
+	// A generous deadline avoids flaking under CPU contention.
 	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
-	var remoteTaskID legacyA2A.TaskID
-	select {
-	case remoteTaskID = <-remoteTaskIDChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("server B was never reached; remoteTaskIDChan is empty")
-	}
+	remoteTaskID := testutil.AwaitValue(t, remoteTaskIDChan, "server B remote task ID")
 	testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
 
 	remoteClient := newLegacyA2AClient(t, serverB)
