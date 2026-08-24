@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +55,45 @@ func TestResolveClientBuildsDefaultClient(t *testing.T) {
 	}
 }
 
+// TestResolveClientSingleFlight pins the concurrency design: many first callers
+// share one build and all get the same client. Nothing exercises the mutex
+// unless a test actually runs callers together — the race detector included.
+func TestResolveClientSingleFlight(t *testing.T) {
+	var attempts atomic.Int32
+	built := &Client{httpClient: http.DefaultClient}
+	release := make(chan struct{})
+	p := newTestProvider(t)
+	p.newClient = func(context.Context) (*Client, error) {
+		attempts.Add(1)
+		<-release // hold the flight open so every caller piles up on it
+		return built, nil
+	}
+
+	const callers = 16
+	var wg sync.WaitGroup
+	got := make([]*Client, callers)
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = p.resolveClient(t.Context())
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("init attempts = %d, want 1 (concurrent callers must share one flight)", n)
+	}
+	for i := range callers {
+		if errs[i] != nil || got[i] != built {
+			t.Fatalf("caller %d = %v, %v; want the single shared client", i, got[i], errs[i])
+		}
+	}
+}
+
 // TestResolveClientHonorsCallerDeadline pins that a caller waiting on a slow
 // init is bounded by its own context: auth.Transport resolves a credential per
 // outbound request, so one cold start must not stall every concurrent request.
@@ -70,10 +110,32 @@ func TestResolveClientHonorsCallerDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("resolveClient() error = %v, want the caller's deadline", err)
 	}
-	// Generous, but far below the initTimeout the attempt itself waits out: a
-	// regression that ignores the caller's ctx fails here.
-	if elapsed > 20*deadline {
-		t.Errorf("resolveClient() returned after %v, want ~the caller's %v deadline", elapsed, deadline)
+	// Loose enough not to flake on a loaded machine, tight enough that a waiter
+	// which ignored the caller's ctx — and so sat out the 30s initTimeout —
+	// fails here.
+	if elapsed >= p.initTimeout {
+		t.Errorf("resolveClient() returned after %v, want the caller's %v deadline, not the %v init bound", elapsed, deadline, p.initTimeout)
+	}
+}
+
+// TestResolveClientBoundsWaitOnHungInit pins the initTimeout: an ADC lookup that
+// never returns cannot be cancelled, so a caller with no deadline of its own must
+// still be released — while the attempt itself is kept.
+func TestResolveClientBoundsWaitOnHungInit(t *testing.T) {
+	p := newTestProvider(t)
+	p.newClient = blockingInit(t)
+	p.initTimeout = 50 * time.Millisecond
+
+	if _, err := p.resolveClient(t.Context()); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("resolveClient() error = %v, want the init timeout reported", err)
+	}
+	// Retiring the attempt would start a fresh lookup — and leak a fresh
+	// thread-pinning goroutine — every initTimeout, forever.
+	p.mu.Lock()
+	pending := p.pending
+	p.mu.Unlock()
+	if pending == nil {
+		t.Error("provider dropped the hung attempt; the next caller would start another lookup")
 	}
 }
 
@@ -101,23 +163,42 @@ func TestResolveClientRetriesFailedInit(t *testing.T) {
 	}
 }
 
-// TestResolveClientRetiresHungInit drives the init timeout: a lookup that never
-// returns cannot be cancelled, so the attempt has to be abandoned — otherwise
-// every later caller attaches to a flight that never lands.
-func TestResolveClientRetiresHungInit(t *testing.T) {
+// TestResolveClientRejectsNilClient pins that a builder returning (nil, nil) is
+// an error rather than a cached nil that nil-derefs on the next retrieval, inside
+// an http.RoundTripper.
+func TestResolveClientRejectsNilClient(t *testing.T) {
 	p := newTestProvider(t)
-	p.newClient = blockingInit(t)
-	p.initTimeout = 50 * time.Millisecond
+	p.newClient = func(context.Context) (*Client, error) { return nil, nil }
 
-	_, err := p.resolveClient(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "exceeded") {
-		t.Fatalf("resolveClient() error = %v, want the init timeout reported", err)
+	if _, err := p.resolveClient(t.Context()); err == nil {
+		t.Fatal("resolveClient() = nil error, want a nil client rejected")
 	}
 	p.mu.Lock()
-	pending := p.pending
+	cached := p.client
 	p.mu.Unlock()
-	if pending != nil {
-		t.Error("provider still holds the retired attempt; the next caller would wait on it again")
+	if cached != nil {
+		t.Errorf("provider cached %v, want nothing", cached)
+	}
+}
+
+// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that a provider given a
+// Client does not pin its caller's context — and with it the caller's whole
+// session and event graph — for the life of the process.
+func TestNewProviderKeepsWiringContextOnlyWhenLazy(t *testing.T) {
+	client, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	cfg := ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}, Client: client}
+	p, err := NewProvider(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	if got := p.(*provider).initCtx; got != nil {
+		t.Errorf("initCtx = %v, want nil when a Client is supplied", got)
+	}
+	if got := newTestProvider(t).initCtx; got == nil {
+		t.Error("initCtx = nil on the lazy path, want the wiring context")
 	}
 }
 
@@ -138,7 +219,7 @@ func blockingInit(t *testing.T) func(context.Context) (*Client, error) {
 // takes the lazy default-client path.
 func newTestProvider(t *testing.T) *provider {
 	t.Helper()
-	p, err := NewProvider(t.Context(), ProviderScheme{Name: authProviderResource}, nil)
+	p, err := NewProvider(t.Context(), ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}

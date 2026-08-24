@@ -49,18 +49,31 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts; the client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
-// use, so it can't inject extra path segments, a query, or a fragment into the
-// request URL it is interpolated into. A separate ".." check blocks path
-// traversal (dots are allowed so domain-style ids still pass).
+// use. It cannot inject a query, a fragment, an authority or a percent-escape
+// into the request URL the name is interpolated into; extra path segments are
+// allowed, since a resource name is itself a path.
 var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
 
 // validateResource rejects a resource name that cannot be safely interpolated
-// into a request URL. [NewProvider] applies it at wiring time too, so a
-// malformed name fails once rather than on every request.
+// into a request URL, or that would not survive path normalization — an empty,
+// "." or ".." segment blocks traversal, and also keeps the name the caller
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
 func validateResource(name string) error {
-	if !resourceNameRE.MatchString(name) || strings.Contains(name, "..") {
+	if !resourceNameRE.MatchString(name) {
 		return fmt.Errorf("resource %q has invalid characters", name)
+	}
+	for seg := range strings.SplitSeq(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("resource %q has an empty or relative path segment", name)
+		}
 	}
 	return nil
 }
@@ -203,7 +216,7 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
 	}
 	if err := validateResource(req.Resource); err != nil {
-		return nil, fmt.Errorf("gcp: RetrieveCredential %w", err)
+		return nil, fmt.Errorf("gcp: RetrieveCredential: %w", err)
 	}
 
 	retrieve := c.retrieveAgentIdentity

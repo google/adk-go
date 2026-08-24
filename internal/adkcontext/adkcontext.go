@@ -18,33 +18,33 @@
 // by the agent and internal/context packages to avoid an import cycle.
 package adkcontext
 
-import "reflect"
-
 type ctxKey int
 
 // IdentityKey is the context value key for the agent.Identity of an ADK context.
 // It lives in an internal package with an unexported type, so no code outside
-// the module can name the key. The value it addresses is the exported
-// agent.Identity, which any in-process context wrapper can read or substitute on
-// the way through — no less than it could call the credential services directly.
+// the module can name the key. The key is therefore unforgeable, but the value
+// it addresses is not: any in-process context wrapper can read the exported
+// agent.Identity on its way past and hand back a different one, without ever
+// naming the key. Treat the identity as trusted only as far as every wrapper in
+// the chain is.
 const IdentityKey ctxKey = 0
 
-// Usable reports whether the methods of interface value v can be called. Both
-// ADK Value implementations read the identity off session.Session, and a
-// typed-nil session survives != nil and then nil-derefs; the kind switch is
-// needed because reflect.Value.IsNil panics on a struct value, which a
-// six-accessor interface like session.Session may well be.
+// ReadIdentity runs read, which fills in an invocation identity from a
+// session.Session, and reports whether it completed.
 //
-// It cannot promise more than that: a non-nil session whose own accessors panic
-// still panics, here as anywhere else in ADK.
-func Usable(v any) bool {
-	if v == nil {
-		return false
-	}
-	switch rv := reflect.ValueOf(v); rv.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
-		return !rv.IsNil()
-	default:
-		return true
-	}
+// It recovers, because every ADK Value implementation reads the identity off
+// session.Session — a public interface whose implementations are arbitrary code.
+// A nil or typed-nil session, or a session wrapping a nil one (the shape
+// llmagent.newWrappedSession produces for a nil original), panics on the first
+// accessor. Value runs inside http.RoundTripper on the caller's goroutine, where
+// net/http does not recover, so a broken session would take the process down;
+// reporting the identity as absent instead fails the credential path closed.
+func ReadIdentity(read func()) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	read()
+	return true
 }

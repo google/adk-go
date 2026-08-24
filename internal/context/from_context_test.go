@@ -73,15 +73,14 @@ func TestIdentityFromContextAbsent(t *testing.T) {
 }
 
 // TestIdentityFromContextSessionShapes covers the session shapes a
-// [session.Session] implementation can legally take. Two of them used to panic
-// inside Value — a struct value tripped reflect.Value.IsNil, and a typed-nil
-// pointer passed an interface-nil check and then dereferenced — which lands
-// inside an http.RoundTripper, where net/http does not recover. The two Value
-// implementations must also agree: a promoted context and its parent answering
-// the identity key differently is its own bug.
+// [session.Session] implementation can legally take. Several of them used to
+// panic inside Value — a struct value tripped reflect.Value.IsNil, a typed-nil
+// pointer passed an interface-nil check and then dereferenced, and a session
+// wrapping a nil one (llmagent.newWrappedSession's shape for a nil original)
+// panicked in the accessor. Value runs inside an http.RoundTripper, where
+// net/http does not recover. Every context implementation must also agree: two
+// of them answering the identity key differently is its own bug.
 func TestIdentityFromContextSessionShapes(t *testing.T) {
-	// A session whose own accessors panic is not covered: no nil test can save
-	// that, and it panics anywhere else in ADK too.
 	cases := []struct {
 		name    string
 		session session.Session
@@ -100,8 +99,16 @@ func TestIdentityFromContextSessionShapes(t *testing.T) {
 			want:    agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: "sid-1"},
 			wantOK:  true,
 		},
+		{
+			// A typed-nil pointer whose accessors do not dereference is usable.
+			name:    "typed-nil pointer with safe accessors",
+			session: (*safeNilSession)(nil),
+			want:    agent.Identity{UserID: "user-nil", AppName: "app-nil", SessionID: "sid-nil"},
+			wantOK:  true,
+		},
 		{name: "nil", session: nil},
 		{name: "typed-nil pointer", session: (*ptrSession)(nil)},
+		{name: "wrapper over a nil session", session: &wrapperSession{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,6 +119,7 @@ func TestIdentityFromContextSessionShapes(t *testing.T) {
 			}{
 				{"invocation context", ic},
 				{"promoted common context", agent.Promote(ic)},
+				{"tool context", agent.NewToolContext(ic, "fc-1", nil, nil)},
 			} {
 				id, ok := agent.IdentityFromContext(ctx.ctx)
 				if ok != tc.wantOK || id != tc.want {
@@ -119,6 +127,69 @@ func TestIdentityFromContextSessionShapes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestIdentityAfterWithContext pins the promoted context's own identity branch.
+// WithContext replaces the embedded parent with a non-ADK context while keeping
+// the invocation — the one shape where delegating to the parent cannot recover
+// the identity, and the reason the branch exists. agent.go does exactly this
+// around a tracing span.
+func TestIdentityAfterWithContext(t *testing.T) {
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app-1", UserID: "user-42"})
+	if err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
+
+	detached := agent.Promote(ic).WithContext(context.Background())
+	id, ok := agent.IdentityFromContext(detached)
+	want := agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: resp.Session.ID()}
+	if !ok || id != want {
+		t.Errorf("IdentityFromContext(WithContext) = %+v, %v; want %+v, true", id, ok, want)
+	}
+}
+
+// TestValueWithNilEmbeddedContext pins the nil-parent guard:
+// NewCleanToolContextTestOnly builds a context with no embedded parent, so
+// without it every non-identity key is a nil-interface method call.
+func TestValueWithNilEmbeddedContext(t *testing.T) {
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	clean, err := agent.NewCleanToolContextTestOnly(agent.Promote(ic), "fc-1", nil, nil)
+	if err != nil {
+		t.Fatalf("NewCleanToolContextTestOnly() error = %v", err)
+	}
+	if got := clean.Value(wrapKey{}); got != nil {
+		t.Errorf("Value(wrapKey{}) = %v, want nil", got)
+	}
+}
+
+// TestIdentityDoesNotInheritEnclosingInvocation pins that identity resolution
+// fails closed. A nested invocation with no session of its own must not report
+// the enclosing invocation's user: that user's credential would then be minted
+// for a call they never made.
+func TestIdentityDoesNotInheritEnclosingInvocation(t *testing.T) {
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app-1", UserID: "alice"})
+	if err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	outer := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
+	if id, ok := agent.IdentityFromContext(outer); !ok || id.UserID != "alice" {
+		t.Fatalf("outer IdentityFromContext() = %+v, %v; want alice", id, ok)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"nested invocation", icontext.NewInvocationContext(outer, icontext.InvocationContextParams{})},
+		{"nested and promoted", agent.Promote(icontext.NewInvocationContext(outer, icontext.InvocationContextParams{}))},
+	} {
+		if id, ok := agent.IdentityFromContext(tc.ctx); ok {
+			t.Errorf("%s IdentityFromContext() = %+v, true; want no identity, not the enclosing user", tc.name, id)
+		}
 	}
 }
 
@@ -157,6 +228,19 @@ type ptrSession struct {
 	session.Session
 	id, app, user string
 }
+
+// wrapperSession is the shape llmagent.newWrappedSession produces for a nil
+// original: non-nil, but every identity accessor is promoted from the nil
+// embedded interface and panics on the first call.
+type wrapperSession struct{ session.Session }
+
+// safeNilSession answers without touching its receiver, so a typed-nil one is
+// still a working session.
+type safeNilSession struct{ session.Session }
+
+func (*safeNilSession) ID() string      { return "sid-nil" }
+func (*safeNilSession) AppName() string { return "app-nil" }
+func (*safeNilSession) UserID() string  { return "user-nil" }
 
 func (s *ptrSession) ID() string      { return s.id }
 func (s *ptrSession) AppName() string { return s.app }

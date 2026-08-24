@@ -124,18 +124,24 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 
 // Value implements context.Context. It returns this invocation's [agent.Identity]
 // for the ADK identity key (so agent.IdentityFromContext can recover it); every
-// other key, and a context with no usable session, delegates to the embedded
-// context, preserving existing behavior.
+// other key delegates to the embedded context, preserving existing behavior.
 //
-// The session check must stay in step with the one agent's promoted context
-// makes, or the two answer the identity key differently.
+// The identity key is answered here even when the session cannot be read, with
+// no identity rather than the enclosing invocation's: inheriting another call's
+// user would mint that user's credential for a request they never made.
 func (c *InvocationContext) Value(key any) any {
-	if key == adkcontext.IdentityKey && adkcontext.Usable(c.params.Session) {
-		return agent.Identity{
-			UserID:    c.params.Session.UserID(),
-			AppName:   c.params.Session.AppName(),
-			SessionID: c.params.Session.ID(),
+	if key == adkcontext.IdentityKey {
+		var id agent.Identity
+		s := c.params.Session
+		if adkcontext.ReadIdentity(func() {
+			id = agent.Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
+		}) {
+			return id
 		}
+		return nil
+	}
+	if c.Context == nil {
+		return nil
 	}
 	return c.Context.Value(key)
 }

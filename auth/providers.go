@@ -63,9 +63,12 @@ type ConsentRequiredError struct {
 	Key string
 }
 
-// Error implements error.
+// Error implements error. It deliberately omits AuthURI: this error becomes a
+// tool's error, which is fed to the model and persisted in the session, and the
+// consent URI carries the state and nonce that bind the credential. Consumers
+// read it off the field.
 func (e *ConsentRequiredError) Error() string {
-	return fmt.Sprintf("auth: interactive consent required (auth_uri=%q)", e.AuthURI)
+	return "auth: interactive consent required"
 }
 
 // StaticToken returns a provider that always yields the given bearer token.

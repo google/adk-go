@@ -23,8 +23,10 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/auth/gcp"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -82,10 +84,54 @@ func TestProviderCredential(t *testing.T) {
 	}
 }
 
-// TestProviderErrorNamesUserAndResource pins that a failed retrieval says which
-// user and which resource failed — several providers can be wired into one
-// process — while staying matchable for the sentinels callers switch on.
-func TestProviderErrorNamesUserAndResource(t *testing.T) {
+// TestProviderErrorAttribution pins that a failed retrieval says which invocation
+// and which resource failed — several providers can be wired into one process —
+// without naming the user, whose id is commonly an email and whose error text
+// reaches the model. Sentinels must stay matchable through the wrap.
+// TestProviderCredentialConcurrent drives two users through one shared provider
+// at the same time. The sequential case above pins the wire contract; this one
+// pins that concurrency cannot cross the streams.
+func TestProviderCredentialConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UserID string `json:"userId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	users := []string{"alice", "bob", "carol", "dave"}
+	ctxs := make([]context.Context, len(users))
+	for i, u := range users {
+		ctxs[i] = adkContext(t, u)
+	}
+
+	var wg sync.WaitGroup
+	got := make([]auth.Credential, len(users)*8)
+	errs := make([]error, len(users)*8)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = p.Credential(ctxs[i%len(users)])
+		}()
+	}
+	wg.Wait()
+
+	for i, cred := range got {
+		want := "tok-" + users[i%len(users)]
+		if errs[i] != nil {
+			t.Fatalf("Credential(%s) error = %v", users[i%len(users)], errs[i])
+		}
+		if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != want {
+			t.Errorf("credential %d = %+v, want bearer %q", i, cred, want)
+		}
+	}
+}
+
+func TestProviderErrorAttribution(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `denied`)
@@ -93,14 +139,19 @@ func TestProviderErrorNamesUserAndResource(t *testing.T) {
 	defer srv.Close()
 
 	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
-	_, err := p.Credential(adkContext(t, "alice"))
+	ctx := adkContext(t, "alice@example.test")
+	id, _ := agent.IdentityFromContext(ctx)
+	_, err := p.Credential(ctx)
 	if err == nil {
 		t.Fatal("Credential() = nil error, want the service failure")
 	}
-	for _, want := range []string{`"alice"`, testResource} {
+	for _, want := range []string{id.SessionID, testResource} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Credential() error = %v, want it to name %s", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "alice@example.test") {
+		t.Errorf("Credential() error = %v, want the user id kept out of it", err)
 	}
 	var apiErr *gcp.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
@@ -119,7 +170,7 @@ func TestProviderNoActingUser(t *testing.T) {
 		{
 			name:    "not an ADK context",
 			ctx:     func(t *testing.T) context.Context { return t.Context() },
-			wantMsg: "must run within an agent invocation",
+			wantMsg: "no ADK invocation identity",
 		},
 		{
 			name:    "invocation without a user",
@@ -148,30 +199,41 @@ func TestProviderNoActingUser(t *testing.T) {
 }
 
 func TestNewProviderValidatesScheme(t *testing.T) {
-	tests := []struct {
-		name   string
-		scheme gcp.ProviderScheme
-		cfg    *gcp.ProviderConfig
+	// Everything here is a wiring mistake, and each must fail at construction
+	// rather than on every request from inside an http.RoundTripper.
+	bad := []struct {
+		name string
+		cfg  gcp.ProviderConfig
 	}{
-		{name: "empty name", scheme: gcp.ProviderScheme{}},
-		{
-			// Rejected here rather than on every request from inside a transport.
-			name:   "malformed resource name",
-			scheme: gcp.ProviderScheme{Name: "projects/p/locations/l/authProviders/../../secret"},
-		},
-		{
-			name:   "unconstructed client",
-			scheme: gcp.ProviderScheme{Name: testResource},
-			cfg:    &gcp.ProviderConfig{Client: &gcp.Client{}},
-		},
+		{"empty name", gcp.ProviderConfig{}},
+		{"path traversal", cfgFor("projects/p/locations/l/authProviders/../../secret")},
+		{"empty path segment", cfgFor("projects/p/locations/l/authProviders//ap")},
+		{"trailing slash routes differently after normalization", cfgFor("projects/p/locations/l/connectors/c/")},
+		{"not a resource name at all", cfgFor("Bearer")},
+		{"unknown collection", cfgFor("projects/p/locations/l/authProvidrs/ap")},
+		{"truncated", cfgFor("projects/p")},
+		{"unconstructed client", gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: testResource}, Client: &gcp.Client{}}},
 	}
-	for _, tt := range tests {
+	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := gcp.NewProvider(t.Context(), tt.scheme, tt.cfg); err == nil {
-				t.Fatal("NewProvider() = nil error, want the scheme rejected")
+			if _, err := gcp.NewProvider(t.Context(), tt.cfg); err == nil {
+				t.Fatal("NewProvider() = nil error, want the config rejected")
 			}
 		})
 	}
+
+	good := []string{testResource, "projects/p/locations/l/connectors/c"}
+	for _, name := range good {
+		t.Run("accepts "+name, func(t *testing.T) {
+			if _, err := gcp.NewProvider(t.Context(), cfgFor(name)); err != nil {
+				t.Fatalf("NewProvider(%q) error = %v", name, err)
+			}
+		})
+	}
+}
+
+func cfgFor(name string) gcp.ProviderConfig {
+	return gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: name}}
 }
 
 // newProvider builds a provider whose client targets srv.
@@ -184,7 +246,7 @@ func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) 
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	p, err := gcp.NewProvider(t.Context(), scheme, &gcp.ProviderConfig{Client: client})
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
