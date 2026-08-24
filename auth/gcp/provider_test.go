@@ -145,13 +145,13 @@ func TestProviderErrorAttribution(t *testing.T) {
 	if err == nil {
 		t.Fatal("Credential() = nil error, want the service failure")
 	}
-	for _, want := range []string{id.SessionID, testResource} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("Credential() error = %v, want it to name %s", err, want)
-		}
+	if !strings.Contains(err.Error(), testResource) {
+		t.Errorf("Credential() error = %v, want it to name the resource", err)
 	}
-	if strings.Contains(err.Error(), "alice@example.test") {
-		t.Errorf("Credential() error = %v, want the user id kept out of it", err)
+	for _, unwanted := range []string{"alice@example.test", id.SessionID} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("Credential() error = %v, want the caller-supplied %q kept out of it", err, unwanted)
+		}
 	}
 	var apiErr *gcp.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {

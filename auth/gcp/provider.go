@@ -31,8 +31,12 @@ import (
 type ProviderScheme struct {
 	// Name is the full resource name, routed by [Client]: either
 	// projects/*/locations/*/connectors/* (IAM Connector) or
-	// projects/*/locations/*/authProviders/* (Agent Identity). [NewProvider]
-	// accepts only those two shapes.
+	// projects/*/locations/*/authProviders/* (Agent Identity).
+	//
+	// [NewProvider] accepts only those two shapes. That is stricter than
+	// [Client.RetrieveCredential] and than adk-python, both of which send any
+	// non-connector name to Agent Identity: at wiring time a name outside the two
+	// is a typo, and this type's name invites passing an HTTP auth scheme.
 	Name string
 	// Scopes are the OAuth scopes requested for the credential.
 	Scopes []string
@@ -56,6 +60,11 @@ type ProviderConfig struct {
 	// at least be reported.
 	Client *Client
 }
+
+// ErrClientUnavailable means the default Application Default Credentials client
+// could not be built in time. The lookup is not cancellable, so the bound is on
+// the wait: the attempt keeps running and a later call may well succeed.
+var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
 // ErrNoActingUser means the provider could not determine the acting end user,
 // either because the context is not an ADK context or because the invocation
@@ -85,8 +94,9 @@ const defaultInitTimeout = 30 * time.Second
 //     whichever user connected first and stay bound to it.
 //   - The transport must not follow a cross-host redirect. net/http strips
 //     Authorization above the RoundTripper, so [auth.Transport] re-resolves and
-//     re-applies the end user's credential to the redirect target. [NewClient]
-//     refuses redirects for the same reason.
+//     re-applies the end user's credential to the redirect target. Set
+//     CheckRedirect on the http.Client that carries the transport; the
+//     ADC-backed client [NewClient] builds for itself does the same.
 //
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
@@ -168,7 +178,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 
 	client, err := p.resolveClient(ctx)
 	if err != nil {
-		return nil, p.attribute(id, err)
+		return nil, p.attribute(err)
 	}
 	cred, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
@@ -177,18 +187,21 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		ContinueURI: p.scheme.ContinueURI,
 	})
 	if err != nil {
-		return nil, p.attribute(id, err)
+		return nil, p.attribute(err)
 	}
 	return cred, nil
 }
 
-// attribute names the invocation and resource a failure belongs to: several
-// providers can be wired into one process, and an unattributed error says
-// nothing about which. It names the session rather than the user, because this
-// error becomes the tool's error — fed to the model and persisted in the
-// session — and UserID is commonly an email.
-func (p *provider) attribute(id agent.Identity, err error) error {
-	return fmt.Errorf("gcp: credential for session %q on %q: %w", id.SessionID, p.scheme.Name, err)
+// attribute names the resource a failure belongs to: several providers can be
+// wired into one process, and an unattributed error says nothing about which.
+//
+// It names nothing else. This error becomes the tool's error, which is fed to
+// the model and persisted in the session, and every id available here is
+// supplied by the caller — a user id is commonly an email, and a session id
+// arrives unvalidated from the request path. The invocation is already
+// identified by the trace and the session the error is stored in.
+func (p *provider) attribute(err error) error {
+	return fmt.Errorf("gcp: resource %q: %w", p.scheme.Name, err)
 }
 
 // resolveClient returns the configured client, building a default one (backed by
@@ -226,9 +239,9 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 		}
 		return in.client, nil
 	case <-timer.C:
-		// Wrap DeadlineExceeded so a caller can tell a bounded wait from a hard
-		// failure without matching on the message.
-		return nil, fmt.Errorf("gcp: default credentials client not ready after %v: %w", p.initTimeout, context.DeadlineExceeded)
+		// A sentinel of its own, not context.DeadlineExceeded: that is what the
+		// caller-deadline arm below returns, and the two mean different things.
+		return nil, fmt.Errorf("%w after %v", ErrClientUnavailable, p.initTimeout)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
 	}
@@ -236,6 +249,25 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 
 // runInit builds the default client once and publishes it to the waiters on in.
 func (p *provider) runInit(in *clientInit) {
+	// This runs on a goroutine the provider owns, so nothing above can recover a
+	// panic here and it would take the process down — where an eagerly built
+	// client would merely have panicked in the caller's own frame. Report it as
+	// this attempt's failure instead, panic value and all, and release the
+	// waiters: without this, an abrupt exit leaves pending set with its goroutine
+	// dead and every later caller waits out initTimeout forever.
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		if r := recover(); r != nil {
+			in.err = fmt.Errorf("gcp: building the default credentials client panicked: %v", r)
+		} else if in.err == nil {
+			in.err = errors.New("gcp: building the default credentials client did not complete")
+		}
+		p.publish(in)
+	}()
+
 	c, err := p.newClient(p.initCtx)
 	switch {
 	case err != nil:
@@ -246,12 +278,18 @@ func (p *provider) runInit(in *clientInit) {
 	default:
 		in.client = c
 	}
+	published = true
+	p.publish(in)
+}
 
+// publish caches a successful client, frees the in-flight slot so a failed
+// attempt is retried rather than cached, and releases the waiters.
+func (p *provider) publish(in *clientInit) {
 	p.mu.Lock()
 	if in.err == nil {
 		p.client = in.client
 	}
-	p.pending = nil // so a failed attempt is retried, not cached
+	p.pending = nil
 	p.mu.Unlock()
 	close(in.done)
 }

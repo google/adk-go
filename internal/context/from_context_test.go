@@ -180,18 +180,77 @@ func TestIdentityDoesNotInheritEnclosingInvocation(t *testing.T) {
 		t.Fatalf("outer IdentityFromContext() = %+v, %v; want alice", id, ok)
 	}
 
+	nested := icontext.NewInvocationContext(outer, icontext.InvocationContextParams{})
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
 	}{
-		{"nested invocation", icontext.NewInvocationContext(outer, icontext.InvocationContextParams{})},
-		{"nested and promoted", agent.Promote(icontext.NewInvocationContext(outer, icontext.InvocationContextParams{}))},
+		{"nested invocation", nested},
+		// Promote copies the invocation, so this would resolve through the
+		// nested context's own guard even if the promoted one leaked.
+		{"nested and promoted", agent.Promote(nested)},
+		{"nested tool context", agent.NewToolContext(nested, "fc-1", nil, nil)},
+		// A non-ADK wrapper in between must not restore what the guard refused.
+		{"nested behind a non-ADK wrapper", context.WithValue(nested, wrapKey{}, "x")},
 	} {
 		if id, ok := agent.IdentityFromContext(tc.ctx); ok {
 			t.Errorf("%s IdentityFromContext() = %+v, true; want no identity, not the enclosing user", tc.name, id)
 		}
 	}
 }
+
+// The guard is on the invocation that owns the session, so it holds for anything
+// derived from that invocation. Reparenting a promoted copy onto an unrelated
+// invocation with WithContext is out of its reach — that is ordinary context
+// delegation, and the unrelated invocation answers.
+
+// TestIdentityThroughSessionlessWrappers pins the other half of that rule: a
+// context that does not own a session — a tool or callback context, whose
+// Session() returns nil by design — must delegate rather than report no
+// identity, or every outbound request from a re-derived tool context fails with
+// ErrNoActingUser.
+func TestIdentityThroughSessionlessWrappers(t *testing.T) {
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app-1", UserID: "user-42"})
+	if err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
+	want := agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: resp.Session.ID()}
+
+	toolCtx := agent.NewToolContext(ic, "fc-1", nil, nil)
+	callbackCtx := agent.NewCallbackContext(ic, nil)
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"tool context", toolCtx},
+		{"promoted tool context", agent.Promote(toolCtx)},
+		{"tool context re-derived from a tool context", agent.NewToolContext(toolCtx, "fc-2", nil, nil)},
+		{"callback context", callbackCtx},
+		{"promoted callback context", agent.Promote(callbackCtx)},
+	} {
+		id, ok := agent.IdentityFromContext(tc.ctx)
+		if !ok || id != want {
+			t.Errorf("%s IdentityFromContext() = %+v, %v; want %+v, true", tc.name, id, ok, want)
+		}
+	}
+}
+
+// TestIdentityFromPanickingSession pins that a session whose Session() accessor
+// itself panics — not only its field accessors — costs the identity and not the
+// process: this runs inside an http.RoundTripper, where net/http does not
+// recover.
+func TestIdentityFromPanickingSession(t *testing.T) {
+	ic := agent.Promote(panickingInvocation{InvocationContext: icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})})
+	if id, ok := agent.IdentityFromContext(ic); ok {
+		t.Errorf("IdentityFromContext() = %+v, true; want no identity", id)
+	}
+}
+
+type panickingInvocation struct{ agent.InvocationContext }
+
+func (panickingInvocation) Session() session.Session { panic("Session() is not supported here") }
 
 // TestValueDelegatesUnknownKeys pins that a session shape that stops the
 // identity lookup does not stop every other key: Value is on the hot path for

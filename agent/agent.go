@@ -431,10 +431,12 @@ func (c *invocationContext) Session() session.Session {
 }
 
 // Value implements context.Context, answering the ADK identity key like every
-// other invocation context so a promoted copy and this one cannot disagree.
+// other invocation context so a promoted copy and this one cannot disagree. It
+// owns its session, so no session means no identity — never the enclosing
+// invocation's, whose user made no such call.
 func (c *invocationContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
-		if id, ok := identityOf(c.session); ok {
+		if id, ok := identityOf(func() session.Session { return c.session }); ok {
 			return id
 		}
 		return nil

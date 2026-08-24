@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,7 +58,8 @@ func TestResolveClientBuildsDefaultClient(t *testing.T) {
 
 // TestResolveClientSingleFlight pins the concurrency design: many first callers
 // share one build and all get the same client. Nothing exercises the mutex
-// unless a test actually runs callers together — the race detector included.
+// unless a test runs callers together — the race detector included, which is
+// what catches a lock that stops locking.
 func TestResolveClientSingleFlight(t *testing.T) {
 	var attempts atomic.Int32
 	built := &Client{httpClient: http.DefaultClient}
@@ -126,8 +128,14 @@ func TestResolveClientBoundsWaitOnHungInit(t *testing.T) {
 	p.newClient = blockingInit(t)
 	p.initTimeout = 50 * time.Millisecond
 
-	if _, err := p.resolveClient(t.Context()); err == nil || !strings.Contains(err.Error(), "not ready") {
-		t.Fatalf("resolveClient() error = %v, want the init timeout reported", err)
+	// A sentinel of its own: the caller-deadline arm returns
+	// context.DeadlineExceeded, and a caller must be able to tell them apart.
+	_, err := p.resolveClient(t.Context())
+	if !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("resolveClient() error = %v, want ErrClientUnavailable", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("resolveClient() error = %v, want it distinguishable from a caller deadline", err)
 	}
 	// Retiring the attempt would start a fresh lookup — and leak a fresh
 	// thread-pinning goroutine — every initTimeout, forever.
@@ -136,6 +144,91 @@ func TestResolveClientBoundsWaitOnHungInit(t *testing.T) {
 	p.mu.Unlock()
 	if pending == nil {
 		t.Error("provider dropped the hung attempt; the next caller would start another lookup")
+	}
+}
+
+// TestResolveClientPublishesLateClient pins that a lookup which lands after every
+// waiter gave up is not wasted: the attempt is kept rather than retired precisely
+// so the next caller gets its client instead of starting another lookup.
+func TestResolveClientPublishesLateClient(t *testing.T) {
+	built := &Client{httpClient: http.DefaultClient}
+	release := make(chan struct{})
+	var attempts atomic.Int32
+	p := newTestProvider(t)
+	p.initTimeout = 20 * time.Millisecond
+	p.newClient = func(context.Context) (*Client, error) {
+		attempts.Add(1)
+		<-release
+		return built, nil
+	}
+
+	if _, err := p.resolveClient(t.Context()); !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("resolveClient() error = %v, want ErrClientUnavailable", err)
+	}
+	close(release)
+
+	// The attempt finishes on its own goroutine; wait for it to publish.
+	deadline := time.Now().Add(2 * time.Second)
+	var got *Client
+	for time.Now().Before(deadline) {
+		if c, err := p.resolveClient(t.Context()); err == nil {
+			got = c
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got != built {
+		t.Fatalf("resolveClient() = %v, want the late-landing client", got)
+	}
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("init attempts = %d, want 1 (the late client must be used, not rebuilt)", n)
+	}
+}
+
+// TestRunInitSurvivesAbruptBuilder pins that a builder which does not return
+// normally still releases the waiters and the in-flight slot. Without the
+// deferred publish, pending stays set with its goroutine dead and every later
+// caller waits out initTimeout, forever.
+func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		build   func(context.Context) (*Client, error)
+		wantMsg string
+	}{
+		{
+			name:    "panic",
+			build:   func(context.Context) (*Client, error) { panic("credentials discovery blew up") },
+			wantMsg: "blew up", // surfaced, not swallowed
+		},
+		{
+			// What a t.Fatal inside a caller-supplied builder does.
+			name:    "runtime.Goexit",
+			build:   func(context.Context) (*Client, error) { runtime.Goexit(); return nil, nil },
+			wantMsg: "did not complete",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProvider(t)
+			p.initTimeout = 5 * time.Second // long enough that a wedge shows up as one
+			p.newClient = tc.build
+
+			done := make(chan error, 1)
+			go func() { _, err := p.resolveClient(t.Context()); done <- err }()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
+					t.Fatalf("resolveClient() error = %v, want it to report %q", err, tc.wantMsg)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("resolveClient() blocked; an abrupt builder wedged the provider")
+			}
+			p.mu.Lock()
+			pending := p.pending
+			p.mu.Unlock()
+			if pending != nil {
+				t.Error("provider kept the dead attempt; the next caller would wait on it forever")
+			}
+		})
 	}
 }
 

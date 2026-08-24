@@ -29,22 +29,24 @@ type ctxKey int
 // the chain is.
 const IdentityKey ctxKey = 0
 
-// ReadIdentity runs read, which fills in an invocation identity from a
-// session.Session, and reports whether it completed.
+// Recovered returns what read produced, and whether it returned at all.
 //
-// It recovers, because every ADK Value implementation reads the identity off
-// session.Session — a public interface whose implementations are arbitrary code.
-// A nil or typed-nil session, or a session wrapping a nil one (the shape
-// llmagent.newWrappedSession produces for a nil original), panics on the first
-// accessor. Value runs inside http.RoundTripper on the caller's goroutine, where
-// net/http does not recover, so a broken session would take the process down;
-// reporting the identity as absent instead fails the credential path closed.
-func ReadIdentity(read func()) (ok bool) {
+// It exists for the ADK Value implementations, which read the invocation
+// identity off session.Session — a public interface whose implementations are
+// arbitrary code. A nil or typed-nil session, a session wrapping a nil one (the
+// shape llmagent.newWrappedSession produces for a nil original), or a Session()
+// accessor that declines, all panic on the way. Value runs inside
+// http.RoundTripper on the caller's goroutine, where net/http does not recover,
+// so a broken session would take the process down; reporting no identity instead
+// fails the credential path closed.
+//
+// Nothing partially built escapes: on a panic the zero value is returned.
+func Recovered[T any](read func() T) (v T, ok bool) {
 	defer func() {
 		if recover() != nil {
-			ok = false
+			var zero T
+			v, ok = zero, false
 		}
 	}()
-	read()
-	return true
+	return read(), true
 }

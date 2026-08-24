@@ -30,9 +30,10 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
-// Identity is a snapshot of an ADK invocation's identity: the acting user, app
-// name, and session a call belongs to. It is recovered from a plain
-// context.Context via [IdentityFromContext].
+// Identity is an ADK invocation's identity: the acting user, app name, and
+// session a call belongs to. It is recovered from a plain context.Context via
+// [IdentityFromContext], which reads it off the live session each time, so a
+// session mutated mid-invocation is reflected in the next lookup.
 type Identity struct {
 	// UserID is the acting end user, as the embedding server put it on the
 	// session. ADK does not authenticate it: anything acting on behalf of this
@@ -46,20 +47,19 @@ type Identity struct {
 	SessionID string
 }
 
-// identityOf reads an invocation identity off s. It is the one place package
-// agent turns a session into an [Identity], so every context type here answers
-// the identity key the same way.
-func identityOf(s session.Session) (Identity, bool) {
-	var id Identity
-	// One Session value, then one call per field: re-reading Session() per field
-	// risks a torn identity, and some context wrappers log on every read.
-	ok := adkcontext.ReadIdentity(func() {
-		id = Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
+// identityOf reads an invocation identity from the session getSession returns.
+// It is the one place package agent turns a session into an [Identity], so every
+// context type here answers the identity key the same way.
+//
+// getSession is called inside the recover, not before it: Session() is itself a
+// method on caller-supplied code and can panic on its own.
+func identityOf(getSession func() session.Session) (Identity, bool) {
+	return adkcontext.Recovered(func() Identity {
+		// One Session value, then one call per field: re-reading Session() per
+		// field risks a torn identity, and some context wrappers log on every read.
+		s := getSession()
+		return Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
 	})
-	if !ok {
-		return Identity{}, false
-	}
-	return id, true
 }
 
 // IdentityFromContext returns the ADK invocation [Identity] carried by ctx, if
@@ -401,20 +401,19 @@ func (c *commonContext) UserID() string {
 // derived context); every other key delegates to the embedded context,
 // preserving existing behavior.
 //
-// An invocation answers the identity key itself even when its session cannot be
-// read, reporting no identity rather than delegating: an enclosing invocation
-// belongs to a different call, and inheriting its user would mint that user's
-// credential for a request they never made. Only a context with no invocation at
-// all delegates the key onwards.
+// A session this context cannot read delegates onwards, because a commonContext
+// does not own a session — it reads one off the invocation it wraps, and some of
+// those (a tool or callback context) decline to hand theirs over, so absence here
+// is not authoritative. The invocation types that do own a session answer for
+// themselves and never delegate the key; see internal/context.
 //
 // Only the identity key reads the session, so no other key is affected by its
 // state, and a session that panics costs the identity, not the process.
 func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey && c.invocationContext != nil {
-		if id, ok := identityOf(c.invocationContext.Session()); ok {
+		if id, ok := identityOf(c.invocationContext.Session); ok {
 			return id
 		}
-		return nil
 	}
 	if c.Context == nil {
 		return nil
