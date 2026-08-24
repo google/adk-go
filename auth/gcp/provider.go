@@ -20,16 +20,15 @@ import (
 	"fmt"
 	"slices"
 	"sync"
-
-	"golang.org/x/sync/singleflight"
+	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 )
 
-// Scheme identifies a GCP auth resource and the access it requests. It mirrors
-// adk-python's GcpAuthProviderScheme.
-type Scheme struct {
+// ProviderScheme identifies a GCP auth resource and the access it requests. It
+// mirrors adk-python's GcpAuthProviderScheme.
+type ProviderScheme struct {
 	// Name is the full resource name, routed by [Client]: either
 	// projects/*/locations/*/connectors/* (IAM Connector) or
 	// projects/*/locations/*/authProviders/* (Agent Identity).
@@ -45,7 +44,9 @@ type Scheme struct {
 // *ProviderConfig, or any zero-valued field, uses the corresponding default.
 type ProviderConfig struct {
 	// Client reaches the credential services. When nil, a default client (backed
-	// by Application Default Credentials) is created lazily on first use.
+	// by Application Default Credentials) is created lazily on first use. That
+	// default targets the production services, so pass a [Client] built by
+	// [NewClient] to reach a test endpoint or to tune the poll timeout.
 	Client *Client
 }
 
@@ -53,6 +54,13 @@ type ProviderConfig struct {
 // either because the context is not an ADK context or because the invocation
 // carries no user.
 var ErrNoActingUser = errors.New("gcp: no acting user")
+
+// defaultInitTimeout retires a hung default-client init so the next call starts
+// a fresh one, instead of every caller attaching to a flight that never lands.
+// The lookup cannot be bounded by a context: FindDefaultCredentials reads the
+// credentials file with os.ReadFile and probes with the context-free
+// metadata.OnGCE(), neither of which observes cancellation.
+const defaultInitTimeout = 30 * time.Second
 
 // NewProvider returns an [auth.CredentialProvider] that resolves credentials for
 // the given GCP resource via the Agent Identity / IAM Connector services.
@@ -62,9 +70,22 @@ var ErrNoActingUser = errors.New("gcp: no acting user")
 // request it authenticates must descend from the invoking user's context. That
 // holds for mcptoolset's per-call requests, but not for a transport that shares
 // one connection across invocations.
-func NewProvider(scheme Scheme, cfg *ProviderConfig) (auth.CredentialProvider, error) {
+//
+// Whoever wires this up is trusting the embedding server: ADK does not
+// authenticate session.UserID, and it now decides whose credential is minted.
+//
+// ctx is used only to build the default client when cfg.Client is nil, and only
+// for its values; its cancellation is not honored, because the client outlives
+// any one request. Pass the process-scoped context the rest of the app is wired
+// with, not a request's.
+func NewProvider(ctx context.Context, scheme ProviderScheme, cfg *ProviderConfig) (auth.CredentialProvider, error) {
 	if scheme.Name == "" {
 		return nil, errors.New("gcp: NewProvider requires a scheme Name")
+	}
+	// The same check RetrieveCredential makes per request: a malformed name is a
+	// wiring mistake, so fail here rather than on every call inside a transport.
+	if err := validateResource(scheme.Name); err != nil {
+		return nil, fmt.Errorf("gcp: NewProvider: %w", err)
 	}
 	if cfg == nil {
 		cfg = &ProviderConfig{}
@@ -75,15 +96,37 @@ func NewProvider(scheme Scheme, cfg *ProviderConfig) (auth.CredentialProvider, e
 	}
 	// Defensive copy: the provider outlives this call and re-reads Scopes per request, so it must not alias a caller-mutable slice.
 	scheme.Scopes = slices.Clone(scheme.Scopes)
-	return &provider{scheme: scheme, client: cfg.Client}, nil
+	return &provider{
+		scheme:      scheme,
+		client:      cfg.Client,
+		initCtx:     context.WithoutCancel(ctx),
+		newClient:   func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
+		initTimeout: defaultInitTimeout,
+	}, nil
 }
 
 type provider struct {
-	scheme Scheme
+	scheme ProviderScheme
+	// initCtx roots the lazily built default client. It is held for the life of
+	// the provider, which is why NewProvider asks for a process-scoped one.
+	initCtx context.Context
+	// newClient and initTimeout are fields, not package constants, so tests can
+	// drive the failure and hang paths a real ADC lookup cannot be made to hit.
+	newClient   func(context.Context) (*Client, error)
+	initTimeout time.Duration
 
-	mu         sync.Mutex
-	client     *Client
-	clientInit singleflight.Group // coalesces concurrent first-time client init
+	mu      sync.Mutex
+	client  *Client
+	pending *clientInit // in-flight lazy init, shared by concurrent callers
+}
+
+// clientInit is one attempt at building the default client. Its fields are
+// written by the attempt's own goroutine and read by waiters only after done is
+// closed.
+type clientInit struct {
+	done   chan struct{}
+	client *Client
+	err    error
 }
 
 var _ auth.CredentialProvider = (*provider)(nil)
@@ -102,60 +145,84 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.RetrieveCredential(ctx, Request{
+	cred, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      id.UserID,
 		Scopes:      p.scheme.Scopes,
 		ContinueURI: p.scheme.ContinueURI,
 	})
+	if err != nil {
+		// Name the user and resource: several providers can be wired into one
+		// process, and the failure otherwise says nothing about which.
+		return nil, fmt.Errorf("gcp: credential for user %q on %q: %w", id.UserID, p.scheme.Name, err)
+	}
+	return cred, nil
 }
 
 // resolveClient returns the configured client, creating a default one (backed by
 // Application Default Credentials) on first use.
 //
-// Concurrent first callers are coalesced via singleflight so the ADC lookup runs
-// once, off the mutex, and each waits on its own ctx: auth.Transport resolves a
-// credential per outbound request, so a slow cold start must not outlive the
-// request that triggered it. Init runs on a context detached from the caller's
-// cancellation (values kept) so the shared client isn't bound to one request. A
-// failed init is not cached; the next call retries.
-//
-// The lookup cannot be bounded by a context: FindDefaultCredentials reads the
-// credentials file with os.ReadFile and probes with the context-free
-// metadata.OnGCE(), neither of which observes cancellation. The bound therefore
-// lives on the waiting side, not on the context handed to NewClient.
+// Concurrent first callers share one attempt, and each waits on its own ctx:
+// auth.Transport resolves a credential per outbound request, so a slow cold
+// start must not outlive the request that triggered it. A failed or timed-out
+// attempt is not cached; the next call starts a new one.
 func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	p.mu.Lock()
-	c := p.client
-	p.mu.Unlock()
-	if c != nil {
+	if c := p.client; c != nil {
+		p.mu.Unlock()
 		return c, nil
 	}
-
-	ch := p.clientInit.DoChan("client", func() (any, error) {
-		// A prior winner may have set the client while we waited.
-		p.mu.Lock()
-		c := p.client
-		p.mu.Unlock()
-		if c != nil {
-			return c, nil
-		}
-		nc, err := NewClient(context.WithoutCancel(ctx), nil)
-		if err != nil {
-			return nil, err
-		}
-		p.mu.Lock()
-		p.client = nc
-		p.mu.Unlock()
-		return nc, nil
-	})
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return nil, r.Err
-		}
-		return r.Val.(*Client), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	in := p.pending
+	if in == nil {
+		in = &clientInit{done: make(chan struct{})}
+		p.pending = in
+		go p.runInit(in)
 	}
+	p.mu.Unlock()
+
+	select {
+	case <-in.done:
+		if in.err != nil {
+			return nil, in.err
+		}
+		return in.client, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
+	}
+}
+
+// runInit runs one attempt at building the default client and publishes it to
+// the waiters on in.
+func (p *provider) runInit(in *clientInit) {
+	type result struct {
+		client *Client
+		err    error
+	}
+	// Buffered, because the lookup cannot be cancelled: once the attempt is
+	// retired nobody receives, and an unbuffered send would leak the goroutine.
+	res := make(chan result, 1)
+	go func() {
+		c, err := p.newClient(p.initCtx)
+		res <- result{c, err}
+	}()
+
+	timer := time.NewTimer(p.initTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-res:
+		in.client = r.client
+		if r.err != nil {
+			in.err = fmt.Errorf("gcp: build default credentials client: %w", r.err)
+		}
+	case <-timer.C:
+		in.err = fmt.Errorf("gcp: building the default credentials client exceeded %v", p.initTimeout)
+	}
+
+	p.mu.Lock()
+	if in.err == nil {
+		p.client = in.client
+	}
+	p.pending = nil // so a failed or retired attempt is retried, not wedged
+	p.mu.Unlock()
+	close(in.done)
 }

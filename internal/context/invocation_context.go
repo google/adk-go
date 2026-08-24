@@ -123,11 +123,14 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 }
 
 // Value implements context.Context. It returns this invocation's [agent.Identity]
-// for the ADK self key (so agent.IdentityFromContext can recover it); every other
-// key, and a context with no session, delegates to the embedded context —
-// preserving existing behavior and never panicking.
+// for the ADK identity key (so agent.IdentityFromContext can recover it); every
+// other key, and a context with no usable session, delegates to the embedded
+// context, preserving existing behavior.
+//
+// The session check must stay in step with the one agent's promoted context
+// makes, or the two answer the identity key differently.
 func (c *InvocationContext) Value(key any) any {
-	if key == adkcontext.IdentityKey && c.params.Session != nil {
+	if key == adkcontext.IdentityKey && adkcontext.Usable(c.params.Session) {
 		return agent.Identity{
 			UserID:    c.params.Session.UserID(),
 			AppName:   c.params.Session.AppName(),

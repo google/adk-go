@@ -18,6 +18,8 @@
 // by the agent and internal/context packages to avoid an import cycle.
 package adkcontext
 
+import "reflect"
+
 type ctxKey int
 
 // IdentityKey is the context value key for the agent.Identity of an ADK context.
@@ -26,3 +28,23 @@ type ctxKey int
 // agent.Identity, which any in-process context wrapper can read or substitute on
 // the way through — no less than it could call the credential services directly.
 const IdentityKey ctxKey = 0
+
+// Usable reports whether the methods of interface value v can be called. Both
+// ADK Value implementations read the identity off session.Session, and a
+// typed-nil session survives != nil and then nil-derefs; the kind switch is
+// needed because reflect.Value.IsNil panics on a struct value, which a
+// six-accessor interface like session.Session may well be.
+//
+// It cannot promise more than that: a non-nil session whose own accessors panic
+// still panics, here as anywhere else in ADK.
+func Usable(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return !rv.IsNil()
+	default:
+		return true
+	}
+}

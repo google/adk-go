@@ -55,6 +55,16 @@ var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/co
 // traversal (dots are allowed so domain-style ids still pass).
 var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
 
+// validateResource rejects a resource name that cannot be safely interpolated
+// into a request URL. [NewProvider] applies it at wiring time too, so a
+// malformed name fails once rather than on every request.
+func validateResource(name string) error {
+	if !resourceNameRE.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("resource %q has invalid characters", name)
+	}
+	return nil
+}
+
 // Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
 var (
 	// ErrConsentRejected means the end user rejected the consent request.
@@ -192,8 +202,8 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 	if req.UserID == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
 	}
-	if !resourceNameRE.MatchString(req.Resource) || strings.Contains(req.Resource, "..") {
-		return nil, fmt.Errorf("gcp: RetrieveCredential resource %q has invalid characters", req.Resource)
+	if err := validateResource(req.Resource); err != nil {
+		return nil, fmt.Errorf("gcp: RetrieveCredential %w", err)
 	}
 
 	retrieve := c.retrieveAgentIdentity

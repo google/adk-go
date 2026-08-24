@@ -72,24 +72,92 @@ func TestIdentityFromContextAbsent(t *testing.T) {
 	}
 }
 
-// TestIdentityFromContextNoSession pins that an ADK context with no session
-// yields (zero, false) instead of panicking — Value is a context.Context method
-// and must never panic — across both the invocation and promoted common context
-// Value paths.
-func TestIdentityFromContextNoSession(t *testing.T) {
-	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}) // Session nil
+// TestIdentityFromContextSessionShapes covers the session shapes a
+// [session.Session] implementation can legally take. Two of them used to panic
+// inside Value — a struct value tripped reflect.Value.IsNil, and a typed-nil
+// pointer passed an interface-nil check and then dereferenced — which lands
+// inside an http.RoundTripper, where net/http does not recover. The two Value
+// implementations must also agree: a promoted context and its parent answering
+// the identity key differently is its own bug.
+func TestIdentityFromContextSessionShapes(t *testing.T) {
+	// A session whose own accessors panic is not covered: no nil test can save
+	// that, and it panics anywhere else in ADK too.
 	cases := []struct {
+		name    string
+		session session.Session
+		want    agent.Identity
+		wantOK  bool
+	}{
+		{
+			name:    "pointer",
+			session: &ptrSession{id: "sid-1", app: "app-1", user: "user-42"},
+			want:    agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: "sid-1"},
+			wantOK:  true,
+		},
+		{
+			name:    "struct value",
+			session: valueSession{id: "sid-1", app: "app-1", user: "user-42"},
+			want:    agent.Identity{UserID: "user-42", AppName: "app-1", SessionID: "sid-1"},
+			wantOK:  true,
+		},
+		{name: "nil", session: nil},
+		{name: "typed-nil pointer", session: (*ptrSession)(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: tc.session})
+			for _, ctx := range []struct {
+				name string
+				ctx  context.Context
+			}{
+				{"invocation context", ic},
+				{"promoted common context", agent.Promote(ic)},
+			} {
+				id, ok := agent.IdentityFromContext(ctx.ctx)
+				if ok != tc.wantOK || id != tc.want {
+					t.Errorf("IdentityFromContext(%s) = %+v, %v; want %+v, %v", ctx.name, id, ok, tc.want, tc.wantOK)
+				}
+			}
+		})
+	}
+}
+
+// TestValueDelegatesUnknownKeys pins that a session shape that stops the
+// identity lookup does not stop every other key: Value is on the hot path for
+// net/http, tracing and logging keys that have nothing to do with the session.
+func TestValueDelegatesUnknownKeys(t *testing.T) {
+	parent := context.WithValue(t.Context(), wrapKey{}, "x")
+	ic := icontext.NewInvocationContext(parent, icontext.InvocationContextParams{Session: (*ptrSession)(nil)})
+	for _, tc := range []struct {
 		name string
 		ctx  context.Context
 	}{
 		{"invocation context", ic},
 		{"promoted common context", agent.Promote(ic)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if id, ok := agent.IdentityFromContext(tc.ctx); ok {
-				t.Errorf("IdentityFromContext() = %+v, ok = true; want zero, false", id)
-			}
-		})
+	} {
+		if got := tc.ctx.Value(wrapKey{}); got != "x" {
+			t.Errorf("%s Value(wrapKey{}) = %v, want %q", tc.name, got, "x")
+		}
 	}
 }
+
+// valueSession and ptrSession embed a nil session.Session for the accessors the
+// identity path never reaches, and read their own fields for the ones it does —
+// so a typed-nil *ptrSession panics on use, as a real session would.
+type valueSession struct {
+	session.Session
+	id, app, user string
+}
+
+func (s valueSession) ID() string      { return s.id }
+func (s valueSession) AppName() string { return s.app }
+func (s valueSession) UserID() string  { return s.user }
+
+type ptrSession struct {
+	session.Session
+	id, app, user string
+}
+
+func (s *ptrSession) ID() string      { return s.id }
+func (s *ptrSession) AppName() string { return s.app }
+func (s *ptrSession) UserID() string  { return s.user }

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/auth"
@@ -29,6 +30,8 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/session"
 )
+
+const testResource = "projects/p/locations/l/authProviders/ap"
 
 // TestProviderCredential drives two users through one shared provider: the
 // provider is long-lived, so serving one user's credential to another is the
@@ -51,25 +54,12 @@ func TestProviderCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := gcp.NewClient(t.Context(), &gcp.Config{
-		HTTPClient:            srv.Client(),
-		AgentIdentityEndpoint: srv.URL,
-	})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
 	scopes := []string{"s1", "s2"}
-	p, err := gcp.NewProvider(
-		gcp.Scheme{
-			Name:        "projects/p/locations/l/authProviders/ap",
-			Scopes:      scopes,
-			ContinueURI: "https://example.test/continue",
-		},
-		&gcp.ProviderConfig{Client: client},
-	)
-	if err != nil {
-		t.Fatalf("NewProvider() error = %v", err)
-	}
+	p := newProvider(t, srv, gcp.ProviderScheme{
+		Name:        testResource,
+		Scopes:      scopes,
+		ContinueURI: "https://example.test/continue",
+	})
 	scopes[0] = "mutated" // the provider must have cloned this
 
 	for _, user := range []string{"alice", "bob"} {
@@ -92,12 +82,101 @@ func TestProviderCredential(t *testing.T) {
 	}
 }
 
-func TestProviderRequiresADKContext(t *testing.T) {
-	// Fails the test if reached: the guard must reject before any service call.
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("credentials service must not be called without an ADK identity")
+// TestProviderErrorNamesUserAndResource pins that a failed retrieval says which
+// user and which resource failed — several providers can be wired into one
+// process — while staying matchable for the sentinels callers switch on.
+func TestProviderErrorNamesUserAndResource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `denied`)
 	}))
 	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, "alice"))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	for _, want := range []string{`"alice"`, testResource} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Credential() error = %v, want it to name %s", err, want)
+		}
+	}
+	var apiErr *gcp.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		t.Errorf("Credential() error = %v, want a wrapped *gcp.APIError with status 403", err)
+	}
+}
+
+// TestProviderNoActingUser covers both identity failures: the guard must reject
+// before any service call, and the two cases must stay distinguishable.
+func TestProviderNoActingUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     func(t *testing.T) context.Context
+		wantMsg string
+	}{
+		{
+			name:    "not an ADK context",
+			ctx:     func(t *testing.T) context.Context { return t.Context() },
+			wantMsg: "must run within an agent invocation",
+		},
+		{
+			name:    "invocation without a user",
+			ctx:     userlessADKContext,
+			wantMsg: "empty UserID",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Fails the test if reached: no identity means no service call.
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("credentials service must not be called without an ADK identity")
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+			_, err := p.Credential(tt.ctx(t))
+			if !errors.Is(err, gcp.ErrNoActingUser) {
+				t.Fatalf("Credential() error = %v, want gcp.ErrNoActingUser", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("Credential() error = %v, want it to mention %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestNewProviderValidatesScheme(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme gcp.ProviderScheme
+		cfg    *gcp.ProviderConfig
+	}{
+		{name: "empty name", scheme: gcp.ProviderScheme{}},
+		{
+			// Rejected here rather than on every request from inside a transport.
+			name:   "malformed resource name",
+			scheme: gcp.ProviderScheme{Name: "projects/p/locations/l/authProviders/../../secret"},
+		},
+		{
+			name:   "unconstructed client",
+			scheme: gcp.ProviderScheme{Name: testResource},
+			cfg:    &gcp.ProviderConfig{Client: &gcp.Client{}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := gcp.NewProvider(t.Context(), tt.scheme, tt.cfg); err == nil {
+				t.Fatal("NewProvider() = nil error, want the scheme rejected")
+			}
+		})
+	}
+}
+
+// newProvider builds a provider whose client targets srv.
+func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) auth.CredentialProvider {
+	t.Helper()
 	client, err := gcp.NewClient(t.Context(), &gcp.Config{
 		HTTPClient:            srv.Client(),
 		AgentIdentityEndpoint: srv.URL,
@@ -105,37 +184,15 @@ func TestProviderRequiresADKContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	p, err := gcp.NewProvider(
-		gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"},
-		&gcp.ProviderConfig{Client: client},
-	)
+	p, err := gcp.NewProvider(t.Context(), scheme, &gcp.ProviderConfig{Client: client})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
-	_, err = p.Credential(t.Context())
-	if !errors.Is(err, gcp.ErrNoActingUser) {
-		t.Fatalf("Credential() error = %v, want gcp.ErrNoActingUser", err)
-	}
+	return p
 }
 
-func TestNewProviderRejectsUnconstructedClient(t *testing.T) {
-	_, err := gcp.NewProvider(
-		gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"},
-		&gcp.ProviderConfig{Client: &gcp.Client{}},
-	)
-	if err == nil {
-		t.Fatal("NewProvider() = nil error, want a zero Client rejected")
-	}
-}
-
-func TestNewProviderValidatesScheme(t *testing.T) {
-	if _, err := gcp.NewProvider(gcp.Scheme{}, nil); err == nil {
-		t.Fatal("NewProvider() = nil error, want error for empty scheme Name")
-	}
-}
-
-// adkContext returns an ADK invocation context (recoverable via agent.IdentityFromContext)
-// for the given user.
+// adkContext returns an ADK invocation context (recoverable via
+// agent.IdentityFromContext) for the given user.
 func adkContext(t *testing.T, userID string) context.Context {
 	t.Helper()
 	svc := session.InMemoryService()
@@ -145,3 +202,19 @@ func adkContext(t *testing.T, userID string) context.Context {
 	}
 	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
 }
+
+// userlessADKContext returns an invocation whose session carries no user — the
+// shape session.InMemoryService refuses to create, but that a custom session
+// service can produce.
+func userlessADKContext(t *testing.T) context.Context {
+	t.Helper()
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: userlessSession{}})
+}
+
+// userlessSession embeds a nil session.Session for the accessors the identity
+// path never reaches.
+type userlessSession struct{ session.Session }
+
+func (userlessSession) ID() string      { return "sid" }
+func (userlessSession) AppName() string { return "app" }
+func (userlessSession) UserID() string  { return "" }

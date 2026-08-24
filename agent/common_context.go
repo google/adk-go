@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"reflect"
 	"time"
 
 	"google.golang.org/genai"
@@ -34,6 +33,11 @@ import (
 // Identity is the read-only identity of an ADK invocation: the acting user, app
 // name, and session a call belongs to. It is recovered from a plain
 // context.Context via [IdentityFromContext].
+//
+// UserID is whatever the embedding server put on the session; ADK does not
+// authenticate it. Anything that acts on behalf of the user named here — minting
+// a per-user credential, for instance — is trusting the server to have bound
+// session.UserID to an authenticated principal.
 type Identity struct {
 	UserID    string
 	AppName   string
@@ -50,7 +54,9 @@ type Identity struct {
 // context through every layer.
 //
 // It returns (zero, false) for a context that does not descend from an ADK
-// context (a non-agent caller).
+// context (a non-agent caller). It returns ok for an invocation that has a
+// session, whose fields may still be empty: a session carrying no user yields an
+// empty UserID, so a caller that needs one must check.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok
@@ -371,12 +377,15 @@ func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
-// Value implements context.Context. For the ADK self key it returns this
+// Value implements context.Context. For the ADK identity key it returns this
 // invocation's [Identity] (so [IdentityFromContext] can recover it from a
 // derived context); every other key delegates to the embedded context,
 // preserving existing behavior. A context without a usable session also
-// delegates, so a wrapped ADK context can still supply the identity and Value
-// never panics.
+// delegates, so a wrapped ADK context can still supply the identity.
+//
+// Only the identity key reads the session, so no other key is affected by the
+// session's state. A [session.Session] whose own accessors panic still panics
+// here, as it would anywhere else in ADK.
 func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey && c.hasSession() {
 		return Identity{UserID: c.UserID(), AppName: c.AppName(), SessionID: c.SessionID()}
@@ -387,15 +396,14 @@ func (c *commonContext) Value(key any) any {
 	return c.Context.Value(key)
 }
 
-// hasSession reports whether an identity can be read off this context. The
-// reflect check rejects a typed-nil Session, which survives != nil and then
-// panics on use.
+// hasSession reports whether an identity can be read off this context. It must
+// stay in step with the same check in internal/context, or a promoted context
+// and its parent answer the identity key differently.
 func (c *commonContext) hasSession() bool {
 	if c.invocationContext == nil {
 		return false
 	}
-	s := c.invocationContext.Session()
-	return s != nil && !reflect.ValueOf(s).IsNil()
+	return adkcontext.Usable(c.invocationContext.Session())
 }
 
 var (
