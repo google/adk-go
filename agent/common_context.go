@@ -72,8 +72,9 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // context through every layer.
 //
 // It returns (zero, false) both for a context that does not descend from an ADK
-// context and for an invocation whose session is missing or unreadable; the two
-// are not distinguishable here. ok does not imply a populated Identity either: an
+// context and for an invocation with no readable session — the two are not
+// distinguishable here, and an invocation never reports an enclosing one's user
+// in place of its own. ok does not imply a populated Identity either: an
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
@@ -396,29 +397,56 @@ func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
-// Value implements context.Context. For the ADK identity key it returns this
-// invocation's [Identity] (so [IdentityFromContext] can recover it from a
-// derived context); every other key delegates to the embedded context,
-// preserving existing behavior.
+// Value implements context.Context. For the ADK identity key it returns the
+// [Identity] of the invocation this context speaks for (so [IdentityFromContext]
+// can recover it from a derived context); every other key delegates to the
+// embedded context, preserving existing behavior.
 //
-// A session this context cannot read delegates onwards, because a commonContext
-// does not own a session — it reads one off the invocation it wraps, and some of
-// those (a tool or callback context) decline to hand theirs over, so absence here
-// is not authoritative. The invocation types that do own a session answer for
-// themselves and never delegate the key; see internal/context.
-//
-// Only the identity key reads the session, so no other key is affected by its
-// state, and a session that panics costs the identity, not the process.
+// Only the identity key touches the invocation, so no other key is affected by
+// its state, and a session that panics costs the identity, not the process.
 func (c *commonContext) Value(key any) any {
-	if key == adkcontext.IdentityKey && c.invocationContext != nil {
-		if id, ok := identityOf(c.invocationContext.Session); ok {
-			return id
-		}
+	if key == adkcontext.IdentityKey {
+		return c.identity()
 	}
 	if c.Context == nil {
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+// identity answers the ADK identity key, as an any so it can report "none".
+//
+// A commonContext owns no session; it speaks for the invocation it wraps, so it
+// asks that invocation and takes its answer as final. That keeps a tool or
+// callback context working — theirs return a nil session by design, and they
+// delegate the key to the context underneath — while leaving a session-less
+// invocation's refusal authoritative.
+//
+// It never falls back to the embedded parent. After WithContext that parent can
+// be an unrelated invocation, and inheriting its user would mint that user's
+// credential for a call they never made.
+func (c *commonContext) identity() any {
+	if c.invocationContext == nil {
+		// No invocation to speak for; the parent may still carry one.
+		if c.Context == nil {
+			return nil
+		}
+		return c.Context.Value(adkcontext.IdentityKey)
+	}
+	// Recovered, because invocationContext can be a typed-nil pointer and its
+	// methods are caller-supplied code.
+	if v, ok := adkcontext.Recovered(func() any {
+		return c.invocationContext.Value(adkcontext.IdentityKey)
+	}); ok && v != nil {
+		return v
+	}
+	// An InvocationContext from outside this module need not answer the key at
+	// all, so fall back to reading its session, method value and call both inside
+	// the recover.
+	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
+		return id
+	}
+	return nil
 }
 
 var (

@@ -192,17 +192,18 @@ func TestIdentityDoesNotInheritEnclosingInvocation(t *testing.T) {
 		{"nested tool context", agent.NewToolContext(nested, "fc-1", nil, nil)},
 		// A non-ADK wrapper in between must not restore what the guard refused.
 		{"nested behind a non-ADK wrapper", context.WithValue(nested, wrapKey{}, "x")},
+		// Reparented onto a plain context that happens to carry the enclosing
+		// invocation. The derived context still speaks for the nested invocation,
+		// so the parent must not supply a user that invocation refused.
+		// (WithContext given an InvocationContext is different: that rebinds which
+		// invocation the context speaks for, and is deliberate.)
+		{"nested, reparented onto a plain carrier of the enclosing invocation", agent.Promote(nested).WithContext(context.WithValue(outer, wrapKey{}, "x"))},
 	} {
 		if id, ok := agent.IdentityFromContext(tc.ctx); ok {
 			t.Errorf("%s IdentityFromContext() = %+v, true; want no identity, not the enclosing user", tc.name, id)
 		}
 	}
 }
-
-// The guard is on the invocation that owns the session, so it holds for anything
-// derived from that invocation. Reparenting a promoted copy onto an unrelated
-// invocation with WithContext is out of its reach — that is ordinary context
-// delegation, and the unrelated invocation answers.
 
 // TestIdentityThroughSessionlessWrappers pins the other half of that rule: a
 // context that does not own a session — a tool or callback context, whose
@@ -220,6 +221,9 @@ func TestIdentityThroughSessionlessWrappers(t *testing.T) {
 
 	toolCtx := agent.NewToolContext(ic, "fc-1", nil, nil)
 	callbackCtx := agent.NewCallbackContext(ic, nil)
+	// Each of these has a session-less wrapper as the invocation it speaks for, so
+	// every one exercises the delegation. A context derived directly from ic does
+	// not, and would pass whatever the delegation did.
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
@@ -227,8 +231,10 @@ func TestIdentityThroughSessionlessWrappers(t *testing.T) {
 		{"tool context", toolCtx},
 		{"promoted tool context", agent.Promote(toolCtx)},
 		{"tool context re-derived from a tool context", agent.NewToolContext(toolCtx, "fc-2", nil, nil)},
+		{"callback context re-derived from a tool context", agent.NewCallbackContext(toolCtx, nil)},
 		{"callback context", callbackCtx},
 		{"promoted callback context", agent.Promote(callbackCtx)},
+		{"tool context re-derived from a callback context", agent.NewToolContext(callbackCtx, "fc-3", nil, nil)},
 	} {
 		id, ok := agent.IdentityFromContext(tc.ctx)
 		if !ok || id != want {
@@ -242,9 +248,15 @@ func TestIdentityThroughSessionlessWrappers(t *testing.T) {
 // process: this runs inside an http.RoundTripper, where net/http does not
 // recover.
 func TestIdentityFromPanickingSession(t *testing.T) {
-	ic := agent.Promote(panickingInvocation{InvocationContext: icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})})
+	parent := context.WithValue(t.Context(), wrapKey{}, "x")
+	inner := icontext.NewInvocationContext(parent, icontext.InvocationContextParams{})
+	ic := agent.Promote(panickingInvocation{InvocationContext: inner})
 	if id, ok := agent.IdentityFromContext(ic); ok {
 		t.Errorf("IdentityFromContext() = %+v, true; want no identity", id)
+	}
+	// The panic costs the identity and nothing else.
+	if got := ic.Value(wrapKey{}); got != "x" {
+		t.Errorf("Value(wrapKey{}) = %v, want %q", got, "x")
 	}
 }
 

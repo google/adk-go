@@ -287,6 +287,12 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}},
 		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}},
 		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}},
+		// Percent-escapes are rejected by the charset, not decoded: the name is
+		// interpolated into a URL, so an escape that survives becomes traversal or
+		// a segment break once the server decodes it.
+		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}},
+		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}},
+		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}},
 	}
 	// Point at a live server: a client with no endpoint fails at transport for
 	// every input, which cannot tell a rejected request from an unreachable one.

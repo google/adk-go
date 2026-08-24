@@ -274,6 +274,34 @@ func TestResolveClientRejectsNilClient(t *testing.T) {
 	}
 }
 
+// TestNewProviderIgnoresWiringContextCancellation pins the documented contract
+// that NewProvider's ctx supplies values only: the default client outlives any
+// one request, so cancelling what was passed at wiring time must not stop it
+// being built.
+func TestNewProviderIgnoresWiringContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	cancel()
+
+	built := &Client{httpClient: http.DefaultClient}
+	prov := p.(*provider)
+	var sawErr error
+	prov.newClient = func(ctx context.Context) (*Client, error) {
+		sawErr = ctx.Err()
+		return built, nil
+	}
+	got, err := prov.resolveClient(t.Context())
+	if err != nil || got != built {
+		t.Fatalf("resolveClient() = %v, %v; want the client despite the cancelled wiring context", got, err)
+	}
+	if sawErr != nil {
+		t.Errorf("the builder saw ctx.Err() = %v, want the cancellation stripped", sawErr)
+	}
+}
+
 // TestNewProviderKeepsWiringContextOnlyWhenLazy pins that a provider given a
 // Client does not pin its caller's context — and with it the caller's whole
 // session and event graph — for the life of the process.

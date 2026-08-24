@@ -173,12 +173,17 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, fmt.Errorf("%w: no ADK invocation identity on the context — not an agent invocation, or its session is unset", ErrNoActingUser)
 	}
 	if id.UserID == "" {
-		return nil, fmt.Errorf("%w: invocation for app %q session %q has an empty UserID", ErrNoActingUser, id.AppName, id.SessionID)
+		// No ids in the message: this text is fed to the model and persisted in
+		// the session, and every id here comes off the request.
+		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
 	}
 
 	client, err := p.resolveClient(ctx)
 	if err != nil {
-		return nil, p.attribute(err)
+		// Not attributed: a client-init failure is about this process's own
+		// credentials, not about the resource, and every provider in the process
+		// fails it identically. Attributing it would also stack the package prefix.
+		return nil, err
 	}
 	cred, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
@@ -192,10 +197,9 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	return cred, nil
 }
 
-// attribute names the resource a failure belongs to: several providers can be
-// wired into one process, and an unattributed error says nothing about which.
-// It is also where the package prefix goes, so the paths that only ever surface
-// through it do not repeat it.
+// attribute names the resource a retrieval failure belongs to: several providers
+// can be wired into one process, and an unattributed error says nothing about
+// which.
 //
 // It names nothing else. This error becomes the tool's error, which is fed to
 // the model and persisted in the session, and every id available here is

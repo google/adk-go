@@ -44,6 +44,9 @@ const IdentityKey ctxKey = 0
 // cost is that a bug inside a caller's accessor surfaces as a missing identity
 // rather than a stack trace — deliberate, since the alternative here is killing
 // the process, and the credential path fails closed either way.
+//
+// It contains a panic, not every way out: an accessor that calls runtime.Goexit
+// ends the calling goroutine, which no recover can undo.
 func Recovered[T any](read func() T) (v T, ok bool) {
 	defer func() {
 		if recover() != nil {

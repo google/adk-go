@@ -46,6 +46,24 @@ func TestInvocationContextIdentityIsOwned(t *testing.T) {
 	}
 }
 
+// TestCommonContextWithoutInvocation pins the guard for a commonContext that
+// speaks for no invocation: it has nothing to answer the identity key with, so it
+// delegates, and a nil parent on top of that must not panic — Value is a
+// context.Context method and runs inside an http.RoundTripper.
+func TestCommonContextWithoutInvocation(t *testing.T) {
+	owner := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+	c := &commonContext{Context: owner} // no invocationContext
+	if got, ok := IdentityFromContext(c); !ok || got.UserID != "alice" {
+		t.Errorf("IdentityFromContext() = %+v, %v; want the parent's identity", got, ok)
+	}
+	if got := (&commonContext{}).Value(adkcontext.IdentityKey); got != nil {
+		t.Errorf("Value(IdentityKey) with no invocation and no parent = %v, want nil", got)
+	}
+	if got := (&commonContext{}).Value(wrapKey{}); got != nil {
+		t.Errorf("Value(wrapKey{}) with no invocation and no parent = %v, want nil", got)
+	}
+}
+
 // TestReadIdentityRecoversPanickingAccessor pins that a session accessor which
 // panics costs the identity and not the process.
 func TestReadIdentityRecoversPanickingAccessor(t *testing.T) {

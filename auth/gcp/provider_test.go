@@ -160,7 +160,9 @@ func TestProviderErrorAttribution(t *testing.T) {
 }
 
 // TestProviderNoActingUser covers both identity failures: the guard must reject
-// before any service call, and the two cases must stay distinguishable.
+// before any service call, the two cases must stay distinguishable, and neither
+// message may carry a caller-supplied id — this text reaches the model and is
+// persisted in the session.
 func TestProviderNoActingUser(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -175,7 +177,7 @@ func TestProviderNoActingUser(t *testing.T) {
 		{
 			name:    "invocation without a user",
 			ctx:     userlessADKContext,
-			wantMsg: "empty UserID",
+			wantMsg: "carries no user",
 		},
 	}
 	for _, tt := range tests {
@@ -193,6 +195,11 @@ func TestProviderNoActingUser(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantMsg) {
 				t.Errorf("Credential() error = %v, want it to mention %q", err, tt.wantMsg)
+			}
+			for _, unwanted := range []string{"app", "sid"} {
+				if strings.Contains(err.Error(), unwanted) {
+					t.Errorf("Credential() error = %v, want the caller-supplied %q kept out of it", err, unwanted)
+				}
 			}
 		})
 	}
