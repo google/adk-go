@@ -57,8 +57,11 @@ var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+
 // resourceNameRE bounds a resource name to the characters GCP resource names
 // use. It cannot inject a query, a fragment, an authority or a percent-escape
 // into the request URL the name is interpolated into; extra path segments are
-// allowed, since a resource name is itself a path.
-var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
+// allowed, since a resource name is itself a path. The colon is allowed for
+// domain-scoped project ids (projects/example.com:my-project/...) — the name is
+// always appended after the endpoint and a /v1 segment, so it can never be read
+// as a scheme.
+var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
 
 // validateResource rejects a resource name that cannot be safely interpolated
 // into a request URL, or that would not survive path normalization — an empty,

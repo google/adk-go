@@ -40,7 +40,10 @@ const IdentityKey ctxKey = 0
 // so a broken session would take the process down; reporting no identity instead
 // fails the credential path closed.
 //
-// Nothing partially built escapes: on a panic the zero value is returned.
+// Nothing partially built escapes: on a panic the zero value is returned. The
+// cost is that a bug inside a caller's accessor surfaces as a missing identity
+// rather than a stack trace — deliberate, since the alternative here is killing
+// the process, and the credential path fails closed either way.
 func Recovered[T any](read func() T) (v T, ok bool) {
 	defer func() {
 		if recover() != nil {

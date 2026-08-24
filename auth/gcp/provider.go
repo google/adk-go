@@ -194,6 +194,8 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 
 // attribute names the resource a failure belongs to: several providers can be
 // wired into one process, and an unattributed error says nothing about which.
+// It is also where the package prefix goes, so the paths that only ever surface
+// through it do not repeat it.
 //
 // It names nothing else. This error becomes the tool's error, which is fed to
 // the model and persisted in the session, and every id available here is
@@ -243,7 +245,7 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 		// caller-deadline arm below returns, and the two mean different things.
 		return nil, fmt.Errorf("%w after %v", ErrClientUnavailable, p.initTimeout)
 	case <-ctx.Done():
-		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
+		return nil, fmt.Errorf("waiting for the default credentials client: %w", ctx.Err())
 	}
 }
 
@@ -261,9 +263,9 @@ func (p *provider) runInit(in *clientInit) {
 			return
 		}
 		if r := recover(); r != nil {
-			in.err = fmt.Errorf("gcp: building the default credentials client panicked: %v", r)
+			in.err = fmt.Errorf("building the default credentials client panicked: %v", r)
 		} else if in.err == nil {
-			in.err = errors.New("gcp: building the default credentials client did not complete")
+			in.err = errors.New("building the default credentials client did not complete")
 		}
 		p.publish(in)
 	}()
@@ -271,10 +273,10 @@ func (p *provider) runInit(in *clientInit) {
 	c, err := p.newClient(p.initCtx)
 	switch {
 	case err != nil:
-		in.err = fmt.Errorf("gcp: build default credentials client: %w", err)
+		in.err = fmt.Errorf("build default credentials client: %w", err)
 	case c == nil:
 		// Caching a nil client would only move the failure to the next retrieval.
-		in.err = errors.New("gcp: default credentials client builder returned no client")
+		in.err = errors.New("default credentials client builder returned no client")
 	default:
 		in.client = c
 	}

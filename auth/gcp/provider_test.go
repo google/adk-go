@@ -222,7 +222,12 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 		})
 	}
 
-	good := []string{testResource, "projects/p/locations/l/connectors/c"}
+	good := []string{
+		testResource,
+		"projects/p/locations/l/connectors/c",
+		// Domain-scoped project ids carry a colon.
+		"projects/example.com:my-project/locations/l/authProviders/ap",
+	}
 	for _, name := range good {
 		t.Run("accepts "+name, func(t *testing.T) {
 			if _, err := gcp.NewProvider(t.Context(), cfgFor(name)); err != nil {
