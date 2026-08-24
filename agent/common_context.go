@@ -72,9 +72,12 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // context through every layer.
 //
 // It returns (zero, false) both for a context that does not descend from an ADK
-// context and for an invocation with no readable session — the two are not
-// distinguishable here, and an invocation never reports an enclosing one's user
-// in place of its own. ok does not imply a populated Identity either: an
+// context and for an invocation with no readable session; the two are not
+// distinguishable here. The invocation types in this module never report an
+// enclosing invocation's user in place of their own — one implemented elsewhere
+// cannot make that promise, since the key is unnameable outside the module and
+// its embedded parent answers instead. ok does not imply a populated Identity
+// either: an
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
@@ -434,11 +437,16 @@ func (c *commonContext) identity() any {
 		return c.Context.Value(adkcontext.IdentityKey)
 	}
 	// Recovered, because invocationContext can be a typed-nil pointer and its
-	// methods are caller-supplied code.
+	// methods are caller-supplied code. The answer is type-asserted, not merely
+	// checked against nil: a permissive Value that answers every key would
+	// otherwise hand back something that is not an Identity, and swallow the
+	// session read below.
 	if v, ok := adkcontext.Recovered(func() any {
 		return c.invocationContext.Value(adkcontext.IdentityKey)
-	}); ok && v != nil {
-		return v
+	}); ok {
+		if id, isIdentity := v.(Identity); isIdentity {
+			return id
+		}
 	}
 	// An InvocationContext from outside this module need not answer the key at
 	// all, so fall back to reading its session, method value and call both inside

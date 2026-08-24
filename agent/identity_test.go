@@ -88,3 +88,21 @@ func (panickingSession) UserID() string { panic("UserID is not available") }
 type wrapKey struct{}
 
 var _ context.Context = (*invocationContext)(nil)
+
+// TestIdentityFromPermissiveInvocation pins that an invocation answering every
+// key with something that is not an [Identity] does not swallow the fallback: a
+// decorator or test double that returns a placeholder for any key would
+// otherwise cost the identity on every outbound request.
+func TestIdentityFromPermissiveInvocation(t *testing.T) {
+	owner := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+	c := &commonContext{Context: t.Context(), invocationContext: permissiveInvocation{InvocationContext: owner}}
+	got, ok := IdentityFromContext(c)
+	if !ok || got.UserID != "alice" {
+		t.Errorf("IdentityFromContext() = %+v, %v; want the session read to be reached", got, ok)
+	}
+}
+
+// permissiveInvocation answers every key, as a decorator or a test double might.
+type permissiveInvocation struct{ InvocationContext }
+
+func (permissiveInvocation) Value(any) any { return "something that is not an Identity" }

@@ -195,8 +195,10 @@ func TestIdentityDoesNotInheritEnclosingInvocation(t *testing.T) {
 		// Reparented onto a plain context that happens to carry the enclosing
 		// invocation. The derived context still speaks for the nested invocation,
 		// so the parent must not supply a user that invocation refused.
-		// (WithContext given an InvocationContext is different: that rebinds which
-		// invocation the context speaks for, and is deliberate.)
+		// (WithContext given an InvocationContext is different on the two
+		// implementations that rebind on it — agent.commonContext and
+		// agent.callbackContextWrapper — where it deliberately changes which
+		// invocation the context speaks for.)
 		{"nested, reparented onto a plain carrier of the enclosing invocation", agent.Promote(nested).WithContext(context.WithValue(outer, wrapKey{}, "x"))},
 	} {
 		if id, ok := agent.IdentityFromContext(tc.ctx); ok {
