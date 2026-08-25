@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"mime"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
@@ -236,8 +237,8 @@ func formatEmbeddedResource(content *mcp.EmbeddedResource) string {
 	if resource.Text != "" {
 		return formatContentWithBody("embedded resource", attributes, resource.Text)
 	}
-	if len(resource.Blob) > 0 && isTextMIMEType(resource.MIMEType) {
-		return formatContentWithBody("embedded resource", attributes, string(resource.Blob))
+	if text, ok := decodeTextBlob(resource.Blob, resource.MIMEType); ok {
+		return formatContentWithBody("embedded resource", attributes, text)
 	}
 	if len(resource.Blob) > 0 {
 		attributes = append(attributes, fmt.Sprintf("size=%d bytes", len(resource.Blob)))
@@ -297,11 +298,38 @@ func formatContentLabel(kind string, attributes []string) string {
 	return "[MCP " + kind + ": " + strings.Join(attributes, ", ") + "]"
 }
 
-func isTextMIMEType(mimeType string) bool {
-	mediaType, _, err := mime.ParseMediaType(mimeType)
+func decodeTextBlob(blob []byte, mimeType string) (string, bool) {
+	if len(blob) == 0 {
+		return "", false
+	}
+
+	mediaType, params, err := mime.ParseMediaType(mimeType)
 	if err != nil {
 		mediaType = strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
 	}
+	if !isTextMediaType(mediaType) {
+		return "", false
+	}
+
+	charset := strings.ToLower(params["charset"])
+	switch charset {
+	case "", "utf-8", "utf8":
+		if !utf8.Valid(blob) {
+			return "", false
+		}
+	case "us-ascii":
+		for _, b := range blob {
+			if b >= utf8.RuneSelf {
+				return "", false
+			}
+		}
+	default:
+		return "", false
+	}
+	return string(blob), true
+}
+
+func isTextMediaType(mediaType string) bool {
 	if strings.HasPrefix(mediaType, "text/") || strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml") {
 		return true
 	}

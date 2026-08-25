@@ -91,6 +91,30 @@ func TestMCPToolRunContent(t *testing.T) {
 				"mimeType=\"application/pdf\", size=4 bytes]"},
 		},
 		{
+			name: "unsupported text charset is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///utf16.txt",
+					MIMEType: "text/plain; charset=utf-16",
+					Blob:     []byte{0xff, 0xfe, 0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///utf16.txt\", " +
+				"mimeType=\"text/plain; charset=utf-16\", size=6 bytes]"},
+		},
+		{
+			name: "invalid UTF-8 text blob is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///invalid.txt",
+					MIMEType: "text/plain",
+					Blob:     []byte{0xc3, 0x28},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///invalid.txt\", " +
+				"mimeType=\"text/plain\", size=2 bytes]"},
+		},
+		{
 			name: "resource link includes available metadata",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.ResourceLink{
