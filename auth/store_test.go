@@ -16,6 +16,8 @@ package auth_test
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,4 +183,46 @@ func TestInMemoryCredentialStoreClockMayTouchStore(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Get() deadlocked; the clock must not be called while holding the lock")
 	}
+}
+
+// The store is documented as safe for concurrent use, and Get writes to the map
+// too — on eviction and on a sweep — so a plain RWMutex read lock would not do.
+// Under -race this fails if the locking is dropped or weakened.
+func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
+	ctx := t.Context()
+	s := auth.NewInMemoryCredentialStore()
+	// A short spread of keys and a mix of live and already-expired entries, so
+	// readers, writers, evictions and sweeps overlap on the same keys.
+	keyFor := func(i int) auth.CredentialKey {
+		return auth.CredentialKey{AppName: "app", UserID: "user-" + strconv.Itoa(i%4), Key: "res"}
+	}
+
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 200 {
+				key := keyFor(g + i)
+				switch (g + i) % 3 {
+				case 0:
+					if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, time.Now().Add(time.Hour)); err != nil {
+						t.Errorf("Set() error = %v", err)
+						return
+					}
+				case 1:
+					if _, _, err := s.Get(ctx, key); err != nil {
+						t.Errorf("Get() error = %v", err)
+						return
+					}
+				case 2:
+					if err := s.Delete(ctx, key); err != nil {
+						t.Errorf("Delete() error = %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

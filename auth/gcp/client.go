@@ -23,7 +23,9 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -168,7 +170,20 @@ type Client struct {
 	connectorURL     string
 	pollTimeout      time.Duration
 	initialBackoff   time.Duration
+	// cacheSlot separates clients that can mint different credentials, so the
+	// provider's cache key can include it. What the services return depends on
+	// the endpoint asked and on the identity the request is authenticated as, and
+	// a caller can supply both — so two providers sharing one store must not
+	// share an entry unless their clients agree on both.
+	//
+	// A caller-supplied HTTPClient is opaque, so its slot is unique per client.
+	// Clients left to Application Default Credentials all authenticate as the one
+	// process principal, so they share a slot and keep sharing cache entries.
+	cacheSlot string
 }
+
+// callerSeq numbers clients whose identity this package cannot inspect.
+var callerSeq atomic.Uint64
 
 // Config configures a [Client]. A nil *Config, or any zero-valued field, uses
 // the corresponding default.
@@ -244,7 +259,24 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		}
 		c.httpClient = hc
 	}
+	c.cacheSlot = joinFields("adc", c.agentIdentityURL, c.connectorURL)
+	if cfg.HTTPClient != nil {
+		c.cacheSlot = joinFields("caller", strconv.FormatUint(callerSeq.Add(1), 10))
+	}
 	return c, nil
+}
+
+// joinFields encodes fields as one unambiguous string, each prefixed with its
+// byte length. No delimiter occurring inside a field can then make two different
+// field lists encode alike, which joining on a separator alone allowed.
+func joinFields(fields ...string) string {
+	var b strings.Builder
+	for _, f := range fields {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return b.String()
 }
 
 // Request identifies the resource and acting user for a credential retrieval.
