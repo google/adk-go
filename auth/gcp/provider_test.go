@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -105,11 +106,18 @@ func TestProviderCredentialConcurrent(t *testing.T) {
 			UserID string `json:"userId"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer"}}`)
+		// With an expiry, so these goroutines drive the cache write and the cache
+		// read, not only the retrieval. Without one the provider declines to cache
+		// and store.Set is never reached under concurrency at all.
+		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
 	}))
 	defer srv.Close()
 
-	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	// Several scopes, so the clone-before-sort in the slot derivation is exercised
+	// concurrently: sorting p.scheme.Scopes in place instead would write a shared
+	// backing array from every one of these goroutines, and a nil Scopes makes
+	// that mutant a no-op.
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource, Scopes: []string{"b", "a", "c"}})
 	users := []string{"alice", "bob", "carol", "dave"}
 	ctxs := make([]context.Context, len(users))
 	for i, u := range users {
@@ -709,6 +717,7 @@ type echoServer struct {
 }
 
 type echoRequest struct {
+	path        string // carries the resource name, which is not in the body
 	userID      string
 	scopes      []string
 	continueURI string
@@ -728,6 +737,7 @@ func newEchoServer(t *testing.T, expireTime string) *echoServer {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		req := echoRequest{
+			path:        r.URL.Path,
 			userID:      body.UserID,
 			scopes:      body.Scopes,
 			continueURI: body.ContinueURI,
@@ -750,8 +760,23 @@ func newEchoServer(t *testing.T, expireTime string) *echoServer {
 // token is the token this request is answered with: everything the service was
 // told, so any two requests that should not share a cache entry get different
 // tokens.
+//
+// Length-prefixed for the same reason the cache slot is. Joining on a delimiter
+// made the token for {scopes:["x"], continueURI:"y|z"} byte-identical to the one
+// for {scopes:["x|y"], continueURI:"z"} — so the two cases written to catch
+// exactly that collision in the cache key could not see it in the token, and
+// rested on the call count alone.
 func (r echoRequest) token() string {
-	return "tok|" + r.caller + "|" + r.userID + "|" + strings.Join(r.scopes, "+") + "|" + r.continueURI
+	fields := []string{"tok", r.path, r.caller, r.userID, strconv.Itoa(len(r.scopes))}
+	fields = append(fields, r.scopes...)
+	fields = append(fields, r.continueURI)
+	var b strings.Builder
+	for _, f := range fields {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return b.String()
 }
 
 func (e *echoServer) calls() int {
@@ -878,7 +903,13 @@ func TestProviderCacheDimensions(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Credential() error = %v", err)
 					}
-					want := echoRequest{userID: r.user, scopes: r.scheme.Scopes, continueURI: r.scheme.ContinueURI, caller: r.who}.token()
+					want := echoRequest{
+						path:        "/v1/" + r.scheme.Name + "/credentials:retrieve",
+						userID:      r.user,
+						scopes:      r.scheme.Scopes,
+						continueURI: r.scheme.ContinueURI,
+						caller:      r.who,
+					}.token()
 					if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != want {
 						t.Errorf("%+v was served %+v, want bearer %q", r, cred, want)
 					}
@@ -925,11 +956,13 @@ func TestProviderCacheIgnoresScopeOrder(t *testing.T) {
 	}
 }
 
-// recordingStore reports every call and what it was handed, and can fail writes.
+// recordingStore reports every call and what it was handed, and can fail either
+// direction.
 type recordingStore struct {
 	inner   auth.CredentialStore
 	sets    int
 	gets    int
+	getErr  error
 	setErr  error
 	nilOnce bool // return a hit carrying no credential on the first Get
 
@@ -939,6 +972,9 @@ type recordingStore struct {
 
 func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
 	s.gets++
+	if s.getErr != nil {
+		return nil, false, s.getErr
+	}
 	if s.nilOnce {
 		s.nilOnce = false
 		return nil, true, nil
@@ -977,22 +1013,119 @@ func newStoreProvider(t *testing.T, e *echoServer, store auth.CredentialStore) a
 	return p
 }
 
-// A configured store is actually used, a write failure does not fail auth, and
-// a hit carrying no credential is treated as a miss rather than returned.
-func TestProviderStorePlumbing(t *testing.T) {
+// TestProviderStoreDegradesRatherThanFails pins that a store which misbehaves
+// costs a round trip and nothing else. Each case breaks the store a different
+// way and requires a usable credential back.
+func TestProviderStoreDegradesRatherThanFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		breakIt func(*recordingStore)
+	}{
+		{"the read fails", func(s *recordingStore) { s.getErr = errors.New("backend unreachable") }},
+		{"the write fails", func(s *recordingStore) { s.setErr = errors.New("disk on fire") }},
+		{"a hit carries no credential", func(s *recordingStore) { s.nilOnce = true }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEchoServer(t, "2999-01-01T00:00:00Z")
+			store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+			tc.breakIt(store)
+			p := newStoreProvider(t, e, store)
+
+			cred, err := p.Credential(adkContext(t, "user-1"))
+			if err != nil {
+				t.Fatalf("Credential() error = %v; a broken store must not fail auth", err)
+			}
+			if cred == nil {
+				t.Fatal("Credential() = nil credential")
+			}
+			if store.gets != 1 {
+				t.Errorf("store gets = %d, want 1 (the configured store must be consulted)", store.gets)
+			}
+		})
+	}
+}
+
+// The configured store is written to, under a key whose app and user land in
+// their own fields.
+func TestProviderStoreWritesTheKeyItRead(t *testing.T) {
 	e := newEchoServer(t, "2999-01-01T00:00:00Z")
-	store := &recordingStore{inner: auth.NewInMemoryCredentialStore(), setErr: errors.New("disk on fire"), nilOnce: true}
+	store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
 	p := newStoreProvider(t, e, store)
 
-	cred, err := p.Credential(adkContext(t, "user-1"))
-	if err != nil {
-		t.Fatalf("Credential() error = %v; a store write failure must not fail auth", err)
-	}
-	if cred == nil {
-		t.Fatal("Credential() = nil credential; a hit with no credential must be treated as a miss")
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v", err)
 	}
 	if store.gets != 1 || store.sets != 1 {
 		t.Errorf("store gets/sets = %d/%d, want 1/1 (the configured store must be used)", store.gets, store.sets)
+	}
+	// The app and the user must land in their own fields, not merely in some
+	// distinct pair: a store that buckets by app and then by user — the shape
+	// auth.CredentialStore is documented for — files them separately, so swapping
+	// the two would file alice's credential under an app named "alice".
+	if store.lastKey.AppName != "app" || store.lastKey.UserID != "user-1" {
+		t.Errorf("store key = %+v, want AppName \"app\" and UserID \"user-1\"", store.lastKey)
+	}
+	if store.lastKey.Key == "" {
+		t.Error("store key has an empty slot")
+	}
+}
+
+// The key the provider writes under is the one Client.CacheKey names, so a
+// caller told to invalidate a credential with it can actually reach the entry.
+func TestClientCacheKeyMatchesWhatTheProviderWrote(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	scheme := gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	key := client.CacheKey(scheme, "app", "user-1")
+	if _, ok, _ := store.Get(t.Context(), key); !ok {
+		t.Fatal("Client.CacheKey() names no cached entry, so a caller cannot invalidate one")
+	}
+	if err := store.Delete(t.Context(), key); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() after Delete error = %v", err)
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (Delete must actually invalidate)", got)
+	}
+}
+
+// Two Clients are two cache dimensions even when built from one config: this
+// package cannot see what identity a Client authenticates as, so it never
+// assumes two of them agree.
+func TestProviderCacheSeparatesClientInstances(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	scheme := gcp.ProviderScheme{Name: testResource}
+	for range 2 {
+		client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
+		if err != nil {
+			t.Fatalf("NewProvider() error = %v", err)
+		}
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (a second Client must not read the first one's entries)", got)
 	}
 }
 
@@ -1007,6 +1140,10 @@ func TestProviderCachedExpiry(t *testing.T) {
 		want       time.Time // zero means: must not be cached
 	}{
 		{"honored as reported", "2030-01-01T00:05:00Z", now.Add(5 * time.Minute)},
+		// Inside the margin the store applies, so the entry would be written and
+		// then refused on the very next read: a guaranteed-dead write.
+		{"less left than the store's margin", "2030-01-01T00:00:05Z", time.Time{}},
+		{"exactly the store's margin", "2030-01-01T00:00:10Z", time.Time{}},
 		{"clamped to the cap", "9999-12-31T23:59:59Z", now.Add(maxCachedLifetimeForTest)},
 		{"absent", "", time.Time{}},
 		{"already past", "2029-12-31T23:00:00Z", time.Time{}},

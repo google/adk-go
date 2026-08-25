@@ -450,3 +450,40 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 		t.Errorf("a caller arriving halfway through the bound waited %v, a full bound being %v: the bound must be the attempt's, not the waiter's", late, p.initTimeout)
 	}
 }
+
+// Two Clients left to Application Default Credentials are still two cache
+// dimensions. NewClient resolves ADC afresh on every call and the transport
+// underneath it can come from the context, so this package cannot know that two
+// of them authenticate as the same principal — and a false miss costs a round
+// trip where a false hit discloses one principal's token to another.
+func TestADCClientsDoNotShareACacheSlot(t *testing.T) {
+	fakeADC(t)
+	newADCClient := func() *Client {
+		t.Helper()
+		c, err := NewClient(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		return c
+	}
+	first, second := newADCClient(), newADCClient()
+	if first.cacheSlot == second.cacheSlot {
+		t.Error("two ADC-built Clients share a cache slot, so one would be served the other's credential")
+	}
+}
+
+// A Client's cache slot must not repeat in another process. A store can outlive
+// the process that wrote to it, or be shared by two, and an entry written by a
+// Client that no longer exists names an identity nothing can check.
+func TestClientCacheSlotIsProcessUnique(t *testing.T) {
+	if clientNonce == newClientNonce() {
+		t.Fatal("clientNonce is fixed; two processes constructing Clients in the same order would collide")
+	}
+	c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if !strings.Contains(c.cacheSlot, clientNonce) {
+		t.Errorf("cache slot %q does not carry the per-process nonce", c.cacheSlot)
+	}
+}

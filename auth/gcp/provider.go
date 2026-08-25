@@ -70,13 +70,15 @@ type ProviderConfig struct {
 	//
 	// One store can safely back several providers: entries are keyed by the app,
 	// the end user, and everything that decides what the service returns — the
-	// resource, the scopes, the continue URI, and the Client. Providers whose
-	// Clients authenticate as different identities do not share entries.
+	// resource, the scopes, the continue URI, and the Client. Two providers share
+	// an entry when they share a Client and agree on all of that, and not
+	// otherwise. Building a Client per provider is therefore a way to get no
+	// sharing at all; see [Config.HTTPClient].
 	//
 	// The cost of caching is staleness. A credential revoked before it expires
 	// keeps being served until the cached entry does, which is the service's
-	// expiry or an hour, whichever comes first. Call
-	// [auth.CredentialStore.Delete] to invalidate one sooner.
+	// expiry or an hour, whichever comes first. To invalidate one sooner, pass
+	// [Client.CacheKey] to [auth.CredentialStore.Delete].
 	Store auth.CredentialStore
 }
 
@@ -188,6 +190,8 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 
 // maxCachedLifetime caps how long a credential is cached, whatever expiry the
 // service reports, so a bad or injected expireTime cannot pin one indefinitely.
+// It also bounds how long a credential revoked before its expiry keeps being
+// served, which the service warns can happen at any time.
 const maxCachedLifetime = time.Hour
 
 // cacheSlot is the store slot a credential for s, minted through c, is cached
@@ -200,9 +204,14 @@ const maxCachedLifetime = time.Hour
 //
 // The components are length-prefixed before hashing, so no combination of
 // delimiters inside a scope or a URI can collide two different schemes. Sorting
-// the scopes makes the slot independent of the caller's ordering. adk-python
-// keys its credential service the same way, on a SHA-256 digest of a canonical
-// encoding of the whole scheme plus the credential used to obtain it.
+// the scopes makes the slot independent of the caller's ordering.
+//
+// adk-python's credential key is also a digest rather than a joined string —
+// two SHA-256s truncated to 16 hex characters, over canonical JSON of the auth
+// scheme and of the credential used to obtain it (auth_tool.py,
+// _stable_model_digest). This one covers the same ground by a different route:
+// Go cannot digest the credential, since a Client's own credentials are opaque
+// to this package, so it names the Client instead.
 func cacheSlot(c *Client, s ProviderScheme) string {
 	scopes := slices.Clone(s.Scopes)
 	slices.Sort(scopes)
@@ -266,9 +275,10 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
 	}
 
-	// Before the cache read, because the client is part of the cache key. Costs a
-	// mutex on the hot path: the client is built at most once, and a provider
-	// that has never built one has nothing cached under its slot either.
+	// Before the cache read, because the Client is part of the cache key and a
+	// provider that has not built one yet has no slot, so nothing can be cached
+	// under it. Costs one mutex on the hot path; the client is built at most
+	// once.
 	client, err := p.resolveClient(ctx)
 	if err != nil {
 		// Deliberately not qualified by resource: a client-init failure is about
@@ -305,18 +315,20 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 // cache stores r under key, best-effort: a store write failure must not fail
 // auth.
 //
-// Nothing is stored unless the service gave a lifetime that is still running.
-// That single test covers three cases: the service reported no expiry, meaning
-// it cannot say when the token dies, so the credential cannot be vouched for
-// later; it reported an unparseable one, which reaches here as the same zero
-// time; or it reported one already spent, which a store deriving a TTL from it
-// would turn into a negative one.
+// Nothing is stored unless the service gave a lifetime with enough left to be
+// worth reading back. That single test covers four cases: the service reported
+// no expiry, meaning it cannot say when the token dies, so the credential cannot
+// be vouched for later; it reported an unparseable one, which reaches here as
+// the same zero time; it reported one already spent, which a store deriving a
+// TTL from it would turn into a negative one; or it reported one so close that
+// a store applying the standard margin would refuse to serve the entry the
+// moment it was written.
 //
 // The far end is clamped rather than rejected, so a wildly distant expiry —
 // wrong, or injected — shortens to the cap instead of pinning the entry.
 func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
 	now := platform.Now(ctx)
-	if !r.ExpiresAt.After(now) {
+	if !r.ExpiresAt.After(now.Add(auth.ExpirySkew)) {
 		return
 	}
 	expiresAt := r.ExpiresAt
