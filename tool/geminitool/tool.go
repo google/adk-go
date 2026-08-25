@@ -55,6 +55,16 @@ type geminiTool struct {
 	value       *genai.Tool
 }
 
+// GenaiTool returns the native [genai.Tool] wrapped by this tool.
+//
+// Gemini native tools are executed by the model rather than called as
+// functions, so they have no function declaration. This method lets callers
+// that describe an agent's tools report them in their own form instead of
+// omitting them.
+func (t *geminiTool) GenaiTool() *genai.Tool {
+	return t.value
+}
+
 // ProcessRequest adds the Gemini tool to the LLM request.
 func (t *geminiTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return setTool(req, t.value)
