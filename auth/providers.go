@@ -70,7 +70,9 @@ type ConsentRequiredError struct {
 	// Nonce is an opaque value echoed back to correlate the consent response.
 	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
-	// Key is the credential-store key to resume the flow under.
+	// Key is an opaque, caller-defined identifier for the credential this flow
+	// will produce, for a consumer that has to resume the flow later. It is not a
+	// [CredentialKey], which identifies a [CredentialStore] entry.
 	Key string
 }
 

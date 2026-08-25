@@ -24,7 +24,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -470,52 +469,19 @@ func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) 
 	return p
 }
 
-func TestProviderCachesCredential(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
-	}))
-	defer srv.Close()
-
-	// Default (in-memory) store; two resolves for the same app+user+resource.
-	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
-	for i := range 2 {
-		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
-			t.Fatalf("call %d: Credential() error = %v", i, err)
-		}
-	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("service calls = %d, want 1 (second resolve should hit the cache)", got)
-	}
-}
-
-func TestProviderSkipsCacheWithoutExpiry(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		// No expireTime: lifetime unknown, so the provider must not cache.
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
-	}))
-	defer srv.Close()
-
-	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
-	for i := range 2 {
-		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
-			t.Fatalf("call %d: Credential() error = %v", i, err)
-		}
-	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("service calls = %d, want 2 (unknown expiry must not be cached)", got)
-	}
-}
-
 // adkContext returns an ADK invocation context (recoverable via
-// agent.IdentityFromContext) for the given user.
+// agent.IdentityFromContext) for the given user, under the app name "app".
 func adkContext(t *testing.T, userID string) context.Context {
 	t.Helper()
+	return adkContextIn(t, "app", userID)
+}
+
+// adkContextIn is adkContext with the app name spelled out, for the tests that
+// vary it.
+func adkContextIn(t *testing.T, appName, userID string) context.Context {
+	t.Helper()
 	svc := session.InMemoryService()
-	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: userID})
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: appName, UserID: userID})
 	if err != nil {
 		t.Fatalf("session Create() error = %v", err)
 	}
@@ -733,101 +699,242 @@ func TestRedactionCoversTheWholeSecretSurface(t *testing.T) {
 	}
 }
 
-// TestProviderCacheIsolatesPrincipals is the guard on the cache's headline
-// property: a long-lived provider must never serve one principal's credential
-// to another. Collapsing the cache key leaves every other test green.
-func TestProviderCacheIsolatesPrincipals(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
+// echoServer answers every retrieval with a token naming what the request asked
+// for, so a credential served from the wrong cache entry is visible in the token
+// rather than only in a call count. It records each request.
+type echoServer struct {
+	*httptest.Server
+	mu       sync.Mutex
+	requests []echoRequest
+}
+
+type echoRequest struct {
+	userID      string
+	scopes      []string
+	continueURI string
+	caller      string // X-Caller-Identity, set by the identity transports below
+}
+
+// newEchoServer starts an echoServer whose tokens expire at expireTime (RFC
+// 3339; empty for a response that reports no expiry).
+func newEchoServer(t *testing.T, expireTime string) *echoServer {
+	t.Helper()
+	e := &echoServer{}
+	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			UserID string `json:"userId"`
+			UserID      string   `json:"userId"`
+			Scopes      []string `json:"scopes"`
+			ContinueURI string   `json:"continueUri"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		// Echo the caller, so a credential served to the wrong principal shows up.
-		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
-	}))
-	defer srv.Close()
+		req := echoRequest{
+			userID:      body.UserID,
+			scopes:      body.Scopes,
+			continueURI: body.ContinueURI,
+			caller:      r.Header.Get("X-Caller-Identity"),
+		}
+		e.mu.Lock()
+		e.requests = append(e.requests, req)
+		e.mu.Unlock()
 
-	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		resp := map[string]any{"token": req.token(), "header": "Authorization: Bearer"}
+		if expireTime != "" {
+			resp["expireTime"] = expireTime
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": resp})
+	}))
+	t.Cleanup(e.Close)
+	return e
+}
+
+// token is the token this request is answered with: everything the service was
+// told, so any two requests that should not share a cache entry get different
+// tokens.
+func (r echoRequest) token() string {
+	return "tok|" + r.caller + "|" + r.userID + "|" + strings.Join(r.scopes, "+") + "|" + r.continueURI
+}
+
+func (e *echoServer) calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.requests)
+}
+
+// identityTransport stamps a caller identity on every request, standing in for
+// the distinct service-account credentials a caller-supplied HTTPClient carries.
+type identityTransport struct {
+	base http.RoundTripper
+	who  string
+}
+
+func (t identityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("X-Caller-Identity", t.who)
+	return t.base.RoundTrip(r)
+}
+
+// newSharingProvider builds a provider against e that shares store with every
+// other provider built the same way. who names the caller identity its client
+// authenticates as; two providers given the same who share one *Client.
+func newSharingProvider(t *testing.T, e *echoServer, store auth.CredentialStore, clients map[string]*gcp.Client, who string, scheme gcp.ProviderScheme) auth.CredentialProvider {
+	t.Helper()
+	client, ok := clients[who]
+	if !ok {
+		var err error
+		client, err = gcp.NewClient(t.Context(), &gcp.Config{
+			HTTPClient:            &http.Client{Transport: identityTransport{base: e.Client().Transport, who: who}},
+			AgentIdentityEndpoint: e.URL,
+		})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		clients[who] = client
 	}
-	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: testResource}, Client: client})
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
+	return p
+}
 
-	// Twice each, so the second pass reads through the cache.
-	for range 2 {
-		for _, user := range []string{"user-1", "user-2"} {
-			cred, err := p.Credential(adkContext(t, user))
-			if err != nil {
-				t.Fatalf("Credential(%q) error = %v", user, err)
-			}
-			if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok-"+user {
-				t.Fatalf("%q was served %+v, want bearer %q", user, cred, "tok-"+user)
-			}
+func TestProviderCachesCredential(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+
+	// Default (in-memory) store; two resolves for the same app+user+resource.
+	p := newProvider(t, e.Server, gcp.ProviderScheme{Name: testResource})
+	for i := range 2 {
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("call %d: Credential() error = %v", i, err)
 		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("service calls = %d, want 2 (one cold read per principal)", got)
+	if got := e.calls(); got != 1 {
+		t.Errorf("service calls = %d, want 1 (second resolve should hit the cache)", got)
 	}
 }
 
-// A store shared by providers that differ only in scopes must not serve the
-// broad credential to the narrow one.
-func TestProviderCacheSeparatesScopes(t *testing.T) {
-	var gotScopes [][]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Scopes []string `json:"scopes"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotScopes = append(gotScopes, body.Scopes)
-		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+strings.Join(body.Scopes, ",")+`","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
-	}))
-	defer srv.Close()
-
-	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+// TestProviderCacheDimensions is the guard on the cache's headline property: a
+// credential must never be served to a request that would not have been minted
+// the same one. Each case runs two resolves that differ in exactly one thing,
+// through one shared store, and requires that both reach the service and each
+// gets its own token. Collapsing any single dimension of the cache key leaves
+// every other test in the package green.
+func TestProviderCacheDimensions(t *testing.T) {
+	const res2 = "projects/p/locations/l/authProviders/other"
+	// resolve names one call: which caller identity mints, for which end user,
+	// under which app, for which scheme.
+	type resolve struct {
+		who, app, user string
+		scheme         gcp.ProviderScheme
 	}
-	store := auth.NewInMemoryCredentialStore()
-	newProvider := func(scope string) auth.CredentialProvider {
-		t.Helper()
-		p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
-			Scheme: gcp.ProviderScheme{Name: testResource, Scopes: []string{scope}},
-			Client: client,
-			Store:  store,
+	base := resolve{who: "sa-alpha", app: "app", user: "user-1", scheme: gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}}
+	with := func(f func(*resolve)) resolve {
+		r := base
+		r.scheme.Scopes = slices.Clone(base.scheme.Scopes)
+		f(&r)
+		return r
+	}
+
+	tests := []struct {
+		name          string
+		first, second resolve
+	}{
+		{name: "end user", second: with(func(r *resolve) { r.user = "user-2" })},
+		{name: "app", second: with(func(r *resolve) { r.app = "other-app" })},
+		{name: "caller identity", second: with(func(r *resolve) { r.who = "sa-beta" })},
+		{name: "resource", second: with(func(r *resolve) { r.scheme.Name = res2 })},
+		{name: "scopes", second: with(func(r *resolve) { r.scheme.Scopes = []string{"drive.readonly"} })},
+		{name: "continue URI", second: with(func(r *resolve) { r.scheme.ContinueURI = "https://example.com/finish" })},
+		// The two pairs below are what an encoding that joins the components on a
+		// delimiter collides, since neither "," nor "|" is escaped or barred from a
+		// scope or a URI: both members slot alike under
+		// name + "|" + join(scopes, ",") + "|" + continueURI.
+		{
+			name:   "one scope holding the scope separator",
+			first:  with(func(r *resolve) { r.scheme.Scopes = []string{"a,b"} }),
+			second: with(func(r *resolve) { r.scheme.Scopes = []string{"a", "b"} }),
+		},
+		{
+			name:   "field separator shifted between scope and continue URI",
+			first:  with(func(r *resolve) { r.scheme.Scopes, r.scheme.ContinueURI = []string{"x"}, "y|z" }),
+			second: with(func(r *resolve) { r.scheme.Scopes, r.scheme.ContinueURI = []string{"x|y"}, "z" }),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			first := tc.first
+			if first.who == "" {
+				first = base
+			}
+			// The pair is symmetric, so also run it reversed: broad-then-narrow hands
+			// out more authority than was asked for, narrow-then-broad only produces a
+			// confusing failure, and one pass checks only one of the two orders.
+			for _, order := range [][2]resolve{{first, tc.second}, {tc.second, first}} {
+				e := newEchoServer(t, "2999-01-01T00:00:00Z")
+				store := auth.NewInMemoryCredentialStore()
+				clients := map[string]*gcp.Client{}
+				for _, r := range order {
+					p := newSharingProvider(t, e, store, clients, r.who, r.scheme)
+					cred, err := p.Credential(adkContextIn(t, r.app, r.user))
+					if err != nil {
+						t.Fatalf("Credential() error = %v", err)
+					}
+					want := echoRequest{userID: r.user, scopes: r.scheme.Scopes, continueURI: r.scheme.ContinueURI, caller: r.who}.token()
+					if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != want {
+						t.Errorf("%+v was served %+v, want bearer %q", r, cred, want)
+					}
+				}
+				if got := e.calls(); got != 2 {
+					t.Errorf("service calls = %d, want 2 (the second resolve must not reuse the first entry)", got)
+				}
+			}
 		})
-		if err != nil {
-			t.Fatalf("NewProvider() error = %v", err)
-		}
-		return p
-	}
-
-	for _, scope := range []string{"drive", "drive.readonly"} {
-		cred, err := newProvider(scope).Credential(adkContext(t, "user-1"))
-		if err != nil {
-			t.Fatalf("Credential(%q) error = %v", scope, err)
-		}
-		if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok-"+scope {
-			t.Errorf("scope %q was served %+v, want bearer %q", scope, cred, "tok-"+scope)
-		}
-	}
-	if len(gotScopes) != 2 {
-		t.Errorf("service calls = %d, want 2 (the narrow provider must not reuse the broad entry)", len(gotScopes))
 	}
 }
 
-// recordingStore reports every call, and can fail writes.
+// The same resolve twice through a shared store is one call, so the isolation
+// above is not just the cache never hitting at all.
+func TestProviderCacheHitsAcrossProviders(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	clients := map[string]*gcp.Client{}
+	scheme := gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}
+	for range 2 {
+		p := newSharingProvider(t, e, store, clients, "sa-alpha", scheme)
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 1 {
+		t.Errorf("service calls = %d, want 1 (a second provider with the same client and scheme should hit the entry)", got)
+	}
+}
+
+// Scope order is the caller's, not a cache dimension.
+func TestProviderCacheIgnoresScopeOrder(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	clients := map[string]*gcp.Client{}
+	for _, scopes := range [][]string{{"a", "b"}, {"b", "a"}} {
+		p := newSharingProvider(t, e, store, clients, "sa-alpha", gcp.ProviderScheme{Name: testResource, Scopes: scopes})
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 1 {
+		t.Errorf("service calls = %d, want 1 (reordered scopes are the same credential)", got)
+	}
+}
+
+// recordingStore reports every call and what it was handed, and can fail writes.
 type recordingStore struct {
 	inner   auth.CredentialStore
 	sets    int
 	gets    int
 	setErr  error
 	nilOnce bool // return a hit carrying no credential on the first Get
+
+	lastKey     auth.CredentialKey
+	lastExpires time.Time
 }
 
 func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
@@ -841,6 +948,7 @@ func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.
 
 func (s *recordingStore) Set(ctx context.Context, key auth.CredentialKey, cred auth.Credential, expiresAt time.Time) error {
 	s.sets++
+	s.lastKey, s.lastExpires = key, expiresAt
 	if s.setErr != nil {
 		return s.setErr
 	}
@@ -851,19 +959,13 @@ func (s *recordingStore) Delete(ctx context.Context, key auth.CredentialKey) err
 	return s.inner.Delete(ctx, key)
 }
 
-// A configured store is actually used, a write failure does not fail auth, and
-// a hit carrying no credential is treated as a miss rather than returned.
-func TestProviderStorePlumbing(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
-	}))
-	defer srv.Close()
-	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+// newStoreProvider builds a provider against e backed by a recordingStore.
+func newStoreProvider(t *testing.T, e *echoServer, store auth.CredentialStore) auth.CredentialProvider {
+	t.Helper()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-
-	store := &recordingStore{inner: auth.NewInMemoryCredentialStore(), setErr: errors.New("disk on fire"), nilOnce: true}
 	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
 		Scheme: gcp.ProviderScheme{Name: testResource},
 		Client: client,
@@ -872,6 +974,16 @@ func TestProviderStorePlumbing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
+	return p
+}
+
+// A configured store is actually used, a write failure does not fail auth, and
+// a hit carrying no credential is treated as a miss rather than returned.
+func TestProviderStorePlumbing(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := &recordingStore{inner: auth.NewInMemoryCredentialStore(), setErr: errors.New("disk on fire"), nilOnce: true}
+	p := newStoreProvider(t, e, store)
+
 	cred, err := p.Credential(adkContext(t, "user-1"))
 	if err != nil {
 		t.Fatalf("Credential() error = %v; a store write failure must not fail auth", err)
@@ -884,33 +996,46 @@ func TestProviderStorePlumbing(t *testing.T) {
 	}
 }
 
-// The service's expiry is honoured only up to a bound, so a bad or injected
-// expireTime cannot pin a credential in the cache.
-func TestProviderClampsServiceExpiry(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"9999-12-31T23:59:59Z"}}`)
-	}))
-	defer srv.Close()
-	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+// TestProviderCachedExpiry pins what lifetime the provider is willing to cache
+// for. The store is asked directly rather than inferred from a call count, so
+// each case fails loudly if the provider stops calling Set at all.
+func TestProviderCachedExpiry(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		expireTime string    // what the service reports
+		want       time.Time // zero means: must not be cached
+	}{
+		{"honored as reported", "2030-01-01T00:05:00Z", now.Add(5 * time.Minute)},
+		{"clamped to the cap", "9999-12-31T23:59:59Z", now.Add(maxCachedLifetimeForTest)},
+		{"absent", "", time.Time{}},
+		{"already past", "2029-12-31T23:00:00Z", time.Time{}},
+		{"unparseable", "not-a-time", time.Time{}},
 	}
-	store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
-	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
-		Scheme: gcp.ProviderScheme{Name: testResource},
-		Client: client,
-		Store:  store,
-	})
-	if err != nil {
-		t.Fatalf("NewProvider() error = %v", err)
-	}
-	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
-		t.Fatalf("Credential() error = %v", err)
-	}
-	// Far past the cap: the entry must already be gone a day later.
-	future := platform.WithTimeProvider(t.Context(), func() time.Time { return time.Now().Add(24 * time.Hour) })
-	key := auth.CredentialKey{AppName: "app", UserID: "user-1", Key: testResource + "||"}
-	if _, ok, _ := store.inner.Get(future, key); ok {
-		t.Error("credential still cached a day later, want the service expiry clamped")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEchoServer(t, tc.expireTime)
+			store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+			p := newStoreProvider(t, e, store)
+
+			ctx := platform.WithTimeProvider(adkContext(t, "user-1"), func() time.Time { return now })
+			if _, err := p.Credential(ctx); err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			switch {
+			case tc.want.IsZero():
+				if store.sets != 0 {
+					t.Errorf("store Set called with expiry %s, want no cache write for expireTime %q", store.lastExpires, tc.expireTime)
+				}
+			case store.sets != 1:
+				t.Errorf("store Set calls = %d, want 1", store.sets)
+			case !store.lastExpires.Equal(tc.want):
+				t.Errorf("cached until %s, want %s", store.lastExpires, tc.want)
+			}
+		})
 	}
 }
+
+// maxCachedLifetimeForTest mirrors the provider's cap. Duplicated rather than
+// exported: the cap is a policy the test should notice changing.
+const maxCachedLifetimeForTest = time.Hour

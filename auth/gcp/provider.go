@@ -16,10 +16,12 @@ package gcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -61,10 +63,20 @@ type ProviderConfig struct {
 	// synchronously, so the cost and any failure move to startup, where they can
 	// at least be reported.
 	Client *Client
-	// Store caches resolved credentials across requests (keyed by app, user, and
-	// resource). When nil, an in-memory store is used. Caching matters here
-	// because each miss is a network round-trip (and up to a ~10s pending poll)
-	// to the credential service.
+	// Store caches resolved credentials across requests. When nil, a private
+	// in-memory store is used. Caching matters here because each miss is a
+	// network round-trip (and up to a ~10s pending poll) to the credential
+	// service.
+	//
+	// One store can safely back several providers: entries are keyed by the app,
+	// the end user, and everything that decides what the service returns — the
+	// resource, the scopes, the continue URI, and the Client. Providers whose
+	// Clients authenticate as different identities do not share entries.
+	//
+	// The cost of caching is staleness. A credential revoked before it expires
+	// keeps being served until the cached entry does, which is the service's
+	// expiry or an hour, whichever comes first. Call
+	// [auth.CredentialStore.Delete] to invalidate one sooner.
 	Store auth.CredentialStore
 }
 
@@ -160,7 +172,6 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 		scheme:      cfg.Scheme,
 		client:      cfg.Client,
 		store:       store,
-		slot:        schemeSlot(cfg.Scheme),
 		newClient:   func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
 		initTimeout: defaultInitTimeout,
 	}
@@ -179,18 +190,31 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 // service reports, so a bad or injected expireTime cannot pin one indefinitely.
 const maxCachedLifetime = time.Hour
 
-// schemeSlot is the store slot for a scheme. Scopes and the continue URI shape
-// what the minted token authorizes, so credentials that differ in them must not
-// share an entry; the sort makes the slot independent of the caller's ordering.
-func schemeSlot(s ProviderScheme) string {
+// cacheSlot is the store slot a credential for s, minted through c, is cached
+// under. It covers everything that decides what comes back: the client (which
+// fixes both the service asked and the identity the ask is authenticated as),
+// the resource, the scopes, and the continue URI. A store shared by several
+// providers would otherwise serve one provider's credential to another —
+// the broad token to a read-only provider, or one caller identity's token to a
+// second identity's provider.
+//
+// The components are length-prefixed before hashing, so no combination of
+// delimiters inside a scope or a URI can collide two different schemes. Sorting
+// the scopes makes the slot independent of the caller's ordering. adk-python
+// keys its credential service the same way, on a SHA-256 digest of a canonical
+// encoding of the whole scheme plus the credential used to obtain it.
+func cacheSlot(c *Client, s ProviderScheme) string {
 	scopes := slices.Clone(s.Scopes)
 	slices.Sort(scopes)
-	return s.Name + "|" + strings.Join(scopes, ",") + "|" + s.ContinueURI
+	fields := []string{c.cacheSlot, s.Name, strconv.Itoa(len(scopes))}
+	fields = append(fields, scopes...)
+	fields = append(fields, s.ContinueURI)
+	sum := sha256.Sum256([]byte(joinFields(fields...)))
+	return hex.EncodeToString(sum[:])
 }
 
 type provider struct {
 	scheme ProviderScheme
-	slot   string
 	store  auth.CredentialStore
 	// initCtx roots the lazily built default client, which is why NewProvider
 	// asks for a process-scoped context. Nil when a Client was supplied.
@@ -242,16 +266,9 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
 	}
 
-	// The slot covers everything that shapes the minted token, not just the
-	// resource: a store shared by a broad and a narrow provider would otherwise
-	// serve the broad token to the narrow one.
-	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: p.slot}
-	// A store read error is non-fatal: fall through and fetch a fresh credential.
-	// A hit carrying no credential is treated as a miss; the interface allows it.
-	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
-		return cred, nil
-	}
-
+	// Before the cache read, because the client is part of the cache key. Costs a
+	// mutex on the hot path: the client is built at most once, and a provider
+	// that has never built one has nothing cached under its slot either.
 	client, err := p.resolveClient(ctx)
 	if err != nil {
 		// Deliberately not qualified by resource: a client-init failure is about
@@ -262,6 +279,16 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		// provider to do it for them.
 		return nil, err
 	}
+
+	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}
+	// A store read error is non-fatal: fall through and fetch a fresh credential.
+	// A hit carrying no credential is a miss, though the interface forbids one:
+	// a third-party store is not worth failing closed over, and returning a nil
+	// credential to auth.Transport would fail the request anyway.
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
+		return cred, nil
+	}
+
 	r, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      id.UserID,
@@ -271,17 +298,45 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cache only when the service reported an expiry; it omits one when the
-	// lifetime is unknown, and a credential with no known lifetime cannot be
-	// vouched for later. Best-effort: a store write failure must not fail auth.
-	if !r.ExpiresAt.IsZero() {
-		expiresAt := r.ExpiresAt
-		if capped := platform.Now(ctx).Add(maxCachedLifetime); expiresAt.After(capped) {
-			expiresAt = capped
-		}
-		_ = p.store.Set(ctx, key, r.Credential, expiresAt)
-	}
+	p.cache(ctx, key, r)
 	return r.Credential, nil
+}
+
+// cache stores r under key, best-effort: a store write failure must not fail
+// auth.
+//
+// Nothing is stored unless the service gave a lifetime that is still running.
+// That single test covers three cases: the service reported no expiry, meaning
+// it cannot say when the token dies, so the credential cannot be vouched for
+// later; it reported an unparseable one, which reaches here as the same zero
+// time; or it reported one already spent, which a store deriving a TTL from it
+// would turn into a negative one.
+//
+// The far end is clamped rather than rejected, so a wildly distant expiry —
+// wrong, or injected — shortens to the cap instead of pinning the entry.
+func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
+	now := platform.Now(ctx)
+	if !r.ExpiresAt.After(now) {
+		return
+	}
+	expiresAt := r.ExpiresAt
+	if capped := now.Add(maxCachedLifetime); expiresAt.After(capped) {
+		expiresAt = capped
+	}
+	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
+}
+
+// attribute names the resource a retrieval failure belongs to: several providers
+// can be wired into one process, and an unattributed error says nothing about
+// which.
+//
+// It names nothing else. This error becomes the tool's error, which is fed to
+// the model and persisted in the session, and every id available here is
+// supplied by the caller — a user id is commonly an email, and a session id
+// arrives unvalidated from the request path. The invocation is already
+// identified by the trace and the session the error is stored in.
+func (p *provider) attribute(err error) error {
+	return fmt.Errorf("gcp: resource %q: %w", p.scheme.Name, err)
 }
 
 // resolveClient returns the configured client, building a default one (backed by
