@@ -54,6 +54,4 @@ jobs:
           token: ${{ secrets.RELEASE_PAT }}
           config-file: ${{ steps.line.outputs.config }}
           manifest-file: ${{ steps.line.outputs.manifest }}
-          # Release the branch the run was triggered on, rather than the
-          # repository default, so a v1 run cannot open a PR against main.
           target-branch: ${{ github.ref_name }}
