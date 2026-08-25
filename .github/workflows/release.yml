@@ -1,4 +1,4 @@
-# Release Please keeps the version constant, the changelog and the release tag
+# Release workflow keeps the version constant, the changelog and the release tag
 # in sync, without anything ever pushing straight to a release branch.
 #
 # On every push to a release line it reads the conventional commits since the
@@ -8,39 +8,7 @@
 # regenerates CHANGELOG.md and updates the manifest. A maintainer reviews and
 # merges that PR like any other; merging it tags the merge commit vX.Y.Z and
 # publishes the GitHub release.
-#
-# Both release lines are served by this one workflow, each with its own config
-# and manifest so their versions advance independently:
-#
-#   main -> .github/release-please-config.json     + .release-please-manifest.json
-#   v1   -> .github/release-please-config-v1.json  + .release-please-manifest-v1.json
-#
-# Release Please reads the config, the manifest and the commits from the branch
-# it is releasing, so both files and this workflow have to exist on `v1` as well
-# as on `main`. Porting them is a separate PR against `v1`.
-#
-# Three things this needs before it works:
-#
-#  1. Settings -> Actions -> General -> "Allow GitHub Actions to create and
-#     approve pull requests" must be enabled, or the action cannot open the PR.
-#
-#  2. RELEASE_PAT must be a GitHub App installation token or a PAT, named after
-#     the secret adk-python uses for the same purpose. A pull request opened
-#     with the built-in GITHUB_TOKEN does not trigger other workflows, so go.yml
-#     and apidiff.yml would not run on the release PR and the bump would land
-#     unverified.
-#
-#  3. The v1 line is documented as patch-only. That policy is not encoded here,
-#     because a `feat:` on v1 would still produce a minor; add
-#     "versioning-strategy": "always-bump-patch" to the v1 config if it should be
-#     enforced rather than reviewed.
-#
-# Only the core module is configured. Submodules such as plugin/agentanalytics
-# version independently and carry no version constant; to release one through
-# this workflow, add it to the config as its own package with
-# "tag-separator": "/" so the tag reads plugin/agentanalytics/vX.Y.Z as Go
-# requires.
-name: Release Please
+name: Release
 
 on:
   push:
