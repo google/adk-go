@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agentinfo_test
+package services_test
 
 import (
 	"context"
@@ -26,8 +26,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/v2/server/adkrest/internal/agentinfo"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
@@ -93,7 +93,7 @@ func (f *fakeToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	return f.tools, nil
 }
 
-func TestCollect(t *testing.T) {
+func TestGetAppInfo(t *testing.T) {
 	tests := []struct {
 		name string
 		// root builds the agent tree under test.
@@ -339,7 +339,7 @@ func TestCollect(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agents := agentinfo.Collect(context.Background(), "test_app", tc.root(t))
+			agents := services.GetAppInfo(context.Background(), "test_app", tc.root(t)).Agents
 
 			gotNames := make([]string, 0, len(agents))
 			for name := range agents {
@@ -363,8 +363,8 @@ func TestCollect(t *testing.T) {
 	}
 }
 
-func TestCollectNilRoot(t *testing.T) {
-	if got := agentinfo.Collect(context.Background(), "test_app", nil); got != nil {
-		t.Errorf("Collect(nil root) = %v, want nil", got)
+func TestGetAppInfoNilRoot(t *testing.T) {
+	if got := services.GetAppInfo(context.Background(), "test_app", nil); got != nil {
+		t.Errorf("GetAppInfo(nil root) = %v, want nil", got)
 	}
 }

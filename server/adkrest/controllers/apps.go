@@ -21,8 +21,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/server/adkrest/internal/agentinfo"
-	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
 )
 
 // AppsAPIController is the controller for the Apps API.
@@ -56,11 +55,5 @@ func (c *AppsAPIController) AppInfoHandler(rw http.ResponseWriter, req *http.Req
 		return
 	}
 
-	EncodeJSONResponse(&models.AppInfo{
-		Name:          appName,
-		RootAgentName: rootAgent.Name(),
-		Description:   rootAgent.Description(),
-		Language:      models.LanguageGo,
-		Agents:        agentinfo.Collect(req.Context(), appName, rootAgent),
-	}, http.StatusOK, rw)
+	EncodeJSONResponse(services.GetAppInfo(req.Context(), appName, rootAgent), http.StatusOK, rw)
 }
