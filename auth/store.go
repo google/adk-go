@@ -64,6 +64,11 @@ type CredentialKey struct {
 // credential-service round-trip on every request; self-caching providers
 // (oauth2.TokenSource) do not need it. Implementations must be safe for
 // concurrent use.
+//
+// It carries no unexported method, so anyone can implement it and its method set
+// is frozen: a method added later breaks every implementation outside this
+// module. That is the price of the seam, and it is why Delete is here from the
+// start rather than added when something first needs it.
 type CredentialStore interface {
 	// Get returns the cached, unexpired credential for key.
 	//
