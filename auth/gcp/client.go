@@ -503,8 +503,11 @@ type credentialPayload struct {
 	ExpireTime string `json:"expireTime"`
 }
 
-// parseExpireTime parses a proto Timestamp (RFC 3339) into a time.Time, or
-// returns the zero time when empty or malformed.
+// parseExpireTime parses the service's expiry into a time.Time, collapsing an
+// absent one and an unparseable one to the same zero time. Callers read that as
+// "lifetime unknown" and decline to cache, which is the safe reading of both:
+// the service omits the field when the token may be permanent or when it cannot
+// say, and a value it sent but we cannot read tells us no more than silence.
 func parseExpireTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
