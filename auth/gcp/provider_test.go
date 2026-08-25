@@ -84,10 +84,6 @@ func TestProviderCredential(t *testing.T) {
 	}
 }
 
-// TestProviderErrorAttribution pins that a failed retrieval says which invocation
-// and which resource failed — several providers can be wired into one process —
-// without naming the user, whose id is commonly an email and whose error text
-// reaches the model. Sentinels must stay matchable through the wrap.
 // TestProviderCredentialConcurrent drives two users through one shared provider
 // at the same time. The sequential case above pins the wire contract; this one
 // pins that concurrency cannot cross the streams.
@@ -131,6 +127,10 @@ func TestProviderCredentialConcurrent(t *testing.T) {
 	}
 }
 
+// TestProviderErrorAttribution pins that a failed retrieval says which resource
+// failed — several providers can be wired into one process — and names no
+// caller-supplied id, since this text is fed to the model and persisted in the
+// session. Sentinels must stay matchable through the wrap.
 func TestProviderErrorAttribution(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

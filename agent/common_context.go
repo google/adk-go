@@ -77,9 +77,8 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // enclosing invocation's user in place of their own — one implemented elsewhere
 // cannot make that promise, since the key is unnameable outside the module and
 // its embedded parent answers instead. ok does not imply a populated Identity
-// either: an
-// invocation whose session carries no user yields an empty UserID, so a caller
-// that needs one must check.
+// either: an invocation whose session carries no user yields an empty UserID, so
+// a caller that needs one must check.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok

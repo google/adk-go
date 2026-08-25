@@ -240,11 +240,11 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
-			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
+			return nil, ErrConsentRejected
 		case pendingOutcome:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
+				return nil, ErrPollTimeout
 			}
 			wait := min(backoff, remaining)
 			select {
