@@ -143,9 +143,19 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 - Tests run **offline by default**: LLM HTTP traffic is replayed from
   `testdata/*.httprr` via `internal/httprr`. Never add live model or network
   calls to tests.
-- To (re)record a package's traffic, supply real credentials (e.g.
-  `GOOGLE_API_KEY`) and run `go generate ./<pkg>/...` (it runs
-  `go test -httprecord=…`); commit the updated `testdata/*.httprr`.
+- `-httprecord` takes a **regexp matched against the cassette's file path**,
+  not a `-run` test-name filter. Keep it as narrow as the set of cassettes you
+  mean to replace: recording against a live model produces a different response
+  every time, so a broad pattern rewrites unrelated cassettes and buries the
+  intended change.
+- To re-record **one** cassette — the normal case — supply real credentials
+  (e.g. `GOOGLE_API_KEY`) and name it in both flags:
+  `go test ./<pkg>/ -run TestFoo -httprecord='TestFoo\.httprr$'`.
+  Commit only that `testdata/*.httprr`.
+- To re-record a whole package, run `go generate ./<pkg>/...`; each package's
+  `//go:generate go test -httprecord=…` directives are scoped so that every
+  cassette is recorded exactly once (enforced by
+  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`).
 - Prefer table-driven tests; shared helpers live in `internal/testutil`.
 
 ## Boundaries

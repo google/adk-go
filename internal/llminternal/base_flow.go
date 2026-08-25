@@ -799,7 +799,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		// Streaming mode comes from the invocation context's RunConfig rather than
+		// the runconfig context value: agent.Run() may be invoked directly (outside
+		// the runner), in which case no runconfig is stored in the Go context and
+		// runconfig.FromContext returns nil (issue #586).
+		useStream := false
+		if rc := ctx.RunConfig(); rc != nil {
+			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
@@ -1399,7 +1406,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -1407,6 +1416,22 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions.
+// This is a deliberate divergance from adk-python which uses last-write-wins.
+func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		return maps.Clone(src)
+	}
+	for key, value := range src {
+		if dstVal, ok := dst[key]; ok {
+			dst[key] = max(dstVal, value)
+		} else {
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
