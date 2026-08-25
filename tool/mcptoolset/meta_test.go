@@ -40,6 +40,13 @@ func TestIsReservedMetaKey(t *testing.T) {
 		{key: "com.giantswarm.muster/authChallenge", want: false},
 		{key: "mcp/key", want: false},
 		{key: "bare", want: false},
+		// Unprefixed keys the protocol reserves as an exception to the prefix rule.
+		{key: "progressToken", want: true},
+		{key: "traceparent", want: true},
+		{key: "tracestate", want: true},
+		{key: "baggage", want: true},
+		// A key name holds no slash, so the prefix ends at the first one.
+		{key: "io.modelcontextprotocol/a/b", want: true},
 	}
 
 	for _, tc := range tests {
@@ -69,6 +76,8 @@ func TestServerMeta(t *testing.T) {
 			name: "reserved keys dropped alongside server keys",
 			meta: mcp.Meta{
 				mcp.MetaKeyServerInfo:  &mcp.Implementation{Name: "s"},
+				"progressToken":        "p1",
+				"traceparent":          "00-trace-span-01",
 				"com.example/auth":     map[string]any{"url": "https://idp.example.com/login"},
 				"com.example.mcp/note": "kept",
 			},

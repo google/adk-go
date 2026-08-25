@@ -69,7 +69,9 @@ func New(cfg Config) (tool.Toolset, error) {
 			// The capability inferred from ElicitationHandler alone covers only
 			// form mode; URL mode must be declared explicitly. RootsV2 preserves
 			// the default roots capability, which setting Capabilities would
-			// otherwise disable.
+			// otherwise disable. RootsV2 is deprecated as of the 2026-07-28
+			// revision (SEP-2577) but remains the only field that carries
+			// ListChanged, so it stays until the SDK offers a replacement.
 			Capabilities: &mcp.ClientCapabilities{
 				Elicitation: &mcp.ElicitationCapabilities{
 					Form: &mcp.FormElicitationCapabilities{},
@@ -168,6 +170,10 @@ type Config struct {
 	// (-32042) error code rather than through an elicitation request is not
 	// handled at all.
 	//
+	// One handler serves every tool of the toolset, and the tool calls of a
+	// single turn run on separate goroutines, so the handler must be safe for
+	// concurrent use.
+	//
 	// It can only be set when Client is nil; for a custom Client, set the
 	// handler in the client's mcp.ClientOptions instead.
 	ElicitationHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
@@ -176,7 +182,9 @@ type Config struct {
 	// notifications, which servers send when an out-of-band (URL-mode)
 	// elicitation has been completed. It requires ElicitationHandler to also
 	// be set, since a completion notification cannot arrive unless an
-	// elicitation was created first.
+	// elicitation was created first. Like ElicitationHandler, it must be safe
+	// for concurrent use.
+	//
 	// It can only be set when Client is nil; for a custom Client, set the
 	// handler in the client's mcp.ClientOptions instead.
 	ElicitationCompleteHandler func(context.Context, *mcp.ElicitationCompleteNotificationRequest)
@@ -222,10 +230,6 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		if llminternal.IsReservedToolName(mcpTool.Name) {
-			return nil, fmt.Errorf("MCP server advertises tool %q, a name reserved by the framework", mcpTool.Name)
-		}
-
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
@@ -233,6 +237,12 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
 			continue
+		}
+
+		// Checked after the filter so that excluding the tool by name remains a
+		// way to keep the rest of the toolset usable.
+		if llminternal.IsReservedToolName(mcpTool.Name) {
+			return nil, fmt.Errorf("MCP server advertises tool %q, a name reserved by the framework", mcpTool.Name)
 		}
 
 		adkTools = append(adkTools, t)

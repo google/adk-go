@@ -158,7 +158,13 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if textResponse.Len() == 0 {
-		return nil, errors.New("no text content in tool response")
+		// A result that carries only metadata is a valid answer, for instance an
+		// auth challenge from an MCP gateway, so it keeps the _meta passthrough
+		// instead of becoming an error.
+		if len(serverMeta(res.Meta)) == 0 {
+			return nil, errors.New("no text content in tool response")
+		}
+		return functionResponse(res, ""), nil
 	}
 
 	return functionResponse(res, textResponse.String()), nil
@@ -166,7 +172,10 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 
 // ToolError reports a tool result that the MCP server marked as an error.
 // Callers reach it with errors.As to read the metadata the server attached to
-// the failed call, which a plain error message cannot carry.
+// the failed call, which a plain error message cannot carry. The reachable
+// caller is an entry of llmagent.Config.OnToolErrorCallbacks: the flow renders
+// the error for the model as its message alone, so Meta, unlike the _meta of a
+// successful result, never reaches the model.
 type ToolError struct {
 	// Details is the text content of the error result, empty when the server
 	// sent none.
@@ -221,11 +230,27 @@ func serverMeta(meta mcp.Meta) map[string]any {
 	return serverKeys
 }
 
+// unprefixedReservedMetaKeys are the _meta keys the MCP protocol reserves
+// without a prefix, as an exception to the prefix rule: the progress token of a
+// request and the W3C trace context that carries it.
+var unprefixedReservedMetaKeys = map[string]bool{
+	"progressToken": true,
+	"traceparent":   true,
+	"tracestate":    true,
+	"baggage":       true,
+}
+
 // isReservedMetaKey reports whether an MCP _meta key belongs to the protocol
-// rather than to the server. A key is reserved when the second label of its
-// prefix (the part before the final slash) is "modelcontextprotocol" or "mcp".
+// rather than to the server. A key is reserved when it is one of the
+// unprefixed protocol keys, or when the second label of its prefix (the part
+// before the first slash) is "modelcontextprotocol" or "mcp".
 func isReservedMetaKey(key string) bool {
-	slash := strings.LastIndex(key, "/")
+	if unprefixedReservedMetaKeys[key] {
+		return true
+	}
+	// The prefix ends at the first slash, and a key name holds no slash, so a
+	// later slash makes the key malformed rather than prefixed.
+	slash := strings.Index(key, "/")
 	if slash < 0 {
 		return false
 	}

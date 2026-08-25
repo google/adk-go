@@ -841,6 +841,16 @@ func TestCallToolMeta(t *testing.T) {
 			},
 		},
 		{
+			name: "metadata-only result",
+			handler: func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{Meta: challengeMeta()}, nil
+			},
+			want: map[string]any{
+				"output": "",
+				"_meta":  wantChallengeMeta,
+			},
+		},
+		{
 			// The server stamps io.modelcontextprotocol/serverInfo on every
 			// result from protocol version 2026-07-28 on, so the absence of
 			// "_meta" here also covers reserved-key filtering.
@@ -1077,4 +1087,47 @@ func TestNewRejectsElicitationCompleteHandlerWithoutElicitationHandler(t *testin
 	if err == nil {
 		t.Fatal("expected error when setting ElicitationCompleteHandler without ElicitationHandler, got nil")
 	}
+}
+
+func TestToolFilterExcludesReservedToolName(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	for _, name := range []string{"get_weather", "transfer_to_agent"} {
+		server.AddTool(&mcp.Tool{
+			Name:        name,
+			Description: "a tool",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+		})
+	}
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:  clientTransport,
+		ToolFilter: tool.StringPredicate([]string{"get_weather"}),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools call failed for a reserved name the filter excludes: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name() != "get_weather" {
+		t.Fatalf("Tools() = %v, want only get_weather", toolNames(tools))
+	}
+}
+
+func toolNames(tools []tool.Tool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name()
+	}
+	return names
 }
