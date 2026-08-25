@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -62,8 +63,9 @@ type ProviderConfig struct {
 }
 
 // ErrClientUnavailable means the default Application Default Credentials client
-// could not be built in time. The lookup is not cancellable, so the bound is on
-// the wait: the attempt keeps running and a later call may well succeed.
+// is not available: discovery failed, or it did not finish inside the bound. The
+// lookup is not cancellable, so that bound is on the wait rather than on the
+// attempt, which keeps running — a later call may well succeed.
 var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
 // ErrNoActingUser means the provider could not determine the acting end user,
@@ -162,6 +164,11 @@ type clientInit struct {
 	done   chan struct{}
 	client *Client
 	err    error
+	// blown is set by the first waiter whose bound expires. Later waiters fail
+	// fast instead of each paying the bound again: the attempt is kept running,
+	// so without this a stuck lookup costs every outbound request its full
+	// initTimeout for as long as it is stuck.
+	blown atomic.Bool
 }
 
 var _ auth.CredentialProvider = (*provider)(nil)
@@ -236,6 +243,14 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	}
 	p.mu.Unlock()
 
+	if in.blown.Load() {
+		select {
+		case <-in.done: // landed after the bound blew; fall through to the result
+		default:
+			return nil, fmt.Errorf("%w: an earlier attempt exceeded %v and is still running", ErrClientUnavailable, p.initTimeout)
+		}
+	}
+
 	timer := time.NewTimer(p.initTimeout)
 	defer timer.Stop()
 	select {
@@ -247,6 +262,7 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	case <-timer.C:
 		// A sentinel of its own, not context.DeadlineExceeded: that is what the
 		// caller-deadline arm below returns, and the two mean different things.
+		in.blown.Store(true)
 		return nil, fmt.Errorf("%w after %v", ErrClientUnavailable, p.initTimeout)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
@@ -277,7 +293,7 @@ func (p *provider) runInit(in *clientInit) {
 	c, err := p.newClient(p.initCtx)
 	switch {
 	case err != nil:
-		in.err = fmt.Errorf("gcp: build default credentials client: %w", err)
+		in.err = fmt.Errorf("%w: %w", ErrClientUnavailable, err)
 	case c == nil:
 		// Caching a nil client would only move the failure to the next retrieval.
 		in.err = errors.New("gcp: default credentials client builder returned no client")

@@ -232,6 +232,50 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 	}
 }
 
+// TestResolveClientFailFastAfterBlownBound pins that a stuck lookup costs the
+// bound once, not once per request. The attempt is deliberately kept running, so
+// without the latch every outbound request would re-pay the full initTimeout for
+// as long as the lookup is stuck.
+func TestResolveClientFailFastAfterBlownBound(t *testing.T) {
+	p := newTestProvider(t)
+	p.newClient = blockingInit(t)
+	p.initTimeout = 200 * time.Millisecond
+
+	start := time.Now()
+	if _, err := p.resolveClient(t.Context()); !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("first resolveClient() error = %v, want ErrClientUnavailable", err)
+	}
+	first := time.Since(start)
+
+	start = time.Now()
+	_, err := p.resolveClient(t.Context())
+	second := time.Since(start)
+	if !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("second resolveClient() error = %v, want ErrClientUnavailable", err)
+	}
+	// The fail-fast path does not wait at all, so a quarter of the bound is a
+	// generous ceiling and still far under the ~200ms a re-paid bound costs.
+	if second > p.initTimeout/4 {
+		t.Errorf("second caller waited %v against a %v bound (first paid %v): the blown bound must be latched", second, p.initTimeout, first)
+	}
+}
+
+// TestResolveClientDiscoveryFailureIsMatchable pins that the common failure —
+// discovery not working at all — carries the same sentinel as the timeout. A
+// caller behind a RoundTripper cannot switch on a message.
+func TestResolveClientDiscoveryFailureIsMatchable(t *testing.T) {
+	p := newTestProvider(t)
+	p.newClient = func(context.Context) (*Client, error) { return nil, errors.New("no credentials on this host") }
+
+	_, err := p.resolveClient(t.Context())
+	if !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("resolveClient() error = %v, want it to wrap ErrClientUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "no credentials on this host") {
+		t.Errorf("resolveClient() error = %v, want the underlying cause kept", err)
+	}
+}
+
 // TestResolveClientRetriesFailedInit pins that a failed ADC discovery is not
 // cached: the doc promises the next call retries, and a provider that wedged on
 // a transient environment failure would never recover.

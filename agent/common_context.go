@@ -419,40 +419,44 @@ func (c *commonContext) Value(key any) any {
 
 // identity answers the ADK identity key, as an any so it can report "none".
 //
-// A commonContext owns no session; it speaks for the invocation it wraps, so it
-// asks that invocation and takes its answer as final. That keeps a tool or
-// callback context working — theirs return a nil session by design, and they
-// delegate the key to the context underneath — while leaving a session-less
-// invocation's refusal authoritative.
+// A commonContext owns no session, so it speaks for the invocation it wraps, and
+// reads that invocation's own session first. Asking the invocation's Value first
+// looks equivalent and is not: an InvocationContext written outside this module
+// embeds the context it was derived from, to inherit cancellation, and cannot
+// override a key it cannot name — so its Value answers with the *enclosing*
+// invocation's identity even when it has a session of its own naming a different
+// user. Reading the session first is what makes an invocation report itself.
 //
-// It never falls back to the embedded parent. After WithContext that parent can
-// be an unrelated invocation, and inheriting its user would mint that user's
-// credential for a call they never made.
+// Only an invocation with no readable session of its own delegates, by asking the
+// invocation it wraps. A tool or callback context is exactly that shape by design
+// and hands the key to the context underneath. An invocation that owns a session
+// field and has none — a nested invocation built without one — gets nil back from
+// that ask and reports no identity, rather than inheriting a user who made no
+// such call.
+//
+// A commonContext speaking for no invocation at all is the one case that consults
+// its own parent, since there is nothing else it could answer for.
 func (c *commonContext) identity() any {
 	if c.invocationContext == nil {
-		// No invocation to speak for; the parent may still carry one.
 		if c.Context == nil {
 			return nil
 		}
 		return c.Context.Value(adkcontext.IdentityKey)
 	}
-	// Recovered, because invocationContext can be a typed-nil pointer and its
-	// methods are caller-supplied code. The answer is type-asserted, not merely
-	// checked against nil: a permissive Value that answers every key would
-	// otherwise hand back something that is not an Identity, and swallow the
-	// session read below.
+	// Method value and call both inside the recover: Session() is caller-supplied
+	// code and invocationContext can be a typed-nil pointer.
+	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
+		return id
+	}
+	// Type-asserted, not merely checked against nil: an invocation with a
+	// permissive Value that answers every key would otherwise hand back something
+	// that is not an Identity and be taken for one.
 	if v, ok := adkcontext.Recovered(func() any {
 		return c.invocationContext.Value(adkcontext.IdentityKey)
 	}); ok {
 		if id, isIdentity := v.(Identity); isIdentity {
 			return id
 		}
-	}
-	// An InvocationContext from outside this module need not answer the key at
-	// all, so fall back to reading its session, method value and call both inside
-	// the recover.
-	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
-		return id
 	}
 	return nil
 }

@@ -102,6 +102,48 @@ func TestIdentityFromPermissiveInvocation(t *testing.T) {
 	}
 }
 
+// TestIdentityFromDecoratedInvocation pins that an invocation reports its OWN
+// user, not the one it inherited. An InvocationContext written outside this
+// module embeds the context it was derived from, to inherit cancellation, and
+// cannot override a key it cannot name — so its Value answers with the enclosing
+// invocation's identity. Reading its session first is what stops one user's
+// credential being minted for another's call.
+func TestIdentityFromDecoratedInvocation(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: &identityTestSession{}} // alice
+	decorated := decoratedInvocation{
+		InvocationContext: enclosing,
+		own:               &otherUserSession{},
+	}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"promoted", Promote(decorated)},
+		{"tool context", NewToolContext(decorated, "fc-1", nil, nil)},
+		{"callback context", NewCallbackContext(decorated, nil)},
+	} {
+		id, ok := IdentityFromContext(tc.ctx)
+		if !ok || id.UserID != "bob" {
+			t.Errorf("%s IdentityFromContext() = %+v, %v; want bob, the decorated invocation's own user", tc.name, id, ok)
+		}
+	}
+}
+
+// decoratedInvocation is how an invocation is wrapped outside this module: embed
+// the enclosing one, override the accessors that differ.
+type decoratedInvocation struct {
+	InvocationContext
+	own session.Session
+}
+
+func (d decoratedInvocation) Session() session.Session { return d.own }
+
+type otherUserSession struct{ session.Session }
+
+func (otherUserSession) ID() string      { return "sid-2" }
+func (otherUserSession) AppName() string { return "app-1" }
+func (otherUserSession) UserID() string  { return "bob" }
+
 // permissiveInvocation answers every key, as a decorator or a test double might.
 type permissiveInvocation struct{ InvocationContext }
 
