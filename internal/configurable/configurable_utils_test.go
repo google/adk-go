@@ -17,6 +17,7 @@ package configurable
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,30 @@ import (
 // Asserting on the sentinels keeps these tests independent of the message text.
 func isContainmentRejection(err error) bool {
 	return errors.Is(err, errConfigReferenceNotLocal) || errors.Is(err, errConfigReferenceSymlink)
+}
+
+// TestIsLinkLike pins the mode predicate the component walk uses. It runs
+// everywhere, unlike the junction test, which needs Windows to build one.
+func TestIsLinkLike(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode fs.FileMode
+		want bool
+	}{
+		{name: "regular file", mode: 0o644, want: false},
+		{name: "directory", mode: fs.ModeDir | 0o755, want: false},
+		{name: "symlink", mode: fs.ModeSymlink | 0o777, want: true},
+		// A Windows directory junction: os.Lstat reports a reparse point whose
+		// tag is not IO_REPARSE_TAG_SYMLINK as irregular, so a ModeSymlink-only
+		// test would walk past it.
+		{name: "junction or other reparse point", mode: fs.ModeIrregular | 0o666, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLinkLike(tc.mode); got != tc.want {
+				t.Errorf("isLinkLike(%v) = %v, want %v", tc.mode, got, tc.want)
+			}
+		})
+	}
 }
 
 // newAgentDir lays out an agent directory with a sibling config, a file outside

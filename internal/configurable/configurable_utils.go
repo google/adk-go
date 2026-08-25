@@ -382,8 +382,9 @@ var (
 	// the referencing config's directory by its spelling alone.
 	errConfigReferenceNotLocal = errors.New("config reference must be a relative path inside the agent directory")
 	// errConfigReferenceSymlink reports a reference that reaches its target
-	// through a symbolic link below that directory.
-	errConfigReferenceSymlink = errors.New("config reference traverses a symbolic link")
+	// through a symbolic link, or through any other reparse point, below that
+	// directory.
+	errConfigReferenceSymlink = errors.New("config reference traverses a link")
 )
 
 // resolveConfigReference turns a config-supplied reference into an absolute path
@@ -441,9 +442,29 @@ func resolveConfigReference(parentPath, refPath string) (string, error) {
 	return absPath, nil
 }
 
-// refuseSymlinkComponents fails if any component of refPath below dir is a
-// symbolic link. A component that does not exist cannot be a link, so a missing
-// file still reports as not found rather than as a traversal.
+// isLinkLike reports whether a component may redirect the read somewhere other
+// than where its own name sits in the tree.
+//
+// ModeSymlink alone is not enough on Windows. A directory junction is a reparse
+// point with tag IO_REPARSE_TAG_MOUNT_POINT, and since Go 1.23 (godebug
+// winsymlink=1) os.Lstat reports it as ModeIrregular, not ModeSymlink: see
+// os/types_windows.go, where only IO_REPARSE_TAG_SYMLINK sets ModeSymlink and
+// every other tag falls through to ModeIrregular. Before Go 1.23 mount points
+// did carry ModeSymlink, which is why testing for it alone looks sufficient.
+// This module declares go 1.26, so it gets the newer mapping and a junction
+// would walk straight past a ModeSymlink-only test.
+//
+// Refusing ModeIrregular as well keeps the rule "do not follow a redirection,
+// refuse it" true for every reparse tag rather than for one of them.
+func isLinkLike(mode fs.FileMode) bool {
+	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
+// refuseSymlinkComponents fails if any component of refPath below dir can
+// redirect the read out of dir: a symbolic link on any platform, or a junction
+// or other reparse point on Windows. A component that does not exist cannot be
+// a link, so a missing file still reports as not found rather than as a
+// traversal.
 func refuseSymlinkComponents(dir, refPath string) error {
 	cur := dir
 	// IsLocal guarantees Clean leaves no ".." components to walk through.
@@ -456,7 +477,7 @@ func refuseSymlinkComponents(dir, refPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to inspect config reference %q: %w", refPath, err)
 		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
+		if isLinkLike(fi.Mode()) {
 			return fmt.Errorf("%w: %s", errConfigReferenceSymlink, refPath)
 		}
 	}
