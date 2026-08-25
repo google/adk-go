@@ -17,6 +17,8 @@ package gcp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,20 +172,40 @@ type Client struct {
 	connectorURL     string
 	pollTimeout      time.Duration
 	initialBackoff   time.Duration
-	// cacheSlot separates clients that can mint different credentials, so the
-	// provider's cache key can include it. What the services return depends on
-	// the endpoint asked and on the identity the request is authenticated as, and
-	// a caller can supply both — so two providers sharing one store must not
-	// share an entry unless their clients agree on both.
+	// cacheSlot names this Client for the credential cache. What the services
+	// return depends on the endpoint asked and on the identity the ask is
+	// authenticated as, so two providers sharing one store must not share an
+	// entry unless their Clients agree on both.
 	//
-	// A caller-supplied HTTPClient is opaque, so its slot is unique per client.
-	// Clients left to Application Default Credentials all authenticate as the one
-	// process principal, so they share a slot and keep sharing cache entries.
+	// It is one value per Client, not one per identity, because this package
+	// cannot observe the identity a Client authenticates as. A caller-supplied
+	// HTTPClient is opaque by construction. So is Application Default
+	// Credentials: NewClient resolves it afresh on every call, so two ADC clients
+	// in one process need not be the same principal — the credentials file can be
+	// rewritten between them, and oauth2.HTTPClient in the context supplies the
+	// transport underneath the ADC one, which this package's own PollTimeout doc
+	// invites a caller to use. Erring towards a false miss costs a round trip;
+	// erring the other way discloses one principal's token to another.
+	//
+	// The value is unique per process as well as within one, so a store that
+	// outlives the process — or is shared by two — misses rather than serving an
+	// entry written by a Client that no longer exists and cannot be identified.
 	cacheSlot string
 }
 
-// callerSeq numbers clients whose identity this package cannot inspect.
-var callerSeq atomic.Uint64
+// clientSeq numbers Clients within this process, and clientNonce separates one
+// process's numbering from another's. See the cacheSlot field.
+var (
+	clientSeq   atomic.Uint64
+	clientNonce = newClientNonce()
+)
+
+func newClientNonce() string {
+	var b [16]byte
+	// Documented never to fail, and it panics rather than returning short.
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
 
 // Config configures a [Client]. A nil *Config, or any zero-valued field, uses
 // the corresponding default.
@@ -192,6 +214,10 @@ type Config struct {
 	// from Application Default Credentials (cloud-platform scope). If set, it is
 	// used verbatim and ADC is not applied, so it must carry its own credentials
 	// and should refuse redirects for the reason [NewClient] describes.
+	//
+	// Two Clients are two cache dimensions even when built from one HTTPClient,
+	// so build a Client once and share it. One per request resolves nothing from
+	// cache and leaves an entry behind per request.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
 	// It is used as given, not parsed: an http:// value would send the ADC token
@@ -259,11 +285,20 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		}
 		c.httpClient = hc
 	}
-	c.cacheSlot = joinFields("adc", c.agentIdentityURL, c.connectorURL)
-	if cfg.HTTPClient != nil {
-		c.cacheSlot = joinFields("caller", strconv.FormatUint(callerSeq.Add(1), 10))
-	}
+	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+// CacheKey returns the key a credential for scheme, retrieved through c on
+// behalf of userID under appName, is cached under — the key to hand
+// [auth.CredentialStore.Delete] to invalidate that credential ahead of its
+// expiry, on a consent revocation or a logout.
+//
+// It is meaningful only to the process that produced c, and only for as long as
+// c is alive: a Client is one cache dimension, so rebuilding it strands whatever
+// the old one cached.
+func (c *Client) CacheKey(scheme ProviderScheme, appName, userID string) auth.CredentialKey {
+	return auth.CredentialKey{AppName: appName, UserID: userID, Key: cacheSlot(c, scheme)}
 }
 
 // joinFields encodes fields as one unambiguous string, each prefixed with its
@@ -314,9 +349,12 @@ type Request struct {
 
 // Retrieval is the result of [Client.RetrieveCredential].
 type Retrieval struct {
+	// Credential authenticates outbound requests as the end user.
 	Credential auth.Credential
 	// ExpiresAt is the credential's expiry, or the zero time when the service
-	// reports no lifetime.
+	// reports no lifetime — which it does when the token may be permanent, or
+	// when it cannot say. Either way the lifetime is unknown, so a caller must
+	// not treat the zero value as "expires now" and must not cache it.
 	ExpiresAt time.Time
 }
 
@@ -455,9 +493,14 @@ func (rejectedOutcome) isOutcome() {}
 // service can't say when the token expires (possibly permanent), so callers must
 // not treat it as "expires now".
 type credentialPayload struct {
-	Token      string `json:"token"`
-	Header     string `json:"header"`
-	ExpireTime string `json:"expireTime"` // RFC 3339; empty when the service reports no expiry
+	Token  string `json:"token"`
+	Header string `json:"header"`
+	// ExpireTime is RFC 3339, and empty when the service reports no expiry. The
+	// name is the one in the published API surface
+	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+	// Success.expireTime), which also warns that the token may be revoked, or
+	// expire slightly early through clock skew, before the time it names.
+	ExpireTime string `json:"expireTime"`
 }
 
 // parseExpireTime parses a proto Timestamp (RFC 3339) into a time.Time, or

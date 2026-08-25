@@ -191,8 +191,7 @@ func TestInMemoryCredentialStoreClockMayTouchStore(t *testing.T) {
 func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 	ctx := t.Context()
 	s := auth.NewInMemoryCredentialStore()
-	// A short spread of keys and a mix of live and already-expired entries, so
-	// readers, writers, evictions and sweeps overlap on the same keys.
+	// A short spread of keys, so readers, writers and evictions collide on them.
 	keyFor := func(i int) auth.CredentialKey {
 		return auth.CredentialKey{AppName: "app", UserID: "user-" + strconv.Itoa(i%4), Key: "res"}
 	}
@@ -206,7 +205,15 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 				key := keyFor(g + i)
 				switch (g + i) % 3 {
 				case 0:
-					if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, time.Now().Add(time.Hour)); err != nil {
+					// Every third write is already spent, so Get's eviction and the
+					// sweep's deletes actually run while other goroutines read. With
+					// only live entries neither branch executes, and the run says
+					// nothing about the write Get performs.
+					expires := time.Now().Add(time.Hour)
+					if (g+i)%2 == 0 {
+						expires = time.Now().Add(-time.Hour)
+					}
+					if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, expires); err != nil {
 						t.Errorf("Set() error = %v", err)
 						return
 					}
@@ -225,4 +232,30 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// Get evicts the expired entry it was asked for, rather than only reporting a
+// miss. That write is the reason the store takes a full Mutex instead of an
+// RWMutex, so nothing else in the suite distinguishes the two designs.
+func TestInMemoryCredentialStoreGetEvicts(t *testing.T) {
+	clock := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return clock })
+	s := auth.NewInMemoryCredentialStore()
+	key := auth.CredentialKey{UserID: "u", Key: "res"}
+	if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, clock.Add(10*time.Second)); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	// Past the entry's expiry but well inside the sweep interval, so only Get's
+	// own eviction can remove it.
+	clock = clock.Add(15 * time.Second)
+	if _, ok, _ := s.Get(ctx, key); ok {
+		t.Fatal("Get() of an expired entry = hit, want miss")
+	}
+	// Set a far-future entry under a second key and read the first one back
+	// through a clock that would make it live again: it must be gone.
+	past := platform.WithTimeProvider(t.Context(), func() time.Time { return clock.Add(-time.Hour) })
+	if _, ok, _ := s.Get(past, key); ok {
+		t.Error("the expired entry survived the Get that reported it a miss")
+	}
 }

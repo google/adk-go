@@ -86,3 +86,59 @@ func (s *InMemoryCredentialStore) swept() time.Time {
 	defer s.mu.Unlock()
 	return s.lastSweep
 }
+
+// A clock that jumps forward once must not switch eviction off for good. The
+// clock is caller-supplied and need not be monotonic, so one call arriving with
+// a far-future reading would otherwise park lastSweep there and suppress every
+// later sweep until real time caught up.
+func TestInMemoryCredentialStoreSweepSurvivesAClockJump(t *testing.T) {
+	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := base
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return clock })
+	s := NewInMemoryCredentialStore()
+
+	// One call lands with a clock five years ahead, on an empty store.
+	ahead := platform.WithTimeProvider(t.Context(), func() time.Time { return base.AddDate(5, 0, 0) })
+	if _, _, err := s.Get(ahead, CredentialKey{UserID: "other", Key: "res"}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	// Entries written on the real clock, short-lived.
+	for i := range 3 {
+		key := CredentialKey{UserID: "gone-" + strconv.Itoa(i), Key: "res"}
+		if err := s.Set(ctx, key, BearerCredential{Token: "t"}, clock.Add(time.Minute)); err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+	}
+
+	// An hour later on the real clock, they are all expired and a sweep is due.
+	// Nobody ever reads their keys, so the sweep is the only thing that can
+	// remove them.
+	clock = clock.Add(time.Hour)
+	if _, _, err := s.Get(ctx, CredentialKey{UserID: "other", Key: "res"}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := s.size(); got != 0 {
+		t.Errorf("store holds %d entries, want them swept once the clock came back", got)
+	}
+}
+
+// An entry's expiry is compared against later clock readings, so it must not
+// carry a monotonic reading one of them might lack: the monotonic clock stops
+// across a suspend and the wall clock does not, and two entries in different
+// clock domains then expire on different timelines.
+func TestInMemoryCredentialStoreSetStripsMonotonic(t *testing.T) {
+	s := NewInMemoryCredentialStore()
+	key := CredentialKey{UserID: "u", Key: "res"}
+	// time.Now() carries a monotonic reading; Round(0) is the only way to drop it.
+	if err := s.Set(t.Context(), key, BearerCredential{Token: "t"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	s.mu.Lock()
+	stored := s.entries[key].expiresAt
+	s.mu.Unlock()
+	// == compares the monotonic reading too, so this holds only once it is gone.
+	if stored != stored.Round(0) {
+		t.Errorf("stored expiry %v carries a monotonic reading", stored)
+	}
+}
