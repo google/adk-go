@@ -24,7 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	llmagentinternal "google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -38,13 +38,6 @@ const toolsetResolveTimeout = 10 * time.Second
 // declarer is implemented by tools the model calls as functions.
 type declarer interface {
 	Declaration() *genai.FunctionDeclaration
-}
-
-// genaiToolProvider is implemented by tools with a native [genai.Tool]
-// representation, such as Google Search, which the model executes itself rather
-// than calling as a function.
-type genaiToolProvider interface {
-	GenaiTool() *genai.Tool
 }
 
 // GetAppInfo describes an app without running it: its root agent, and every
@@ -93,8 +86,8 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		// Record before recursing so that a cycle terminates here.
 		agents[a.Name()] = info
 
-		if llmAgent, ok := a.(llmagentinternal.Agent); ok {
-			state := llmagentinternal.Reveal(llmAgent)
+		if llmAgent, ok := a.(llminternal.Agent); ok {
+			state := llminternal.Reveal(llmAgent)
 			// An agent whose instruction comes from an InstructionProvider
 			// reports an empty instruction: resolving it needs session state
 			// that does not exist outside of an invocation.
@@ -115,27 +108,26 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 	return agents
 }
 
-// agentTools describes the tools an LLM agent exposes to the model.
+// agentTools describes the tools an LLM agent exposes to the model, as function
+// declarations.
 //
-// Tools that are neither function-callable nor native Gemini tools are omitted:
-// they shape the request (by injecting memory or examples into the prompt, for
-// example) rather than offering the model anything to call.
-func agentTools(ctx context.Context, appName, agentName string, state *llmagentinternal.State) []*genai.Tool {
+// Tools without a declaration are omitted, matching adk-python. Those are the
+// tools the model does not call as functions: built-in Gemini tools such as
+// Google Search, which the model executes itself, and tools that only shape the
+// request by injecting memory or examples into the prompt.
+func agentTools(ctx context.Context, appName, agentName string, state *llminternal.State) []*genai.Tool {
 	tools := resolveTools(ctx, appName, agentName, state)
 
 	infos := make([]*genai.Tool, 0, len(tools))
 	for _, t := range tools {
-		switch v := t.(type) {
-		case declarer:
-			if decl := v.Declaration(); decl != nil {
-				infos = append(infos, &genai.Tool{
-					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-				})
-			}
-		case genaiToolProvider:
-			if gt := v.GenaiTool(); gt != nil {
-				infos = append(infos, gt)
-			}
+		d, ok := t.(declarer)
+		if !ok {
+			continue
+		}
+		if decl := d.Declaration(); decl != nil {
+			infos = append(infos, &genai.Tool{
+				FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+			})
 		}
 	}
 	return infos
@@ -144,7 +136,7 @@ func agentTools(ctx context.Context, appName, agentName string, state *llmagenti
 // resolveTools returns an agent's static tools followed by the tools of each of
 // its toolsets. A toolset that fails to resolve is logged and skipped: a
 // description of the rest of the app is more useful than no description at all.
-func resolveTools(ctx context.Context, appName, agentName string, state *llmagentinternal.State) []tool.Tool {
+func resolveTools(ctx context.Context, appName, agentName string, state *llminternal.State) []tool.Tool {
 	tools := slices.Clone(state.Tools)
 	if len(state.Toolsets) == 0 {
 		return tools

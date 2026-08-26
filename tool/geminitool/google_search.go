@@ -37,20 +37,11 @@ func (s GoogleSearch) Description() string {
 	return "Performs a Google search to retrieve information from the web."
 }
 
-// GenaiTool returns the native [genai.Tool] representation of this tool.
-//
-// GoogleSearch is executed by the model rather than called as a function, so it
-// has no function declaration. This method lets callers that describe an
-// agent's tools report it in its own form instead of omitting it.
-func (s GoogleSearch) GenaiTool() *genai.Tool {
-	return &genai.Tool{
-		GoogleSearch: &genai.GoogleSearch{},
-	}
-}
-
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (s GoogleSearch) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return setTool(req, s.GenaiTool())
+	return setTool(req, &genai.Tool{
+		GoogleSearch: &genai.GoogleSearch{},
+	})
 }
 
 // IsLongRunning implements tool.Tool.
