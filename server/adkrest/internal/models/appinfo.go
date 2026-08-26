@@ -36,8 +36,7 @@ type AppInfo struct {
 // AgentInfo describes a single agent within an app.
 //
 // Agents that are not LLM agents report an empty Instruction and no Tools,
-// because they have neither. Tools is never nil: the wire contract requires the
-// field, and a nil slice would marshal to null.
+// because they have neither.
 type AgentInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
