@@ -200,8 +200,12 @@ var (
 	clientNonce = newClientNonce()
 )
 
+// nonceBytes is the width of clientNonce. 128 bits makes a collision between two
+// processes not worth reasoning about.
+const nonceBytes = 16
+
 func newClientNonce() string {
-	var b [16]byte
+	var b [nonceBytes]byte
 	// Documented never to fail, and it panics rather than returning short.
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
@@ -294,6 +298,10 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 // [auth.CredentialStore.Delete] to invalidate that credential ahead of its
 // expiry, on a consent revocation or a logout.
 //
+// Pass the same [ProviderScheme] value the provider was built with. A scheme
+// differing in any field names a different entry, and Delete of a key nothing
+// is filed under succeeds silently, so a mistake here reads as "already gone".
+//
 // It is meaningful only to the process that produced c, and only for as long as
 // c is alive: a Client is one cache dimension, so rebuilding it strands whatever
 // the old one cached.
@@ -351,10 +359,11 @@ type Request struct {
 type Retrieval struct {
 	// Credential authenticates outbound requests as the end user.
 	Credential auth.Credential
-	// ExpiresAt is the credential's expiry, or the zero time when the service
-	// reports no lifetime — which it does when the token may be permanent, or
-	// when it cannot say. Either way the lifetime is unknown, so a caller must
-	// not treat the zero value as "expires now" and must not cache it.
+	// ExpiresAt is the credential's expiry, or the zero time when the lifetime is
+	// unknown: the service reports none when the token may be permanent or when
+	// it cannot say, and one it reports that cannot be parsed arrives here the
+	// same way. A caller must not read the zero value as "expires now", and must
+	// not cache a credential carrying it.
 	ExpiresAt time.Time
 }
 
@@ -495,11 +504,15 @@ func (rejectedOutcome) isOutcome() {}
 type credentialPayload struct {
 	Token  string `json:"token"`
 	Header string `json:"header"`
-	// ExpireTime is RFC 3339, and empty when the service reports no expiry. The
-	// name is the one in the published API surface
+	// ExpireTime is RFC 3339, and empty when the service reports no expiry.
+	//
+	// For Agent Identity the name is the one in the published API surface
 	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
 	// Success.expireTime), which also warns that the token may be revoked, or
-	// expire slightly early through clock skew, before the time it names.
+	// expire slightly early through clock skew, before the time it names. The IAM
+	// Connector service publishes no discovery document to anonymous callers, so
+	// its field is taken to be the same name; if it is not, a connector
+	// credential simply reports no lifetime and is never cached.
 	ExpireTime string `json:"expireTime"`
 }
 

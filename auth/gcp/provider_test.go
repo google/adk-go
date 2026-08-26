@@ -959,11 +959,16 @@ func TestProviderCacheIgnoresScopeOrder(t *testing.T) {
 // recordingStore reports every call and what it was handed, and can fail either
 // direction.
 type recordingStore struct {
-	inner   auth.CredentialStore
+	inner  auth.CredentialStore
+	getErr error
+	setErr error
+
+	// CredentialStore is documented safe for concurrent use, so the double is too
+	// — otherwise the first test to drive one from two goroutines reports a race
+	// in the harness rather than a finding about the code.
+	mu      sync.Mutex
 	sets    int
 	gets    int
-	getErr  error
-	setErr  error
 	nilOnce bool // return a hit carrying no credential on the first Get
 
 	lastKey     auth.CredentialKey
@@ -971,6 +976,8 @@ type recordingStore struct {
 }
 
 func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gets++
 	if s.getErr != nil {
 		return nil, false, s.getErr
@@ -983,6 +990,8 @@ func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.
 }
 
 func (s *recordingStore) Set(ctx context.Context, key auth.CredentialKey, cred auth.Credential, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.sets++
 	s.lastKey, s.lastExpires = key, expiresAt
 	if s.setErr != nil {
@@ -1140,6 +1149,10 @@ func TestProviderCachedExpiry(t *testing.T) {
 		want       time.Time // zero means: must not be cached
 	}{
 		{"honored as reported", "2030-01-01T00:05:00Z", now.Add(5 * time.Minute)},
+		// A short-lived credential is still worth caching. Together with the
+		// boundary cases below this pins auth.ExpirySkew to something under a
+		// minute: widen it and this stops being cached at all.
+		{"a minute of life left", "2030-01-01T00:01:00Z", now.Add(time.Minute)},
 		// Inside the margin the store applies, so the entry would be written and
 		// then refused on the very next read: a guaranteed-dead write.
 		{"less left than the store's margin", "2030-01-01T00:00:05Z", time.Time{}},

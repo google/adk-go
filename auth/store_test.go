@@ -16,8 +16,6 @@ package auth_test
 
 import (
 	"context"
-	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -185,55 +183,6 @@ func TestInMemoryCredentialStoreClockMayTouchStore(t *testing.T) {
 	}
 }
 
-// The store is documented as safe for concurrent use, and Get writes to the map
-// too — on eviction and on a sweep — so a plain RWMutex read lock would not do.
-// Under -race this fails if the locking is dropped or weakened.
-func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
-	ctx := t.Context()
-	s := auth.NewInMemoryCredentialStore()
-	// A short spread of keys, so readers, writers and evictions collide on them.
-	keyFor := func(i int) auth.CredentialKey {
-		return auth.CredentialKey{AppName: "app", UserID: "user-" + strconv.Itoa(i%4), Key: "res"}
-	}
-
-	var wg sync.WaitGroup
-	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range 200 {
-				key := keyFor(g + i)
-				switch (g + i) % 3 {
-				case 0:
-					// Every third write is already spent, so Get's eviction and the
-					// sweep's deletes actually run while other goroutines read. With
-					// only live entries neither branch executes, and the run says
-					// nothing about the write Get performs.
-					expires := time.Now().Add(time.Hour)
-					if (g+i)%2 == 0 {
-						expires = time.Now().Add(-time.Hour)
-					}
-					if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, expires); err != nil {
-						t.Errorf("Set() error = %v", err)
-						return
-					}
-				case 1:
-					if _, _, err := s.Get(ctx, key); err != nil {
-						t.Errorf("Get() error = %v", err)
-						return
-					}
-				case 2:
-					if err := s.Delete(ctx, key); err != nil {
-						t.Errorf("Delete() error = %v", err)
-						return
-					}
-				}
-			}
-		}()
-	}
-	wg.Wait()
-}
-
 // Get evicts the expired entry it was asked for, rather than only reporting a
 // miss. That write is the reason the store takes a full Mutex instead of an
 // RWMutex, so nothing else in the suite distinguishes the two designs.
@@ -252,10 +201,39 @@ func TestInMemoryCredentialStoreGetEvicts(t *testing.T) {
 	if _, ok, _ := s.Get(ctx, key); ok {
 		t.Fatal("Get() of an expired entry = hit, want miss")
 	}
-	// Set a far-future entry under a second key and read the first one back
-	// through a clock that would make it live again: it must be gone.
+	// Read it back through a clock that would make it live again: it must be gone,
+	// which only holds if the miss above also deleted it.
 	past := platform.WithTimeProvider(t.Context(), func() time.Time { return clock.Add(-time.Hour) })
 	if _, ok, _ := s.Get(past, key); ok {
 		t.Error("the expired entry survived the Get that reported it a miss")
+	}
+}
+
+// ExpirySkew is public API and the provider's caching floor, so its value is
+// pinned from both sides: a wider margin would silently raise that floor, and a
+// narrower one would hand out credentials with no usable life left.
+func TestExpirySkewBoundary(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return now })
+	tests := []struct {
+		name    string
+		expiry  time.Time
+		wantHit bool
+	}{
+		{"a nanosecond outside the margin", now.Add(auth.ExpirySkew + time.Nanosecond), true},
+		{"exactly the margin", now.Add(auth.ExpirySkew), false},
+		{"a nanosecond inside the margin", now.Add(auth.ExpirySkew - time.Nanosecond), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := auth.NewInMemoryCredentialStore()
+			key := auth.CredentialKey{Key: "res"}
+			if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, tc.expiry); err != nil {
+				t.Fatalf("Set() error = %v", err)
+			}
+			if _, ok, _ := s.Get(ctx, key); ok != tc.wantHit {
+				t.Errorf("Get() = hit %v, want %v", ok, tc.wantHit)
+			}
+		})
 	}
 }

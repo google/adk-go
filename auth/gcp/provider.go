@@ -78,7 +78,10 @@ type ProviderConfig struct {
 	// The cost of caching is staleness. A credential revoked before it expires
 	// keeps being served until the cached entry does, which is the service's
 	// expiry or an hour, whichever comes first. To invalidate one sooner, pass
-	// [Client.CacheKey] to [auth.CredentialStore.Delete].
+	// [Client.CacheKey] to [auth.CredentialStore.Delete] — which needs a Client,
+	// so set one here rather than leaving it to the lazy default if you intend to
+	// invalidate at all. The provider does not expose the Client it builds for
+	// itself.
 	Store auth.CredentialStore
 }
 
@@ -101,8 +104,8 @@ var ErrClientUnavailable = errors.New("gcp: default credentials client unavailab
 
 // ErrNoActingUser means the provider could not determine the acting end user,
 // either because the context is not an ADK context or because the invocation
-// carries no user. Unlike adk-python, which degrades such a turn into an auth
-// request, the Go provider fails the request: no user, no credential.
+// carries no user. No user, no credential — the same call adk-python makes,
+// which raises on a missing user id rather than degrading the turn.
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
@@ -206,12 +209,15 @@ const maxCachedLifetime = time.Hour
 // delimiters inside a scope or a URI can collide two different schemes. Sorting
 // the scopes makes the slot independent of the caller's ordering.
 //
-// adk-python's credential key is also a digest rather than a joined string —
-// two SHA-256s truncated to 16 hex characters, over canonical JSON of the auth
-// scheme and of the credential used to obtain it (auth_tool.py,
-// _stable_model_digest). This one covers the same ground by a different route:
-// Go cannot digest the credential, since a Client's own credentials are opaque
-// to this package, so it names the Client instead.
+// There is no adk-python original to match. Python's credential service is not
+// on this provider's path at all: GcpAuthProviderScheme is a CustomAuthScheme,
+// and CredentialManager returns the provider's credential directly without ever
+// loading or saving one (credential_manager.py). Caching GCP credentials is a Go
+// addition, and this slot is its own design. The nearest analogue is
+// _stable_model_digest (auth_tool.py), which hashes canonical JSON of the auth
+// scheme and of the credential used to obtain it — the second of which Go cannot
+// do, a Client's credentials being opaque to this package, hence naming the
+// Client instead.
 func cacheSlot(c *Client, s ProviderScheme) string {
 	scopes := slices.Clone(s.Scopes)
 	slices.Sort(scopes)

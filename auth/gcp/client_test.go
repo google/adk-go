@@ -110,6 +110,17 @@ func TestRetrieveCredential(t *testing.T) {
 			wantBearer: "tok",
 		},
 		{
+			// The connector reads its expiry from the operation's response, a
+			// different path from Agent Identity's. Without this case, dropping the
+			// expiry there leaves the suite green and a connector-backed provider
+			// silently never caches.
+			name:       "connector bearer with expiry",
+			resource:   connectorResource,
+			bodies:     []string{`{"done":true,"response":{"token":"tok","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`},
+			wantBearer: "tok",
+			wantExpiry: "2999-01-01T00:00:00Z",
+		},
+		{
 			name:       "connector polls consent pending then succeeds",
 			resource:   connectorResource,
 			bodies:     []string{`{"metadata":{"@type":"x","consentPending":{}}}`, `{"done":true,"response":{"token":"tok","header":"Authorization: Bearer"}}`},
