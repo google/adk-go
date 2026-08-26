@@ -149,8 +149,8 @@ func TestAppInfoHandler(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools is %T, want an array", support["tools"])
 	}
-	if len(tools) != 2 {
-		t.Fatalf("len(tools) = %d, want 2 (a function tool and a built-in tool)", len(tools))
+	if len(tools) != 1 {
+		t.Fatalf("len(tools) = %d, want 1 (the built-in tool has no declaration)", len(tools))
 	}
 }
 

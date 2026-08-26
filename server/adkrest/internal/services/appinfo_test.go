@@ -152,7 +152,7 @@ func TestGetAppInfo(t *testing.T) {
 			},
 		},
 		{
-			name: "native Gemini tools are reported in their own form",
+			name: "built-in tools without a declaration are omitted",
 			root: func(t *testing.T) agent.Agent {
 				return newLLMAgent(t, llmagent.Config{
 					Name:        "searcher",
@@ -163,18 +163,11 @@ func TestGetAppInfo(t *testing.T) {
 			},
 			wantAgents: []string{"searcher"},
 			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				tools := agents["searcher"].Tools
-				if len(tools) != 2 {
-					t.Fatalf("len(Tools) = %d, want 2 (the built-in tool must not be dropped)", len(tools))
+				if diff := cmp.Diff([]string{"get_weather"}, toolNames(agents["searcher"].Tools)); diff != "" {
+					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 				}
-				var gotSearch bool
-				for _, tl := range tools {
-					if tl.GoogleSearch != nil {
-						gotSearch = true
-					}
-				}
-				if !gotSearch {
-					t.Error("no tool reported GoogleSearch; the built-in tool was dropped or mis-serialized")
+				if got := len(agents["searcher"].Tools); got != 1 {
+					t.Errorf("len(Tools) = %d, want 1", got)
 				}
 			},
 		},
