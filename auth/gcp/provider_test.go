@@ -1468,3 +1468,79 @@ func TestProviderRefreshServesACredentialSomebodyElseAlreadyFetched(t *testing.T
 		t.Errorf("service calls = %d, want 2 (the straggler must not mint again)", calls)
 	}
 }
+
+// A refresh whose replacement cannot be cached, and a refresh that fails, must
+// both leave the rejected credential gone. Leaving it in place means the very
+// next request is served the credential the downstream just refused, for the
+// rest of its cached life.
+func TestProviderRefreshEvictsWhatItCannotReplace(t *testing.T) {
+	tests := []struct {
+		name string
+		// refresh is what the service does on the second call.
+		refresh func(w http.ResponseWriter)
+		wantErr bool
+	}{
+		{
+			name: "the replacement has no usable lifetime",
+			refresh: func(w http.ResponseWriter) {
+				_, _ = io.WriteString(w, `{"success":{"token":"tok2","header":"Authorization: Bearer"}}`)
+			},
+		},
+		{
+			name:    "the refresh fails",
+			refresh: func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) },
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				if n == 1 {
+					_, _ = io.WriteString(w, fmt.Sprintf(
+						`{"success":{"token":"tok1","header":"Authorization: Bearer","expireTime":%q}}`,
+						time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+					return
+				}
+				tc.refresh(w)
+			}))
+			defer srv.Close()
+
+			client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			store := auth.NewInMemoryCredentialStore()
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+				Scheme: gcp.ProviderScheme{Name: testResource},
+				Client: client,
+				Store:  store,
+			})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			ctx := adkContext(t, "user-1")
+			first, err := p.Credential(ctx)
+			if err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, "app", "user-1")
+			if _, ok, _ := store.Get(ctx, key); !ok {
+				t.Fatal("the first credential was not cached, so this case proves nothing")
+			}
+
+			_, err = p.(auth.RefreshingProvider).Refresh(ctx, first)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("Refresh() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if _, ok, _ := store.Get(ctx, key); ok {
+				t.Error("the rejected credential is still cached, so the next request is served it again")
+			}
+		})
+	}
+}

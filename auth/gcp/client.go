@@ -567,11 +567,15 @@ type retrieveRequest struct {
 	Scopes      []string `json:"scopes,omitempty"`
 	ContinueURI string   `json:"continueUri,omitempty"`
 	// ForceRefreshToken carries the token that was just rejected, which asks the
-	// service to mint a replacement rather than return the same one. Both services
-	// take it under this name
+	// service to mint a replacement rather than return the same one.
+	//
+	// Agent Identity takes it under this name, and documents that a caller seeing
+	// a PERMISSION_DENIED should retry with it set
 	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
-	// RetrieveCredentialsRequest.forceRefreshToken); the older boolean
-	// force_refresh is gone from the API.
+	// RetrieveCredentialsRequest.forceRefreshToken). The IAM Connector publishes
+	// no discovery document to anonymous callers, so its field is assumed to be
+	// the same; if it is not, the service returns the credential it already had
+	// and the retry fails as it would have anyway.
 	ForceRefreshToken string `json:"forceRefreshToken,omitempty"`
 }
 

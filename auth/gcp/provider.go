@@ -241,8 +241,10 @@ type provider struct {
 	mu      sync.Mutex
 	client  *Client
 	pending *clientInit // in-flight lazy init, shared by concurrent callers
-	// refreshed is when each key was last force-refreshed, for the cooldown.
-	refreshed map[auth.CredentialKey]time.Time
+	// refreshed is when each key was last force-refreshed, for the cooldown, and
+	// refreshSwept paces the removal of entries past it.
+	refreshed    map[auth.CredentialKey]time.Time
+	refreshSwept time.Time
 }
 
 // clientInit is one attempt at building the default client. Its fields are
@@ -320,15 +322,19 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
 		return cred, nil
 	}
-	// Before anything that can fail: whatever happens next, the credential the
-	// downstream just refused must not be served again. A refresh that errors, or
-	// that returns something too short-lived to cache, would otherwise leave it
-	// in place.
-	_ = p.store.Delete(ctx, key)
 	if !p.allowRefresh(key) {
+		// Nothing will replace it, so drop it: a credential the downstream refused
+		// must not be served again. The next request then resolves normally, which
+		// costs what every request cost before there was a cache.
+		_ = p.store.Delete(ctx, key)
 		return nil, fmt.Errorf("gcp: refusing to force-refresh %s twice inside %v", p.scheme.Name, refreshCooldown)
 	}
-	return p.fetch(ctx, client, key, rejectedToken)
+	cred, err := p.fetch(ctx, client, key, rejectedToken)
+	if err != nil {
+		_ = p.store.Delete(ctx, key)
+		return nil, err
+	}
+	return cred, nil
 }
 
 // refreshCooldown is the shortest interval between two forced refreshes of one
@@ -338,22 +344,36 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 const refreshCooldown = 30 * time.Second
 
 // allowRefresh reports whether key may be force-refreshed now, recording the
-// attempt when it may. Entries older than the cooldown are dropped as it goes,
-// so the map holds only keys refreshed within one cooldown window.
+// attempt when it may.
+//
+// The attempt is recorded whether or not the fetch that follows succeeds. The
+// cooldown protects the credential service, and a service failing every forced
+// refresh is precisely the one that must not be asked again at the downstream's
+// rate.
+//
+// Only key's own entry is examined per call, and the whole map is swept at most
+// once per cooldown: the sweep is O(entries), and this lock is the one every
+// credential resolution takes, so a scan on a fixed fraction of calls would put
+// the process's whole auth path behind it. Same reasoning, same shape, as
+// InMemoryCredentialStore's own sweep.
 func (p *provider) allowRefresh(key auth.CredentialKey) bool {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for k, at := range p.refreshed {
-		if now.Sub(at) >= refreshCooldown {
-			delete(p.refreshed, k)
-		}
-	}
-	if _, recent := p.refreshed[key]; recent {
+	if at, seen := p.refreshed[key]; seen && now.Sub(at) < refreshCooldown {
 		return false
+	}
+	if !p.refreshSwept.IsZero() && now.Sub(p.refreshSwept) >= refreshCooldown {
+		for k, at := range p.refreshed {
+			if now.Sub(at) >= refreshCooldown {
+				delete(p.refreshed, k)
+			}
+		}
+		p.refreshSwept = now
 	}
 	if p.refreshed == nil {
 		p.refreshed = make(map[auth.CredentialKey]time.Time)
+		p.refreshSwept = now
 	}
 	p.refreshed[key] = now
 	return true
@@ -398,7 +418,12 @@ func (p *provider) fetch(ctx context.Context, client *Client, key auth.Credentia
 	if err != nil {
 		return nil, err
 	}
-	p.cache(ctx, key, r)
+	if !p.cache(ctx, key, r) && priorToken != "" {
+		// A forced refresh whose result is not cacheable must still evict what it
+		// replaced, or the credential the downstream refused stays and is served
+		// again for the rest of its cached life.
+		_ = p.store.Delete(ctx, key)
+	}
 	return r.Credential, nil
 }
 
@@ -439,16 +464,18 @@ func credentialToken(c auth.Credential) string {
 // Wall clock, not platform.Now: what is being decided is when a real credential
 // stops working, which no simulated clock changes. [auth.CredentialStore.Set]
 // says the same of the value written here.
-func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
+// It reports whether an entry was written, which a forced refresh needs: a
+// result it cannot cache must not leave the rejected credential behind.
+func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) bool {
 	now := time.Now()
 	if !r.ExpiresAt.After(now.Add(auth.ExpirySkew)) {
-		return
+		return false
 	}
 	expiresAt := r.ExpiresAt
 	if capped := now.Add(maxCachedLifetime); expiresAt.After(capped) {
 		expiresAt = capped
 	}
-	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
+	return p.store.Set(ctx, key, r.Credential, expiresAt) == nil
 }
 
 // resolveClient returns the configured client, building a default one (backed by
