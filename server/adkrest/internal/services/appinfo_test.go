@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
 type weatherArgs struct {
@@ -359,5 +361,107 @@ func TestGetAppInfo(t *testing.T) {
 func TestGetAppInfoNilRoot(t *testing.T) {
 	if got := services.GetAppInfo(context.Background(), "test_app", nil); got != nil {
 		t.Errorf("GetAppInfo(nil root) = %v, want nil", got)
+	}
+}
+
+// mcpEchoInput is the argument struct of the tool served by the in-memory MCP
+// server below.
+type mcpEchoInput struct {
+	Text string `json:"text" jsonschema:"the text to echo"`
+}
+
+type mcpEchoOutput struct {
+	Echoed string `json:"echoed"`
+}
+
+func mcpEcho(ctx context.Context, req *mcp.CallToolRequest, in mcpEchoInput) (*mcp.CallToolResult, mcpEchoOutput, error) {
+	return nil, mcpEchoOutput{Echoed: in.Text}, nil
+}
+
+// TestGetAppInfoWithMCPToolset covers a real remote-style toolset: tools are
+// discovered over the MCP protocol at request time rather than being known
+// statically. The server runs in memory, so the test stays offline.
+func TestGetAppInfoWithMCPToolset(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "echo_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "Echoes the given text."}, mcpEcho)
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatalf("failed to connect MCP server: %v", err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+	if err != nil {
+		t.Fatalf("mcptoolset.New failed: %v", err)
+	}
+
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "echo_agent",
+		Description: "Echoes text.",
+		Instruction: "Use the echo tool.",
+		Tools:       []tool.Tool{newWeatherTool(t, "local_tool")},
+		Toolsets:    []tool.Toolset{ts},
+	})
+
+	info := services.GetAppInfo(t.Context(), "mcp_app", root)
+	if info == nil {
+		t.Fatal("GetAppInfo returned nil")
+	}
+
+	got := toolNames(info.Agents["echo_agent"].Tools)
+	if diff := cmp.Diff([]string{"echo", "local_tool"}, got); diff != "" {
+		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
+	}
+
+	// The declaration must survive the MCP round trip, schema included.
+	for _, tl := range info.Agents["echo_agent"].Tools {
+		decl := tl.FunctionDeclarations[0]
+		if decl.Name != "echo" {
+			continue
+		}
+		if decl.Description != "Echoes the given text." {
+			t.Errorf("echo description = %q, want %q", decl.Description, "Echoes the given text.")
+		}
+		if decl.Parameters == nil && decl.ParametersJsonSchema == nil {
+			t.Error("echo declaration has no parameter schema")
+		}
+	}
+}
+
+// TestGetAppInfoMCPToolsetContextCancelled covers a toolset that cannot be
+// reached in time: the agent must still be described, minus its toolset's
+// tools. It also pins the context propagation -- the request context reaches
+// ts.Tools, so a client disconnect stops toolset resolution.
+func TestGetAppInfoMCPToolsetContextCancelled(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "echo_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "Echoes the given text."}, mcpEcho)
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatalf("failed to connect MCP server: %v", err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+	if err != nil {
+		t.Fatalf("mcptoolset.New failed: %v", err)
+	}
+
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "echo_agent",
+		Description: "Echoes text.",
+		Instruction: "Use the echo tool.",
+		Tools:       []tool.Tool{newWeatherTool(t, "local_tool")},
+		Toolsets:    []tool.Toolset{ts},
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	info := services.GetAppInfo(ctx, "mcp_app", root)
+	if info == nil {
+		t.Fatal("GetAppInfo returned nil")
+	}
+	if diff := cmp.Diff([]string{"local_tool"}, toolNames(info.Agents["echo_agent"].Tools)); diff != "" {
+		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}
 }
