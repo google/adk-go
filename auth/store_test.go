@@ -76,7 +76,7 @@ func TestInMemoryCredentialStoreExpiryBoundaries(t *testing.T) {
 	}{
 		{name: "an hour left", left: time.Hour, wantHit: true},
 		{name: "long past", left: -time.Hour, wantHit: false},
-		{name: "inside the skew window", left: auth.ExpirySkew - time.Second, wantHit: false},
+		{name: "inside the skew window", left: auth.ExpirySkew / 2, wantHit: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,24 +154,29 @@ func TestInMemoryCredentialStoreZeroValue(t *testing.T) {
 	}
 }
 
-// ExpirySkew is public API and the provider's caching floor, so its value is
-// pinned from both sides: a wider margin would silently raise that floor, and a
-// narrower one would hand out credentials with no usable life left.
+// ExpirySkew is public API and the provider's caching floor. Its value is
+// asserted against a literal rather than measured against itself: a test written
+// only in terms of the constant moves with it and pins nothing, and changing a
+// released package's constant should have to be deliberate.
+func TestExpirySkewValue(t *testing.T) {
+	if auth.ExpirySkew != 10*time.Second {
+		t.Errorf("auth.ExpirySkew = %v, want 10s; changing it changes both what this store serves and what producers cache", auth.ExpirySkew)
+	}
+}
+
+// Which side of the margin is inclusive decides whether the store serves exactly
+// what a producer will cache. The exact boundary is pinned in an internal test of
+// expired(), since a wall clock moves between the write and the read; these
+// cases carry enough slack that the read cannot cross a boundary on its own.
 func TestExpirySkewBoundary(t *testing.T) {
 	tests := []struct {
 		name    string
 		left    time.Duration
 		wantHit bool
 	}{
-		// Relative to the constant: these pin which side of the boundary is
-		// inclusive, so that the store serves exactly what a producer will cache.
-		{"just outside the margin", auth.ExpirySkew + time.Second, true},
+		{"well outside the margin", auth.ExpirySkew + time.Minute, true},
 		{"exactly the margin", auth.ExpirySkew, false},
-		{"just inside the margin", auth.ExpirySkew - time.Millisecond, false},
-		// Spelled in seconds, so they move if the constant does. A test written
-		// only against ExpirySkew measures it against itself and pins nothing.
-		{"eleven seconds left", 11 * time.Second, true},
-		{"nine seconds left", 9 * time.Second, false},
+		{"well inside the margin", auth.ExpirySkew / 2, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -521,9 +521,23 @@ type credentialPayload struct {
 	// Success.expireTime), which also warns that the token may be revoked, or
 	// expire slightly early through clock skew, before the time it names. The IAM
 	// Connector service publishes no discovery document to anonymous callers, so
-	// its field is taken to be the same name; if it is not, a connector
-	// credential simply reports no lifetime and is never cached.
-	ExpireTime string `json:"expireTime"`
+	// its field is assumed to be the same name and shape; if it is not, a
+	// connector credential reports no lifetime and is never cached.
+	ExpireTime lenientTime `json:"expireTime"`
+}
+
+// lenientTime is a JSON string that declines to fail. Only the cache reads this
+// field, and the IAM Connector's shape for it is an assumption, so a value of an
+// unexpected type must cost a cache entry rather than the whole retrieval — the
+// credential itself is perfectly usable without an expiry.
+type lenientTime string
+
+func (t *lenientTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*t = lenientTime(s)
+	}
+	return nil
 }
 
 // parseExpireTime parses the service's expiry into a time.Time, collapsing an
@@ -531,11 +545,11 @@ type credentialPayload struct {
 // "lifetime unknown" and decline to cache, which is the safe reading of both:
 // the service omits the field when the token may be permanent or when it cannot
 // say, and a value it sent but we cannot read tells us no more than silence.
-func parseExpireTime(s string) time.Time {
-	if s == "" {
+func parseExpireTime(v lenientTime) time.Time {
+	if v == "" {
 		return time.Time{}
 	}
-	t, err := time.Parse(time.RFC3339, s)
+	t, err := time.Parse(time.RFC3339, string(v))
 	if err != nil {
 		return time.Time{}
 	}

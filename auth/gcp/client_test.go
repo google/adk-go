@@ -110,6 +110,16 @@ func TestRetrieveCredential(t *testing.T) {
 			wantBearer: "tok",
 		},
 		{
+			// The connector's expireTime shape is an assumption — the service
+			// publishes no discovery document — so a value of another JSON type must
+			// cost the cache entry, not the credential. Decoding it strictly would
+			// fail the whole retrieval and take auth down with it.
+			name:       "connector expireTime of an unexpected JSON type",
+			resource:   connectorResource,
+			bodies:     []string{`{"done":true,"response":{"token":"tok","header":"Authorization: Bearer","expireTime":{"seconds":1798761600}}}`},
+			wantBearer: "tok",
+		},
+		{
 			// The connector reads its expiry from the operation's response, a
 			// different path from Agent Identity's. Without this case, dropping the
 			// expiry there leaves the suite green and a connector-backed provider

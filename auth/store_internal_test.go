@@ -96,9 +96,11 @@ func TestInMemoryCredentialStoreSweepIgnoresTheCallersClock(t *testing.T) {
 // The store is documented safe for concurrent use, and Get writes to the map on
 // eviction while the sweep deletes from it, so a plain RWMutex read lock would
 // not do. The pacing is shortened so the sweep body runs while readers are in
-// flight — at its default it fires once, on an empty map, before any of these
-// goroutines start — but not to zero, which would sweep every expired entry
-// before any Get could reach one and leave the eviction branch uncovered.
+// flight: left alone it fires once, on an empty map, before any of these
+// goroutines start. Shortened, but not to the point of sweeping on every call,
+// which would remove every expired entry before a Get could reach one and leave
+// the eviction branch with no concurrent coverage. Note that a zero sweepEvery
+// is the sentinel for the one-minute default, not for "always".
 func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 	ctx := t.Context()
 	s := NewInMemoryCredentialStore()
