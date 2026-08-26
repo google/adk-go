@@ -59,6 +59,14 @@ type CredentialKey struct {
 	Key string
 }
 
+// The same warning applies to a store that flattens a CredentialKey into one
+// identifier of its own — a row key, a filename, a cache line. AppName and
+// UserID come off the request and ADK does not authenticate either, so joining
+// the three fields on a separator lets {app "acme", user "bob|X"} and
+// {app "acme|bob", user "X"} name one entry, and one end user is then served
+// another's credential. Length-prefix or digest them, as auth/gcp does for the
+// slot itself.
+
 // CredentialStore caches resolved credentials across calls, keyed by
 // [CredentialKey]. It exists so network-backed providers (e.g. auth/gcp) avoid a
 // credential-service round-trip on every request; self-caching providers
