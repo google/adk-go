@@ -100,8 +100,23 @@ var (
 	}
 )
 
+// maxConsecutiveThoughtOnlyTurns bounds how many thought-only ("thinking")
+// turns in a row the flow accepts before giving up, so the model is re-called
+// at most maxConsecutiveThoughtOnlyTurns-1 times waiting for an answer. A model
+// that keeps emitting thoughts without ever surfacing an answer would otherwise
+// spin forever, appending an event per turn and re-sending an ever-growing
+// history. Any turn that is not a final response resets the count.
+//
+// This is a safety net against a degenerate model, not a tuning knob: it is
+// deliberately not configurable, because a caller has no basis for choosing a
+// value. It is set high on purpose. A bound that is too low never requests an
+// answer the model was about to give, which is worse than a few wasted calls
+// before a degenerate model is cut off.
+const maxConsecutiveThoughtOnlyTurns = 10
+
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		thoughtOnlyTurns := 0
 		for {
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
@@ -115,10 +130,25 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			// A thought-only ("thinking") turn reports as final but has no
-			// answer; don't stop on it — call the model again.
-			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
+			if lastEvent == nil {
 				return
+			}
+			if lastEvent.IsFinalResponse() {
+				// A thought-only ("thinking") turn reports as final but has no
+				// answer; don't stop on it — call the model again. Give up once
+				// the model has produced only thoughts too many times in a row,
+				// leaving the last thinking event as the result.
+				if !isThoughtOnlyTurn(lastEvent) {
+					return
+				}
+				thoughtOnlyTurns++
+				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
+					return
+				}
+			} else {
+				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
 				// We may have reached max token limit during streaming mode.
@@ -799,7 +829,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		// Streaming mode comes from the invocation context's RunConfig rather than
+		// the runconfig context value: agent.Run() may be invoked directly (outside
+		// the runner), in which case no runconfig is stored in the Go context and
+		// runconfig.FromContext returns nil (issue #586).
+		useStream := false
+		if rc := ctx.RunConfig(); rc != nil {
+			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
@@ -1399,7 +1436,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -1407,6 +1446,22 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions.
+// This is a deliberate divergance from adk-python which uses last-write-wins.
+func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		return maps.Clone(src)
+	}
+	for key, value := range src {
+		if dstVal, ok := dst[key]; ok {
+			dst[key] = max(dstVal, value)
+		} else {
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
