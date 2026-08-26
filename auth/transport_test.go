@@ -17,6 +17,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -148,9 +149,11 @@ type sequenceRT struct {
 	calls    int
 	auths    []string
 	bodies   []string
+	reqs     []*http.Request
 }
 
 func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.reqs = append(s.reqs, req)
 	s.auths = append(s.auths, req.Header.Get("Authorization"))
 	body := ""
 	if req.Body != nil {
@@ -168,17 +171,19 @@ func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // refreshProvider is a RefreshingProvider that yields cred first and fresh after
-// Refresh is called.
+// Refresh is called. It records what it was told was rejected.
 type refreshProvider struct {
 	cred      auth.Credential
 	fresh     auth.Credential
 	refreshes int
+	rejected  auth.Credential
 }
 
 func (p *refreshProvider) Credential(context.Context) (auth.Credential, error) { return p.cred, nil }
 
-func (p *refreshProvider) Refresh(context.Context) (auth.Credential, error) {
+func (p *refreshProvider) Refresh(_ context.Context, rejected auth.Credential) (auth.Credential, error) {
 	p.refreshes++
+	p.rejected = rejected
 	return p.fresh, nil
 }
 
@@ -307,7 +312,7 @@ func (p *errRefreshProvider) Credential(context.Context) (auth.Credential, error
 	return p.cred, nil
 }
 
-func (p *errRefreshProvider) Refresh(context.Context) (auth.Credential, error) {
+func (p *errRefreshProvider) Refresh(context.Context, auth.Credential) (auth.Credential, error) {
 	return nil, errors.New("refresh boom")
 }
 
@@ -354,4 +359,96 @@ func TestTransportRefreshNilCredentialNoPanic(t *testing.T) {
 	if base.calls != 1 {
 		t.Errorf("base calls = %d, want 1 (no retry with nil credential)", base.calls)
 	}
+}
+
+// Refresh is told which credential the downstream rejected. Without it a
+// provider has to guess from its own cache, which by then may hold a different
+// credential entirely.
+func TestTransportPassesTheRejectedCredentialToRefresh(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	stale := auth.BearerCredential{Token: "stale"}
+	p := &refreshProvider{cred: stale, fresh: auth.BearerCredential{Token: "fresh"}}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	resp, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/"))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if p.rejected != auth.Credential(stale) {
+		t.Errorf("Refresh was told %+v was rejected, want %+v", p.rejected, stale)
+	}
+}
+
+// consentRefreshProvider refuses to refresh because the end user must consent
+// again.
+type consentRefreshProvider struct{ cred auth.Credential }
+
+func (p *consentRefreshProvider) Credential(context.Context) (auth.Credential, error) {
+	return p.cred, nil
+}
+
+func (p *consentRefreshProvider) Refresh(context.Context, auth.Credential) (auth.Credential, error) {
+	return nil, fmt.Errorf("gcp: %w", &auth.ConsentRequiredError{AuthURI: "https://consent.example", Nonce: "n"})
+}
+
+// A refresh that needs interactive consent is the one refusal worth surfacing:
+// it is actionable, and Credential reports it the same way, so both paths
+// through one Transport agree. Every other refresh failure degrades to the
+// downstream's own rejection.
+func TestTransportSurfacesConsentFromRefresh(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	tr := &auth.Transport{Provider: &consentRefreshProvider{cred: auth.BearerCredential{Token: "stale"}}, Base: base}
+
+	resp, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/"))
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Error("RoundTrip() returned a response alongside the consent error")
+	}
+	var consent *auth.ConsentRequiredError
+	if !errors.As(err, &consent) {
+		t.Fatalf("RoundTrip() error = %v, want a *auth.ConsentRequiredError", err)
+	}
+	if consent.AuthURI != "https://consent.example" {
+		t.Errorf("AuthURI = %q, want the one the provider reported", consent.AuthURI)
+	}
+	if base.calls != 1 {
+		t.Errorf("base calls = %d, want 1 (no retry once consent is required)", base.calls)
+	}
+}
+
+// The retry is built from the caller's request, not from the first attempt, so
+// a header the first credential set cannot survive into it.
+func TestTransportRetryDoesNotInheritTheFirstCredentialsHeader(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	p := &refreshProvider{
+		cred:  auth.APIKeyCredential{Name: "X-First", Value: "one"},
+		fresh: auth.APIKeyCredential{Name: "X-Second", Value: "two"},
+	}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	resp, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/"))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if len(base.reqs) != 2 {
+		t.Fatalf("base calls = %d, want 2", len(base.reqs))
+	}
+	retry := base.reqs[1]
+	if got := retry.Header.Get("X-Second"); got != "two" {
+		t.Errorf("retry X-Second = %q, want the refreshed credential", got)
+	}
+	if got := retry.Header.Get("X-First"); got != "" {
+		t.Errorf("retry still carries X-First = %q from the rejected credential", got)
+	}
+}
+
+func mustRequest(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	return req
 }
