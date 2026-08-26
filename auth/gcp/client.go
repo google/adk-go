@@ -187,6 +187,9 @@ type Client struct {
 	// invites a caller to use. Erring towards a false miss costs a round trip;
 	// erring the other way discloses one principal's token to another.
 	//
+	// The converse is a precondition this package cannot enforce and states on
+	// Config.HTTPClient: one Client must not authenticate as several identities.
+	//
 	// The value is unique per process as well as within one, so a store that
 	// outlives the process — or is shared by two — misses rather than serving an
 	// entry written by a Client that no longer exists and cannot be identified.
@@ -219,9 +222,16 @@ type Config struct {
 	// used verbatim and ADC is not applied, so it must carry its own credentials
 	// and should refuse redirects for the reason [NewClient] describes.
 	//
+	// It must authenticate as one identity for the Client's whole life. A Client
+	// is a credential-cache dimension precisely because it is assumed to fix who
+	// the credential service mints on behalf of, and a transport that picks its
+	// credentials out of the request context breaks that assumption without this
+	// package being able to see it: every tenant would share one cache entry.
+	// Build a Client per identity instead.
+	//
 	// Two Clients are two cache dimensions even when built from one HTTPClient,
-	// so build a Client once and share it. One per request resolves nothing from
-	// cache and leaves an entry behind per request.
+	// so build a Client once per identity and share it. One per request resolves
+	// nothing from cache and leaves an entry behind per request.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
 	// It is used as given, not parsed: an http:// value would send the ADC token

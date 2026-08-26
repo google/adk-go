@@ -15,12 +15,10 @@
 package auth_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"google.golang.org/adk/v2/auth"
-	"google.golang.org/adk/v2/platform"
 )
 
 func TestInMemoryCredentialStoreGetSet(t *testing.T) {
@@ -67,31 +65,29 @@ func TestInMemoryCredentialStoreExpiry(t *testing.T) {
 	}
 }
 
-// TestInMemoryCredentialStoreGetHonorsClock verifies Get evaluates expiry
-// against the context's clock (platform.Now), so a test can drive time
-// deterministically via platform.WithTimeProvider — no real sleeping.
-func TestInMemoryCredentialStoreGetHonorsClock(t *testing.T) {
-	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	expiry := base.Add(time.Hour)
+// Expiry is judged on the wall clock, and a test drives it by choosing how much
+// life to store rather than by moving a clock: a credential dies when its issuer
+// says it does, so this type reads no overridable clock at all.
+func TestInMemoryCredentialStoreExpiryBoundaries(t *testing.T) {
 	tests := []struct {
 		name    string
-		clock   time.Time
+		left    time.Duration
 		wantHit bool
 	}{
-		{name: "before expiry", clock: base, wantHit: true},
-		{name: "past expiry", clock: base.Add(2 * time.Hour), wantHit: false},
-		{name: "inside the skew window", clock: expiry.Add(-time.Second), wantHit: false},
+		{name: "an hour left", left: time.Hour, wantHit: true},
+		{name: "long past", left: -time.Hour, wantHit: false},
+		{name: "inside the skew window", left: auth.ExpirySkew - time.Second, wantHit: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return tc.clock })
+			ctx := t.Context()
 			s := auth.NewInMemoryCredentialStore()
 			key := auth.CredentialKey{Key: "res"}
-			if err := s.Set(ctx, key, auth.BearerCredential{Token: "tok"}, expiry); err != nil {
+			if err := s.Set(ctx, key, auth.BearerCredential{Token: "tok"}, time.Now().Add(tc.left)); err != nil {
 				t.Fatal(err)
 			}
 			if _, ok, _ := s.Get(ctx, key); ok != tc.wantHit {
-				t.Errorf("Get() with clock %s = hit %v, want %v", tc.clock, ok, tc.wantHit)
+				t.Errorf("Get() with %s left = hit %v, want %v", tc.left, ok, tc.wantHit)
 			}
 		})
 	}
@@ -158,81 +154,35 @@ func TestInMemoryCredentialStoreZeroValue(t *testing.T) {
 	}
 }
 
-// The clock is caller-supplied code; calling it under the store's non-reentrant
-// mutex would deadlock a TimeProvider that reaches back into the store.
-func TestInMemoryCredentialStoreClockMayTouchStore(t *testing.T) {
-	s := auth.NewInMemoryCredentialStore()
-	key := auth.CredentialKey{Key: "res"}
-	ctx := platform.WithTimeProvider(t.Context(), func() time.Time {
-		_, _, _ = s.Get(context.Background(), auth.CredentialKey{Key: "other"})
-		return time.Now()
-	})
-	if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, time.Now().Add(time.Hour)); err != nil {
-		t.Fatalf("Set() error = %v", err)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _, _ = s.Get(ctx, key)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Get() deadlocked; the clock must not be called while holding the lock")
-	}
-}
-
-// Get evicts the expired entry it was asked for, rather than only reporting a
-// miss. That write is the reason the store takes a full Mutex instead of an
-// RWMutex, so nothing else in the suite distinguishes the two designs.
-func TestInMemoryCredentialStoreGetEvicts(t *testing.T) {
-	clock := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return clock })
-	s := auth.NewInMemoryCredentialStore()
-	key := auth.CredentialKey{UserID: "u", Key: "res"}
-	if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, clock.Add(10*time.Second)); err != nil {
-		t.Fatalf("Set() error = %v", err)
-	}
-
-	// Past the entry's expiry but well inside the sweep interval, so only Get's
-	// own eviction can remove it.
-	clock = clock.Add(15 * time.Second)
-	if _, ok, _ := s.Get(ctx, key); ok {
-		t.Fatal("Get() of an expired entry = hit, want miss")
-	}
-	// Read it back through a clock that would make it live again: it must be gone,
-	// which only holds if the miss above also deleted it.
-	past := platform.WithTimeProvider(t.Context(), func() time.Time { return clock.Add(-time.Hour) })
-	if _, ok, _ := s.Get(past, key); ok {
-		t.Error("the expired entry survived the Get that reported it a miss")
-	}
-}
-
 // ExpirySkew is public API and the provider's caching floor, so its value is
 // pinned from both sides: a wider margin would silently raise that floor, and a
 // narrower one would hand out credentials with no usable life left.
 func TestExpirySkewBoundary(t *testing.T) {
-	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return now })
 	tests := []struct {
 		name    string
-		expiry  time.Time
+		left    time.Duration
 		wantHit bool
 	}{
-		{"a nanosecond outside the margin", now.Add(auth.ExpirySkew + time.Nanosecond), true},
-		{"exactly the margin", now.Add(auth.ExpirySkew), false},
-		{"a nanosecond inside the margin", now.Add(auth.ExpirySkew - time.Nanosecond), false},
+		// Relative to the constant: these pin which side of the boundary is
+		// inclusive, so that the store serves exactly what a producer will cache.
+		{"just outside the margin", auth.ExpirySkew + time.Second, true},
+		{"exactly the margin", auth.ExpirySkew, false},
+		{"just inside the margin", auth.ExpirySkew - time.Millisecond, false},
+		// Spelled in seconds, so they move if the constant does. A test written
+		// only against ExpirySkew measures it against itself and pins nothing.
+		{"eleven seconds left", 11 * time.Second, true},
+		{"nine seconds left", 9 * time.Second, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
 			s := auth.NewInMemoryCredentialStore()
 			key := auth.CredentialKey{Key: "res"}
-			if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, tc.expiry); err != nil {
+			if err := s.Set(ctx, key, auth.BearerCredential{Token: "t"}, time.Now().Add(tc.left)); err != nil {
 				t.Fatalf("Set() error = %v", err)
 			}
 			if _, ok, _ := s.Get(ctx, key); ok != tc.wantHit {
-				t.Errorf("Get() = hit %v, want %v", ok, tc.wantHit)
+				t.Errorf("Get() with %s left = hit %v, want %v", tc.left, ok, tc.wantHit)
 			}
 		})
 	}
