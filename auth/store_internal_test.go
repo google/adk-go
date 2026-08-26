@@ -95,14 +95,15 @@ func TestInMemoryCredentialStoreSweepIgnoresTheCallersClock(t *testing.T) {
 
 // The store is documented safe for concurrent use, and Get writes to the map on
 // eviction while the sweep deletes from it, so a plain RWMutex read lock would
-// not do. Armed so the sweep body actually runs while readers are in flight:
-// left at its default pacing it fires once, on an empty map, before any of these
-// goroutines start.
+// not do. The pacing is shortened so the sweep body runs while readers are in
+// flight — at its default it fires once, on an empty map, before any of these
+// goroutines start — but not to zero, which would sweep every expired entry
+// before any Get could reach one and leave the eviction branch uncovered.
 func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 	ctx := t.Context()
 	s := NewInMemoryCredentialStore()
 	s.mu.Lock()
-	s.sweepEvery = time.Nanosecond
+	s.sweepEvery = 200 * time.Microsecond
 	s.mu.Unlock()
 
 	keyFor := func(i int) CredentialKey {
@@ -201,5 +202,53 @@ func TestInMemoryCredentialStoreDeleteSweeps(t *testing.T) {
 	}
 	if got := s.size(); got != 0 {
 		t.Errorf("store holds %d entries after an armed Delete, want the expired one swept", got)
+	}
+}
+
+// Get evicts the expired entry it was asked for, rather than only reporting a
+// miss. That write is the reason the store takes a full Mutex instead of an
+// RWMutex, so nothing else in the suite distinguishes the two designs.
+func TestInMemoryCredentialStoreGetEvicts(t *testing.T) {
+	s := NewInMemoryCredentialStore()
+	key := CredentialKey{UserID: "u", Key: "res"}
+	if err := s.Set(t.Context(), key, BearerCredential{Token: "t"}, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if got := s.size(); got != 1 {
+		t.Fatalf("store holds %d entries, want the expired one resident until something removes it", got)
+	}
+
+	// No sweep is due, so a miss here can only come from Get's own eviction.
+	if _, ok, _ := s.Get(t.Context(), key); ok {
+		t.Fatal("Get() of an expired entry = hit, want miss")
+	}
+	if got := s.size(); got != 0 {
+		t.Error("Get() reported a miss without evicting the expired entry")
+	}
+}
+
+// expired's boundary is the exact complement of the floor a producer applies
+// before caching, so the store serves precisely what the auth/gcp provider is
+// willing to write and nothing it is not. It is pinned here rather than through
+// Get because a wall clock cannot hold still: any reading taken after the write
+// has already moved past the equality case.
+func TestExpiredBoundary(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		expiresAt time.Time
+		want      bool
+	}{
+		{"a nanosecond beyond the margin", now.Add(ExpirySkew + time.Nanosecond), false},
+		{"exactly the margin", now.Add(ExpirySkew), true},
+		{"a nanosecond inside the margin", now.Add(ExpirySkew - time.Nanosecond), true},
+		{"already past", now.Add(-time.Nanosecond), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expired(now, tc.expiresAt); got != tc.want {
+				t.Errorf("expired(now, now%+v) = %v, want %v", tc.expiresAt.Sub(now), got, tc.want)
+			}
+		})
 	}
 }

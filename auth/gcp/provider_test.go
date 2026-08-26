@@ -33,7 +33,6 @@ import (
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/auth/gcp"
 	icontext "google.golang.org/adk/v2/internal/context"
-	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -1139,48 +1138,82 @@ func TestProviderCacheSeparatesClientInstances(t *testing.T) {
 }
 
 // TestProviderCachedExpiry pins what lifetime the provider is willing to cache
-// for. The store is asked directly rather than inferred from a call count, so
-// each case fails loudly if the provider stops calling Set at all.
+// for. The store is asked what it was handed rather than inferring from a call
+// count, so each case fails loudly if the provider stops calling Set at all.
+//
+// Expiries are relative to the wall clock, because that is the clock the whole
+// path now uses: a credential dies when the issuer says it does, not when a
+// simulated clock says so.
 func TestProviderCachedExpiry(t *testing.T) {
-	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	const noCache = time.Duration(0)
 	tests := []struct {
-		name       string
-		expireTime string    // what the service reports
-		want       time.Time // zero means: must not be cached
+		name string
+		// left is how much life the service reports, from now. The zero value
+		// means the service reports no expiry at all.
+		left string
+		// want is the lifetime the store should be handed, or noCache. When clamped
+		// is set it is measured from the provider's clock; otherwise the service's
+		// own expiry must be passed through untouched.
+		want    time.Duration
+		clamped bool
 	}{
-		{"honored as reported", "2030-01-01T00:05:00Z", now.Add(5 * time.Minute)},
-		// A short-lived credential is still worth caching. Together with the
-		// boundary cases below this pins auth.ExpirySkew to something under a
-		// minute: widen it and this stops being cached at all.
-		{"a minute of life left", "2030-01-01T00:01:00Z", now.Add(time.Minute)},
-		// Inside the margin the store applies, so the entry would be written and
+		{name: "honored as reported", left: "5m", want: 5 * time.Minute},
+		// A short-lived credential is still worth caching. With the boundary cases
+		// below this pins auth.ExpirySkew under a minute: widen it and this stops
+		// being cached at all.
+		{name: "a minute of life left", left: "1m", want: time.Minute},
+		{name: "clamped to the cap", left: "8760h", want: maxCachedLifetimeForTest, clamped: true},
+		// At or inside the margin the store applies, the entry would be written and
 		// then refused on the very next read: a guaranteed-dead write.
-		{"less left than the store's margin", "2030-01-01T00:00:05Z", time.Time{}},
-		{"exactly the store's margin", "2030-01-01T00:00:10Z", time.Time{}},
-		{"clamped to the cap", "9999-12-31T23:59:59Z", now.Add(maxCachedLifetimeForTest)},
-		{"absent", "", time.Time{}},
-		{"already past", "2029-12-31T23:00:00Z", time.Time{}},
-		{"unparseable", "not-a-time", time.Time{}},
+		{name: "less left than the store's margin", left: "5s", want: noCache},
+		{name: "exactly the store's margin", left: "10s", want: noCache},
+		{name: "already past", left: "-1h", want: noCache},
+		{name: "absent", left: "", want: noCache},
+		{name: "unparseable", left: "garbage", want: noCache},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEchoServer(t, tc.expireTime)
+			issued := time.Now()
+			expireTime := tc.left
+			if d, err := time.ParseDuration(tc.left); err == nil {
+				expireTime = issued.Add(d).Format(time.RFC3339Nano)
+			}
+			e := newEchoServer(t, expireTime)
 			store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
 			p := newStoreProvider(t, e, store)
 
-			ctx := platform.WithTimeProvider(adkContext(t, "user-1"), func() time.Time { return now })
-			if _, err := p.Credential(ctx); err != nil {
+			before := time.Now()
+			if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
 				t.Fatalf("Credential() error = %v", err)
 			}
-			switch {
-			case tc.want.IsZero():
+			after := time.Now()
+
+			if tc.want == noCache {
 				if store.sets != 0 {
-					t.Errorf("store Set called with expiry %s, want no cache write for expireTime %q", store.lastExpires, tc.expireTime)
+					t.Errorf("store Set called with expiry %s, want no cache write for expireTime %q", store.lastExpires, expireTime)
 				}
-			case store.sets != 1:
-				t.Errorf("store Set calls = %d, want 1", store.sets)
-			case !store.lastExpires.Equal(tc.want):
-				t.Errorf("cached until %s, want %s", store.lastExpires, tc.want)
+				return
+			}
+			if store.sets != 1 {
+				t.Fatalf("store Set calls = %d, want 1", store.sets)
+			}
+			if !tc.clamped {
+				// Passed through untouched, so this is exact.
+				want, err := time.Parse(time.RFC3339Nano, expireTime)
+				if err != nil {
+					t.Fatalf("parse %q: %v", expireTime, err)
+				}
+				if !store.lastExpires.Equal(want) {
+					t.Errorf("cached until %s, want the service's own %s", store.lastExpires, want)
+				}
+				return
+			}
+			// Clamped to the cap measured from the provider's own clock read, which
+			// happens somewhere between these two. The window is the test's
+			// scheduling jitter, not a tolerance on the arithmetic.
+			lo, hi := before.Add(tc.want), after.Add(tc.want)
+			if store.lastExpires.Before(lo) || store.lastExpires.After(hi) {
+				t.Errorf("cached until %s, want %s from now (between %s and %s)", store.lastExpires, tc.want, lo, hi)
 			}
 		})
 	}

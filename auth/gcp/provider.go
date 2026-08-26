@@ -27,7 +27,6 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
-	"google.golang.org/adk/v2/platform"
 )
 
 // ProviderScheme identifies a GCP auth resource and the access it requests. It
@@ -332,8 +331,12 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 //
 // The far end is clamped rather than rejected, so a wildly distant expiry —
 // wrong, or injected — shortens to the cap instead of pinning the entry.
+//
+// Wall clock, not platform.Now: what is being decided is when a real credential
+// stops working, which no simulated clock changes. [auth.CredentialStore.Set]
+// says the same of the value written here.
 func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
-	now := platform.Now(ctx)
+	now := time.Now()
 	if !r.ExpiresAt.After(now.Add(auth.ExpirySkew)) {
 		return
 	}

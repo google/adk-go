@@ -499,14 +499,16 @@ func TestClientCacheSlotIsProcessUnique(t *testing.T) {
 // joinFields must be injective: no two distinct field lists may encode alike,
 // whatever characters the fields contain. This is what stands between a scope
 // holding a delimiter and a cross-provider cache hit, and the cache-dimension
-// tests above cannot pin it on their own — every pair they compare also differs
-// in the scope count, so an encoding that merely joined on a separator would
-// still tell them apart.
+// cases in provider_test.go do not pin it on their own — none of the pairs they
+// compare uses ":" as a field value, so a ":"-separated join tells them apart.
 func TestJoinFieldsIsInjective(t *testing.T) {
-	// Every field list that can be built from a small alphabet of delimiters, at
-	// every length up to 3. A separator-joining encoding collides inside this set
-	// whatever separator it picks, because each separator is itself a field value.
-	alphabet := []string{"", "a", ",", "|", ":", "0", "1:", "a,b", "a|b"}
+	// Every field list that can be built from this alphabet, at every length up to
+	// 3. A separator-joining encoding collides inside the set whatever separator
+	// it picks, because each separator is itself a field value. The long entries
+	// are load-bearing too: with every field under ten bytes the length prefix is
+	// a single digit and is self-punctuating, so dropping the ":" would survive.
+	long := strings.Repeat("a", 19)
+	alphabet := []string{"", "a", ",", "|", ":", "0", "1:", "a,b", "a|b", "23", long, "319" + long}
 	var lists [][]string
 	var build func(prefix []string, depth int)
 	build = func(prefix []string, depth int) {

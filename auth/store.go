@@ -19,8 +19,6 @@ import (
 	"errors"
 	"sync"
 	"time"
-
-	"google.golang.org/adk/v2/platform"
 )
 
 // ExpirySkew is how long before its stated expiry [InMemoryCredentialStore]
@@ -79,8 +77,8 @@ type CredentialStore interface {
 	// backend that way would have its result silently dropped.
 	//
 	// An entry should be treated as expired shortly before its stated expiry, by
-	// no more than [ExpirySkew]. Producers decline to cache anything with less
-	// than that left, so a store applying a wider margin would be handed
+	// no more than [ExpirySkew]. Producers decline to cache anything with that
+	// much left or less, so a store applying a wider margin would be handed
 	// credentials it then refuses to serve, and the cache would do nothing.
 	//
 	// The returned credential must be safe for concurrent [Credential.Apply] and
@@ -88,9 +86,17 @@ type CredentialStore interface {
 	// value handed in — a store that materializes credentials on read owes it
 	// too, since one value is handed to every request that hits.
 	Get(ctx context.Context, key CredentialKey) (Credential, bool, error)
-	// Set stores cred for key until expiresAt, an absolute time on the context's
-	// clock ([platform.Now]). Both arguments are required: a caller that cannot
-	// establish a lifetime must not cache, rather than cache forever.
+	// Set stores cred for key until expiresAt, an absolute wall-clock time. Both
+	// arguments are required: a caller that cannot establish a lifetime must not
+	// cache, rather than cache forever.
+	//
+	// Wall clock, and not platform.Now, deliberately. That seam is scoped to one
+	// call tree so concurrent runs can hold independent clocks, and a credential's
+	// expiry is not that kind of quantity: the token dies when its issuer says it
+	// does, on everybody's clock at once. Judging it on a simulated clock would
+	// serve a dead credential to a real request, or drop a live one — and the
+	// sweep, which judges entries the caller does not own, would let one call tree
+	// empty another's.
 	//
 	// cred must be safe for concurrent [Credential.Apply] and must not be mutated
 	// after Set returns, since every hit for key hands the same value to a
@@ -171,16 +177,13 @@ func NewInMemoryCredentialStore() *InMemoryCredentialStore {
 	return &InMemoryCredentialStore{entries: make(map[CredentialKey]cacheEntry)}
 }
 
-// Get implements [CredentialStore]. Expiry is evaluated against the context's
-// clock ([platform.Now]), so tests can drive it deterministically.
-func (s *InMemoryCredentialStore) Get(ctx context.Context, key CredentialKey) (Credential, bool, error) {
-	// Resolved before the lock: platform.Now is caller-supplied, and a clock that
-	// reaches back into the store would deadlock on this non-reentrant mutex.
-	now := platform.Now(ctx)
+// Get implements [CredentialStore].
+func (s *InMemoryCredentialStore) Get(_ context.Context, key CredentialKey) (Credential, bool, error) {
+	now := time.Now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sweep()
+	s.sweep(now)
 	e, ok := s.entries[key]
 	if !ok {
 		return nil, false, nil
@@ -193,7 +196,7 @@ func (s *InMemoryCredentialStore) Get(ctx context.Context, key CredentialKey) (C
 }
 
 // Set implements [CredentialStore].
-func (s *InMemoryCredentialStore) Set(ctx context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error {
+func (s *InMemoryCredentialStore) Set(_ context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error {
 	if cred == nil {
 		return errors.New("auth: Set requires a credential")
 	}
@@ -208,7 +211,7 @@ func (s *InMemoryCredentialStore) Set(ctx context.Context, key CredentialKey, cr
 	if s.entries == nil {
 		s.entries = make(map[CredentialKey]cacheEntry)
 	}
-	s.sweep()
+	s.sweep(time.Now())
 	// Round(0) strips the monotonic reading a caller derived expiresAt from its
 	// own clock would carry. Comparing two entries in different clock domains
 	// diverges across a suspend, when the monotonic clock stops but the wall
@@ -227,21 +230,13 @@ func expired(now, expiresAt time.Time) bool {
 }
 
 // sweep drops every expired entry, at most once per [sweepInterval]. The caller
-// holds s.mu.
-//
-// It reads the wall clock itself rather than taking the caller's
-// ([platform.Now]). The caller's clock is scoped to one call tree by design, and
-// this decision is not: it deletes other callers' entries. One request arriving
-// with a clock pinned to next year would otherwise empty a shared store, and two
-// call trees whose clocks differ by more than the interval would make every call
-// sweep. time.Now also always carries a monotonic reading, so the interval
-// cannot be defeated by a clock that steps.
-func (s *InMemoryCredentialStore) sweep() {
+// holds s.mu and supplies now, which is always the wall clock — see Set on why
+// this type reads no other.
+func (s *InMemoryCredentialStore) sweep(now time.Time) {
 	every := s.sweepEvery
 	if every == 0 {
 		every = sweepInterval
 	}
-	now := time.Now()
 	if !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < every {
 		return
 	}
@@ -257,7 +252,7 @@ func (s *InMemoryCredentialStore) sweep() {
 func (s *InMemoryCredentialStore) Delete(_ context.Context, key CredentialKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sweep()
+	s.sweep(time.Now())
 	delete(s.entries, key)
 	return nil
 }
