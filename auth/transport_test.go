@@ -137,10 +137,25 @@ func newRequest(t *testing.T) *http.Request {
 }
 
 // closeTrackingBody is an io.ReadCloser that records whether Close was called.
-type closeTrackingBody struct{ closed bool }
+type closeTrackingBody struct {
+	payload string
+	read    int
+	closed  bool
+}
 
-func (b *closeTrackingBody) Read([]byte) (int, error) { return 0, io.EOF }
-func (b *closeTrackingBody) Close() error             { b.closed = true; return nil }
+func (b *closeTrackingBody) Read(p []byte) (int, error) {
+	if b.read >= len(b.payload) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.payload[b.read:])
+	b.read += n
+	return n, nil
+}
+
+func (b *closeTrackingBody) Close() error { b.closed = true; return nil }
+
+// drained reports whether the body was read to the end and closed.
+func (b *closeTrackingBody) drained() bool { return b.closed && b.read == len(b.payload) }
 
 // sequenceRT returns the given status codes in order (200 once exhausted) and
 // records the Authorization header and body of each request it receives.
@@ -150,6 +165,10 @@ type sequenceRT struct {
 	auths    []string
 	bodies   []string
 	reqs     []*http.Request
+	// respBodies are the response bodies handed out, so a test can assert the
+	// first one was drained and closed before the retry. http.NoBody cannot show
+	// that: its Read is EOF and its Close a no-op.
+	respBodies []*closeTrackingBody
 }
 
 func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -167,7 +186,9 @@ func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		code = s.statuses[s.calls]
 	}
 	s.calls++
-	return &http.Response{StatusCode: code, Body: http.NoBody, Header: http.Header{}}, nil
+	rb := &closeTrackingBody{payload: "rejected"}
+	s.respBodies = append(s.respBodies, rb)
+	return &http.Response{StatusCode: code, Body: rb, Header: http.Header{}}, nil
 }
 
 // refreshProvider is a RefreshingProvider that yields cred first and fresh after
@@ -175,11 +196,22 @@ func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
 type refreshProvider struct {
 	cred      auth.Credential
 	fresh     auth.Credential
+	resolves  int
 	refreshes int
 	rejected  auth.Credential
 }
 
-func (p *refreshProvider) Credential(context.Context) (auth.Credential, error) { return p.cred, nil }
+// Credential yields a different credential on every call, so a Transport that
+// re-derived the rejected one instead of passing the one it applied hands
+// Refresh a value no request ever carried — which is the round-1 defect, and is
+// invisible against a fake that answers constantly.
+func (p *refreshProvider) Credential(context.Context) (auth.Credential, error) {
+	p.resolves++
+	if p.resolves == 1 {
+		return p.cred, nil
+	}
+	return p.fresh, nil
+}
 
 func (p *refreshProvider) Refresh(_ context.Context, rejected auth.Credential) (auth.Credential, error) {
 	p.refreshes++
@@ -451,4 +483,74 @@ func mustRequest(t *testing.T, method, url string) *http.Request {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 	return req
+}
+
+// The first response's body is read out and closed before the retry, or its
+// connection is not returned to the pool.
+func TestTransportDrainsTheRejectedResponseBeforeRetrying(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	p := &refreshProvider{cred: auth.BearerCredential{Token: "stale"}, fresh: auth.BearerCredential{Token: "fresh"}}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	resp, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/"))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if len(base.respBodies) != 2 {
+		t.Fatalf("responses = %d, want 2", len(base.respBodies))
+	}
+	if !base.respBodies[0].drained() {
+		t.Error("the rejected response was not drained and closed before the retry")
+	}
+}
+
+// The same holds on the consent path, which returns no response for the caller
+// to close.
+func TestTransportDrainsTheRejectedResponseOnConsent(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	tr := &auth.Transport{Provider: &consentRefreshProvider{cred: auth.BearerCredential{Token: "stale"}}, Base: base}
+
+	if _, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/")); err == nil {
+		t.Fatal("RoundTrip() = nil error, want the consent error")
+	}
+	if len(base.respBodies) != 1 {
+		t.Fatalf("responses = %d, want 1", len(base.respBodies))
+	}
+	if !base.respBodies[0].drained() {
+		t.Error("the rejected response was not drained and closed, and nobody else can close it")
+	}
+}
+
+// Only an auth rejection triggers the refresh. Anything else — success, a
+// server error, a rate limit — is returned as it came, or a refresh a new token
+// cannot help becomes a duplicate request and a needless re-mint.
+func TestTransportRefreshesOnlyOnAuthRejection(t *testing.T) {
+	for _, status := range []int{
+		http.StatusOK,
+		http.StatusBadRequest,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			base := &sequenceRT{statuses: []int{status, http.StatusOK}}
+			p := &refreshProvider{cred: auth.BearerCredential{Token: "stale"}, fresh: auth.BearerCredential{Token: "fresh"}}
+			tr := &auth.Transport{Provider: p, Base: base}
+
+			resp, err := tr.RoundTrip(mustRequest(t, http.MethodGet, "https://example.com/"))
+			if err != nil {
+				t.Fatalf("RoundTrip() error = %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != status {
+				t.Errorf("status = %d, want %d returned untouched", resp.StatusCode, status)
+			}
+			if base.calls != 1 {
+				t.Errorf("base calls = %d, want 1 (no retry)", base.calls)
+			}
+			if p.refreshes != 0 {
+				t.Errorf("refreshes = %d, want 0", p.refreshes)
+			}
+		})
+	}
 }

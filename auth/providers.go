@@ -47,8 +47,8 @@ type CredentialProvider interface {
 }
 
 // RefreshingProvider is an optional [CredentialProvider] capability. After a
-// credential is rejected downstream (HTTP 401/403), [Transport] calls Refresh to
-// obtain a fresh credential — bypassing and replacing any cache — and retries
+// credential is rejected downstream (HTTP 401/403) — and the request body can be
+// replayed — [Transport] calls Refresh to obtain a fresh credential and retries
 // the request once. Providers without a cache, or that self-refresh (e.g. an
 // oauth2.TokenSource), need not implement it.
 //
@@ -59,9 +59,15 @@ type CredentialProvider interface {
 type RefreshingProvider interface {
 	CredentialProvider
 
-	// Refresh resolves a replacement for rejected, discarding any cached value
-	// for the current invocation and forcing the underlying source to mint a new
-	// one. It must not return rejected.
+	// Refresh resolves a replacement for rejected. It must not return rejected,
+	// and must not leave rejected where a later call will find it.
+	//
+	// Minting is not required. An implementation that finds another request has
+	// already replaced the credential should return what that request fetched,
+	// and one that is rate-limiting itself should return an error rather than
+	// mint again — a forced refresh typically invalidates a live token, so a
+	// downstream returning 401 to everything must not set the rate at which that
+	// happens.
 	//
 	// rejected is the credential [Transport] applied to the request the
 	// downstream turned down — passed in rather than looked up, because between
