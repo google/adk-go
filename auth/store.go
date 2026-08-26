@@ -78,8 +78,15 @@ type CredentialStore interface {
 	// credential whenever the error is non-nil, so a store reporting a degraded
 	// backend that way would have its result silently dropped.
 	//
-	// An entry should be treated as expired shortly before its stated expiry;
-	// [ExpirySkew] is the margin [InMemoryCredentialStore] applies.
+	// An entry should be treated as expired shortly before its stated expiry, by
+	// no more than [ExpirySkew]. Producers decline to cache anything with less
+	// than that left, so a store applying a wider margin would be handed
+	// credentials it then refuses to serve, and the cache would do nothing.
+	//
+	// The returned credential must be safe for concurrent [Credential.Apply] and
+	// must not be mutated afterwards, the same requirement Set places on the
+	// value handed in — a store that materializes credentials on read owes it
+	// too, since one value is handed to every request that hits.
 	Get(ctx context.Context, key CredentialKey) (Credential, bool, error)
 	// Set stores cred for key until expiresAt, an absolute time on the context's
 	// clock ([platform.Now]). Both arguments are required: a caller that cannot
@@ -91,6 +98,11 @@ type CredentialStore interface {
 	// cope with a cred it cannot encode — several of this package's credentials
 	// are opaque, and one wraps a live token source — by rejecting it, which
 	// costs a round trip rather than correctness.
+	//
+	// Both arguments are secret. cred is bearer material, and key names the
+	// application and the acting end user, so neither belongs in a log line or an
+	// error string, and a store that persists them owes them the protection the
+	// credentials themselves get.
 	Set(ctx context.Context, key CredentialKey, cred Credential, expiresAt time.Time) error
 	// Delete removes any entry for key. Removing an absent key is not an error.
 	//
@@ -102,15 +114,18 @@ type CredentialStore interface {
 	// The auth/gcp provider bounds that to an hour and exposes the key to delete
 	// as gcp.Client.CacheKey.
 	//
-	// Delete does not cancel a retrieval already in flight. One that began before
-	// the Delete will still write its result afterwards, so a caller invalidating
-	// a credential it has just seen rejected should expect a fresh one, not none.
+	// Delete does not cancel a retrieval already in flight, and it reports success
+	// whether or not an entry was there. A retrieval that began before the Delete
+	// writes its result afterwards, so if it began before the revocation it
+	// restores exactly the credential the caller was removing, for the full
+	// cached lifetime, and the nil return said nothing about it. Invalidate again
+	// once the request that failed has returned.
 	Delete(ctx context.Context, key CredentialKey) error
 }
 
 // sweepInterval is the shortest time between sweeps of expired entries. Nothing
 // else evicts a principal that resolves once and never returns, and the sweep is
-// O(entries), so it is paced by wall clock rather than by call count: a large
+// O(entries), so it is paced by elapsed time rather than by call count: a large
 // store under heavy traffic would otherwise pay for a scan on a fixed fraction
 // of its calls.
 const sweepInterval = time.Minute
@@ -120,19 +135,30 @@ const sweepInterval = time.Minute
 // InMemoryCredentialService, which buckets the same way, and adds per-entry
 // expiry. The zero value is ready to use.
 //
-// It holds one entry per key seen, and it is unbounded: an expired entry is
-// dropped when its key is read, and otherwise by a sweep that any call at least
-// [sweepInterval] after the last one performs. Steady-state size is therefore
-// the number of distinct keys active within one credential lifetime. A process
-// that stops calling the store entirely retains whatever it last held, so a
-// caller that must not keep credential material past its use should
-// [InMemoryCredentialStore.Delete] it.
+// It holds one entry per key ever written and has no size limit. An expired
+// entry is dropped when its key is read, and otherwise by a sweep that any call
+// at least [sweepInterval] after the last one performs, so the resident count is
+// the number of distinct keys written within one credential lifetime.
+//
+// That is a count of keys, not of requests — unless the producer makes it one.
+// The auth/gcp provider keys on the Client among other things, so a program that
+// builds a Client per request writes an entry per request that nothing will ever
+// read again, and the store then grows with request rate until the sweep catches
+// up. Build long-lived Clients, or supply a store of your own that bounds
+// itself.
+//
+// A process that stops calling the store entirely retains whatever it last held:
+// nothing here runs on its own. A caller that must not keep credential material
+// past its use should [InMemoryCredentialStore.Delete] it.
 type InMemoryCredentialStore struct {
 	// mu guards every field below. Not an RWMutex: Get evicts on expiry and can
 	// sweep, so readers write.
-	mu        sync.Mutex
+	mu sync.Mutex
+	// lastSweep is on the store's own clock, never a caller's. See sweep.
 	lastSweep time.Time
-	entries   map[CredentialKey]cacheEntry
+	// sweepEvery overrides sweepInterval; only tests set it.
+	sweepEvery time.Duration
+	entries    map[CredentialKey]cacheEntry
 }
 
 type cacheEntry struct {
@@ -154,7 +180,7 @@ func (s *InMemoryCredentialStore) Get(ctx context.Context, key CredentialKey) (C
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sweep(now)
+	s.sweep()
 	e, ok := s.entries[key]
 	if !ok {
 		return nil, false, nil
@@ -176,14 +202,13 @@ func (s *InMemoryCredentialStore) Set(ctx context.Context, key CredentialKey, cr
 	if expiresAt.IsZero() {
 		return errors.New("auth: Set requires an expiry")
 	}
-	now := platform.Now(ctx)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.entries == nil {
 		s.entries = make(map[CredentialKey]cacheEntry)
 	}
-	s.sweep(now)
+	s.sweep()
 	// Round(0) strips the monotonic reading a caller derived expiresAt from its
 	// own clock would carry. Comparing two entries in different clock domains
 	// diverges across a suspend, when the monotonic clock stops but the wall
@@ -193,19 +218,31 @@ func (s *InMemoryCredentialStore) Set(ctx context.Context, key CredentialKey, cr
 }
 
 // expired reports whether an entry expiring at expiresAt is spent as of now,
-// counting the skew margin.
+// counting the skew margin. Exactly [ExpirySkew] left counts as spent, so this
+// is the precise complement of the test a producer applies before caching — the
+// auth/gcp provider stores exactly what this will serve, and nothing that it
+// won't.
 func expired(now, expiresAt time.Time) bool {
-	return now.Add(ExpirySkew).After(expiresAt)
+	return !expiresAt.After(now.Add(ExpirySkew))
 }
 
 // sweep drops every expired entry, at most once per [sweepInterval]. The caller
 // holds s.mu.
-func (s *InMemoryCredentialStore) sweep(now time.Time) {
-	// A clock that went backwards makes a sweep due rather than suppressing one.
-	// The clock is caller-supplied and need not be monotonic, and one call
-	// arriving with a far-future reading would otherwise park lastSweep there and
-	// switch eviction off until real time caught up.
-	if d := now.Sub(s.lastSweep); d >= 0 && d < sweepInterval {
+//
+// It reads the wall clock itself rather than taking the caller's
+// ([platform.Now]). The caller's clock is scoped to one call tree by design, and
+// this decision is not: it deletes other callers' entries. One request arriving
+// with a clock pinned to next year would otherwise empty a shared store, and two
+// call trees whose clocks differ by more than the interval would make every call
+// sweep. time.Now also always carries a monotonic reading, so the interval
+// cannot be defeated by a clock that steps.
+func (s *InMemoryCredentialStore) sweep() {
+	every := s.sweepEvery
+	if every == 0 {
+		every = sweepInterval
+	}
+	now := time.Now()
+	if !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < every {
 		return
 	}
 	s.lastSweep = now
@@ -220,6 +257,7 @@ func (s *InMemoryCredentialStore) sweep(now time.Time) {
 func (s *InMemoryCredentialStore) Delete(_ context.Context, key CredentialKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweep()
 	delete(s.entries, key)
 	return nil
 }
