@@ -51,12 +51,30 @@ type CredentialProvider interface {
 // obtain a fresh credential — bypassing and replacing any cache — and retries
 // the request once. Providers without a cache, or that self-refresh (e.g. an
 // oauth2.TokenSource), need not implement it.
+//
+// adk-python's equivalent seam is BaseCredentialRefresher, whose refresh() also
+// takes the credential rather than re-deriving it
+// (auth/refresher/base_credential_refresher.py). The retry itself has no
+// adk-python counterpart.
 type RefreshingProvider interface {
 	CredentialProvider
 
-	// Refresh resolves a fresh credential, discarding any cached value for the
-	// current invocation and forcing the underlying source to mint a new one.
-	Refresh(ctx context.Context) (Credential, error)
+	// Refresh resolves a replacement for rejected, discarding any cached value
+	// for the current invocation and forcing the underlying source to mint a new
+	// one. It must not return rejected.
+	//
+	// rejected is the credential [Transport] applied to the request the
+	// downstream turned down — passed in rather than looked up, because between
+	// the rejection and this call another request may already have replaced the
+	// cached value, and force-refreshing a credential that is working destroys a
+	// good token. It is never nil.
+	//
+	// Returning an error leaves [Transport] to surface the downstream's original
+	// rejection, so a provider that cannot refresh should say so rather than
+	// return the credential it was given. The exception is
+	// [ConsentRequiredError], which Transport propagates: it is the one refusal
+	// the caller can act on.
+	Refresh(ctx context.Context, rejected Credential) (Credential, error)
 }
 
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].

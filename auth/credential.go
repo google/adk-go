@@ -105,6 +105,12 @@ type withHeaders struct {
 	headers map[string]string
 }
 
+// Unwrap returns the credential this wraps, so a caller that needs to inspect
+// the credential itself — a provider reading back the token it issued, say — is
+// not blocked by the wrapper. [errors.As] is not involved; this is the
+// conventional shape for an accessor on a wrapper type.
+func (c withHeaders) Unwrap() Credential { return c.inner }
+
 // Apply implements [Credential].
 func (c withHeaders) Apply(h http.Header) error {
 	if c.inner == nil {
