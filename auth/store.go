@@ -33,7 +33,9 @@ import (
 // the Success.expireTime field).
 //
 // It is exported so another [CredentialStore] can apply the same margin, and so
-// a producer can decline to cache a credential with less than this left.
+// a producer can decline to cache a credential with this much left or less —
+// which is the boundary the reference producer and this store both use, so that
+// the store serves exactly what a producer will write.
 const ExpirySkew = 10 * time.Second
 
 // CredentialKey identifies a cached credential: the app, the acting user, and a
@@ -162,7 +164,8 @@ type InMemoryCredentialStore struct {
 	mu sync.Mutex
 	// lastSweep is on the store's own clock, never a caller's. See sweep.
 	lastSweep time.Time
-	// sweepEvery overrides sweepInterval; only tests set it.
+	// sweepEvery overrides sweepInterval; only tests set it. Zero means the
+	// default, so it cannot be used to ask for a sweep on every call.
 	sweepEvery time.Duration
 	entries    map[CredentialKey]cacheEntry
 }

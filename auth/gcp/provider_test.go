@@ -1162,6 +1162,10 @@ func TestProviderCachedExpiry(t *testing.T) {
 		// below this pins auth.ExpirySkew under a minute: widen it and this stops
 		// being cached at all.
 		{name: "a minute of life left", left: "1m", want: time.Minute},
+		// Twice the margin, so widening the floor to any multiple of it stops
+		// caching this. The floor is what keeps a guaranteed-dead entry out; it is
+		// not a licence to refuse short-lived credentials.
+		{name: "twice the store's margin", left: "20s", want: 20 * time.Second},
 		{name: "clamped to the cap", left: "8760h", want: maxCachedLifetimeForTest, clamped: true},
 		// At or inside the margin the store applies, the entry would be written and
 		// then refused on the very next read: a guaranteed-dead write.
