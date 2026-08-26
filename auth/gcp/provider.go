@@ -213,10 +213,10 @@ const maxCachedLifetime = time.Hour
 // and CredentialManager returns the provider's credential directly without ever
 // loading or saving one (credential_manager.py). Caching GCP credentials is a Go
 // addition, and this slot is its own design. The nearest analogue is
-// _stable_model_digest (auth_tool.py), which hashes canonical JSON of the auth
-// scheme and of the credential used to obtain it — the second of which Go cannot
-// do, a Client's credentials being opaque to this package, hence naming the
-// Client instead.
+// AuthConfig.get_credential_key (auth_tool.py), which joins two digests of
+// canonical JSON — one of the auth scheme, one of the credential used to obtain
+// it. Go cannot produce the second, a Client's credentials being opaque to this
+// package, so it names the Client instead.
 func cacheSlot(c *Client, s ProviderScheme) string {
 	scopes := slices.Clone(s.Scopes)
 	slices.Sort(scopes)

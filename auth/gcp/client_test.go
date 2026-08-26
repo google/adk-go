@@ -202,7 +202,12 @@ func TestRetrieveCredential(t *testing.T) {
 				}
 				wantBearer(t, got.Credential, tc.wantBearer)
 				if tc.wantExpiry != "" {
-					want, _ := time.Parse(time.RFC3339, tc.wantExpiry)
+					want, err := time.Parse(time.RFC3339, tc.wantExpiry)
+					if err != nil {
+						// Otherwise a mistyped want parses to the zero time, which is exactly
+						// what a dropped expiry produces, and the case asserts its own inverse.
+						t.Fatalf("parse wantExpiry %q: %v", tc.wantExpiry, err)
+					}
 					if !got.ExpiresAt.Equal(want) {
 						t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, want)
 					}
