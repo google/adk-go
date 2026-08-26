@@ -241,6 +241,8 @@ type provider struct {
 	mu      sync.Mutex
 	client  *Client
 	pending *clientInit // in-flight lazy init, shared by concurrent callers
+	// refreshed is when each key was last force-refreshed, for the cooldown.
+	refreshed map[auth.CredentialKey]time.Time
 }
 
 // clientInit is one attempt at building the default client. Its fields are
@@ -293,26 +295,68 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	return p.fetch(ctx, client, key, "")
 }
 
-// Refresh implements [auth.RefreshingProvider]. The cached credential has just
-// been rejected downstream, so this deliberately does not read the cache: it
-// asks the service for a replacement and overwrites the entry.
+// Refresh implements [auth.RefreshingProvider].
 //
-// The rejected token itself is the ask. Both services take it as
-// forceRefreshToken and mint a new credential rather than returning the same
-// one — or start a fresh consent flow, which surfaces as an
-// [auth.ConsentRequiredError] exactly as it would on a cold resolve. Sending it
-// is best-effort: a credential this package cannot read a token out of refreshes
-// without the hint, which at worst gets the same credential back.
-func (p *provider) Refresh(ctx context.Context) (auth.Credential, error) {
+// The rejected token is the ask: both services take it as forceRefreshToken and
+// mint a replacement rather than returning the same credential — or start a
+// fresh consent flow, which surfaces as an [auth.ConsentRequiredError] exactly
+// as it would on a cold resolve. It comes from the caller rather than from the
+// cache, because the cache may already hold a different credential by now, and
+// force-refreshing one that is working destroys a good token.
+//
+// Two things bound what a downstream can make this do. A cache that already
+// holds something other than the rejected credential means another request has
+// refreshed, so this serves that instead of minting again. And a force refresh
+// invalidates a live token at the service, so one per key per
+// [refreshCooldown] is all a downstream gets, however fast it returns 401.
+// Beyond that the entry is still dropped — a credential known to be rejected is
+// never served again — and the next request resolves normally.
+func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.Credential, error) {
 	client, key, err := p.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var prior string
-	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
-		prior = credentialToken(cred)
+	rejectedToken := credentialToken(rejected)
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
+		return cred, nil
 	}
-	return p.fetch(ctx, client, key, prior)
+	// Before anything that can fail: whatever happens next, the credential the
+	// downstream just refused must not be served again. A refresh that errors, or
+	// that returns something too short-lived to cache, would otherwise leave it
+	// in place.
+	_ = p.store.Delete(ctx, key)
+	if !p.allowRefresh(key) {
+		return nil, fmt.Errorf("gcp: refusing to force-refresh %s twice inside %v", p.scheme.Name, refreshCooldown)
+	}
+	return p.fetch(ctx, client, key, rejectedToken)
+}
+
+// refreshCooldown is the shortest interval between two forced refreshes of one
+// credential. The trigger is a downstream 401, so without it a downstream that
+// rejects everything sets the rate at which this process re-mints — and thereby
+// invalidates — an end user's credential at the service.
+const refreshCooldown = 30 * time.Second
+
+// allowRefresh reports whether key may be force-refreshed now, recording the
+// attempt when it may. Entries older than the cooldown are dropped as it goes,
+// so the map holds only keys refreshed within one cooldown window.
+func (p *provider) allowRefresh(key auth.CredentialKey) bool {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, at := range p.refreshed {
+		if now.Sub(at) >= refreshCooldown {
+			delete(p.refreshed, k)
+		}
+	}
+	if _, recent := p.refreshed[key]; recent {
+		return false
+	}
+	if p.refreshed == nil {
+		p.refreshed = make(map[auth.CredentialKey]time.Time)
+	}
+	p.refreshed[key] = now
+	return true
 }
 
 // resolve names the acting user's cache entry and the client that will fill it.
@@ -359,9 +403,15 @@ func (p *provider) fetch(ctx context.Context, client *Client, key auth.Credentia
 }
 
 // credentialToken reads the token out of a resolved GCP credential, for the
-// force-refresh hint. A credential wrapped for extra headers yields "", and the
-// refresh then proceeds without the hint.
+// force-refresh hint and to tell one credential from another.
+//
+// It unwraps first: every non-bearer credential this package mints is wrapped
+// for the extra X-Goog-Api-Key header, so reading the concrete type without
+// unwrapping would find nothing for that whole route.
 func credentialToken(c auth.Credential) string {
+	if u, ok := c.(interface{ Unwrap() auth.Credential }); ok {
+		c = u.Unwrap()
+	}
 	switch v := c.(type) {
 	case auth.BearerCredential:
 		return v.Token

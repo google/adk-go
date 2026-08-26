@@ -547,14 +547,16 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 			ctx := adkContext(t, "user-1")
 
 			// Prime the cache with the initial token.
-			if cred, err := p.Credential(ctx); err != nil {
+			first, err := p.Credential(ctx)
+			if err != nil {
 				t.Fatalf("Credential() error = %v", err)
-			} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok1" {
-				t.Fatalf("initial credential = %+v, want tok1", cred)
+			}
+			if bc, ok := first.(auth.BearerCredential); !ok || bc.Token != "tok1" {
+				t.Fatalf("initial credential = %+v, want tok1", first)
 			}
 
-			// Refresh sends the prior token and returns a new one.
-			cred, err := rp.Refresh(ctx)
+			// Refresh sends the rejected token back and returns a new one.
+			cred, err := rp.Refresh(ctx, first)
 			if err != nil {
 				t.Fatalf("Refresh() error = %v", err)
 			}
@@ -1328,3 +1330,141 @@ func TestProviderCachedExpiry(t *testing.T) {
 // maxCachedLifetimeForTest mirrors the provider's cap. Duplicated rather than
 // exported: the cap is a policy the test should notice changing.
 const maxCachedLifetimeForTest = time.Hour
+
+// refreshFixture wires a provider whose service answers every retrieval with a
+// token naming the forceRefreshToken it was sent, so a refresh that lost the
+// hint is visible in the credential rather than only in a call count.
+func refreshFixture(t *testing.T, header string) (auth.RefreshingProvider, auth.CredentialStore, *gcp.Client, func() (int, string)) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls int
+	var lastHint string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		calls++
+		n := calls
+		lastHint = body.ForceRefreshToken
+		mu.Unlock()
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":%q,"expireTime":%q}}`,
+			n, header, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp, ok := p.(auth.RefreshingProvider)
+	if !ok {
+		t.Fatal("the gcp provider does not implement auth.RefreshingProvider")
+	}
+	return rp, store, client, func() (int, string) { mu.Lock(); defer mu.Unlock(); return calls, lastHint }
+}
+
+// A non-bearer credential is wrapped for the extra X-Goog-Api-Key header, so
+// reading its concrete type without unwrapping finds nothing — and the refresh
+// then loses the hint and is handed back the credential that was just rejected.
+func TestProviderRefreshReadsThroughAWrappedCredential(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "X-Goog-Api-Key")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := first.(auth.BearerCredential); ok {
+		t.Fatal("the fixture produced a bearer credential; this case is about the wrapped one")
+	}
+	if _, err := rp.Refresh(ctx, first); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	calls, hint := seen()
+	if calls != 2 {
+		t.Fatalf("service calls = %d, want 2", calls)
+	}
+	// The hint is the whole point: without it the service is entitled to return
+	// the very credential the downstream just rejected.
+	if hint != "tok1" {
+		t.Errorf("forceRefreshToken = %q, want %q — the token inside the wrapper", hint, "tok1")
+	}
+}
+
+// A downstream that rejects everything must not set the rate at which this
+// process re-mints, and thereby invalidates, an end user's credential.
+func TestProviderRefreshIsRateLimited(t *testing.T) {
+	rp, store, client, seen := refreshFixture(t, "Authorization: Bearer")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Fatalf("service calls = %d, want 2 (the cold resolve and one refresh)", calls)
+	}
+
+	// A second forced refresh of the same credential inside the cooldown is
+	// refused rather than served.
+	if _, err := rp.Refresh(ctx, fresh); err == nil {
+		t.Error("Refresh() twice inside the cooldown = nil error, want it refused")
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Errorf("service calls = %d, want 2 (the refused refresh must not reach the service)", calls)
+	}
+	// Refused or not, the rejected credential is gone: it is known bad.
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, "app", "user-1")
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached after a refused refresh")
+	}
+}
+
+// Another request may have refreshed already. Force-refreshing then destroys a
+// token that is working, so a cached credential that is not the rejected one is
+// served instead.
+func TestProviderRefreshServesACredentialSomebodyElseAlreadyFetched(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Fatalf("service calls = %d, want 2", calls)
+	}
+
+	// A straggler still holding the first credential asks again. The cache holds
+	// the fresh one, which nothing has rejected.
+	got, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() for a straggler error = %v", err)
+	}
+	if got != fresh {
+		t.Errorf("straggler was served %+v, want the credential already fetched, %+v", got, fresh)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Errorf("service calls = %d, want 2 (the straggler must not mint again)", calls)
+	}
+}

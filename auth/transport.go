@@ -15,6 +15,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,10 +93,22 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !ok {
 		return resp, nil
 	}
-	fresh, err := rp.Refresh(req.Context())
-	if err != nil || fresh == nil {
-		// Refresh failed (or returned no credential): release the replay body we
-		// opened and surface the original rejection rather than retry/panic.
+	fresh, err := rp.Refresh(req.Context(), cred)
+	if err != nil {
+		_ = body.Close()
+		// One refusal is worth surfacing: interactive consent is something the
+		// caller can act on, and Credential reports it the same way, so the two
+		// paths through this Transport agree on it. Every other failure degrades
+		// to the rejection the downstream actually sent, which is more
+		// informative than "we could not refresh".
+		var consent *ConsentRequiredError
+		if errors.As(err, &consent) {
+			drain(resp)
+			return nil, err
+		}
+		return resp, nil
+	}
+	if fresh == nil {
 		_ = body.Close()
 		return resp, nil
 	}
@@ -106,6 +119,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // applyAndSend sends a clone of req (with the given body) after applying cred,
 // leaving the caller's request untouched. It closes body on an apply error,
 // otherwise the base RoundTripper owns it.
+//
+// The clone starts from the caller's request, not from the first attempt, so a
+// retry cannot inherit a header the first credential set. A credential that
+// writes Authorization overwrites it either way; one that writes a different
+// header would otherwise leave the first one's behind.
 func applyAndSend(base http.RoundTripper, req *http.Request, body io.ReadCloser, cred Credential) (*http.Response, error) {
 	out := req.Clone(req.Context())
 	out.Body = body
