@@ -42,13 +42,6 @@ type declarer interface {
 
 // GetAppInfo describes an app without running it: its root agent, and every
 // agent reachable from that root with its instruction, tools and children.
-//
-// Every kind of agent is included. Agents that are not LLM agents report an
-// empty instruction and no tools, because they have neither; their children are
-// still walked, so the result always describes the whole tree.
-//
-// An agent reachable by more than one path is reported once, which also stops a
-// cyclic tree from recursing forever.
 func GetAppInfo(ctx context.Context, appName string, root agent.Agent) *models.AppInfo {
 	if root == nil {
 		return nil
@@ -79,11 +72,9 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		info := &models.AgentInfo{
 			Name:        a.Name(),
 			Description: a.Description(),
-			// Never nil: the wire contract requires the field to be present,
-			// and a nil slice would marshal to null.
+			// Contract requires Tools field to be present.
 			Tools: []*genai.Tool{},
 		}
-		// Record before recursing so that a cycle terminates here.
 		agents[a.Name()] = info
 
 		if llmAgent, ok := a.(llminternal.Agent); ok {
@@ -111,10 +102,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 // agentTools describes the tools an LLM agent exposes to the model, as function
 // declarations.
 //
-// Tools without a declaration are omitted, matching adk-python. Those are the
-// tools the model does not call as functions: built-in Gemini tools such as
-// Google Search, which the model executes itself, and tools that only shape the
-// request by injecting memory or examples into the prompt.
+// Tools without a declaration are omitted.
 func agentTools(ctx context.Context, appName, agentName string, state *llminternal.State) []*genai.Tool {
 	tools := resolveTools(ctx, appName, agentName, state)
 
@@ -162,8 +150,7 @@ func resolveTools(ctx context.Context, appName, agentName string, state *llminte
 
 // appInfoContext is a minimal [agent.ReadonlyContext] for resolving toolsets
 // outside of an invocation. Describing an app runs no agent, so there is no
-// user content, no session and no invocation to expose; a toolset that consults
-// any of them sees empty values rather than a nil dereference.
+// user content, no session and no invocation to expose.
 type appInfoContext struct {
 	context.Context
 
