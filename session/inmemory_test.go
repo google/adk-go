@@ -184,6 +184,60 @@ func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 	t.Log("AppendEvent did not deadlock")
 }
 
+func TestInMemoryService_AppendEvent_StripsTempStateFromCanonicalRecord(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:scratch":   "ephemeral",
+				"persistent_key": "keep",
+			},
+		},
+	}
+
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// Read the session back from the service. Create and Get never hand out a
+	// pointer to the canonical record, so this is the only way to see what was
+	// actually stored.
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	var storedEvent *session.Event
+	for ev := range getResp.Session.Events().All() {
+		storedEvent = ev
+	}
+	if storedEvent == nil {
+		t.Fatalf("expected an event on the session returned by Get, got none")
+	}
+	if _, exists := storedEvent.Actions.StateDelta["temp:scratch"]; exists {
+		t.Errorf("expected temp:scratch to be stripped from the stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+	if storedEvent.Actions.StateDelta["persistent_key"] != "keep" {
+		t.Errorf("expected persistent_key on the stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
 func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) {
 	ctx := t.Context()
 	service := session.InMemoryService()
