@@ -57,9 +57,10 @@ func pendingCallIDs(events []*session.Event) map[string]bool {
 // between them (a restart, an OOM kill, a disconnect, a cancellation), the
 // session keeps a function call that no function response answers. That
 // history is replayed on every later turn, and a provider that requires strict
-// pairing then rejects the whole conversation: Anthropic answers "tool_use ids
-// were found without tool_result blocks immediately after", and the session
-// stays unusable until it is deleted.
+// pairing then rejects the whole conversation, so the session stays unusable
+// until it is deleted. The OpenAI Responses API rejects a function call item
+// that no function call output answers, and Anthropic answers "tool_use ids
+// were found without tool_result blocks immediately after".
 //
 // The repair runs on the request rather than the stored events, so recorded
 // history stays intact and a session that is already broken heals on its next
@@ -105,7 +106,7 @@ func pairUnansweredFunctionCalls(contents []*genai.Content, pending map[string]b
 		// in one message; otherwise the results need a turn of their own,
 		// before whatever currently follows.
 		if len(answered) > 0 {
-			following.Parts = append(following.Parts, parts...)
+			following.Parts = withResultsInserted(following.Parts, parts)
 			continue
 		}
 		paired = append(paired, &genai.Content{Role: genai.RoleUser, Parts: parts})
@@ -152,4 +153,22 @@ func responseIDs(content *genai.Content) []string {
 		ids = append(ids, response.ID)
 	}
 	return ids
+}
+
+// withResultsInserted returns parts with results added to its leading run of
+// responses. Anthropic requires every tool result to precede any other block in
+// the message that carries it, so a placeholder appended after a trailing text
+// part would be rejected for the same reason the missing result was.
+func withResultsInserted(parts, results []*genai.Part) []*genai.Part {
+	insertIndex := len(parts)
+	for i, part := range parts {
+		if part == nil || part.FunctionResponse == nil {
+			insertIndex = i
+			break
+		}
+	}
+	joined := make([]*genai.Part, 0, len(parts)+len(results))
+	joined = append(joined, parts[:insertIndex]...)
+	joined = append(joined, results...)
+	return append(joined, parts[insertIndex:]...)
 }
