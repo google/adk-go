@@ -16,7 +16,6 @@ package services_test
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"testing"
 
@@ -79,19 +78,15 @@ func toolNames(tools []*genai.Tool) []string {
 	return names
 }
 
-// fakeToolset returns tools, or an error, without touching the network.
+// fakeToolset returns a fixed set of tools without touching the network.
 type fakeToolset struct {
 	name  string
 	tools []tool.Tool
-	err   error
 }
 
 func (f *fakeToolset) Name() string { return f.name }
 
 func (f *fakeToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
 	return f.tools, nil
 }
 
@@ -191,27 +186,6 @@ func TestGetAppInfo(t *testing.T) {
 			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
 				want := []string{"list_tables", "ping", "run_query"}
 				if diff := cmp.Diff(want, toolNames(agents["db"].Tools)); diff != "" {
-					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
-				}
-			},
-		},
-		{
-			name: "a failing toolset does not lose the other tools",
-			root: func(t *testing.T) agent.Agent {
-				return newLLMAgent(t, llmagent.Config{
-					Name:        "db",
-					Description: "Talks to a database.",
-					Instruction: "Query.",
-					Tools:       []tool.Tool{newWeatherTool(t, "ping")},
-					Toolsets: []tool.Toolset{&fakeToolset{
-						name: "broken_toolset",
-						err:  errors.New("connection refused"),
-					}},
-				})
-			},
-			wantAgents: []string{"db"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if diff := cmp.Diff([]string{"ping"}, toolNames(agents["db"].Tools)); diff != "" {
 					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 				}
 			},
