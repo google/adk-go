@@ -153,6 +153,36 @@ func TestContentsRequestProcessor_PairUnansweredFunctionCalls(t *testing.T) {
 			},
 		},
 		{
+			name: "placeholder stays ahead of a trailing text part",
+			events: []*session.Event{
+				userEvent("search and fetch"),
+				callEvent(nil, fcSearch, fcFetch),
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							{FunctionResponse: frSearch},
+							{Text: "and please hurry"},
+						},
+					}},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("search and fetch", genai.RoleUser),
+				functionCallContent(fcSearch, fcFetch),
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{FunctionResponse: frSearch},
+					{FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_2",
+						Name:     "fetch_tool",
+						Response: map[string]any{"result": missingResult},
+					}},
+					{Text: "and please hurry"},
+				}},
+			},
+		},
+		{
 			name: "call held open reports that it awaits a response",
 			events: []*session.Event{
 				userEvent("do the thing"),
