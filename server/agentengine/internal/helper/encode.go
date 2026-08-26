@@ -15,6 +15,7 @@
 package helper
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"reflect"
@@ -120,6 +121,14 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
+		// A byte slice is a byte string, not a list of numbers. encoding/json
+		// base64-encodes it and the JSON convention follows. Converting element by
+		// element would send every byte through this type switch and fail on
+		// reflect.Uint8, which fails the whole containing struct. genai.Part's
+		// ThoughtSignature is the field that hits this in practice.
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
+		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())

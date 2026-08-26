@@ -15,6 +15,7 @@
 package helper
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -249,5 +250,88 @@ func TestOmitEmpty(t *testing.T) {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
 
+	}
+}
+
+func TestByteSlice(t *testing.T) {
+	type withBytes struct {
+		Signature []byte `json:"signature,omitempty"`
+		Name      string `json:"name,omitempty"`
+	}
+
+	tests := []struct {
+		name  string
+		input withBytes
+		want  map[string]any
+	}{
+		{
+			name:  "non-empty byte slice is base64 encoded",
+			input: withBytes{Signature: []byte{0x01, 0x02, 0x03}, Name: "a"},
+			want:  map[string]any{"signature": "AQID", "name": "a"},
+		},
+		{
+			name:  "empty byte slice is dropped by omitempty",
+			input: withBytes{Signature: []byte{}, Name: "a"},
+			want:  map[string]any{"name": "a"},
+		},
+		{
+			name:  "nil byte slice is dropped by omitempty",
+			input: withBytes{Name: "a"},
+			want:  map[string]any{"name": "a"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := convertSnake("", "", tt.input)
+			if err != nil {
+				t.Fatalf("convertSnake() failed: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("convertSnake() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestThoughtSignature(t *testing.T) {
+	// A thought signature is what thinking models put on a part in practice, and
+	// before byte slices were handled it failed conversion of the whole event.
+	signature := []byte("thought-signature-bytes")
+	event := session.Event{
+		ID: "1",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{Text: "hello", ThoughtSignature: signature},
+				},
+			},
+		},
+	}
+
+	got, err := convertSnake("", "", event)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("convertSnake() returned %T, want map[string]any", got)
+	}
+	content, ok := m["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content is %T, want map[string]any", m["content"])
+	}
+	parts, ok := content["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts is %#v, want a slice of one element", content["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("parts[0] is %T, want map[string]any", parts[0])
+	}
+	want := base64.StdEncoding.EncodeToString(signature)
+	if part["thought_signature"] != want {
+		t.Errorf("thought_signature = %v, want %v", part["thought_signature"], want)
 	}
 }
