@@ -81,7 +81,7 @@ func main() {
 		Description: "Delegates the orchestrator's output to an LlmAgent child, or returns its own.",
 		// Registering the wrapped LlmAgent lets the runner resolve its event
 		// author. Without it the runner logs "Event from an unknown agent"
-		// on every delegated turn.
+		// on every turn after a delegated one, when it walks the history.
 		SubAgents: []agent.Agent{drafterAgent},
 		Edges:     workflow.Chain(workflow.Start, assistant),
 	})
