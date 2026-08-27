@@ -294,10 +294,10 @@ func emitTestSignals(sessionID, eventID, opName string, tp *sdktrace.TracerProvi
 	record.SetObservedTimestamp(time.Now())
 	record.SetEventName("test-log-event")
 	record.SetBody(
-		log.MapValue(
-			log.KeyValue{
+		attribute.MapValue(
+			attribute.KeyValue{
 				Key:   "message",
-				Value: log.StringValue("test log message"),
+				Value: attribute.StringValue("test log message"),
 			},
 		),
 	)
