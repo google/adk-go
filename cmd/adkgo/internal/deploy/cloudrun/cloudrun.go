@@ -49,6 +49,7 @@ type cloudRunServiceFlags struct {
 	a2aAgentCardURL string
 	a2a             bool // enable a2a or not
 	api             bool // enable api or not
+	debugApi        bool // enable debug api or not
 	webui           bool // enable webui or not
 	pubsub          bool // enable pubsub trigger or not
 	pubsubTrigger   triggerConfigFlags
@@ -109,6 +110,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.debugApi, "debug_api", false, "Enable Debug API (if API is enabled)")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.pubsub, "pubsub", false, "Enable PubSub subrouter")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRetries, "pubsub_max_retries", 3, "Maximum retries for HTTP 429 errors from PubSub triggers")
@@ -158,6 +160,10 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				f.build.execPath = path.Join(f.build.tempDir, exec)
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
+
+			if f.cloudRun.debugApi && !f.cloudRun.api {
+				return fmt.Errorf("cannot enable Debug API without having enabled API")
+			}
 
 			return nil
 		})
@@ -210,6 +216,10 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 
 			if flags.cloudRun.api {
 				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)
+
+				if flags.cloudRun.debugApi {
+					b.WriteString(`, "-include_debug_api"`)
+				}
 			}
 			if flags.cloudRun.a2a {
 				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.cloudRun.a2aAgentCardURL + `"`)
