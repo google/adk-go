@@ -17,8 +17,10 @@ package remoteagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -59,11 +61,51 @@ type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard,
 // Callers that want lazy/cached resolution should implement caching within the provider function.
 type AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
 
+// ErrUnsupportedCardSource is returned by the [AgentCardProvider] that
+// [NewAgentCardProvider] builds, for a source carrying a URL scheme the
+// provider cannot serve. It is permanent: the same source will not resolve on
+// a retry, unlike a file that is missing or a fetch that did not land.
+var ErrUnsupportedCardSource = errors.New("unsupported agent card source")
+
+// classifyCardSource reports whether a source names a local file rather than
+// an http(s) URL to fetch, and rejects a source carrying some other scheme.
+// Without the rejection a source such as "file:///opt/card.json" reaches
+// os.ReadFile whole and fails as a missing path, naming something the caller
+// never wrote.
+//
+// A scheme here means the "scheme://" of a hierarchical URL, not every colon.
+// A colon is an ordinary character in a POSIX filename, so "cards:v2/card.json"
+// is a path and stays one; a source is a URL only once it also carries the two
+// slashes. What may sit in front of them is left to net/url to say, so that the
+// rule is RFC 3986's and not a second opinion about it.
+func classifyCardSource(source string) (isFile bool, err error) {
+	prefix, _, hasSlashes := strings.Cut(source, "://")
+	if !hasSlashes {
+		return true, nil
+	}
+	// url.Parse lowercases a scheme and stops at the first character a scheme
+	// may not hold, so the prefix is a scheme exactly when it survives the trip
+	// unchanged. "notes:/a://b" and "dir/sub://x" do not, and are paths.
+	u, parseErr := url.Parse(prefix + ":")
+	if parseErr != nil || u.Scheme != strings.ToLower(prefix) {
+		return true, nil
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w %q: scheme %q is not supported, use http(s):// or a file path", ErrUnsupportedCardSource, source, u.Scheme)
+}
+
 // NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
-// The source can be an http(s) URL or a local file path.
+// The source can be an http(s) URL or a local file path. A source carrying any
+// other scheme, such as "file://", is rejected rather than read as a path.
 func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentCardProvider {
 	return func(ctx context.Context) (*a2a.AgentCard, error) {
-		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		isFile, err := classifyCardSource(source)
+		if err != nil {
+			return nil, err
+		}
+		if !isFile {
 			card, err := agentcard.DefaultResolver.Resolve(ctx, source, opts...)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
@@ -128,6 +170,22 @@ type A2AConfig struct {
 	// created from the content or error of that callback and the remaining
 	// callbacks will be skipped.
 	AfterAgentCallbacks []agent.AfterAgentCallback
+
+	// AllowTransferToAgent controls whether a transfer_to_agent value set by
+	// the remote A2A peer in its response metadata is honored by the local
+	// orchestrator.
+	//
+	// TransferToAgent drives which agent runs next within the caller's own
+	// configured multi-agent tree, so accepting it from a remote peer lets
+	// that peer redirect the local orchestrator's control flow. This
+	// defaults to false (the peer-supplied value is redacted) so that
+	// connecting to an agent you do not fully trust is safe by default. Set
+	// this to true only for closed, trusted deployments that rely on the
+	// remote peer being able to select the next local agent.
+	//
+	// This is applied uniformly after conversion, whether the default
+	// converter or a custom Converter is used.
+	AllowTransferToAgent bool
 
 	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
 	// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
@@ -265,6 +323,15 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				event, err = cfg.Converter(ctx, req, a2aEvent, a2aErr)
 			} else {
 				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
+			}
+
+			// See toEventActions: TransferToAgent is restored here, after
+			// conversion, only when the caller has opted in via
+			// AllowTransferToAgent.
+			if err == nil && event != nil && a2aEvent != nil && cfg.AllowTransferToAgent {
+				if transferToAgent, ok := adka2a.TransferToAgentFromMeta(a2aEvent.Meta()); ok {
+					event.Actions.TransferToAgent = transferToAgent
+				}
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {

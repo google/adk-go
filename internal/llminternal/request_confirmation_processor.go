@@ -108,6 +108,50 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 
 		agentName := ctx.Agent().Name()
 
+		// Detect tampered confirmations before resuming any tool.
+		//
+		// The resume path below trusts the tool name and arguments embedded in
+		// the agent-authored confirmation-request event (via OriginalCallFrom),
+		// gated only by the author check. The user's approval carries only the
+		// confirmation-call ID and a {"confirmed": true} decision; it does not
+		// restate or bind the arguments. So if two events present the same
+		// confirmation-call ID but embed different original calls, a single user
+		// approval is ambiguous: we cannot tell which call the user actually saw
+		// and approved. An attacker who can append an event stamped with this
+		// agent's name (for example by tampering with the session store) can
+		// exploit this to swap in different arguments, or a different tool,
+		// behind a legitimate approval. When a confirmation-call ID resolves to
+		// conflicting original calls across events, refuse to resume it (fail
+		// closed): the legitimate action is blocked rather than the attacker's
+		// action executed.
+		conflictingConfirmations := make(map[string]bool)
+		originalCallByConfirmationID := make(map[string]string)
+		for _, event := range events {
+			if event.Author != agentName {
+				continue
+			}
+			for _, functionCall := range utils.FunctionCalls(event.Content) {
+				if _, ok := confirmationResponses[functionCall.ID]; !ok {
+					continue
+				}
+				originalFunctionCall, err := toolconfirmation.OriginalCallFrom(functionCall)
+				if err != nil {
+					continue
+				}
+				canonical, err := json.Marshal(originalFunctionCall)
+				if err != nil {
+					continue
+				}
+				if prev, seen := originalCallByConfirmationID[functionCall.ID]; seen {
+					if prev != string(canonical) {
+						conflictingConfirmations[functionCall.ID] = true
+					}
+					continue
+				}
+				originalCallByConfirmationID[functionCall.ID] = string(canonical)
+			}
+		}
+
 		// TODO could we skip events for >= confirmationEventIndex
 		for k := len(events) - 2; k >= 0; k-- {
 			event := events[k]
@@ -137,6 +181,13 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			for _, functionCall := range calls {
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
+					continue
+				}
+				if conflictingConfirmations[functionCall.ID] {
+					// Ambiguous/tampered confirmation (see above): this
+					// confirmation-call ID resolves to conflicting original calls
+					// across events, so we cannot trust which one the user
+					// approved. Refuse to resume it.
 					continue
 				}
 				originalFunctionCall, err := toolconfirmation.OriginalCallFrom(functionCall)
