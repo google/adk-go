@@ -69,9 +69,14 @@ func TestToSessionEvent(t *testing.T) {
 					},
 					TurnComplete: true,
 				},
-				Author:  agentName,
-				Branch:  branch,
-				Actions: session.EventActions{Escalate: true, TransferToAgent: "a-2"},
+				Author: agentName,
+				Branch: branch,
+				// TransferToAgent is peer-supplied metadata; this conversion
+				// layer never restores it -- see
+				// TestToSessionEventWithParts_TransferToAgentAlwaysRedacted and
+				// TransferToAgentFromMeta, which a caller uses to restore it
+				// explicitly after making its own trust decision about the peer.
+				Actions: session.EventActions{Escalate: true},
 			},
 		},
 		{
@@ -738,5 +743,50 @@ func TestToSessionEventWithParts_NilResultFiltered(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestToSessionEventWithParts_TransferToAgentAlwaysRedacted verifies that a
+// remote A2A peer's transfer_to_agent metadata is never restored by this
+// conversion layer, regardless of caller. A caller that has made its own
+// trust decision about the remote peer restores it explicitly afterwards,
+// using TransferToAgentFromMeta -- see
+// remoteagent.A2AConfig.AllowTransferToAgent.
+func TestToSessionEventWithParts_TransferToAgentAlwaysRedacted(t *testing.T) {
+	branch, agentName := "main", "a2a agent"
+	a2aAgent, err := agent.New(agent.Config{Name: agentName})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+
+	input := &a2a.Message{
+		Parts: a2a.ContentParts{a2a.NewTextPart("foo")},
+		Metadata: map[string]any{
+			metadataTransferToAgentKey: "a-2",
+			metadataEscalateKey:        true,
+		},
+	}
+
+	got, err := ToSessionEventWithParts(ictx, input, nil)
+	if err != nil {
+		t.Fatalf("ToSessionEventWithParts() error = %v", err)
+	}
+	want := session.EventActions{Escalate: true}
+	if diff := cmp.Diff(want, got.Actions); diff != "" {
+		t.Errorf("Actions wrong result (+got,-want)\ndiff = %s", diff)
+	}
+}
+
+func TestTransferToAgentFromMeta(t *testing.T) {
+	if got, ok := TransferToAgentFromMeta(nil); ok || got != "" {
+		t.Errorf("TransferToAgentFromMeta(nil) = (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := TransferToAgentFromMeta(map[string]any{}); ok || got != "" {
+		t.Errorf("TransferToAgentFromMeta(empty) = (%q, %v), want (\"\", false)", got, ok)
+	}
+	meta := map[string]any{metadataTransferToAgentKey: "a-2"}
+	if got, ok := TransferToAgentFromMeta(meta); !ok || got != "a-2" {
+		t.Errorf("TransferToAgentFromMeta(meta) = (%q, %v), want (\"a-2\", true)", got, ok)
 	}
 }
