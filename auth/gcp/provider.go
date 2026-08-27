@@ -243,7 +243,7 @@ type provider struct {
 	pending *clientInit // in-flight lazy init, shared by concurrent callers
 	// refreshed is when each key was last force-refreshed, for the cooldown, and
 	// refreshSwept paces the removal of entries past it.
-	refreshed    map[auth.CredentialKey]time.Time
+	refreshed    map[string]time.Time
 	refreshSwept time.Time
 }
 
@@ -294,7 +294,8 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
 		return cred, nil
 	}
-	return p.fetch(ctx, client, key, "")
+	cred, _, err := p.fetch(ctx, client, key, "")
+	return cred, err
 }
 
 // Refresh implements [auth.RefreshingProvider].
@@ -322,19 +323,65 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
 		return cred, nil
 	}
-	if !p.allowRefresh(key) {
+	if !p.allowRefresh(refreshSlot(key.UserID, p.scheme)) {
 		// Nothing will replace it, so drop it: a credential the downstream refused
 		// must not be served again. The next request then resolves normally, which
 		// costs what every request cost before there was a cache.
-		_ = p.store.Delete(ctx, key)
+		p.evictRejected(ctx, key, rejectedToken)
 		return nil, fmt.Errorf("gcp: refusing to force-refresh %s twice inside %v", p.scheme.Name, refreshCooldown)
 	}
-	cred, err := p.fetch(ctx, client, key, rejectedToken)
-	if err != nil {
-		_ = p.store.Delete(ctx, key)
+	cred, cached, err := p.fetch(ctx, client, key, rejectedToken)
+	switch {
+	case err != nil:
+		p.evictRejected(ctx, key, rejectedToken)
 		return nil, err
+	case rejectedToken != "" && credentialToken(cred) == rejectedToken:
+		// The service handed back what it already had. It does that when the hint
+		// did not reach it, or when the credential was never the reason for the
+		// rejection — a 403 for a missing ACL, say, which no new token fixes.
+		// Retrying with it would be a second guaranteed failure, so report instead
+		// and let the downstream's own answer stand.
+		p.evictRejected(ctx, key, rejectedToken)
+		return nil, fmt.Errorf("gcp: resource %q: the credential service returned the credential that was rejected", p.scheme.Name)
+	case !cached:
+		// Nothing replaced the entry, so the rejected credential is still in it.
+		p.evictRejected(ctx, key, rejectedToken)
 	}
 	return cred, nil
+}
+
+// evictRejected drops key's entry while it still holds the credential that was
+// refused. Another request may have replaced it in the meantime, and deleting
+// that would throw away a credential nothing has rejected — which is also what
+// would then defeat the check at the top of Refresh for everyone still holding
+// the old one.
+//
+// A write landing between the read and the delete would still lose, and the
+// store offers no compare-and-delete to close that. The window is two adjacent
+// calls rather than a network round trip.
+func (p *provider) evictRejected(ctx context.Context, key auth.CredentialKey, rejectedToken string) {
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
+		return
+	}
+	_ = p.store.Delete(ctx, key)
+}
+
+// refreshSlot identifies the credential a forced refresh acts on *at the
+// service*, which is what the cooldown is protecting.
+//
+// Deliberately coarser than the cache key. The app name and the Client are cache
+// dimensions the service never sees, so counting them would multiply the bound
+// by however many apps and Clients a deployment happens to wire up — and the
+// bound is the whole point. Erring coarse costs a refusal that degrades to the
+// downstream's own error; erring fine costs the bound.
+func refreshSlot(userID string, s ProviderScheme) string {
+	scopes := slices.Clone(s.Scopes)
+	slices.Sort(scopes)
+	fields := []string{userID, s.Name, strconv.Itoa(len(scopes))}
+	fields = append(fields, scopes...)
+	fields = append(fields, s.ContinueURI)
+	sum := sha256.Sum256([]byte(joinFields(fields...)))
+	return hex.EncodeToString(sum[:])
 }
 
 // refreshCooldown is the shortest interval between two forced refreshes of one
@@ -356,11 +403,11 @@ const refreshCooldown = 30 * time.Second
 // credential resolution takes, so a scan on a fixed fraction of calls would put
 // the process's whole auth path behind it. Same reasoning, same shape, as
 // InMemoryCredentialStore's own sweep.
-func (p *provider) allowRefresh(key auth.CredentialKey) bool {
+func (p *provider) allowRefresh(slot string) bool {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if at, seen := p.refreshed[key]; seen && now.Sub(at) < refreshCooldown {
+	if at, seen := p.refreshed[slot]; seen && now.Sub(at) < refreshCooldown {
 		return false
 	}
 	if !p.refreshSwept.IsZero() && now.Sub(p.refreshSwept) >= refreshCooldown {
@@ -372,10 +419,10 @@ func (p *provider) allowRefresh(key auth.CredentialKey) bool {
 		p.refreshSwept = now
 	}
 	if p.refreshed == nil {
-		p.refreshed = make(map[auth.CredentialKey]time.Time)
+		p.refreshed = make(map[string]time.Time)
 		p.refreshSwept = now
 	}
-	p.refreshed[key] = now
+	p.refreshed[slot] = now
 	return true
 }
 
@@ -405,9 +452,11 @@ func (p *provider) resolve(ctx context.Context) (*Client, auth.CredentialKey, er
 	return client, auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}, nil
 }
 
-// fetch retrieves a credential from the service and caches it. priorToken, when
-// set, asks for a replacement for a credential that was just rejected.
-func (p *provider) fetch(ctx context.Context, client *Client, key auth.CredentialKey, priorToken string) (auth.Credential, error) {
+// fetch retrieves a credential from the service and caches it, reporting whether
+// an entry was written — a caller replacing a rejected credential needs to know,
+// since a result too short-lived to cache leaves the old one in place.
+// priorToken, when set, asks for a replacement for a credential just rejected.
+func (p *provider) fetch(ctx context.Context, client *Client, key auth.CredentialKey, priorToken string) (auth.Credential, bool, error) {
 	r, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      key.UserID,
@@ -416,15 +465,9 @@ func (p *provider) fetch(ctx context.Context, client *Client, key auth.Credentia
 		PriorToken:  priorToken,
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if !p.cache(ctx, key, r) && priorToken != "" {
-		// A forced refresh whose result is not cacheable must still evict what it
-		// replaced, or the credential the downstream refused stays and is served
-		// again for the rest of its cached life.
-		_ = p.store.Delete(ctx, key)
-	}
-	return r.Credential, nil
+	return r.Credential, p.cache(ctx, key, r), nil
 }
 
 // credentialToken reads the token out of a resolved GCP credential, for the

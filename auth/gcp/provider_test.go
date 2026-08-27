@@ -488,6 +488,9 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 		endpoint func(cfg *gcp.Config, url string)
 		// success builds the service-specific success envelope carrying tok.
 		success func(tok string) string
+		// forced reports whether a request body asked for a forced refresh. The
+		// two services spell that differently, which is the point of the split.
+		forced func(body forceRefreshFields) bool
 	}{
 		{
 			name:     "agent identity",
@@ -496,6 +499,7 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 			success: func(tok string) string {
 				return fmt.Sprintf(`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
 			},
+			forced: func(b forceRefreshFields) bool { return b.ForceRefreshToken != "" },
 		},
 		{
 			name:     "iam connector",
@@ -504,23 +508,22 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 			success: func(tok string) string {
 				return fmt.Sprintf(`{"done":true,"response":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
 			},
+			forced: func(b forceRefreshFields) bool { return b.ForceRefresh },
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
-			var lastForceRefreshToken string
+			var lastBody forceRefreshFields
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					ForceRefreshToken string `json:"forceRefreshToken"`
-				}
+				var body forceRefreshFields
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				mu.Lock()
-				lastForceRefreshToken = body.ForceRefreshToken
+				lastBody = body
 				mu.Unlock()
 				tok := "tok1"
-				if body.ForceRefreshToken != "" {
+				if tc.forced(body) {
 					tok = "tok2" // a forced refresh mints a new token
 				}
 				// Include an expiry so the credential is cached; Refresh reads the
@@ -561,10 +564,19 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 				t.Fatalf("Refresh() error = %v", err)
 			}
 			mu.Lock()
-			got := lastForceRefreshToken
+			got := lastBody
 			mu.Unlock()
-			if got != "tok1" {
-				t.Errorf("forceRefreshToken = %q, want %q (the prior token)", got, "tok1")
+			if !tc.forced(got) {
+				t.Errorf("request body %+v did not ask for a forced refresh", got)
+			}
+			// Agent Identity is told which token to replace; the connector is not
+			// given the field, so it must not be sent one.
+			wantToken := ""
+			if strings.Contains(tc.resource, "/authProviders/") {
+				wantToken = "tok1"
+			}
+			if got.ForceRefreshToken != wantToken {
+				t.Errorf("forceRefreshToken = %q, want %q", got.ForceRefreshToken, wantToken)
 			}
 			if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
 				t.Errorf("refreshed credential = %+v, want tok2", cred)
@@ -1542,5 +1554,186 @@ func TestProviderRefreshEvictsWhatItCannotReplace(t *testing.T) {
 				t.Error("the rejected credential is still cached, so the next request is served it again")
 			}
 		})
+	}
+}
+
+// forceRefreshFields is both services' force-refresh spellings in one struct, so
+// a test can assert that each route sends its own and not the other's.
+type forceRefreshFields struct {
+	ForceRefreshToken string `json:"forceRefreshToken"`
+	ForceRefresh      bool   `json:"forceRefresh"`
+}
+
+// A service that hands back the credential it already had has not refreshed
+// anything. Retrying with it is a second guaranteed failure, so Refresh reports
+// instead and lets the downstream's own answer stand — and the known-bad
+// credential does not survive in the cache either.
+func TestProviderRefreshRejectsTheSameCredentialComingBack(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// The same token every time, whatever the request asked for.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok1","header":"Authorization: Bearer","expireTime":%q}}`,
+			time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	ctx := adkContext(t, "user-1")
+	first, err := p.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	got, err := p.(auth.RefreshingProvider).Refresh(ctx, first)
+	if err == nil {
+		t.Fatalf("Refresh() = %+v, nil error; want it refused when the service returns the rejected credential", got)
+	}
+	if got != nil {
+		t.Errorf("Refresh() returned %+v alongside the error, want nil", got)
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, "app", "user-1")
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached, so the next request is served it again")
+	}
+}
+
+// The cooldown protects a credential at the service, which is identified by the
+// end user and the scheme — not by the app name, which the service never sees.
+// Counting app names would multiply the bound by however many a deployment wires
+// up.
+func TestProviderRefreshCooldownIgnoresTheAppName(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+
+	first, err := rp.Credential(adkContextIn(t, "app-one", "user-1"))
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, err := rp.Refresh(adkContextIn(t, "app-one", "user-1"), first); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	callsAfterFirst, _ := seen()
+
+	// A second app, same end user and scheme: one credential at the service, so
+	// one forced refresh.
+	second, err := rp.Credential(adkContextIn(t, "app-two", "user-1"))
+	if err != nil {
+		t.Fatalf("Credential() for the second app error = %v", err)
+	}
+	if _, err := rp.Refresh(adkContextIn(t, "app-two", "user-1"), second); err == nil {
+		t.Error("Refresh() under a second app name = nil error, want the cooldown to hold")
+	}
+	calls, _ := seen()
+	if calls != callsAfterFirst+1 {
+		t.Errorf("service calls = %d, want %d (only the second app's cold resolve, not another forced refresh)", calls, callsAfterFirst+1)
+	}
+}
+
+// swappingStore lets a test place a credential change between two of the
+// provider's reads, which is what the eviction guard exists for and what a
+// sequential test cannot otherwise produce.
+type swappingStore struct {
+	inner   auth.CredentialStore
+	armed   int             // Gets still to answer with pinned before swapping
+	pinned  auth.Credential // what the provider sees first
+	swapped auth.Credential // what it sees after, as if somebody else had written
+	deletes int
+}
+
+func (s *swappingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	switch {
+	case s.armed > 0:
+		s.armed--
+		return s.pinned, true, nil
+	case s.swapped != nil:
+		return s.swapped, true, nil
+	}
+	return s.inner.Get(ctx, key)
+}
+
+func (s *swappingStore) Set(ctx context.Context, key auth.CredentialKey, cred auth.Credential, expiresAt time.Time) error {
+	return s.inner.Set(ctx, key, cred, expiresAt)
+}
+
+func (s *swappingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
+	s.deletes++
+	return s.inner.Delete(ctx, key)
+}
+
+// Eviction is the last thing Refresh does on every failing path, and by then its
+// view of the entry is stale: another request may have replaced it since. That
+// replacement has not been rejected, so deleting it would throw away a working
+// credential — and leave every straggler still holding the old one with nothing
+// to be served.
+func TestProviderRefreshDoesNotEvictACredentialSomebodyElseReplaced(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		// A new token each time, so the same-token guard never trips here.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":"Authorization: Bearer","expireTime":%q}}`,
+			n, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := &swappingStore{inner: auth.NewInMemoryCredentialStore()}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp := p.(auth.RefreshingProvider)
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := p.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	// Burn the cooldown, so the Refresh below takes the throttled path — the
+	// shortest route to the eviction.
+	if _, err := rp.Refresh(ctx, rejected); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	// One read answers with the rejected credential, so Refresh proceeds past its
+	// straggler check; every read after that answers with a replacement, as if
+	// another request had landed in between.
+	store.pinned = rejected
+	store.swapped = auth.BearerCredential{Token: "replaced-by-somebody-else"}
+	store.armed = 1
+	before := store.deletes
+
+	if _, err := rp.Refresh(ctx, rejected); err == nil {
+		t.Fatal("Refresh() inside the cooldown = nil error, want it refused")
+	}
+	if store.deletes != before {
+		t.Error("Refresh deleted an entry another request had already replaced")
 	}
 }
