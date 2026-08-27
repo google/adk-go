@@ -51,24 +51,27 @@ never calls the model.
 ## Workflow
 
 ```mermaid
-graph LR
-    User[User]
-    subgraph "ADK Application Workflow"
-        Start((Start)) --> A[Dynamic Node: assistant]
-        A -.->|"2. guard runs in Go"| Q{"is request in scope?"}
-        Q -.->|"3a. yes: RunNode + WithUseAsOutput"| D[Agent Node: drafter LLM]
-        D -.->|"4. the drafter's own event is the output"| End((End))
-        Q -.->|"3b. no: plain return, no model call"| End
+sequenceDiagram
+    actor User
+    participant A as assistant<br/>(dynamic node)
+    participant D as drafter<br/>(LlmAgent node)
+
+    User->>A: request
+    Note over A: isEmailRequest(request) decides in Go,<br/>before any model call
+
+    alt in scope
+        A->>D: RunNode(request, WithUseAsOutput())
+        D-->>User: the drafter's own event carries the output
+        Note over A: assistant emits no event of its own
+    else out of scope
+        A-->>User: assistant returns its own string
     end
-    User -- "1. request" --> Start
-    End -- "5. reply" --> User
 ```
 
-`Start → assistant` is the only static graph edge, drawn solid. The dotted
-arrows are the orchestrator's Go body at work: the `isEmailRequest` guard, the
-imperative `RunNode` call, and the output each branch produces. `End` marks the
-end of the run rather than a node — `assistant` is the last node in the graph.
-Exactly one of `3a` and `3b` runs per turn.
+The arrow back to the user is the whole point: on the delegating branch it
+leaves `drafter`, not `assistant`. `assistant` is also the graph's last node —
+`Start → assistant` is its only static edge, and everything else above happens
+inside the orchestrator's Go body.
 
 ## Running the sample
 
@@ -86,11 +89,12 @@ User -> what is the weather today
 Agent -> Out of scope. Ask me to draft an email.
 
 User -> email the team that Friday standup is canceled
-Agent -> Subject: Canceled: Friday Standup Meeting
+Agent -> Subject: Friday Standup Canceled
 Hi Team,
-Please note that our daily standup meeting scheduled for this Friday is canceled.
-If you have any urgent updates or blockers, please share them in our team chat. We will resume our regular standup schedule on Monday.
-Have a great weekend,
+Please note that our standup meeting this Friday is canceled.
+If you have any urgent updates or blockers to share, please post them in our team channel. Otherwise, we will resume our regular schedule next week.
+Have a great weekend!
+Best regards,
 [Your Name]
 ```
 
@@ -131,5 +135,5 @@ stamped for the whole ancestor chain.
 
 ### Tunable: pick a different model
 
-Edit `gemini-flash-latest` in `main.go` to whatever model your credentials have
+Edit `gemini-3.5-flash` in `main.go` to whatever model your credentials have
 access to. The drafter prompt is short and any modern Gemini model handles it.

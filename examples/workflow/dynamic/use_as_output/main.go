@@ -40,7 +40,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-3.5-flash", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("gemini.NewModel: %v", err)
 	}
