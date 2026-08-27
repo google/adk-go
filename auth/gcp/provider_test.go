@@ -1737,3 +1737,112 @@ func TestProviderRefreshDoesNotEvictACredentialSomebodyElseReplaced(t *testing.T
 		t.Error("Refresh deleted an entry another request had already replaced")
 	}
 }
+
+// The cooldown must separate end users. It is the only dimension of the refresh
+// slot that varies within one provider — the scheme is fixed at construction —
+// so without this, collapsing the slot to a constant passes every other test in
+// the package, and one user's 401-storming downstream would block every other
+// user's refresh for the length of the cooldown.
+func TestProviderRefreshCooldownSeparatesUsers(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+
+	refresh := func(user string) error {
+		t.Helper()
+		ctx := adkContext(t, user)
+		cred, err := rp.Credential(ctx)
+		if err != nil {
+			t.Fatalf("Credential(%q) error = %v", user, err)
+		}
+		_, err = rp.Refresh(ctx, cred)
+		return err
+	}
+	if err := refresh("user-1"); err != nil {
+		t.Fatalf("Refresh() for the first user error = %v", err)
+	}
+	if err := refresh("user-2"); err != nil {
+		t.Errorf("Refresh() for a second user error = %v; the first user's cooldown must not bind them", err)
+	}
+	// Two cold resolves and two forced refreshes.
+	if calls, _ := seen(); calls != 4 {
+		t.Errorf("service calls = %d, want 4", calls)
+	}
+}
+
+// The end-to-end path nothing else drives: a downstream 401 reaching a real
+// provider through a real Transport, the rejected credential surviving the trip
+// in a form the provider can read a token out of, and the retry going out with
+// the replacement. Both halves are covered elsewhere against a stub of the
+// other, which is exactly the seam two earlier defects lived on.
+func TestTransportRefreshesThroughTheRealProvider(t *testing.T) {
+	var mu sync.Mutex
+	var hints []string
+	credSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		hints = append(hints, body.ForceRefreshToken)
+		n := len(hints)
+		mu.Unlock()
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":"Authorization: Bearer","expireTime":%q}}`,
+			n, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer credSrv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: credSrv.Client(), AgentIdentityEndpoint: credSrv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  auth.NewInMemoryCredentialStore(),
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	// The downstream refuses the first credential and accepts the second.
+	var seenAuth []string
+	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		n := len(seenAuth)
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, "no")
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer downstream.Close()
+
+	hc := &http.Client{Transport: &auth.Transport{Provider: p, Base: downstream.Client().Transport}}
+	req, err := http.NewRequestWithContext(adkContext(t, "user-1"), http.MethodGet, downstream.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 after the refresh and retry", resp.StatusCode)
+	}
+	mu.Lock()
+	gotAuth, gotHints := slices.Clone(seenAuth), slices.Clone(hints)
+	mu.Unlock()
+	if want := []string{"Bearer tok1", "Bearer tok2"}; !slices.Equal(gotAuth, want) {
+		t.Errorf("downstream saw %q, want %q", gotAuth, want)
+	}
+	// The second retrieval must carry the rejected token, which is the whole
+	// point of passing it through Transport rather than re-reading the cache.
+	if want := []string{"", "tok1"}; !slices.Equal(gotHints, want) {
+		t.Errorf("credential service saw forceRefreshToken %q, want %q", gotHints, want)
+	}
+}

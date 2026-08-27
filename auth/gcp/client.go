@@ -363,9 +363,13 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
-	// PriorToken is the previously issued (now rejected) token. Both services
-	// take it as force_refresh_token to mint a fresh credential after a
-	// downstream rejection; empty on a normal fetch.
+	// PriorToken is the previously issued, now rejected, token. Setting it asks
+	// the service to mint a fresh credential rather than return the one it
+	// already has. Empty on a normal fetch.
+	//
+	// The two services spell the ask differently on the wire and this one field
+	// covers both — Agent Identity is sent the token, the IAM Connector a
+	// boolean. See the request types below.
 	PriorToken string
 }
 

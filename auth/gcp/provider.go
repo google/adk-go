@@ -300,20 +300,30 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 
 // Refresh implements [auth.RefreshingProvider].
 //
-// The rejected token is the ask: both services take it as forceRefreshToken and
-// mint a replacement rather than returning the same credential — or start a
-// fresh consent flow, which surfaces as an [auth.ConsentRequiredError] exactly
-// as it would on a cold resolve. It comes from the caller rather than from the
-// cache, because the cache may already hold a different credential by now, and
-// force-refreshing one that is working destroys a good token.
+// The rejected token is the ask. Each service is told in its own way — see
+// [Request.PriorToken] — and mints a replacement rather than returning the same
+// credential, or starts a fresh consent flow, which surfaces as an
+// [auth.ConsentRequiredError] exactly as it would on a cold resolve. It comes
+// from the caller rather than from the cache, because the cache may already hold
+// a different credential by now, and force-refreshing one that is working
+// destroys a good token.
 //
 // Two things bound what a downstream can make this do. A cache that already
 // holds something other than the rejected credential means another request has
 // refreshed, so this serves that instead of minting again. And a force refresh
-// invalidates a live token at the service, so one per key per
+// invalidates a live token at the service, so one per [refreshSlot] per
 // [refreshCooldown] is all a downstream gets, however fast it returns 401.
-// Beyond that the entry is still dropped — a credential known to be rejected is
-// never served again — and the next request resolves normally.
+//
+// That bound is per provider, and providers are meant to be long-lived — see
+// [NewProvider]. Several of them over one credential each hold their own bucket,
+// so the ceiling is a small multiple chosen at wiring time rather than anything
+// the downstream can drive. Sharing one limiter between providers is possible
+// and simply not worth it yet.
+//
+// On every path that does not produce a replacement the rejected entry is
+// dropped, so a credential known to be refused is not served again, and the next
+// request resolves normally — unforced, at the cost every request paid before
+// there was a cache.
 func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.Credential, error) {
 	client, key, err := p.resolve(ctx)
 	if err != nil {
@@ -356,9 +366,12 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 // would then defeat the check at the top of Refresh for everyone still holding
 // the old one.
 //
-// A write landing between the read and the delete would still lose, and the
-// store offers no compare-and-delete to close that. The window is two adjacent
-// calls rather than a network round trip.
+// A write landing between the read and the delete still loses: these are two
+// separately locked store calls and the interface has no compare-and-delete. The
+// window is two adjacent calls rather than a network round trip, and what it
+// costs is one spurious eviction — a cache miss and one extra retrieval on the
+// next request. It cannot serve a rejected credential or cross principals, which
+// is why it is left open rather than closed with an optional interface.
 func (p *provider) evictRejected(ctx context.Context, key auth.CredentialKey, rejectedToken string) {
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
 		return
