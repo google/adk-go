@@ -38,7 +38,7 @@ import (
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
-		TraceCapacity: cfg.DebugConfig.TelemetryTraceCapacity,
+		TraceCapacity: cfg.DebugConfig.TraceCapacity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create debug telemetry service: %w", err)
@@ -84,16 +84,16 @@ type ServerConfig struct {
 	DebugApiConfig  DebugApiConfig
 }
 
+// DebugApiConfig contains parameters for the debug api.
 type DebugApiConfig struct {
 	IncludeDebugAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.
 type DebugTelemetryConfig struct {
-
 	// Maximum number of traces to keep in memory.
 	// If <= 0, the default capacity 10_000 is used.
-	TelemetryTraceCapacity int
+	TraceCapacity int
 }
 
 // Server is an HTTP server that serves the ADK REST API.
