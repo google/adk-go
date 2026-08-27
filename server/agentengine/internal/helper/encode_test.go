@@ -163,6 +163,24 @@ func TestEventLogProbs(t *testing.T) {
 	}
 }
 
+func TestConvertSnakeByteSlice(t *testing.T) {
+	// Regression test for https://github.com/google/adk-go/issues/1386:
+	// []byte fields (e.g. genai.Part.ThoughtSignature) previously failed
+	// conversion with "unsupported type: uint8", causing the whole enclosing
+	// struct to fall back to its raw Go form instead of snake_case JSON.
+	type payload struct {
+		Data []byte `json:"data"`
+	}
+	got, err := convertSnake("", "", payload{Data: []byte{0x01, 0x02, 0x03}})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	want := map[string]any{"data": "AQID"}
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Errorf("convertSnake() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestEmbedded(t *testing.T) {
 	type A struct {
 		anInteger int

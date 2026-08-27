@@ -15,6 +15,7 @@
 package helper
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"reflect"
@@ -120,6 +121,15 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
+		// A byte slice ([]byte) is a single logical value (e.g. a base64-encoded
+		// blob such as genai.Part.ThoughtSignature), not a list of elements to
+		// recurse into. Without this, each uint8 element hits the default case and
+		// fails conversion with "unsupported type: uint8", which makes the whole
+		// enclosing struct fall back to its raw Go form. Match encoding/json by
+		// emitting a base64-encoded string.
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
+		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())
