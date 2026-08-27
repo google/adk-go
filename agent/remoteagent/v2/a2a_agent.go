@@ -17,8 +17,10 @@ package remoteagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -59,11 +61,51 @@ type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard,
 // Callers that want lazy/cached resolution should implement caching within the provider function.
 type AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
 
+// ErrUnsupportedCardSource is returned by the [AgentCardProvider] that
+// [NewAgentCardProvider] builds, for a source carrying a URL scheme the
+// provider cannot serve. It is permanent: the same source will not resolve on
+// a retry, unlike a file that is missing or a fetch that did not land.
+var ErrUnsupportedCardSource = errors.New("unsupported agent card source")
+
+// classifyCardSource reports whether a source names a local file rather than
+// an http(s) URL to fetch, and rejects a source carrying some other scheme.
+// Without the rejection a source such as "file:///opt/card.json" reaches
+// os.ReadFile whole and fails as a missing path, naming something the caller
+// never wrote.
+//
+// A scheme here means the "scheme://" of a hierarchical URL, not every colon.
+// A colon is an ordinary character in a POSIX filename, so "cards:v2/card.json"
+// is a path and stays one; a source is a URL only once it also carries the two
+// slashes. What may sit in front of them is left to net/url to say, so that the
+// rule is RFC 3986's and not a second opinion about it.
+func classifyCardSource(source string) (isFile bool, err error) {
+	prefix, _, hasSlashes := strings.Cut(source, "://")
+	if !hasSlashes {
+		return true, nil
+	}
+	// url.Parse lowercases a scheme and stops at the first character a scheme
+	// may not hold, so the prefix is a scheme exactly when it survives the trip
+	// unchanged. "notes:/a://b" and "dir/sub://x" do not, and are paths.
+	u, parseErr := url.Parse(prefix + ":")
+	if parseErr != nil || u.Scheme != strings.ToLower(prefix) {
+		return true, nil
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w %q: scheme %q is not supported, use http(s):// or a file path", ErrUnsupportedCardSource, source, u.Scheme)
+}
+
 // NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
-// The source can be an http(s) URL or a local file path.
+// The source can be an http(s) URL or a local file path. A source carrying any
+// other scheme, such as "file://", is rejected rather than read as a path.
 func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentCardProvider {
 	return func(ctx context.Context) (*a2a.AgentCard, error) {
-		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		isFile, err := classifyCardSource(source)
+		if err != nil {
+			return nil, err
+		}
+		if !isFile {
 			card, err := agentcard.DefaultResolver.Resolve(ctx, source, opts...)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
