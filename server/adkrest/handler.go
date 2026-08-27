@@ -56,7 +56,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	}
-	if cfg.DebugConfig.IncludeDebugAPI {
+	if cfg.DebugApiConfig.IncludeDebugAPI {
 		subrouters = append(subrouters, routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)))
 	}
 
@@ -80,12 +80,16 @@ type ServerConfig struct {
 	ArtifactService artifact.Service
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
-	DebugConfig     DebugConfig
+	DebugConfig     DebugTelemetryConfig
+	DebugApiConfig  DebugApiConfig
 }
 
-// DebugConfig contains parameters for the debug telemetry.
-type DebugConfig struct {
+type DebugApiConfig struct {
 	IncludeDebugAPI bool
+}
+
+// DebugTelemetryConfig contains parameters for the debug telemetry.
+type DebugTelemetryConfig struct {
 
 	// Maximum number of traces to keep in memory.
 	// If <= 0, the default capacity 10_000 is used.
