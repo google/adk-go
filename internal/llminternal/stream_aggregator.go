@@ -23,8 +23,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/llminternal/converters"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/internal/llminternal/converters"
+	"google.golang.org/adk/v2/model"
 )
 
 // streamingResponseAggregator aggregates partial streaming responses.
@@ -78,7 +78,9 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 
 func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMResponse) *model.LLMResponse {
 	s.response = llmResponse
-	s.usageMetadata = llmResponse.UsageMetadata
+	if llmResponse.UsageMetadata != nil {
+		s.usageMetadata = llmResponse.UsageMetadata
+	}
 	if llmResponse.GroundingMetadata != nil {
 		s.groundingMetadata = llmResponse.GroundingMetadata
 	}

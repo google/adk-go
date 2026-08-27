@@ -32,8 +32,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
 )
 
 func TestSessionSpansHandler(t *testing.T) {
@@ -294,10 +294,10 @@ func emitTestSignals(sessionID, eventID, opName string, tp *sdktrace.TracerProvi
 	record.SetObservedTimestamp(time.Now())
 	record.SetEventName("test-log-event")
 	record.SetBody(
-		log.MapValue(
-			log.KeyValue{
+		attribute.MapValue(
+			attribute.KeyValue{
 				Key:   "message",
-				Value: log.StringValue("test log message"),
+				Value: attribute.StringValue("test log message"),
 			},
 		),
 	)

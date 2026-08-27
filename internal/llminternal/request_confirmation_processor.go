@@ -21,12 +21,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type confirmedCall struct {
@@ -106,18 +106,88 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return
 		}
 
+		agentName := ctx.Agent().Name()
+
+		// Detect tampered confirmations before resuming any tool.
+		//
+		// The resume path below trusts the tool name and arguments embedded in
+		// the agent-authored confirmation-request event (via OriginalCallFrom),
+		// gated only by the author check. The user's approval carries only the
+		// confirmation-call ID and a {"confirmed": true} decision; it does not
+		// restate or bind the arguments. So if two events present the same
+		// confirmation-call ID but embed different original calls, a single user
+		// approval is ambiguous: we cannot tell which call the user actually saw
+		// and approved. An attacker who can append an event stamped with this
+		// agent's name (for example by tampering with the session store) can
+		// exploit this to swap in different arguments, or a different tool,
+		// behind a legitimate approval. When a confirmation-call ID resolves to
+		// conflicting original calls across events, refuse to resume it (fail
+		// closed): the legitimate action is blocked rather than the attacker's
+		// action executed.
+		conflictingConfirmations := make(map[string]bool)
+		originalCallByConfirmationID := make(map[string]string)
+		for _, event := range events {
+			if event.Author != agentName {
+				continue
+			}
+			for _, functionCall := range utils.FunctionCalls(event.Content) {
+				if _, ok := confirmationResponses[functionCall.ID]; !ok {
+					continue
+				}
+				originalFunctionCall, err := toolconfirmation.OriginalCallFrom(functionCall)
+				if err != nil {
+					continue
+				}
+				canonical, err := json.Marshal(originalFunctionCall)
+				if err != nil {
+					continue
+				}
+				if prev, seen := originalCallByConfirmationID[functionCall.ID]; seen {
+					if prev != string(canonical) {
+						conflictingConfirmations[functionCall.ID] = true
+					}
+					continue
+				}
+				originalCallByConfirmationID[functionCall.ID] = string(canonical)
+			}
+		}
+
 		// TODO could we skip events for >= confirmationEventIndex
 		for k := len(events) - 2; k >= 0; k-- {
 			event := events[k]
-			// Find the system generated FunctionCall event requesting the tool confirmation
+			// Find the system generated FunctionCall event requesting the tool confirmation.
+			//
+			// Only this agent can ask this agent's user for confirmation. Function call
+			// parts also reach the session from other places, notably an A2A peer
+			// response converted into a model-role event: honouring a confirmation
+			// request from such an event would let the peer choose which local tool
+			// runs, and with what arguments, bypassing the human-in-the-loop gate
+			// entirely. Skip any event not authored by this agent.
+			if event.Author != agentName {
+				continue
+			}
 			calls := utils.FunctionCalls(event.Content)
 			if len(calls) == 0 {
 				continue
 			}
 			toolsToResumeByFunctionCallID := map[string]*confirmedCall{}
+			// Record the order the confirmation requests appear in the event so we
+			// can re-dispatch the resumed calls in that same order below. Ranging
+			// over the map directly would use Go's randomized map iteration order,
+			// which makes the re-dispatched function calls, the assembled response,
+			// and the resulting StateDelta last-writer-wins merge all
+			// non-deterministic across runs.
+			var resumeOrder []string
 			for _, functionCall := range calls {
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
+					continue
+				}
+				if conflictingConfirmations[functionCall.ID] {
+					// Ambiguous/tampered confirmation (see above): this
+					// confirmation-call ID resolves to conflicting original calls
+					// across events, so we cannot trust which one the user
+					// approved. Refuse to resume it.
 					continue
 				}
 				originalFunctionCall, err := toolconfirmation.OriginalCallFrom(functionCall)
@@ -125,6 +195,14 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					continue
 				}
 
+				// Record each original call ID in resumeOrder only once: two
+				// confirmation requests in the same event can resolve to the same
+				// originalFunctionCall.ID, and the resumed tool must be dispatched
+				// once, not once per confirmation.
+				_, seen := toolsToResumeByFunctionCallID[originalFunctionCall.ID]
+				if !seen {
+					resumeOrder = append(resumeOrder, originalFunctionCall.ID)
+				}
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
 					confirmation: &confirmation,
 					call:         *originalFunctionCall,
@@ -154,9 +232,18 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			parts := make([]*genai.Part, 0)
+			// Re-dispatch in request order (resumeOrder), so the parts slice and the
+			// downstream response/StateDelta merge are deterministic.
+			parts := make([]*genai.Part, 0, len(toolsToResumeByFunctionCallID))
 			toolsToResumeConfirmation := make(map[string]*toolconfirmation.ToolConfirmation, len(toolsToResumeByFunctionCallID))
-			for callID, cc := range toolsToResumeByFunctionCallID {
+			for _, callID := range resumeOrder {
+				cc, ok := toolsToResumeByFunctionCallID[callID]
+				if !ok {
+					// Skip calls whose response is already present in this event
+					// snapshot (removed by the delete pass above); re-dispatching such
+					// a call would run its tool a second time within this resume.
+					continue
+				}
 				parts = append(parts, &genai.Part{FunctionCall: &cc.call})
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}

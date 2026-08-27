@@ -21,11 +21,11 @@ import (
 	"log"
 	"sync"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // New creates a SequentialAgent.
@@ -41,8 +41,8 @@ func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return s.impl.RunLive(ctx)
 }
 
-// Use the SequentialAgent when you want the execution to occur in a fixed,
-// strict order.
+// New creates a SequentialAgent, which runs its sub-agents in a fixed, strict
+// order. Use it when you want the execution to occur sequentially.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
@@ -137,7 +137,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	taskCompletedTool, err := functiontool.New(functiontool.Config{
 		Name:        "task_completed",
 		Description: "Signals that the agent has successfully completed the user's question or task.",
-	}, func(ctx agent.ToolContext, args taskCompletedArgs) (taskCompletedResults, error) {
+	}, func(ctx agent.Context, args taskCompletedArgs) (taskCompletedResults, error) {
 		return taskCompletedResults{Result: "Task completion signaled."}, nil
 	})
 	if err != nil {

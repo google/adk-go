@@ -22,13 +22,13 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
 func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
-	event := session.NewEvent(ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 	event.Author = ctx.Agent().Name()
 	event.Branch = ctx.Branch()
 	return event
@@ -352,7 +352,7 @@ func toEventActions(meta map[string]any) session.EventActions {
 	}
 	var result session.EventActions
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
-	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
+	// TransferToAgent intentionally NOT restored from peer metadata.
 	return result
 }
 

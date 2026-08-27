@@ -14,7 +14,14 @@
 
 // Package adka2a allows exposing ADK agents via A2A.
 //
-// Deprecated: Use google.golang.org/adk/server/adka2a/v2 instead.
+// NewExecutor returns an a2a-go AgentExecutor. To serve it over HTTP, wrap it
+// with a2a-go's request handler and transport-specific HTTP handler, such as
+// [a2asrv.NewHandler] and [a2asrv.NewJSONRPCHandler].
+//
+// Deprecated: Use google.golang.org/adk/v2/server/adka2a/v2 instead.
+//
+// [a2asrv.NewHandler]: https://pkg.go.dev/github.com/a2aproject/a2a-go/a2asrv#NewHandler
+// [a2asrv.NewJSONRPCHandler]: https://pkg.go.dev/github.com/a2aproject/a2a-go/a2asrv#NewJSONRPCHandler
 package adka2a
 
 import (
@@ -32,11 +39,11 @@ import (
 	a2asrvv2 "github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	v2 "google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	v2 "google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 // BeforeExecuteCallback is the callback which will be called before an execution is started.
@@ -250,6 +257,7 @@ func NewExecutor(config ExecutorConfig) *Executor {
 	return &Executor{impl: v2.NewExecutor(v1Config)}
 }
 
+// Execute runs the agent for the given request, writing resulting events to the queue.
 func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	execCtx, err := toExecutorContext(ctx, reqCtx)
 	if err != nil {
@@ -277,6 +285,8 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	return nil
 }
 
+// Cancel cancels the in-progress execution for the given request, writing any
+// resulting events to the queue.
 func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	v2ReqCtx, err := toExecutorContext(ctx, reqCtx)
 	if err != nil {
@@ -299,6 +309,7 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 	return nil
 }
 
+// Cleanup releases resources associated with a completed request.
 func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
 	execCtx, err := toExecutorContext(ctx, reqCtx)
 	if err != nil {

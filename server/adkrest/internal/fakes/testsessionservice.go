@@ -13,7 +13,6 @@
 // limitations under the License.
 
 // Package fakes contains a fake implementation of different ADK services used for testing
-
 package fakes
 
 import (
@@ -22,7 +21,7 @@ import (
 	"iter"
 	"time"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 type TestState map[string]any

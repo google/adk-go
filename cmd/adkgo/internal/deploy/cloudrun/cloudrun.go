@@ -27,8 +27,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"google.golang.org/adk/cmd/adkgo/internal/deploy"
-	"google.golang.org/adk/internal/cli/util"
+	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
+	"google.golang.org/adk/v2/internal/cli/util"
 )
 
 type gCloudFlags struct {

@@ -21,14 +21,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func ptr[T any](v T) *T {
@@ -629,7 +629,7 @@ type GetWeatherArgs struct {
 	Location string `json:"location"`
 }
 
-func getWeather(ctx agent.ToolContext, args GetWeatherArgs) (map[string]any, error) {
+func getWeather(ctx agent.Context, args GetWeatherArgs) (map[string]any, error) {
 	return map[string]any{
 		"temperature": 22,
 		"condition":   "sunny",
@@ -945,7 +945,7 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 		CallID string `json:"call_id"`
 	}
 
-	trackExecution := func(ctx agent.ToolContext, args TrackExecutionArgs) (string, error) {
+	trackExecution := func(ctx agent.Context, args TrackExecutionArgs) (string, error) {
 		executionLog = append(executionLog, args.CallID)
 		return "Executed: " + args.CallID, nil
 	}
@@ -1101,6 +1101,50 @@ func TestMetadataOnlyChunkDoesNotAbortStream(t *testing.T) {
 
 	if finalResponse.Content.Parts[0].Text != "Here are some movie recommendations." {
 		t.Errorf("unexpected text in final response: %q", finalResponse.Content.Parts[0].Text)
+	}
+}
+
+func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	usageMetadata := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     3,
+		CandidatesTokenCount: 5,
+		TotalTokenCount:      8,
+	}
+	chunks := []*genai.GenerateContentResponse{
+		{
+			Candidates:    []*genai.Candidate{{Content: genai.NewContentFromText("Hello", "model")}},
+			UsageMetadata: usageMetadata,
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content:      genai.NewContentFromText(" world", "model"),
+				FinishReason: genai.FinishReasonStop,
+			}},
+		},
+	}
+
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if finalResponse.UsageMetadata == nil {
+		t.Fatal("expected usage metadata in the final aggregated response, got nil")
+	}
+	if finalResponse.UsageMetadata.PromptTokenCount != usageMetadata.PromptTokenCount ||
+		finalResponse.UsageMetadata.CandidatesTokenCount != usageMetadata.CandidatesTokenCount ||
+		finalResponse.UsageMetadata.TotalTokenCount != usageMetadata.TotalTokenCount {
+		t.Errorf("usage metadata was not retained: got %+v, want %+v", finalResponse.UsageMetadata, usageMetadata)
 	}
 }
 

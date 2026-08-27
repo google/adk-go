@@ -1,0 +1,280 @@
+httprr trace v1
+1168 2081
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 936
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please perform the irreversible action."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any \"perform an action\" request, call the executor\nsub-agent EXACTLY ONCE with a request describing what to do. Once it\nreturns its structured `output`, reply with one short sentence\nconfirming completion.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes the action to the executor.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Executes an irreversible action after the user confirms.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"executor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:54:44 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1900
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "executor",
+              "args": {
+                "request": "Perform the irreversible action as requested by the user."
+              },
+              "id": "ail38ig8"
+            },
+            "thoughtSignature": "EoEFCv4EAQw51sd+WYflQTFTo4Z+iidEsRLnusetJqBE/pN39R4wKOys0moadzX+w82vZ7HTNMW9Rs/3VdRaStvqBtvGN4OpqiUzRSbMu+rlGH3/TjsBN6uKhnoJU3A4e6D+A2QorxqQs7Sz0s+3tPH7h5P3GCw5EUe4KCfDhXOlErYkKR0qI3/0FFLLzdBL5BR9ItDH9dWYiG+PDgvkZThGu/OAvMRkpWGu4fJOCBr3vNXL514ZWt1DyxDC85Wqxe5ELLAhLli4YZVkisoROgpTx8B4R/IzLK0ynMPJ4M4PYNh2eleh98MMwnIKk61+b844njxoZXypYd1B/YnRMS6ZdiZ8cYia8exRPmey9cvUBHbvPfeBNTlHnb+EPXtC42wYOOL8xWphIoul3/ZURoOe0iVAhWojY1QldY9s3aOzwQxEjWfbbaYPAJa7XOQS051h2K/yiWmfVYBuJvkRz4fVYAgyugJWY50nfqRnT6nwAJ87LIl7G9My3kgdqtfzqQJDYw9KKuD0paZCvwN448rsiqUSMJLbxlcAt/S2JddpTlhEho3T5pUvfmk6an4zT8ryJ1hnNthXsD9ae9KxCUl7o9v413XhNiAbWXk4PUxxAMw9PERgZGrmQ0/mCzE055Y+kCreJlLErYYzFM/lH0cSX5xdmDF5NuleUQEICQHAj0myODfHwkFKc24JyW4CpVbzjsA/33fBAaM58Qz073xRfn4XLazcDtjWAEOMxtom0HNUiefRnkQJjGGYn3BUAyUrZAmD3VISrE1tGMEYbw7BHvVcR/Fh+SlLNbUI3LFoJETFIYIKLQENeR0M/Sp++Kxwt7o5RIhATTSfgmxZl3VyUCM="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 166,
+    "candidatesTokenCount": 23,
+    "totalTokenCount": 316,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 166
+      }
+    ],
+    "thoughtsTokenCount": 127,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "8nwyapixL-ignsEP-NmBgAk"
+}
+2335 1917
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2102
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Perform the irreversible action as requested by the user.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You execute an irreversible action.\n\nWORKFLOW (exact order):\n  1. FIRST call the `confirm` tool (no arguments). This requires\n     human approval and will pause your execution.\n  2. AFTER the confirm tool returns a successful result, immediately\n     call `finish_task` with {\"done\": true}.\n\nNever skip step 1. Never ask the user follow-up questions in natural\nlanguage — always use the confirm tool.\n\nYou are an agent. Your internal name is \"executor\". The description about you is \"Executes an irreversible action after the user confirms.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Confirms the user wants to proceed with the irreversible action.","name":"confirm","parametersJsonSchema":{"additionalProperties":false,"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"result":{"type":"string"}},"required":["result"],"type":"object"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"done":{"type":"BOOLEAN"}},"required":["done"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:54:46 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1518
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "confirm",
+              "args": {},
+              "id": "jdgix5m0"
+            },
+            "thoughtSignature": "EtUECtIEAQw51sc24g9vax567uQ4aQ7o7itqw52HBSKTG6rYMj26VGAPpzB0LjQywXgusJx4oh9KMSW531jU/yhXZKKCqZpdWlwh6SYxjcryhAfnhILFZ/b5X3Y2dXwb2/H+Vk6jRZ9F9NjPHFI/L/O7Gr0kStU34h7bidiMxQHcfLY6+UhcZ/iUJIu7pznqQ9D19n0JMFTgM1ShWC+CbspHldu3JyHdVBPqXSSlX3cz8FAKfTh8hXMdYaEdvFrK/5vLHooVuIch/+WQ4Z2cPtPmukBDaXTijCUwSGN3Qv8CMt3BzEEOVCP0s2Fu6OGo71iIuDuzw+YtexuNRm1RTEqj7EyH8mEg8+ZCymXHpCch5nUU6nuyCnLLY4vVv8X8dkJlebObmdWzvgB68gB8VfNUK1gkik/OFRahGhSLNWcpgYLulGJ8Npg6JWigcXibKdAVEOjwmuOxgI6Zks6DpvkoovdWMGGUX4xa6d2H/wadox5e9fbEhSYEJtUd4qXXe7Qkw5PxdvtEYmAJFCyr+090CtnGNcpqYYnMBm+bwDFtQIlfxNWn8Qbq32V7YJZQ/cHb/32AzEOJYdYND+HKoUPtMQeujMsLdnFP8dlmQzO6FXDF/wmz121qJ9gcbab9yuAV1bOj7uwebLn7F4mKcPB8PmK3h7/Z+vQ8VD3SpSXLvaKxSxfFpSqy4sZ2MRoZGQKkSNgsIzQyq81znCEMYP6nrSBU7SvhydgcfxHNb20kCyypBVUNzfewL/1bz4FKbg42WqbcC6A/42wQl3+pQIZd4iFNq1sW"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 424,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 559,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 424
+      }
+    ],
+    "thoughtsTokenCount": 127,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9HwyaovuKMiUkdUPmYWTqAo"
+}
+3364 1609
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3131
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Perform the irreversible action as requested by the user.\"}"}],"role":"user"},{"parts":[{"functionCall":{"id":"jdgix5m0","name":"confirm"},"thoughtSignature":"EtUECtIEAQw51sc24g9vax567uQ4aQ7o7itqw52HBSKTG6rYMj26VGAPpzB0LjQywXgusJx4oh9KMSW531jU/yhXZKKCqZpdWlwh6SYxjcryhAfnhILFZ/b5X3Y2dXwb2/H+Vk6jRZ9F9NjPHFI/L/O7Gr0kStU34h7bidiMxQHcfLY6+UhcZ/iUJIu7pznqQ9D19n0JMFTgM1ShWC+CbspHldu3JyHdVBPqXSSlX3cz8FAKfTh8hXMdYaEdvFrK/5vLHooVuIch/+WQ4Z2cPtPmukBDaXTijCUwSGN3Qv8CMt3BzEEOVCP0s2Fu6OGo71iIuDuzw+YtexuNRm1RTEqj7EyH8mEg8+ZCymXHpCch5nUU6nuyCnLLY4vVv8X8dkJlebObmdWzvgB68gB8VfNUK1gkik/OFRahGhSLNWcpgYLulGJ8Npg6JWigcXibKdAVEOjwmuOxgI6Zks6DpvkoovdWMGGUX4xa6d2H/wadox5e9fbEhSYEJtUd4qXXe7Qkw5PxdvtEYmAJFCyr+090CtnGNcpqYYnMBm+bwDFtQIlfxNWn8Qbq32V7YJZQ/cHb/32AzEOJYdYND+HKoUPtMQeujMsLdnFP8dlmQzO6FXDF/wmz121qJ9gcbab9yuAV1bOj7uwebLn7F4mKcPB8PmK3h7/Z+vQ8VD3SpSXLvaKxSxfFpSqy4sZ2MRoZGQKkSNgsIzQyq81znCEMYP6nrSBU7SvhydgcfxHNb20kCyypBVUNzfewL/1bz4FKbg42WqbcC6A/42wQl3+pQIZd4iFNq1sW"}],"role":"model"},{"parts":[{"functionResponse":{"id":"jdgix5m0","name":"confirm","response":{"result":"Approved. Proceeding."}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You execute an irreversible action.\n\nWORKFLOW (exact order):\n  1. FIRST call the `confirm` tool (no arguments). This requires\n     human approval and will pause your execution.\n  2. AFTER the confirm tool returns a successful result, immediately\n     call `finish_task` with {\"done\": true}.\n\nNever skip step 1. Never ask the user follow-up questions in natural\nlanguage — always use the confirm tool.\n\nYou are an agent. Your internal name is \"executor\". The description about you is \"Executes an irreversible action after the user confirms.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Confirms the user wants to proceed with the irreversible action.","name":"confirm","parametersJsonSchema":{"additionalProperties":false,"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"result":{"type":"string"}},"required":["result"],"type":"object"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"done":{"type":"BOOLEAN"}},"required":["done"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:54:47 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1277
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "done": true
+              },
+              "id": "7p8w0zxz"
+            },
+            "thoughtSignature": "EsgCCsUCAQw51seX85mCe/fTehyBEIwrrMSHwNvlcgX9cPwHphcuUgl3AN6rXvXNcz+FFGhLU7sFhPjV30oiSy5PByl6zHfq/HhpVon/tCoOJqiWIl0AmCU3/tYQUScAX5aNQip4SxHPfS9bV3RNm9h6xT+Yn5z8xXQLmBWUsPE6TOTQUvqfpEbtAfWznG2b5L+JY84eyvN+ygydUeJblfCskCcYI7xdB0oJ0CZEcy57H3OpVd6DyTk0HJScke09TbF9IOQtV0P/RhZC0uLEAefBFtzKwq7hcg2MMkFGvespi0eA+SEA8NrfChobKrJtP2M+B/X+6rAh4eGsUOpfJtDnTFKo7ltZJhv4mXuzPv99TRwiB9essHU4FVCGrlkSiWnZYy99AXz/1e/7IgCHx9kCoUu+CNa1/Kngns1rUhsAcyKuSsU49vDMBA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 575,
+    "candidatesTokenCount": 14,
+    "totalTokenCount": 663,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 575
+      }
+    ],
+    "thoughtsTokenCount": 74,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9nwyarXPCuPknsEP3_vawAo"
+}
+2318 1297
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2085
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please perform the irreversible action."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Perform the irreversible action as requested by the user."},"id":"ail38ig8","name":"executor"},"thoughtSignature":"EoEFCv4EAQw51sd+WYflQTFTo4Z+iidEsRLnusetJqBE/pN39R4wKOys0moadzX+w82vZ7HTNMW9Rs/3VdRaStvqBtvGN4OpqiUzRSbMu+rlGH3/TjsBN6uKhnoJU3A4e6D+A2QorxqQs7Sz0s+3tPH7h5P3GCw5EUe4KCfDhXOlErYkKR0qI3/0FFLLzdBL5BR9ItDH9dWYiG+PDgvkZThGu/OAvMRkpWGu4fJOCBr3vNXL514ZWt1DyxDC85Wqxe5ELLAhLli4YZVkisoROgpTx8B4R/IzLK0ynMPJ4M4PYNh2eleh98MMwnIKk61+b844njxoZXypYd1B/YnRMS6ZdiZ8cYia8exRPmey9cvUBHbvPfeBNTlHnb+EPXtC42wYOOL8xWphIoul3/ZURoOe0iVAhWojY1QldY9s3aOzwQxEjWfbbaYPAJa7XOQS051h2K/yiWmfVYBuJvkRz4fVYAgyugJWY50nfqRnT6nwAJ87LIl7G9My3kgdqtfzqQJDYw9KKuD0paZCvwN448rsiqUSMJLbxlcAt/S2JddpTlhEho3T5pUvfmk6an4zT8ryJ1hnNthXsD9ae9KxCUl7o9v413XhNiAbWXk4PUxxAMw9PERgZGrmQ0/mCzE055Y+kCreJlLErYYzFM/lH0cSX5xdmDF5NuleUQEICQHAj0myODfHwkFKc24JyW4CpVbzjsA/33fBAaM58Qz073xRfn4XLazcDtjWAEOMxtom0HNUiefRnkQJjGGYn3BUAyUrZAmD3VISrE1tGMEYbw7BHvVcR/Fh+SlLNbUI3LFoJETFIYIKLQENeR0M/Sp++Kxwt7o5RIhATTSfgmxZl3VyUCM="}],"role":"model"},{"parts":[{"functionResponse":{"id":"ail38ig8","name":"executor","response":{"done":true}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any \"perform an action\" request, call the executor\nsub-agent EXACTLY ONCE with a request describing what to do. Once it\nreturns its structured `output`, reply with one short sentence\nconfirming completion.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes the action to the executor.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Executes an irreversible action after the user confirms.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"executor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:54:48 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1391
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I have successfully completed the requested irreversible action.",
+            "thoughtSignature": "EtUBCtIBAQw51sfYLPQb6bx3BrLzJeQIYoFf+OV8oR+kzoC5S3YU0ivXQ3PkqqteJbtmuxN4BvhuhZtKgC9iUwUIg21ofVtQTwZbOuxMuUV7xYDmFZFnAosrlmS1Hk3vAie98GIVmFUordTEX4RIXJ/RDLmZ/zRgjcFqUhjq1hrjHrajon+uf7DmPHiVkuLSTbX4BY7ZgM2NaZuOZZALeUorQoARwybehPqbr28oARui4N4i2xmGZBUnxwg0mxccO68HyuH3YByxKXa3da0vFRgnqiQ0HJLn"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 326,
+    "candidatesTokenCount": 9,
+    "totalTokenCount": 364,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 326
+      }
+    ],
+    "thoughtsTokenCount": 29,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "93wyaqrTG-6akdUPtOrP-A4"
+}
+2806 1624
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2573
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please perform the irreversible action."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Perform the irreversible action as requested by the user."},"id":"ail38ig8","name":"executor"},"thoughtSignature":"EoEFCv4EAQw51sd+WYflQTFTo4Z+iidEsRLnusetJqBE/pN39R4wKOys0moadzX+w82vZ7HTNMW9Rs/3VdRaStvqBtvGN4OpqiUzRSbMu+rlGH3/TjsBN6uKhnoJU3A4e6D+A2QorxqQs7Sz0s+3tPH7h5P3GCw5EUe4KCfDhXOlErYkKR0qI3/0FFLLzdBL5BR9ItDH9dWYiG+PDgvkZThGu/OAvMRkpWGu4fJOCBr3vNXL514ZWt1DyxDC85Wqxe5ELLAhLli4YZVkisoROgpTx8B4R/IzLK0ynMPJ4M4PYNh2eleh98MMwnIKk61+b844njxoZXypYd1B/YnRMS6ZdiZ8cYia8exRPmey9cvUBHbvPfeBNTlHnb+EPXtC42wYOOL8xWphIoul3/ZURoOe0iVAhWojY1QldY9s3aOzwQxEjWfbbaYPAJa7XOQS051h2K/yiWmfVYBuJvkRz4fVYAgyugJWY50nfqRnT6nwAJ87LIl7G9My3kgdqtfzqQJDYw9KKuD0paZCvwN448rsiqUSMJLbxlcAt/S2JddpTlhEho3T5pUvfmk6an4zT8ryJ1hnNthXsD9ae9KxCUl7o9v413XhNiAbWXk4PUxxAMw9PERgZGrmQ0/mCzE055Y+kCreJlLErYYzFM/lH0cSX5xdmDF5NuleUQEICQHAj0myODfHwkFKc24JyW4CpVbzjsA/33fBAaM58Qz073xRfn4XLazcDtjWAEOMxtom0HNUiefRnkQJjGGYn3BUAyUrZAmD3VISrE1tGMEYbw7BHvVcR/Fh+SlLNbUI3LFoJETFIYIKLQENeR0M/Sp++Kxwt7o5RIhATTSfgmxZl3VyUCM="}],"role":"model"},{"parts":[{"functionResponse":{"id":"ail38ig8","name":"executor","response":{"done":true}}}],"role":"user"},{"parts":[{"text":"I have successfully completed the requested irreversible action.","thoughtSignature":"EtUBCtIBAQw51sfYLPQb6bx3BrLzJeQIYoFf+OV8oR+kzoC5S3YU0ivXQ3PkqqteJbtmuxN4BvhuhZtKgC9iUwUIg21ofVtQTwZbOuxMuUV7xYDmFZFnAosrlmS1Hk3vAie98GIVmFUordTEX4RIXJ/RDLmZ/zRgjcFqUhjq1hrjHrajon+uf7DmPHiVkuLSTbX4BY7ZgM2NaZuOZZALeUorQoARwybehPqbr28oARui4N4i2xmGZBUnxwg0mxccO68HyuH3YByxKXa3da0vFRgnqiQ0HJLn"}],"role":"model"},{"parts":[{"text":"Did the action complete successfully?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any \"perform an action\" request, call the executor\nsub-agent EXACTLY ONCE with a request describing what to do. Once it\nreturns its structured `output`, reply with one short sentence\nconfirming completion.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes the action to the executor.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Executes an irreversible action after the user confirms.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"executor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:54:51 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3110
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Yes, the action completed successfully.",
+            "thoughtSignature": "EtsDCtgDAQw51sfMtglwjP92QJiBKiDkvgrhJr6pfdf0TIy/1y6XLe7maBUs4FX1JzbHWLysM0VmihICWxYCxzpndT15FGPCqT+ZrY1n7IjlKNAE7U9p8NSVm03nfStA8Cz4bniSgqRRrQ57NkwK7MCSlThXDPkezIcthKVLmC97Ji3vgXSmkI9/IuzWQJbGJr2fWZJ3XARcMBIuAx72gWZtGNglFGpo5RVmrPBCy77rQH7m+4TJ1Uz/zsAAHZscZSVXNfrCbsA33jjxWYNvWbnEEs8NAEuvJLvVHUAxwrc/PNNu3RnTY4ZHKRHOuU9XXdidgMCYFvMGb38AyLYqEYXdEMcddZuC08cLhLcITPyb2MLwn1GIWfCRfwExNScMVbYgdS3USAtb2d0iWLJlyfHfR2T1Fa4nXnkcTinzWkS/byHLCIDO3P+4O6A9g0htmNzHulCOvASf3M4ndRLsyMYiTWDHl2Td9WAh3fDb+dxV0CPL9a17KtYZIDJA8lhHfNbXlXeKVJmg4Moz8upZtXJLHEww5zezCsDSUbkJ1ki/3SPC4XV/0jIrXCRdpZrA5ZKZ+wJ0AOUQU5EYwXwFZLgDKRbyPikYtRFSmowQkpOVtkHjO2ppatn8BfM/NA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 372,
+    "candidatesTokenCount": 7,
+    "totalTokenCount": 463,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 372
+      }
+    ],
+    "thoughtsTokenCount": 84,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "-HwyaoTeNKK1nsEPt9WaqAs"
+}

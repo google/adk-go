@@ -22,11 +22,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
-	"google.golang.org/adk/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/tool/skilltoolset/internal/skilltool"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
 type mockSource struct {
@@ -74,7 +74,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 	return io.NopCloser(strings.NewReader(res)), nil
 }
 
-func createToolContext(t *testing.T) agent.ToolContext {
+func createToolContext(t *testing.T) agent.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return agent.NewToolContext(invCtx, "", nil, nil)
 }
