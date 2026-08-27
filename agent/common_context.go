@@ -444,10 +444,22 @@ func (c *commonContext) identity() any {
 	}
 	// Method value and call both inside the recover: Session() is caller-supplied
 	// code and invocationContext can be a typed-nil pointer.
-	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
-		return id
+	s, read := adkcontext.Recovered(func() session.Session { return c.invocationContext.Session() })
+	if !read {
+		// The invocation cannot say who it is. It must not inherit an answer from
+		// what it embeds: a broken invocation is not an absent one, and the context
+		// it was derived from belongs to a different call.
+		return nil
 	}
-	// Type-asserted, not merely checked against nil: an invocation with a
+	if s != nil {
+		if id, ok := identityOf(func() session.Session { return s }); ok {
+			return id
+		}
+		// Present but unreadable is broken too, and delegating would inherit.
+		return nil
+	}
+	// No session of its own, which a tool or callback context is by design, so ask
+	// the invocation. Type-asserted, not merely checked against nil: one with a
 	// permissive Value that answers every key would otherwise hand back something
 	// that is not an Identity and be taken for one.
 	if v, ok := adkcontext.Recovered(func() any {
