@@ -81,11 +81,11 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
-	DebugApiConfig  DebugApiConfig
+	DebugApiConfig  DebugAPIConfig
 }
 
-// DebugApiConfig contains parameters for the debug api.
-type DebugApiConfig struct {
+// DebugAPIConfig contains parameters for the debug API.
+type DebugAPIConfig struct {
 	IncludeDebugAPI bool
 }
 
