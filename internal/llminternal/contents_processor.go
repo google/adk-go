@@ -533,6 +533,13 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		// Events from a sibling branch are not part of this agent's
+		// current turn. In parallel delegations, a sibling may append its
+		// response after this agent's user input; treating that response as
+		// the pivot would slice the input out of the request.
+		if !eventBelongsToBranch(branch, event) {
+			continue
+		}
 		// An out-of-scope event cannot start this agent's turn: it is
 		// invisible to the agent, so skip it as a pivot (matching
 		// adk-python's _should_include_event_in_context gate here).
