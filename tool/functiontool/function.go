@@ -24,10 +24,11 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/typeutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // FunctionTool: borrow implementation from MCP go.
@@ -67,8 +68,8 @@ type Config struct {
 }
 
 // Func represents a Go function that can be wrapped in a tool.
-// It takes a tool.Context and a generic argument type, and returns a generic result type.
-type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
+// It takes a agent.Context and a generic argument type, and returns a generic result type.
+type Func[TArgs, TResults any] func(agent.Context, TArgs) (TResults, error)
 
 // ErrInvalidArgument indicates the input parameter type is invalid.
 var ErrInvalidArgument = errors.New("invalid argument")
@@ -151,7 +152,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -181,7 +182,7 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result map[string]any, err error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	defer func() {
 		if r := recover(); r != nil {
@@ -200,7 +201,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := f.requireConfirmation
@@ -219,7 +220,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 				return nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 
@@ -256,7 +257,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 //    function can return an error, that needs to be included in the output
 //    json schema. And for function that never returns an error, I think it
 //    gets less uglier.
-//  * MCP ToolHandler expects mcp.ServerSession. types.ToolContext may be close
+//  * MCP ToolHandler expects mcp.ServerSession. agent.Context may be close
 //    to it, but we don't need to expose this to user function
 //    (similar to ADK Python FunctionTool [2])
 // References

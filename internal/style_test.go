@@ -54,13 +54,15 @@ func TestCopyrightHeader(t *testing.T) {
 		"internal/util":       true,
 		// The following was copied from golang.org/x/oscar.
 		"internal/httprr": true,
+		// Contains vendored dependencies, not subject to copyright checks.
+		"vendor": true,
 	}
 	_ = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			if ignore[path] {
+			if ignore[filepath.ToSlash(path)] {
 				return filepath.SkipDir
 			}
 			return nil

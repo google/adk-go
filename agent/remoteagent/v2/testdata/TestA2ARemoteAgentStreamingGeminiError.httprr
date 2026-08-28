@@ -1,0 +1,46 @@
+httprr trace v1
+501 6929
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 255
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"tell me about the capital of Poland"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant.\n\nYou are an agent. Your internal name is \"model-agent\"."}],"role":"user"}}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 10 Mar 2026 14:12:50 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=811
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "The capital of Poland is **Warsaw** (Polish: *Warszawa*).\n\nHere's some information about it:\n\n*   **Location"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 31,"totalTokenCount": 91,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ":** It's located in east-central Poland, on the Vistula River.\n*   **Population:** It's the largest city in Poland, with a metropolitan area of over 3 million people.\n*   **"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 79,"totalTokenCount": 139,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "History & Resilience:** Warsaw has a incredibly dramatic history, most notably its near-total destruction during World War II, particularly during the Warsaw Uprising in 1944. An estimated 85% of its buildings were destroyed."}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 127,"totalTokenCount": 187,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "\n*   **Reconstruction:** Despite the devastation, the city was meticulously rebuilt, often using original bricks and careful historical documentation. This includes the famous **Old Town**, which was so faithfully reconstructed that it was designated a **UNESCO World Heritage Site** in"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 177,"totalTokenCount": 237,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 1980 as \"an outstanding example of a near-total reconstruction of a historical continuity and cultural heritage destroyed by World War II.\"\n*   **Modern City:** Today, Warsaw is a vibrant, modern European capital, a major"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 225,"totalTokenCount": 285,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " economic, political, and cultural hub. It boasts a dynamic skyline with numerous skyscrapers, reflecting its rapid growth and development since the fall of communism.\n*   **Key Landmarks & Attractions:**\n    *   **Old Town (Stare"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 273,"totalTokenCount": 333,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " Miasto):** Market Square, Royal Castle, Barbican.\n    *   **Palace of Culture and Science:** A controversial but iconic gift from the Soviet Union, offering panoramic views.\n    *   **Łazienki Park"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 322,"totalTokenCount": 382,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ":** A beautiful park with palaces, an amphitheater, and a monument to Frédéric Chopin.\n    *   **Warsaw Uprising Museum:** A powerful and moving museum dedicated to the 1944 uprising.\n    *   **"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 371,"totalTokenCount": 431,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "POLIN Museum of the History of Polish Jews:** An award-winning museum exploring the thousand-year history of Jews in Poland.\n    *   **Royal Route:** A historic route connecting the Royal Castle with the Wilanów Palace,"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 419,"totalTokenCount": 479,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " lined with churches, palaces, and statues.\n*   **Culture:** It's a major center for arts and culture, with numerous theaters, museums, art galleries, and music venues. Chopin, the famous composer, spent his early"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 467,"totalTokenCount": 527,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " life in Warsaw.\n*   **Economy:** Warsaw is Poland's primary economic engine, home to numerous international companies, financial institutions, and a thriving startup scene.\n\nIn essence, Warsaw is a city that embodies resilience, rebirth, and a blend"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 518,"totalTokenCount": 578,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " of rich history with dynamic modernity."}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 30,"candidatesTokenCount": 525,"totalTokenCount": 585,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 30}],"thoughtsTokenCount": 30},"modelVersion": "gemini-2.5-flash","responseId": "4SawaZC7Oojp7M8P7KjSyAc"}
+

@@ -18,7 +18,7 @@ import (
 	"iter"
 	"testing"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 var _ Agent = (*testAgent)(nil)
@@ -44,6 +44,14 @@ func (a *testAgent) SubAgents() []Agent {
 }
 
 func (a *testAgent) internal() *agent {
+	panic("not implemented")
+}
+
+func (a *testAgent) FindAgent(name string) Agent {
+	panic("not implemented")
+}
+
+func (a *testAgent) FindSubAgent(name string) Agent {
 	panic("not implemented")
 }
 

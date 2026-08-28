@@ -1,0 +1,105 @@
+httprr trace v1
+976 1430
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 744
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42\n\nYou are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:52:40 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1359
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "rand_number",
+              "args": {
+                "seed": 5
+              }
+            },
+            "thoughtSignature": "Co4CAb4+9vshp23q730zmpKZA44y18kH57i34mjTjHqu63zEHBWY7uvTVnM/ct8OnEACaGkPS1ns8seAUWXuxgHXkmWRzzFFveogyu8/m8CbLxzfYaalGxiriSPCN9pLcIq6WfzwCIobgZh5szHcYKM4zOipgtV7f1eUX/wrGmuaNYBx7OurtouFK6x11rBjafcIaKp1PNrXHkxHwtQ7TEl0QegcsN4vVol82qyw4Pp+bl6PhzkjWvgqnNsnuPmJN8Emm6Ajf5ovW1GuPR9iTuAz6f1ncwyKlhZuLQMZKla7MsV7kcx+fUfFvJIF69A/FqH020HABFpD+CWaUzR0KaTWTcE3MvlZkmUy6sTx9a4R"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 136,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 211,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 136
+      }
+    ],
+    "thoughtsTokenCount": 60
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "NzCwaf7JAvrikdUPuqqn8QU"
+}
+1544 815
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1311
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"},"thoughtSignature":"Co4CAb4+9vshp23q730zmpKZA44y18kH57i34mjTjHqu63zEHBWY7uvTVnM/ct8OnEACaGkPS1ns8seAUWXuxgHXkmWRzzFFveogyu8/m8CbLxzfYaalGxiriSPCN9pLcIq6WfzwCIobgZh5szHcYKM4zOipgtV7f1eUX/wrGmuaNYBx7OurtouFK6x11rBjafcIaKp1PNrXHkxHwtQ7TEl0QegcsN4vVol82qyw4Pp+bl6PhzkjWvgqnNsnuPmJN8Emm6Ajf5ovW1GuPR9iTuAz6f1ncwyKlhZuLQMZKla7MsV7kcx+fUfFvJIF69A/FqH020HABFpD+CWaUzR0KaTWTcE3MvlZkmUy6sTx9a4R"}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42\n\nYou are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:52:40 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=402
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "3"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 166,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 167,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 166
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "ODCwaevWGfH3nsEP2v-88AQ"
+}

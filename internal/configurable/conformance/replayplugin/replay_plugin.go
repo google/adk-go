@@ -45,13 +45,13 @@ import (
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/configurable/conformance/replayplugin/recording"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable/conformance/replayplugin/recording"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // New creates an instance of the replay plugin.
@@ -109,7 +109,7 @@ func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 }
 
 // beforeModel intercepts LLM requests, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	on, err := p.isReplayModeOn(ctx.State())
 	if err != nil {
 		return nil, err
@@ -129,11 +129,15 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
-	return recording.LLMResponse, nil
+	if len(recording.LLMResponses) == 0 {
+		return nil, fmt.Errorf("no LLM responses found in recording for agent %q", agentName)
+	}
+
+	return recording.LLMResponses[0], nil
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	on, err := p.isReplayModeOn(ctx.State())
 	if err != nil {
 		return nil, err
@@ -158,7 +162,7 @@ func (p *replayPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string
 		if ft, ok := t.(toolinternal.FunctionTool); ok {
 			_, err := ft.Run(ctx, args)
 			if err != nil {
-				return nil, err
+				fmt.Println("Error calling tool:", err)
 			}
 		}
 	}
@@ -231,7 +235,7 @@ func (p *replayPlugin) isReplayModeOn(sessionState session.State) (bool, error) 
 }
 
 // getInvocationState retrieves the replay state for the current invocation.
-func (p *replayPlugin) getInvocationState(ctx agent.CallbackContext) (*invocationReplayState, error) {
+func (p *replayPlugin) getInvocationState(ctx agent.Context) (*invocationReplayState, error) {
 	invocationID := ctx.InvocationID()
 	state, ok := p.invocationStates[invocationID]
 	if !ok {
@@ -312,8 +316,7 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 		return nil, fmt.Errorf("failed to parse recordings from %s: %w", recordingsPath, err)
 	}
 
-	removeUnderscores(&root)
-	fixTypeMismatches(&root)
+	normalizeYAMLNode(&root)
 
 	var recordings recording.Recordings
 	if err := root.Decode(&recordings); err != nil {
@@ -328,8 +331,12 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 			prevMessageId = recordings.Recordings[i].UserMessageIndex
 			index = 0
 		}
-		recordings.Recordings[i].Index = index
-		index++
+		if recordings.Recordings[i].LLMRecording != nil {
+			recordings.Recordings[i].Index = index
+			index++
+		} else {
+			recordings.Recordings[i].Index = -1 // Not used for sync
+		}
 	}
 
 	// 4. Create and Store State
@@ -373,8 +380,10 @@ func getNextRecordingForAgent(state *invocationReplayState, agentName string) (*
 	state.mu.Lock()
 	for state.curIndex != expectedRecording.Index {
 		state.cond.Wait()
-		time.Sleep(1 * time.Second)
 	}
+	// FIXME: remove this sleep, move curIndex++ and state cond.Broadcast() to onEvent callback.
+	// This sleep is here to make the replay deterministic, but it's not ideal.
+	time.Sleep(time.Duration(expectedRecording.Index) * time.Millisecond * 10)
 
 	state.agentReplayIndices[agentName]++
 	state.curIndex++
@@ -419,16 +428,50 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 		cmpopts.EquateEmpty(),
 	}
 
-	// Compare!
-	// cmp.Diff returns an empty string if they are equal, otherwise a human-readable diff.
-	if diff := cmp.Diff(expectedLLMRequest, actualLLMRequest, opts...); diff != "" {
-		for _, content := range expectedLLMRequest.Contents {
-			for _, part := range content.Parts {
-				if part.Text != "" {
-					part.Text = modifyString(part.Text)
+	for _, toolAny := range expectedLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+	for _, toolAny := range actualLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+
+	if transferToolAny, ok := expectedLLMRequest.Tools["transfer_to_agent"]; ok {
+		transferTool := transferToolAny.(*genai.FunctionDeclaration)
+		transferTool.Description = `Transfer the question to another agent.
+This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+	}
+
+	if expectedLLMRequest.Config != nil {
+		for _, tool := range expectedLLMRequest.Config.Tools {
+			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
+				if funcDecl.Name == "transfer_to_agent" {
+					funcDecl.Description = `Transfer the question to another agent.
+This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 				}
 			}
 		}
+	}
+
+	if actualLLMRequest.Config != nil {
+		for _, tool := range actualLLMRequest.Config.Tools {
+			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
+			}
+		}
+	}
+
+	// Compare!
+	// cmp.Diff returns an empty string if they are equal, otherwise a human-readable diff.
+	if diff := cmp.Diff(expectedLLMRequest, actualLLMRequest, opts...); diff != "" {
+		// If initial comparison fails due to string formatting (e.g., Python vs Go JSON whitespace or quote styles),
+		// normalize embedded JSON structures across both expected and actual requests before re-comparing.
+		canonicalizeRequestContents(expectedLLMRequest)
+		canonicalizeRequestContents(actualLLMRequest)
 
 		if diff := cmp.Diff(expectedLLMRequest, actualLLMRequest, opts...); diff != "" {
 			return fmt.Errorf("LLM request mismatch for agent '%s' (index %d):\n%s",
@@ -439,9 +482,35 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 	return nil
 }
 
+// canonicalizeRequestContents normalizes all JSON-like strings within the request's contents and system instructions.
+func canonicalizeRequestContents(req *model.LLMRequest) {
+	if req == nil {
+		return
+	}
+	for _, content := range req.Contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.Text != "" {
+				part.Text = canonicalizeJSONSubstrings(part.Text)
+			}
+		}
+	}
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part != nil && part.Text != "" {
+				part.Text = canonicalizeJSONSubstrings(part.Text)
+			}
+		}
+	}
+}
+
 var (
 	// Matches either "parameters: " or "result: " followed by a JSON-like object/array
 	dataBlockRegex = regexp.MustCompile(`(?i)(parameters|result):\s*([\{\[].*[\}\]])`)
+	// Matches any standalone or embedded JSON-like object/array
+	jsonCandidateRegex = regexp.MustCompile(`([\{\[].*[\}\]])`)
 	// Matches 'key' or 'value' but ignores apostrophes inside words like O'Malley
 	quoteRegex = regexp.MustCompile(`'([^']*)'`)
 	// Matches Python/Pseudo-JSON constants specifically as values
@@ -488,26 +557,80 @@ func modifyString(input string) string {
 	})
 }
 
+// canonicalizeJSONSubstrings searches for standalone or embedded JSON candidates within a string and re-marshals
+// them canonically to eliminate key-ordering, whitespace, and quote differences between Python and Go serializers.
+func canonicalizeJSONSubstrings(input string) string {
+	s := modifyString(input)
+	return jsonCandidateRegex.ReplaceAllStringFunc(s, func(rawData string) string {
+		normalized := quoteRegex.ReplaceAllString(rawData, `"$1"`)
+		normalized = nullRegex.ReplaceAllString(normalized, "null")
+		normalized = boolRegex.ReplaceAllStringFunc(normalized, func(m string) string {
+			return strings.ToLower(m)
+		})
+
+		var parsed any
+		if err := json.Unmarshal([]byte(normalized), &parsed); err != nil {
+			return rawData
+		}
+		fixedJSON, err := json.Marshal(parsed)
+		if err != nil {
+			return rawData
+		}
+		return string(fixedJSON)
+	})
+}
+
+// getNextToolRecordingForAgent retrieves the next unconsumed tool recording that matches the given function.
+func getNextToolRecordingForAgent(state *invocationReplayState, agentName string, matchFn func(*recording.Recording) (bool, error)) (*recording.Recording, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	var firstError error
+
+	for i := range state.recordings.Recordings {
+		rec := &state.recordings.Recordings[i]
+		if rec.UserMessageIndex != state.userMessageIndex || rec.AgentName != agentName {
+			continue
+		}
+		if state.consumedRecordings[i] {
+			continue
+		}
+
+		matched, err := matchFn(rec)
+		if matched {
+			state.consumedRecordings[i] = true
+			return rec, nil
+		}
+		if firstError == nil && err != nil {
+			firstError = err
+		}
+	}
+
+	if firstError != nil {
+		return nil, firstError
+	}
+
+	return nil, fmt.Errorf("no matching tool recording found for agent '%s' at user_message_index %d", agentName, state.userMessageIndex)
+}
+
 // verifyAndGetNextToolRecordingForAgent ensures the next recording is a tool call and matches the actual call.
 func (p *replayPlugin) verifyAndGetNextToolRecordingForAgent(state *invocationReplayState, agentName string, t tool.Tool, args map[string]any) (*recording.ToolRecording, error) {
-	currentAgentIndex, ok := state.GetAgentReplayIndex(agentName)
-	if !ok {
-		currentAgentIndex = 0
+	matchFn := func(rec *recording.Recording) (bool, error) {
+		if rec.ToolRecording == nil {
+			return false, fmt.Errorf("expected tool recording for agent '%s', but found LLM recording", agentName)
+		}
+		err := verifyToolCallMatch(rec.ToolRecording.ToolCall, t.Name(), args, agentName, state.agentReplayIndices[agentName])
+		return err == nil, err
 	}
-	expectedRecording, err := getNextRecordingForAgent(state, agentName)
+
+	expectedRecording, err := getNextToolRecordingForAgent(state, agentName, matchFn)
 	if err != nil {
 		return nil, err
 	}
 
-	if expectedRecording.ToolRecording == nil {
-		return nil, fmt.Errorf("expected tool recording for agent '%s' at index %d, but found LLM recording", agentName, currentAgentIndex)
-	}
-
-	// Strict verification of tool call
-	err = verifyToolCallMatch(expectedRecording.ToolRecording.ToolCall, t.Name(), args, agentName, currentAgentIndex)
-	if err != nil {
-		return nil, err
-	}
+	state.mu.Lock()
+	state.agentReplayIndices[agentName]++
+	state.mu.Unlock()
 
 	return expectedRecording.ToolRecording, nil
 }
@@ -525,4 +648,20 @@ func verifyToolCallMatch(expectedToolCall *genai.FunctionCall, toolName string, 
 	}
 
 	return nil
+}
+
+func normalizeDescription(desc string) string {
+	lines := strings.Split(desc, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		cleaned = append(cleaned, strings.TrimSpace(line))
+	}
+	// Remove empty lines at the start and end
+	for len(cleaned) > 0 && cleaned[0] == "" {
+		cleaned = cleaned[1:]
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n")
 }

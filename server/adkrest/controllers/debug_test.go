@@ -32,8 +32,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
 )
 
 func TestSessionSpansHandler(t *testing.T) {
@@ -92,7 +92,7 @@ func TestSessionSpansHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			eventID := "test-event"
 			opName := semconv.GenAIOperationNameExecuteTool.Value.AsString()
-			testTelemetry := setupTestTelemetry()
+			testTelemetry := setupTestTelemetry(t)
 
 			apiController := controllers.NewDebugAPIController(nil, nil, testTelemetry.dt)
 			req, err := http.NewRequest(http.MethodGet, "/debug/sessions/"+tt.reqSessionID+"/spans", nil)
@@ -204,7 +204,7 @@ func TestEventSpanHandler(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionID := "test-session"
-			testTelemetry := setupTestTelemetry()
+			testTelemetry := setupTestTelemetry(t)
 
 			apiController := controllers.NewDebugAPIController(nil, nil, testTelemetry.dt)
 			req, err := http.NewRequest(http.MethodGet, "/debug/events/"+tt.reqEventID+"/span", nil)
@@ -258,8 +258,11 @@ type testTelemetry struct {
 	lp     *sdklog.LoggerProvider
 }
 
-func setupTestTelemetry() *testTelemetry {
-	dt := services.NewDebugTelemetry()
+func setupTestTelemetry(t *testing.T) *testTelemetry {
+	dt, err := services.NewDebugTelemetryWithConfig(nil)
+	if err != nil {
+		t.Fatalf("failed to create debug telemetry: %v", err)
+	}
 
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(dt.SpanProcessor()))
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(dt.LogProcessor()))
@@ -291,10 +294,10 @@ func emitTestSignals(sessionID, eventID, opName string, tp *sdktrace.TracerProvi
 	record.SetObservedTimestamp(time.Now())
 	record.SetEventName("test-log-event")
 	record.SetBody(
-		log.MapValue(
-			log.KeyValue{
+		attribute.MapValue(
+			attribute.KeyValue{
 				Key:   "message",
-				Value: log.StringValue("test log message"),
+				Value: attribute.StringValue("test log message"),
 			},
 		),
 	)

@@ -15,6 +15,8 @@
 package llminternal_test
 
 import (
+	"context"
+	"encoding/json"
 	"iter"
 	"slices"
 	"strings"
@@ -24,13 +26,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type testModel struct {
@@ -239,10 +242,283 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				}
 			}
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest after contentsRequestProcessor mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot
+// guards the include_contents="none" pivot against an out-of-scope
+// event: a scoped event must not be chosen as the turn start, otherwise
+// the unscoped agent would see an empty/truncated turn. Mirrors
+// adk-python's _should_include_event_in_context gate in
+// _get_current_turn_contents.
+func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *testing.T) {
+	t.Parallel()
+	events := []*session.Event{
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("unscoped turn", "user"),
+			},
+		},
+		{
+			Author:         "user",
+			IsolationScope: "task-1",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("scoped task", "user"),
+			},
+		},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:            "testAgent",
+		Model:           &testModel{},
+		IncludeContents: "none",
+	}))
+	// Unscoped agent: the trailing scoped event must be skipped as the
+	// pivot, so the unscoped user turn is what the agent sees.
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   testAgent,
+		Session: &fakeSession{events: events},
+	})
+
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{genai.NewContentFromText("unscoped turn", "user")}
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestContentsRequestProcessor_IncludeContentsNone_IgnoresSiblingBranchPivot(t *testing.T) {
+	t.Parallel()
+
+	const branch = "coordinator.translator_es"
+	events := []*session.Event{
+		{
+			Author: "user",
+			Branch: branch,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("good morning", genai.RoleUser),
+			},
+		},
+		{
+			Author: "translator_fr",
+			Branch: "coordinator.translator_fr",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("Bonjour", genai.RoleModel),
+			},
+		},
+	}
+
+	a := utils.Must(llmagent.New(llmagent.Config{
+		Name:            "translator_es",
+		Model:           &testModel{},
+		Mode:            llmagent.ModeSingleTurn,
+		IncludeContents: "none",
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   a,
+		Branch:  branch,
+		Session: &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+
+	want := []*genai.Content{genai.NewContentFromText("good morning", genai.RoleUser)}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
+// verifies that the contents from the different scope are not included
+// in the content for LLM.
+func TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope(t *testing.T) {
+	t.Parallel()
+	const myScope = "task-mine"
+	events := []*session.Event{
+		// Foreign-scoped user event: must be filtered out.
+		{
+			Author:         "user",
+			IsolationScope: "garbage-scope",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("foreign payload", "user"),
+			},
+		},
+		// In-scope user event: must reach the LLM.
+		{
+			Author:         "user",
+			IsolationScope: myScope,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("my task brief", "user"),
+			},
+		},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  "scopedAgent",
+		Model: &testModel{},
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          testAgent,
+		IsolationScope: myScope,
+		Session:        &fakeSession{events: events},
+	})
+
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{genai.NewContentFromText("my task brief", "user")}
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
+	t.Parallel()
+	const taskAgentName = "taskAgent"
+	const coordName = "coord"
+	const fcID = "fc-1"
+	args := map[string]any{"goal": "summarize"}
+	events := []*session.Event{
+		{
+			Author: coordName,
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: fcID, Name: taskAgentName, Args: args,
+					}}},
+				},
+			},
+		},
+		{
+			Author:         taskAgentName,
+			IsolationScope: fcID,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("working on it", "model"),
+			},
+		},
+	}
+
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	t.Run("task mode prepends FC args without nudge", func(t *testing.T) {
+		taskAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:  taskAgentName,
+			Model: &testModel{},
+			Mode:  llmagent.ModeTask,
+		}))
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			Agent:          taskAgent,
+			IsolationScope: fcID,
+			Session:        &fakeSession{events: events},
+		})
+		req := &model.LLMRequest{}
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			}
+		}
+		want := []*genai.Content{
+			{Role: genai.RoleUser, Parts: []*genai.Part{{Text: string(argsJSON)}}},
+			genai.NewContentFromText("working on it", "model"),
+		}
+		if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
+			t.Errorf("contents mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("single_turn mode appends nudge after FC args", func(t *testing.T) {
+		stAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:            taskAgentName,
+			Model:           &testModel{},
+			Mode:            llmagent.ModeSingleTurn,
+			IncludeContents: "none",
+		}))
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			Agent:          stAgent,
+			IsolationScope: fcID,
+			Session:        &fakeSession{events: events},
+		})
+		req := &model.LLMRequest{}
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			}
+		}
+		wantLeading := &genai.Content{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{
+				{Text: string(argsJSON)},
+				{Text: llminternal.SingleTurnNudge},
+			},
+		}
+		if len(req.Contents) == 0 {
+			t.Fatal("expected at least one content; got none")
+		}
+		if diff := cmp.Diff(wantLeading, req.Contents[0]); diff != "" {
+			t.Errorf("leading content mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T) {
+	t.Parallel()
+	const taskAgentName = "taskAgent"
+	const scope = "wf:node-1"
+	userInput := genai.NewContentFromText("do the thing", genai.RoleUser)
+
+	// Session has no event carrying a FunctionCall with ID == scope.
+	events := []*session.Event{
+		{
+			Author:         taskAgentName,
+			IsolationScope: scope,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("ack", "model"),
+			},
+		},
+	}
+
+	taskAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  taskAgentName,
+		Model: &testModel{},
+		Mode:  llmagent.ModeTask,
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          taskAgent,
+		IsolationScope: scope,
+		UserContent:    userInput,
+		Session:        &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{
+		{Role: genai.RoleUser, Parts: userInput.Parts},
+		genai.NewContentFromText("ack", "model"),
+	}
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -252,10 +528,11 @@ func TestContentsRequestProcessor(t *testing.T) {
 
 	t.Parallel()
 	testCases := []struct {
-		name   string
-		branch string
-		events []*session.Event
-		want   []*genai.Content
+		name           string
+		branch         string
+		isolationScope string
+		events         []*session.Event
+		want           []*genai.Content
 	}{
 		{
 			name:   "NilEvent",
@@ -309,6 +586,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			name: "ExcludeToolConfirmation",
+			events: []*session.Event{
+				{
+					Author: "AgentA",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call_confirm_123",
+										Name: "adk_request_confirmation",
+										Args: map[string]any{"message": "Confirm delete?"},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										ID:       "call_confirm_123",
+										Name:     "adk_request_confirmation",
+										Response: map[string]any{"confirmed": true},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
 			name:   "FilterByBranch",
 			branch: "branch1.task1",
 			events: []*session.Event{
@@ -355,6 +672,60 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			// Isolation scope is exact-match (unlike branch, where empty
+			// is universally visible): a scoped agent sees ONLY events
+			// with the same scope, not unscoped ones.
+			name:           "FilterByIsolationScope_Scoped",
+			isolationScope: "task-1",
+			events: []*session.Event{
+				{
+					Author:         "user",
+					IsolationScope: "task-1",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 1", "user"),
+					},
+				},
+				{
+					Author:         "user",
+					IsolationScope: "task-2",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 2", "user"),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("unscoped", "user"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("in task 1", "user"),
+			},
+		},
+		{
+			// An unscoped agent (empty scope) sees ONLY unscoped events.
+			name: "FilterByIsolationScope_Unscoped",
+			events: []*session.Event{
+				{
+					Author:         "user",
+					IsolationScope: "task-1",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 1", "user"),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("unscoped", "user"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("unscoped", "user"),
+			},
+		},
+		{
 			name: "AuthEvent",
 			events: []*session.Event{
 				{
@@ -378,6 +749,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			name: "TranscriptionAggregation",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "hello ", Finished: false},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "world", Finished: true},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "hi ", Finished: false},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "there", Finished: true},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "ok", Finished: true},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hello world", "user"),
+				genai.NewContentFromText("hi there", "model"),
+				genai.NewContentFromText("ok", "user"),
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -388,8 +799,9 @@ func TestContentsRequestProcessor(t *testing.T) {
 			}))
 
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-				Agent:  testAgent,
-				Branch: tc.branch,
+				Agent:          testAgent,
+				Branch:         tc.branch,
+				IsolationScope: tc.isolationScope,
 				Session: &fakeSession{
 					events: tc.events,
 				},
@@ -405,7 +817,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 				}
 			}
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -665,6 +1077,70 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"output": "preserved"},
 	}
 
+	// Human-in-the-loop confirmation call/responses
+	fcHITLApproved := &genai.FunctionCall{
+		ID:   "hitl_approved_call",
+		Name: "request_vacation_days",
+		Args: map[string]any{"days": 5, "user_id": "user-123"},
+	}
+	frHITLApprovedPending := &genai.FunctionResponse{
+		ID:       "hitl_approved_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "Manager approval is required.", "request_id": "req-1"},
+	}
+	frHITLApprovedFinal := &genai.FunctionResponse{
+		ID:       "hitl_approved_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "The time off request is accepted.", "days_approved": 5, "request_id": "req-1"},
+	}
+	fcHITLApprovalRequest := &genai.FunctionCall{
+		ID:   "hitl_approved_confirmation",
+		Name: toolconfirmation.FunctionCallName,
+		Args: map[string]any{
+			"originalFunctionCall": fcHITLApproved,
+			"toolConfirmation": toolconfirmation.ToolConfirmation{
+				Confirmed: false,
+				Hint:      "Please approve or reject the tool call request_vacation_days().",
+			},
+		},
+	}
+	frHITLApprovalConfirmed := &genai.FunctionResponse{
+		ID:       "hitl_approved_confirmation",
+		Name:     toolconfirmation.FunctionCallName,
+		Response: map[string]any{"confirmed": true},
+	}
+	fcHITLDenied := &genai.FunctionCall{
+		ID:   "hitl_denied_call",
+		Name: "request_vacation_days",
+		Args: map[string]any{"days": 10, "user_id": "user-123"},
+	}
+	frHITLDeniedPending := &genai.FunctionResponse{
+		ID:       "hitl_denied_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "Manager approval is required.", "request_id": "req-2"},
+	}
+	frHITLDeniedFinal := &genai.FunctionResponse{
+		ID:       "hitl_denied_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "The time off request is rejected.", "days_approved": 0, "request_id": "req-2"},
+	}
+	fcHITLDenialRequest := &genai.FunctionCall{
+		ID:   "hitl_denied_confirmation",
+		Name: toolconfirmation.FunctionCallName,
+		Args: map[string]any{
+			"originalFunctionCall": fcHITLDenied,
+			"toolConfirmation": toolconfirmation.ToolConfirmation{
+				Confirmed: false,
+				Hint:      "Please approve or reject the tool call request_vacation_days().",
+			},
+		},
+	}
+	frHITLDenialRejected := &genai.FunctionResponse{
+		ID:       "hitl_denied_confirmation",
+		Name:     toolconfirmation.FunctionCallName,
+		Response: map[string]any{"confirmed": false},
+	}
+
 	// Error Call/Response
 	frOrphaned := &genai.FunctionResponse{
 		ID:       "no_matching_call",
@@ -722,6 +1198,56 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Run long process", "user"),
 				NewContentFromFunctionCall(fcLRO, "model"),
 				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves unrelated function events",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process and search", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process and search", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "HITL confirmation approved preserves resumed tool response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Request five vacation days", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLApproved, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovedPending, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLApprovalRequest, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovalConfirmed, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovedFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Request five vacation days", "user"),
+				NewContentFromFunctionCall(fcHITLApproved, "model"),
+				NewContentFromFunctionResponse(frHITLApprovedFinal, "user"),
+			},
+		},
+		{
+			name: "HITL confirmation denied preserves rejected tool response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Request ten vacation days", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLDenied, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDeniedPending, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLDenialRequest, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDenialRejected, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDeniedFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Request ten vacation days", "user"),
+				NewContentFromFunctionCall(fcHITLDenied, "model"),
+				NewContentFromFunctionResponse(frHITLDeniedFinal, "user"),
 			},
 		},
 		{
@@ -902,7 +1428,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			}
 
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -935,32 +1461,40 @@ func (s *fakeSession) State() session.State {
 	return nil
 }
 
-func (s *fakeSession) Events() session.Events {
-	return s
-}
-
 func (s *fakeSession) ID() string {
-	return ""
-}
-
-func (s *fakeSession) AppName() string {
-	return ""
+	return "test_session"
 }
 
 func (s *fakeSession) UserID() string {
-	return ""
+	return "test_user"
+}
+
+func (s *fakeSession) AppName() string {
+	return "test_app"
 }
 
 func (s *fakeSession) LastUpdateTime() time.Time {
 	return time.Time{}
 }
 
-func (s *fakeSession) All() iter.Seq[*session.Event] {
-	return slices.Values(s.events)
+func (s *fakeSession) Events() session.Events {
+	return s
 }
 
 func (s *fakeSession) Len() int {
 	return len(s.events)
+}
+
+func (s *fakeSession) All() iter.Seq[*session.Event] {
+	return slices.Values(s.events)
+}
+
+func (s *fakeSession) AllBackward() iter.Seq[*session.Event] {
+	return nil
+}
+
+func (s *fakeSession) Append(ctx context.Context, e ...*session.Event) error {
+	return nil
 }
 
 func (s *fakeSession) At(i int) *session.Event {
@@ -971,3 +1505,15 @@ var (
 	_ session.Session = (*fakeSession)(nil)
 	_ session.Events  = (*fakeSession)(nil)
 )
+
+func wantWithContinuation(want []*genai.Content) []*genai.Content {
+	if len(want) > 0 {
+		if last := want[len(want)-1]; last != nil && last.Role != "user" {
+			res := make([]*genai.Content, len(want), len(want)+1)
+			copy(res, want)
+			res = append(res, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+			return res
+		}
+	}
+	return want
+}

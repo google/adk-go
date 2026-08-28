@@ -1,17 +1,16 @@
 httprr trace v1
-1109 1743
+1101 1715
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 877
+Content-Length: 869
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools.\n\nYou are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:51:28 GMT
+Date: Tue, 10 Mar 2026 14:09:49 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1829
+Server-Timing: gfet4t7; dur=962
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -29,11 +28,11 @@ X-Xss-Protection: 0
               "name": "calculator",
               "args": {
                 "skill_id": "add",
-                "rationale": "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation.",
-                "request": "2 + 2"
+                "request": "2 + 2",
+                "rationale": "The user is asking to add two numbers, and the calculator tool has an 'add' skill that can perform this operation."
               }
             },
-            "thoughtSignature": "CsICAb4+9vt9/1L8xVx5XEypruXBMQq91+7+GBLGcwKMWCtvAu6hM5Z4i5GvJBwtX8ySyc8rIlvB7DSOcyC213aJPiftSL+a7uzcah7u3rVFo61dVDHlP0bWTFhfSytHbavUt6H3ojfXxgriMXWbXIpIKaBq15kYAwzTk9sIjg2uPjeHB256gAZnibTqt9ltEWG7r4Un0mBfspbsQaHAb1wt+uIoqrWYU+v9ogI+UKSgPYy2oZs6Li07t3E2KpFOY2gGEkmMVvmgTGwwQ2+KwK9XgKfNYbj+twqTH6a4YfCHjRpdpERYy67axHodRX+IXiPhPGurknNz9O2vULnU2DnIv1LCR7v6HcbF46Mra6JVYJTCNJz2Z44QMBxlBZY4vbV+1jTAhx3lY9rONTtyxdUMt8n8b2d0f69sW6xTGRG6GI8fkA=="
+            "thoughtSignature": "CtUCAb4+9vstWkvxauzjmusQV16aWpo/PQ7OMXTl2AAfjcNHrf66VJ+K+vjBB7b/Xc+uQ0ka6jVfHXyert4j2BFnwyrpmmW7Kyrle00NJfDippgXt+eXzPmEQHNLdBbgSSHBSVoRVUV8lRChvlTgACd4ihfJkBi4LA5xutfgcrpe6E/juxhdxO0eBRT/JVLsdVxCCKWogFG+4Bhm7HFpqZvEbALMnRbkEb9lNPI5bKkx0UdwzTFuJCzT8SVcs8a8XGBsaxhMj0gypaidLAy2DyDJOCVTfglxQIn6W+6jF+3OGDFr77o281+RbpfN1iP3BD+A7GUfr9Fn8KE3dyMrzKTfvrvfmvZLABLQEyaVUXUpkF7vgpQFaAi3SjSbv/R9VYmFeAFma9lH3jXcyzTbVfl2VfqR29nEwlHsP/44ECn1j0ZE3r+9aarV7d/nteIt60QLP3pPUIM="
           }
         ],
         "role": "model"
@@ -44,35 +43,34 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 164,
-    "candidatesTokenCount": 49,
-    "totalTokenCount": 285,
+    "promptTokenCount": 165,
+    "candidatesTokenCount": 52,
+    "totalTokenCount": 298,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 164
+        "tokenCount": 165
       }
     ],
-    "thoughtsTokenCount": 72
+    "thoughtsTokenCount": 81
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "z1iYaZPaArLZ2roPsKvdOQ"
+  "responseId": "LCawaZ-6Bd7ensEP5rH1kAw"
 }
-598 785
+590 544
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 352
+Content-Length: 344
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"2 + 2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers."},{"text":"You are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."}],"role":"user"}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"2 + 2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."}],"role":"user"}}HTTP/2.0 200 OK
 Connection: close
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Disposition: attachment
 Content-Type: text/event-stream
-Date: Fri, 20 Feb 2026 12:51:30 GMT
+Date: Tue, 10 Mar 2026 14:09:49 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1182
+Server-Timing: gfet4t7; dur=686
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -80,21 +78,20 @@ X-Content-Type-Options: nosniff
 X-Frame-Options: SAMEORIGIN
 X-Xss-Protection: 0
 
-data: {"candidates": [{"content": {"parts": [{"text": "calculator.add(2, 2)"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 49,"candidatesTokenCount": 9,"totalTokenCount": 99,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 49}],"thoughtsTokenCount": 41},"modelVersion": "gemini-2.5-flash","responseId": "0FiYabrDO5H-2roP9_2W2Q0"}
+data: {"candidates": [{"finishReason": "UNEXPECTED_TOOL_CALL","index": 0}],"usageMetadata": {"promptTokenCount": 50,"totalTokenCount": 50,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 50}]}}
 
-1775 1352
+1853 2362
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1542
+Content-Length: 1620
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2 + 2"},"name":"calculator"},"thoughtSignature":"CsICAb4+9vt9/1L8xVx5XEypruXBMQq91+7+GBLGcwKMWCtvAu6hM5Z4i5GvJBwtX8ySyc8rIlvB7DSOcyC213aJPiftSL+a7uzcah7u3rVFo61dVDHlP0bWTFhfSytHbavUt6H3ojfXxgriMXWbXIpIKaBq15kYAwzTk9sIjg2uPjeHB256gAZnibTqt9ltEWG7r4Un0mBfspbsQaHAb1wt+uIoqrWYU+v9ogI+UKSgPYy2oZs6Li07t3E2KpFOY2gGEkmMVvmgTGwwQ2+KwK9XgKfNYbj+twqTH6a4YfCHjRpdpERYy67axHodRX+IXiPhPGurknNz9O2vULnU2DnIv1LCR7v6HcbF46Mra6JVYJTCNJz2Z44QMBxlBZY4vbV+1jTAhx3lY9rONTtyxdUMt8n8b2d0f69sW6xTGRG6GI8fkA=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"result":"calculator.add(2, 2)"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2 + 2"},"name":"calculator"},"thoughtSignature":"CtUCAb4+9vstWkvxauzjmusQV16aWpo/PQ7OMXTl2AAfjcNHrf66VJ+K+vjBB7b/Xc+uQ0ka6jVfHXyert4j2BFnwyrpmmW7Kyrle00NJfDippgXt+eXzPmEQHNLdBbgSSHBSVoRVUV8lRChvlTgACd4ihfJkBi4LA5xutfgcrpe6E/juxhdxO0eBRT/JVLsdVxCCKWogFG+4Bhm7HFpqZvEbALMnRbkEb9lNPI5bKkx0UdwzTFuJCzT8SVcs8a8XGBsaxhMj0gypaidLAy2DyDJOCVTfglxQIn6W+6jF+3OGDFr77o281+RbpfN1iP3BD+A7GUfr9Fn8KE3dyMrzKTfvrvfmvZLABLQEyaVUXUpkF7vgpQFaAi3SjSbv/R9VYmFeAFma9lH3jXcyzTbVfl2VfqR29nEwlHsP/44ECn1j0ZE3r+9aarV7d/nteIt60QLP3pPUIM="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools.\n\nYou are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:51:31 GMT
+Date: Tue, 10 Mar 2026 14:09:51 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1582
+Server-Timing: gfet4t7; dur=1602
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -108,8 +105,170 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "2 + 2 = 4.",
-            "thoughtSignature": "CqsCAb4+9vvS8nnHtdgLkkrI6NN79dQZn96idZjhvpGjIaj5VVNNNyphjhLpRYg2jMEDMmpAJSjfviZhXvsXhCj6IRCkFAp8yQQrzo5roVOoNzhXQa9uly0aKjcQ29R+iAhElRo61oZILmplH4Ugx67nYTu3YjwykEOsZglEgBxfM0gH+HlETbJCzzLlVHaAWm1ONFhtRDNVNLCH/TWygDb41kpdODOhC2sBDVQwvMCdi44GV71zU6Q8N5S2S62d51tFBw04DzuZ3O04dsgiHtwBh/rePO4Mxjw6L006nh+kPaoUxMf8MqE5un0WSUZJTcYEyw1RpJK7Prfm0DJXZvw3ldUjlpnHB9wQXEa9m+c8FLjqwKWI1isqT5oMEjfWqwZsgW00+Be4qe8H+VI="
+            "functionCall": {
+              "name": "calculator",
+              "args": {
+                "skill_id": "add",
+                "request": "add 2 and 2",
+                "rationale": "The user wants to add 2 and 2. The calculator tool with the \"add\" skill can perform this operation."
+              }
+            },
+            "thoughtSignature": "Cr0GAb4+9vv8+09t2pLVTIf043HQXo7KHDiVeK5PoGfqTtNzSgeThEgZuPRE1B+hTr7FnqC77t8OQfHBt1GAmeNtaY0pncAqo6gLv/2/q/nLgOiwdjHMkv9WagOVCr5H/mNnR+zaYI1zzOXpeWkTQQUBaaOdGqo21LBUTUbjzvXVG3uhcZDVW7v7vkiSEFd1cWwJs6acP3UhQMSNT4M8EU8NVmSBd0eIqAcYhNkQYRkxXFuEh3MP+mJFk3w4XyhpIuQgpGp9tFoASKdm0PyCD0YxPbOc+NdBaMcknJxV/rzaorT2iZE39eHgeuveuAU9k6+zo6AXNVuPu+BHrAvRsvt51gH2Je3Lyh4pHsvmYUOSE4vqY1rWC8rdcFgRqsKi8GhKsmI3NK57r0z/f/UlAn3x+Xr5bILB58gp5HQLNAMpmaxZRlIVe3Szz7WXsGu+XIHfUXGgqniC7Dqnl3Y5UEelpeZiIj9+ZnrHXhxssmXT4qRJH0KnAOZ/m9RPsfN8QwYASeq8XA88zhizOvhYHsQSi61HXBU9ZjYND3iXHs/jk09azjS/A9jrxckrcGq2InGpb/+gzwx7rFwMINThItWbHP1EHHP1gt4J47eUJjIQWv0wIvjy5pv1WVUie/mY/QBqCSb0uGMwyGgmrZjC/hv+J7zdZrvnAG9iyNDn4bWz8SiIk/XHJBA7te+akcIQlobIwh5RkOnEf3qURBVNW97qJD2usw1Kl3NIt+5nwTqQpbtDMbMzDuUXQ5lJEnRkQa+tPs8t775QQ3SQN2lXXrUN/DI6EpYLAVlQNnsSiLE9uCkr6y3h2xkxyd1MFETOCIjMMjtZXQiiiDoBxfkzOhlrNE1uKFnCg3q8pavpZ5RoRRO5xyiKGAcXChLMBpGSIekeL4n9NqDRj6QaCv8MhudePqCePwBunypF4W7myDpg91AQsP6Mju8rEGTsRJyaDP26ewfVfhaFYJZxJYxZNtZsTSHiSN/6EJYJqinxhtAqLY6gxwjFXN0SreJr6P6dH1vKizraNa+CwxOSLfidtwnWpobUEBRv2knXrRkSlaVjkJ+Zx1DkqX5qEK0rv+gqat2/8ZmLWhVhAb7vmgHlyA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 217,
+    "candidatesTokenCount": 54,
+    "totalTokenCount": 459,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 217
+      }
+    ],
+    "thoughtsTokenCount": 188
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "LSawaYq0LfH3nsEP2v-88AQ"
+}
+596 544
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 350
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"add 2 and 2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."}],"role":"user"}}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 10 Mar 2026 14:09:51 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=616
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"finishReason": "UNEXPECTED_TOOL_CALL","index": 0}],"usageMetadata": {"promptTokenCount": 52,"totalTokenCount": 52,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 52}]}}
+
+3262 3170
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3029
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2 + 2"},"name":"calculator"},"thoughtSignature":"CtUCAb4+9vstWkvxauzjmusQV16aWpo/PQ7OMXTl2AAfjcNHrf66VJ+K+vjBB7b/Xc+uQ0ka6jVfHXyert4j2BFnwyrpmmW7Kyrle00NJfDippgXt+eXzPmEQHNLdBbgSSHBSVoRVUV8lRChvlTgACd4ihfJkBi4LA5xutfgcrpe6E/juxhdxO0eBRT/JVLsdVxCCKWogFG+4Bhm7HFpqZvEbALMnRbkEb9lNPI5bKkx0UdwzTFuJCzT8SVcs8a8XGBsaxhMj0gypaidLAy2DyDJOCVTfglxQIn6W+6jF+3OGDFr77o281+RbpfN1iP3BD+A7GUfr9Fn8KE3dyMrzKTfvrvfmvZLABLQEyaVUXUpkF7vgpQFaAi3SjSbv/R9VYmFeAFma9lH3jXcyzTbVfl2VfqR29nEwlHsP/44ECn1j0ZE3r+9aarV7d/nteIt60QLP3pPUIM="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"add 2 and 2"},"name":"calculator"},"thoughtSignature":"Cr0GAb4+9vv8+09t2pLVTIf043HQXo7KHDiVeK5PoGfqTtNzSgeThEgZuPRE1B+hTr7FnqC77t8OQfHBt1GAmeNtaY0pncAqo6gLv/2/q/nLgOiwdjHMkv9WagOVCr5H/mNnR+zaYI1zzOXpeWkTQQUBaaOdGqo21LBUTUbjzvXVG3uhcZDVW7v7vkiSEFd1cWwJs6acP3UhQMSNT4M8EU8NVmSBd0eIqAcYhNkQYRkxXFuEh3MP+mJFk3w4XyhpIuQgpGp9tFoASKdm0PyCD0YxPbOc+NdBaMcknJxV/rzaorT2iZE39eHgeuveuAU9k6+zo6AXNVuPu+BHrAvRsvt51gH2Je3Lyh4pHsvmYUOSE4vqY1rWC8rdcFgRqsKi8GhKsmI3NK57r0z/f/UlAn3x+Xr5bILB58gp5HQLNAMpmaxZRlIVe3Szz7WXsGu+XIHfUXGgqniC7Dqnl3Y5UEelpeZiIj9+ZnrHXhxssmXT4qRJH0KnAOZ/m9RPsfN8QwYASeq8XA88zhizOvhYHsQSi61HXBU9ZjYND3iXHs/jk09azjS/A9jrxckrcGq2InGpb/+gzwx7rFwMINThItWbHP1EHHP1gt4J47eUJjIQWv0wIvjy5pv1WVUie/mY/QBqCSb0uGMwyGgmrZjC/hv+J7zdZrvnAG9iyNDn4bWz8SiIk/XHJBA7te+akcIQlobIwh5RkOnEf3qURBVNW97qJD2usw1Kl3NIt+5nwTqQpbtDMbMzDuUXQ5lJEnRkQa+tPs8t775QQ3SQN2lXXrUN/DI6EpYLAVlQNnsSiLE9uCkr6y3h2xkxyd1MFETOCIjMMjtZXQiiiDoBxfkzOhlrNE1uKFnCg3q8pavpZ5RoRRO5xyiKGAcXChLMBpGSIekeL4n9NqDRj6QaCv8MhudePqCePwBunypF4W7myDpg91AQsP6Mju8rEGTsRJyaDP26ewfVfhaFYJZxJYxZNtZsTSHiSN/6EJYJqinxhtAqLY6gxwjFXN0SreJr6P6dH1vKizraNa+CwxOSLfidtwnWpobUEBRv2knXrRkSlaVjkJ+Zx1DkqX5qEK0rv+gqat2/8ZmLWhVhAb7vmgHlyA=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools.\n\nYou are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:09:55 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3295
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "calculator",
+              "args": {
+                "rationale": "The user wants to add two numbers, and the calculator tool has an 'add' skill that can perform this operation. Providing the request as '2+2' and explicitly setting the skill_id to 'add' should allow the calculator to correctly perform the addition.",
+                "request": "2+2",
+                "skill_id": "add"
+              }
+            },
+            "thoughtSignature": "CrQKAb4+9vsHtyTo1nFULUKtvO66j3fZQoZhe7BVlgQ5jJOI4OJk7G/mDXeq5RGaUnloSH+S55e6wxRWzjtSaCkumrvNYnCLf8iKqy9Anz979Its9x6Fc3lBT0BHKhkGboq7FLuixWOVdgKM68GYDkIY/qYUg+koPL4nQo22tPNaRG0P94MEaglrTtPbSCDsCSpq8YFshLBT4Yago871D++bJnThzCBvOKD0eRnQnx7Pz+nHbWntijrvA9gTQ39UMJ7dduCJAYHw3L01F4hODoDn/McB/Rh7RNhZmUycqxRMwQI0eR1eUgzgkNeMcl3+iS1Q/Vt9BINp3PTjH7OQcO8233jItueR0u6lNtc75RYfGnbk1ydG873CHTnV3RT2Lfpag8g+pn5TIoDv2yKdP4u2nHviZs4SVDGFOH28/idoQhSiH8j6w9kgYRHiMvProJmytTihggqyFs6dHZo632RKu2lm3bl0rFG/UdVMNZEK6nqNwF2e7ksqqY2wwy1z/P/nXNuFzqV34pRplQtYPYXanvXdb5wHwt0zsA4bPD+ba8TVspCzkrMZVNs9+EUyK/jx+hDGRbyMRX52TRFPbVYYzAhJVB4QcTxMxRB0ATO2YYkpzr7hUeFQ9dxqsXIuMW/RqP+A4343JpGOd1IMZN9w0DiorYiYv6RO34Gu/IlvA4flqfsGTznL9szU8lZ1lMV8C9k7Buyx9vpwAcHbmt/QojAqj/uIxH6P1dbfCaob6sNXtjqlAI+mS2mDs+sZkkYxwtvDy/JZtNksm2eubD5mIMHp1Ca2xmBG5hWnq+2z2IreiywUVHdB8GaI6Pb0e2+vVk1jl09OVVTYebcFl7Q/2l9pV4IPoCwNnbqkbT2zdV6UEQtlp2ge+Ayd7mPSDdZto31Hk+HlmWr767s6zlP/5G3YcLN+FiJllFBRo2kvzpNfFCWHsuwn6cAiq4JvuHgXwZNNJaXueUU5YpbgfRN45cHozFX3G7M+cN4ld+ndxyD4pru1Z1APh/wXMjLfmSAjzmwZ45h13l8RV6AkazAvle1g/zVvqL1GwYYucpIBHnwOpH77xg7TUiTp/ZOng/FhaNBC3JXy4lTz6RgTpwc4tFtPogOTxUORZIOSgFWN6OQyDia9FNoodXe3UT/esUqCoJNGu+clQ1VhDr0bKW2vrJpRSkWpYMLiZeXNT/PSmqwwN3kil3SxHd3CtJpC9q/VzC4k8dJFzrbQLTwIs8kfzH0Epk732AhK5l9n7EM2OiS6+Wzlw/z2+HZbXl+MHzy+i3mBuyhqCLHm49pJKhI4Ou/O2Q/+w55T3qhS8sgyxK93ybAmdtH37XaL5JBwLRDZhsAAjw2LQJ015iqKPQQAlAwMmF/1+FIcAwPMr9rJtXKPK/BaFLUNC0YuCKr3Q6HHjv8HP+SVejjz7N9hwmu5MXcFt/zkWwbi8iY95kLpaQ/svNtTWp8cOveq23PDt8oVx7RwU07OaW5ej43Nfs09ALRT9XpjajJe8HrTgoOQjJlqAJjv7yCD9Y/+y3IdRXNSE0D3oz8A8HMC/x7lZwLh/ztPVGBP7ezKRxSDKUOTT8onjlhF789hO6X6Xw6Z9Q5PM4M7DG2oXRQcjftlw/PFrxxnl5W0Dxwb9UappLw5tZLtBUZlk7q1lCciKUpXN9VPFXC3XTMqKOWPDnRbdbUdcitPUkiH3rgQy0OV+0g2iHNLhBgIkR5Ei9pFpZht8UPHyd/qFN3Z8RusYxVE0sxc0rM7OI6vKm6xbloT5VBTepDKHhWn"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 271,
+    "candidatesTokenCount": 80,
+    "totalTokenCount": 657,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 271
+      }
+    ],
+    "thoughtsTokenCount": 306
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "LyawafntOumakdUP6ZHlkQo"
+}
+588 544
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 342
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"2+2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."}],"role":"user"}}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 10 Mar 2026 14:09:55 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=562
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"finishReason": "UNEXPECTED_TOOL_CALL","index": 0}],"usageMetadata": {"promptTokenCount": 49,"totalTokenCount": 49,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 49}]}}
+
+5331 2901
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 5098
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2 + 2"},"name":"calculator"},"thoughtSignature":"CtUCAb4+9vstWkvxauzjmusQV16aWpo/PQ7OMXTl2AAfjcNHrf66VJ+K+vjBB7b/Xc+uQ0ka6jVfHXyert4j2BFnwyrpmmW7Kyrle00NJfDippgXt+eXzPmEQHNLdBbgSSHBSVoRVUV8lRChvlTgACd4ihfJkBi4LA5xutfgcrpe6E/juxhdxO0eBRT/JVLsdVxCCKWogFG+4Bhm7HFpqZvEbALMnRbkEb9lNPI5bKkx0UdwzTFuJCzT8SVcs8a8XGBsaxhMj0gypaidLAy2DyDJOCVTfglxQIn6W+6jF+3OGDFr77o281+RbpfN1iP3BD+A7GUfr9Fn8KE3dyMrzKTfvrvfmvZLABLQEyaVUXUpkF7vgpQFaAi3SjSbv/R9VYmFeAFma9lH3jXcyzTbVfl2VfqR29nEwlHsP/44ECn1j0ZE3r+9aarV7d/nteIt60QLP3pPUIM="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"add 2 and 2"},"name":"calculator"},"thoughtSignature":"Cr0GAb4+9vv8+09t2pLVTIf043HQXo7KHDiVeK5PoGfqTtNzSgeThEgZuPRE1B+hTr7FnqC77t8OQfHBt1GAmeNtaY0pncAqo6gLv/2/q/nLgOiwdjHMkv9WagOVCr5H/mNnR+zaYI1zzOXpeWkTQQUBaaOdGqo21LBUTUbjzvXVG3uhcZDVW7v7vkiSEFd1cWwJs6acP3UhQMSNT4M8EU8NVmSBd0eIqAcYhNkQYRkxXFuEh3MP+mJFk3w4XyhpIuQgpGp9tFoASKdm0PyCD0YxPbOc+NdBaMcknJxV/rzaorT2iZE39eHgeuveuAU9k6+zo6AXNVuPu+BHrAvRsvt51gH2Je3Lyh4pHsvmYUOSE4vqY1rWC8rdcFgRqsKi8GhKsmI3NK57r0z/f/UlAn3x+Xr5bILB58gp5HQLNAMpmaxZRlIVe3Szz7WXsGu+XIHfUXGgqniC7Dqnl3Y5UEelpeZiIj9+ZnrHXhxssmXT4qRJH0KnAOZ/m9RPsfN8QwYASeq8XA88zhizOvhYHsQSi61HXBU9ZjYND3iXHs/jk09azjS/A9jrxckrcGq2InGpb/+gzwx7rFwMINThItWbHP1EHHP1gt4J47eUJjIQWv0wIvjy5pv1WVUie/mY/QBqCSb0uGMwyGgmrZjC/hv+J7zdZrvnAG9iyNDn4bWz8SiIk/XHJBA7te+akcIQlobIwh5RkOnEf3qURBVNW97qJD2usw1Kl3NIt+5nwTqQpbtDMbMzDuUXQ5lJEnRkQa+tPs8t775QQ3SQN2lXXrUN/DI6EpYLAVlQNnsSiLE9uCkr6y3h2xkxyd1MFETOCIjMMjtZXQiiiDoBxfkzOhlrNE1uKFnCg3q8pavpZ5RoRRO5xyiKGAcXChLMBpGSIekeL4n9NqDRj6QaCv8MhudePqCePwBunypF4W7myDpg91AQsP6Mju8rEGTsRJyaDP26ewfVfhaFYJZxJYxZNtZsTSHiSN/6EJYJqinxhtAqLY6gxwjFXN0SreJr6P6dH1vKizraNa+CwxOSLfidtwnWpobUEBRv2knXrRkSlaVjkJ+Zx1DkqX5qEK0rv+gqat2/8ZmLWhVhAb7vmgHlyA=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2+2"},"name":"calculator"},"thoughtSignature":"CrQKAb4+9vsHtyTo1nFULUKtvO66j3fZQoZhe7BVlgQ5jJOI4OJk7G/mDXeq5RGaUnloSH+S55e6wxRWzjtSaCkumrvNYnCLf8iKqy9Anz979Its9x6Fc3lBT0BHKhkGboq7FLuixWOVdgKM68GYDkIY/qYUg+koPL4nQo22tPNaRG0P94MEaglrTtPbSCDsCSpq8YFshLBT4Yago871D++bJnThzCBvOKD0eRnQnx7Pz+nHbWntijrvA9gTQ39UMJ7dduCJAYHw3L01F4hODoDn/McB/Rh7RNhZmUycqxRMwQI0eR1eUgzgkNeMcl3+iS1Q/Vt9BINp3PTjH7OQcO8233jItueR0u6lNtc75RYfGnbk1ydG873CHTnV3RT2Lfpag8g+pn5TIoDv2yKdP4u2nHviZs4SVDGFOH28/idoQhSiH8j6w9kgYRHiMvProJmytTihggqyFs6dHZo632RKu2lm3bl0rFG/UdVMNZEK6nqNwF2e7ksqqY2wwy1z/P/nXNuFzqV34pRplQtYPYXanvXdb5wHwt0zsA4bPD+ba8TVspCzkrMZVNs9+EUyK/jx+hDGRbyMRX52TRFPbVYYzAhJVB4QcTxMxRB0ATO2YYkpzr7hUeFQ9dxqsXIuMW/RqP+A4343JpGOd1IMZN9w0DiorYiYv6RO34Gu/IlvA4flqfsGTznL9szU8lZ1lMV8C9k7Buyx9vpwAcHbmt/QojAqj/uIxH6P1dbfCaob6sNXtjqlAI+mS2mDs+sZkkYxwtvDy/JZtNksm2eubD5mIMHp1Ca2xmBG5hWnq+2z2IreiywUVHdB8GaI6Pb0e2+vVk1jl09OVVTYebcFl7Q/2l9pV4IPoCwNnbqkbT2zdV6UEQtlp2ge+Ayd7mPSDdZto31Hk+HlmWr767s6zlP/5G3YcLN+FiJllFBRo2kvzpNfFCWHsuwn6cAiq4JvuHgXwZNNJaXueUU5YpbgfRN45cHozFX3G7M+cN4ld+ndxyD4pru1Z1APh/wXMjLfmSAjzmwZ45h13l8RV6AkazAvle1g/zVvqL1GwYYucpIBHnwOpH77xg7TUiTp/ZOng/FhaNBC3JXy4lTz6RgTpwc4tFtPogOTxUORZIOSgFWN6OQyDia9FNoodXe3UT/esUqCoJNGu+clQ1VhDr0bKW2vrJpRSkWpYMLiZeXNT/PSmqwwN3kil3SxHd3CtJpC9q/VzC4k8dJFzrbQLTwIs8kfzH0Epk732AhK5l9n7EM2OiS6+Wzlw/z2+HZbXl+MHzy+i3mBuyhqCLHm49pJKhI4Ou/O2Q/+w55T3qhS8sgyxK93ybAmdtH37XaL5JBwLRDZhsAAjw2LQJ015iqKPQQAlAwMmF/1+FIcAwPMr9rJtXKPK/BaFLUNC0YuCKr3Q6HHjv8HP+SVejjz7N9hwmu5MXcFt/zkWwbi8iY95kLpaQ/svNtTWp8cOveq23PDt8oVx7RwU07OaW5ej43Nfs09ALRT9XpjajJe8HrTgoOQjJlqAJjv7yCD9Y/+y3IdRXNSE0D3oz8A8HMC/x7lZwLh/ztPVGBP7ezKRxSDKUOTT8onjlhF789hO6X6Xw6Z9Q5PM4M7DG2oXRQcjftlw/PFrxxnl5W0Dxwb9UappLw5tZLtBUZlk7q1lCciKUpXN9VPFXC3XTMqKOWPDnRbdbUdcitPUkiH3rgQy0OV+0g2iHNLhBgIkR5Ei9pFpZht8UPHyd/qFN3Z8RusYxVE0sxc0rM7OI6vKm6xbloT5VBTepDKHhWn"}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"error":"error from sub-agent \"calculator\" (code: \"UNEXPECTED_TOOL_CALL\", message: \"\")"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools.\n\nYou are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:09:58 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2769
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I am sorry, I cannot fulfill this request. The calculator tool is not working as expected. I am getting an error when I try to use it.",
+            "thoughtSignature": "CoILAb4+9vudz1XnXdU/nJydig4ktLc5tKK93RRRSGAw17B7QsvCelCuj1MmbmIp0Y4MBE/LsPl4zB2hBMBqgkZdctxik+0oAYyGKoK2VG2FW9xRz+7pRt4v0nFIjZxfuzYSN9ZTzhuu+N15zRS1Ft5yQiJi4BL5SqaFjq30nYNIngIetdFS6ulIP6Fy358MmStiZIezI3XG1dhxPEbIF1Q+oV94UUW9NBXxN50WR0Y5qeAYV/DrvCU2mZRdleXdUmcSv8V+URipKHrPlAlSdL2jdZUEexr+OjL1LBNJ1G+mqYLVk5gOuD1PBFBqCNlwqbflAgWUbfVzCWjcf7ej0jQQ5/Ek3YtxolG+cPUPrU5t7MkTM5BPhoxSE/q5k8/qAaMK06eaSfhGnyhXen2bi1+WjTKiqPlXV6avPDGaEibI2NTFcNeu13/FeeQV2CJSn5/HFItJONpqJJUW/izGlk4374IdENn0HTFK1Y+ap8FJEMJfIXk3NnYpC0K3NgAqOFsWTprK0mWqqadhTJcTnKrZ63rNuPnGWiUisnGSZvNzIFDwY6ADxy8m+ojaALoTDkSC3MexqS1hNQTNBrCuLESW/dkH6LLz0yL6E8k1hclQ0UJsN/HKZk88BgGVZc9ZE84ES5ksE9UMzGYUc6fuxqdwlzbpNfLBOloW8H7l/5Nkdo1QphyMzjfUX0XIoYUIHzjIqy98jWnmWtMipvuKjGVhi4uvX/RJu+lex5xhHadSPRsjbt44+C4g8myGGY/VWzX4fI4F1Q45034RZ4svqeqRldm//ePrWWo6U08bgA2ADOkunLfy62DER3VgmlmLxdA9c9+qf0N3vFiKEmu6jB4IiVPMFSsGAJnq1iID6xy8TwxXoBQkUoHT/ukmPIPJlQ7ghlOkR8ES1c3fQgn9wIaB58p/N6xMsOocflczFvvMuqfALUy3ysCYnuZeSpThOX9MBZfkaNrsgAgjR7oQSSrWg58aFXz1dCFAvulnxgMVKqkAN1yJF9q6aI9NUwViX9OtXY+CJM3TNpVRuQjMBqG3iYDNkvibpzHJr/9fW8qFY4S6yOOFBv/FNGGhN2n+Qd9THqFRo1AnbLJi0U0wefHdrKg/VwO+BwZ14KVfun6mlxR/mmWOaNSABlFfnh0rNnx1Y+Oh6JozQcuKmhGo7SGZYbI5iwMtHzD0tJloOaxZJ4FbCTSaoANiv3SR3rWXJ5FlKQ7WCziePJ3tYADz3J/r+rsBjLix3TiRTIdfKOZJhqC+KViszSCDutEdqJ/V2Iy77FJWTIJmnqHQ9xh8v5pGEsId8aevdW2C58a5Qf+C2VFjRdGvuU+MFKPCUzVAhL1ICc2qhNjLK1t2RcY8hv6kVkQycb11S4llv6y8v8tSzdXRia4TySeMDB7CMAyo8wzuOUzssa7+jy7ChUx2bX++deT6E9Jq2m4OfyuVwYvV/duFWuEbi/Dhu1HdNoGKdrCx0n2a5+vO9g83FAGyMcD0P/kv+fNnvCPOVZDTZZc2dECvenvISWijaZTU/Z6+fQCG3IM2FJIL7OLzP+4Nko9JLZF3z3EQErNN94pc/ZGmxk4YmMs++q3D/sC2Jf/BF8fA8qFrgtgc7l3r1NiplJV7IgIKLD5HLWYIHikjem2i1u3RLAIv2hR0HPgs4uErheBWpvj7QvnAja+CzePzBZHMZjdYEXqzM0I/Jwt3OcUkEO6Iq39NZ5i7rrAYJnvmPUHylR9BfvWSEhdWYaVWmXaPG1gABMmgQ/FL+5QAa6D1KfB4U+0DJP0x9Xco5FQE135ZPBpLFkJ+SnYnxDetZtx01TM/78l56jCmomSfh5HZ6tC2xDVtqTnjV9P79ZzeNRROlqlzbQJY+dbuwWsRBSOqNH+N"
           }
         ],
         "role": "model"
@@ -119,17 +278,17 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 201,
-    "candidatesTokenCount": 8,
-    "totalTokenCount": 280,
+    "promptTokenCount": 322,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 672,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 201
+        "tokenCount": 322
       }
     ],
-    "thoughtsTokenCount": 71
+    "thoughtsTokenCount": 319
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "0liYafLTC-ad0-kPrfidgAs"
+  "responseId": "MyawaZWNNPzLkdUPsrHY4Ak"
 }

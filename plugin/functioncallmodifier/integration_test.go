@@ -22,17 +22,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/plugin/functioncallmodifier"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/plugin/functioncallmodifier"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 //go:generate go test -v -httprecord=testdata/.*\.httprr
@@ -66,7 +66,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 				return []tool.Tool{agentToolDefault}
 			},
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation.",
+			wantRationaleStateValue:  "The user wants to add two numbers, and the calculator tool has an 'add' skill that can perform this operation. Providing the request as '2+2' and explicitly setting the skill_id to 'add' should allow the calculator to correctly perform the addition.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},
@@ -74,7 +74,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 			name:                     "transfer to agent tool",
 			tools:                    func(a agent.Agent) []tool.Tool { return []tool.Tool{} },
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has skills for mathematical operations.",
+			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has an add skill.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},

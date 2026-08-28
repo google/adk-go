@@ -22,13 +22,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -64,7 +65,7 @@ type mcpTool struct {
 
 	requireConfirmation bool
 
-	requireConfirmationProvider ConfirmationProvider
+	requireConfirmationProvider tool.ConfirmationProvider
 }
 
 // Name implements the tool.Tool.
@@ -82,7 +83,7 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *mcpTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
@@ -90,10 +91,10 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := t.requireConfirmation
@@ -112,11 +113,10 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 				return nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", t.Name())
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 
-	// TODO: add auth
 	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,

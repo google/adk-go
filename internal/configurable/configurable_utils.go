@@ -17,10 +17,12 @@ package configurable
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,16 +30,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/exitlooptool"
-	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/adk/tool/mcptoolset"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/exampletool"
+	"google.golang.org/adk/v2/tool/exitlooptool"
+	"google.golang.org/adk/v2/tool/geminitool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
 type AgentFactory func(ctx context.Context, configBytes []byte, configPath string) (agent.Agent, error)
@@ -67,6 +70,10 @@ func init() {
 	if err := Register("SequentialAgent", newSequentialAgent); err != nil {
 		panic(err)
 	}
+	if err := Register("Workflow", newWorkflowAgent); err != nil {
+		panic(err)
+	}
+
 	err := RegisterToolFactory("exit_loop", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
 		return exitlooptool.New()
 	})
@@ -140,7 +147,56 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	// TODO: ExampleTool
+	err = RegisterToolFactory("ExampleTool", func(ctx context.Context, args map[string]any) (tool.Tool, error) {
+		if args == nil {
+			return nil, fmt.Errorf("args is nil")
+		}
+
+		raw, ok := args["examples"]
+		if !ok {
+			return nil, fmt.Errorf("examples not found in args")
+		}
+
+		// 1. Cast the top-level 'examples' to a generic slice
+		examplesSlice, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("examples is not a list")
+		}
+
+		// 2. Iterate and normalize the 'output' field
+		for i, item := range examplesSlice {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			output := m["output"]
+			if output == nil {
+				continue
+			}
+
+			// Check if 'output' is NOT a slice. If it's a single object,
+			// wrap it in a new slice []any{output}
+			if _, isSlice := output.([]any); !isSlice {
+				m["output"] = []any{output}
+				examplesSlice[i] = m
+			}
+		}
+
+		// 3. Now marshal/unmarshal as usual into your clean struct
+		bytes, _ := json.Marshal(examplesSlice)
+		var examples []*exampletool.Example
+		if err := json.Unmarshal(bytes, &examples); err != nil {
+			return nil, fmt.Errorf("failed to decode normalized examples: %w", err)
+		}
+
+		return exampletool.New(exampletool.ExampleToolConfig{
+			Examples: examples,
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
 		if !ok {
@@ -164,11 +220,19 @@ func init() {
 		}
 		serverArgsStr := make([]string, len(serverArgs))
 		for i, arg := range serverArgs {
-			serverArgsStr[i] = arg.(string)
+			s, ok := arg.(string)
+			if !ok {
+				return nil, fmt.Errorf("server_params.args[%d]: expected string, got %T (%v)", i, arg, arg)
+			}
+			serverArgsStr[i] = s
 		}
 		toolFilterStr := make([]string, len(toolFilter))
 		for i, t := range toolFilter {
-			toolFilterStr[i] = t.(string)
+			s, ok := t.(string)
+			if !ok {
+				return nil, fmt.Errorf("tool_filter[%d]: expected string, got %T (%v)", i, t, t)
+			}
+			toolFilterStr[i] = s
 		}
 
 		mcpSet, err := mcptoolset.New(mcptoolset.Config{
@@ -315,15 +379,34 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 		return nil, fmt.Errorf("agent reference path cannot be empty")
 	}
 
-	targetPath := refPath
-	// Handle relative paths
-	if !filepath.IsAbs(refPath) {
-		targetPath = filepath.Join(filepath.Dir(parentPath), refPath)
+	if filepath.IsAbs(refPath) {
+		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
 	}
+
+	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
 
 	absPath, err := filepath.Abs(targetPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Prevent path traversal outside the parent agent's directory. Both sides are
+	// made absolute before comparing, and symlinks are resolved where the paths
+	// exist, so a symlink inside the agent directory cannot be used to escape it.
+	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
+		parentDir = resolved
+	}
+	checkPath := absPath
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		checkPath = resolved
+	}
+	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
+		return nil, fmt.Errorf(
+			"path traversal detected: config_path %q resolves outside agent directory", refPath)
 	}
 
 	registryMu.RLock()

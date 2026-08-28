@@ -24,10 +24,11 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	weblauncher "google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/adkrest"
+	"google.golang.org/adk/v2/cmd/launcher"
+	weblauncher "google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/telemetry"
 )
 
 // apiConfig contains parametres for lauching ADK REST API
@@ -35,6 +36,7 @@ type apiConfig struct {
 	frontendAddress string
 	pathPrefix      string
 	sseWriteTimeout time.Duration
+	traceCapacity   int
 }
 
 // apiLauncher can launch ADK REST API
@@ -73,10 +75,25 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
+	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+		ArtifactService: config.ArtifactService,
+		SSEWriteTimeout: a.config.sseWriteTimeout,
+		PluginConfig:    config.PluginConfig,
+		DebugConfig: adkrest.DebugTelemetryConfig{
+			TraceCapacity: a.config.traceCapacity,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create REST server: %w", err)
+	}
+
+	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
 
 	// Wrap it with CORS middleware
-	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
+	corsHandler := corsWithArgs(a.config.frontendAddress)(restServer)
 
 	// If prefix is empty, don't use PathPrefix("") because it's too greedy.
 	// Instead, attach the handler to the main router directly.
@@ -125,6 +142,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
+	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
 
 	return &apiLauncher{
 		config: config,

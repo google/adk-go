@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package database provides a session.Service backed by a relational
+// database (for example PostgreSQL, Spanner, or SQLite) using GORM.
 package database
 
 import (
@@ -22,10 +24,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // databaseService is an database implementation of sessionService.Service.
@@ -75,7 +77,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 
 	sessionID := req.SessionID
 	if sessionID == "" {
-		sessionID = uuid.NewString()
+		sessionID = platform.NewUUID(ctx)
 	}
 
 	stateMap := req.State
@@ -87,9 +89,9 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		userID:    req.UserID,
 		sessionID: sessionID,
 		state:     stateMap,
-		updatedAt: time.Now(),
+		updatedAt: platform.Now(ctx),
 	}
-	createdSession, err := createStorageSession(val)
+	createdSession, err := createStorageSession(ctx, val)
 	if err != nil {
 		return nil, err
 	}
@@ -109,12 +111,16 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		// apply state delta
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly: an unset time.Time serializes to
+			// a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
@@ -376,8 +382,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
@@ -397,12 +403,16 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly (see Create): an unset time.Time
+			// serializes to a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
