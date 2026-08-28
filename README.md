@@ -47,6 +47,16 @@ To add ADK Go to your project, run:
 go get google.golang.org/adk/v2
 ```
 
+## 📖 Docs for AI coding agents
+
+[adk.dev/llms.txt](https://adk.dev/llms.txt) is a machine-readable index of the ADK documentation, and [adk.dev/llms-full.txt](https://adk.dev/llms-full.txt) is the same documentation as a single file. Both are generated from [adk-docs](https://github.com/google/adk-docs/) and include the Go API reference and samples, so you can point a coding agent at either one for context:
+
+```text
+Plan and implement an agent that reviews customer issues and generates a report. Use the ADK Go framework, referring to https://adk.dev/llms-full.txt for sample code.
+```
+
+To work on this repository rather than build with it, see [AGENTS.md](AGENTS.md).
+
 ## 📄 License
 
 This project is licensed under the Apache 2.0 License - see the
