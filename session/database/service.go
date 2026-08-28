@@ -382,8 +382,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
@@ -487,7 +487,7 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 
 // extractStateDeltas splits a single state delta map into three separate maps
 // for app, user, and session states based on key prefixes.
-// Temporary keys (starting with TempStatePrefix) are ignored.
+// Temporary keys (starting with session.KeyPrefixTemp) are ignored.
 func extractStateDeltas(delta map[string]any) (
 	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
 ) {
