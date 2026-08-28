@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -340,5 +341,181 @@ func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+
+	createCalled := false
+	var requestBody string
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			// Table metadata request: returns 404 Not Found to trigger creation
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			// Table creation request
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createCalled = true
+				bodyBytes, _ := io.ReadAll(r.Body)
+				requestBody = string(bodyBytes)
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	_, err = NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Plugin initialization error: %v", err)
+	}
+
+	if !createCalled {
+		t.Error("Expected table creation to be called")
+	}
+
+	if !strings.Contains(requestBody, "timePartitioning") {
+		t.Errorf("Expected request body to contain 'timePartitioning', got: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "DAY") {
+		t.Errorf("Expected partitioning type to be 'DAY', got request body: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "timestamp") {
+		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
+	}
+}
+
+func TestContextualTraceStacking(t *testing.T) {
+	p, _, mCtx := setupTestPlugin(t)
+
+	beforeRunCb := p.BeforeRunCallback()
+	if beforeRunCb == nil {
+		t.Fatal("BeforeRunCallback is nil")
+	}
+
+	// 1. Trigger BeforeRunCallback to push root span
+	_, err := beforeRunCb(mCtx)
+	if err != nil {
+		t.Fatalf("BeforeRunCallback error: %v", err)
+	}
+
+	stack := tm.getStack(mCtx.InvocationID())
+	if stack == nil {
+		t.Fatal("Expected stack to be initialized, got nil")
+	}
+
+	stack.mu.Lock()
+	spansLen := len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 1 {
+		t.Errorf("Expected 1 span in stack, got %d", spansLen)
+	}
+
+	stack.mu.Lock()
+	rootSpanID := stack.spans[0].spanID
+	stack.mu.Unlock()
+	if rootSpanID == "" {
+		t.Error("Expected non-empty root span ID")
+	}
+
+	// 2. Trigger BeforeModelCallback to push nested span
+	beforeModelCb := p.BeforeModelCallback()
+	if beforeModelCb == nil {
+		t.Fatal("BeforeModelCallback is nil")
+	}
+
+	_, err = beforeModelCb(mCtx, &model.LLMRequest{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("BeforeModelCallback error: %v", err)
+	}
+
+	stack.mu.Lock()
+	spansLen = len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 2 {
+		t.Errorf("Expected 2 spans in stack after model start, got %d", spansLen)
+	}
+
+	stack.mu.Lock()
+	nestedSpan := stack.spans[1]
+	stack.mu.Unlock()
+	if nestedSpan.parentSpanID != rootSpanID {
+		t.Errorf("Expected nested span parent ID to be %s, got %s", rootSpanID, nestedSpan.parentSpanID)
+	}
+
+	// 3. Trigger AfterModelCallback to pop nested span
+	afterModelCb := p.AfterModelCallback()
+	if afterModelCb == nil {
+		t.Fatal("AfterModelCallback is nil")
+	}
+
+	_, err = afterModelCb(mCtx, &model.LLMResponse{}, nil)
+	if err != nil {
+		t.Fatalf("AfterModelCallback error: %v", err)
+	}
+
+	stack.mu.Lock()
+	spansLen = len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 1 {
+		t.Errorf("Expected 1 span in stack after model end, got %d", spansLen)
+	}
+
+	// 4. Trigger AfterRunCallback to pop root span and cleanup
+	afterRunCb := p.AfterRunCallback()
+	if afterRunCb == nil {
+		t.Fatal("AfterRunCallback is nil")
+	}
+
+	afterRunCb(mCtx)
+
+	tm.mu.RLock()
+	_, exists := tm.stacks[mCtx.InvocationID()]
+	tm.mu.RUnlock()
+	if exists {
+		t.Error("Expected stack to be cleaned up and removed from traceManager, but it still exists")
 	}
 }
