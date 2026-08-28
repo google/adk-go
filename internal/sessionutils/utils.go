@@ -27,7 +27,7 @@ const (
 
 // ExtractStateDeltas splits a single state delta map into three separate maps
 // for app, user, and session states based on key prefixes.
-// Temporary keys (starting with TempStatePrefix) are ignored.
+// Temporary keys (starting with tempPrefix) are ignored.
 func ExtractStateDeltas(delta map[string]any) (
 	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
 ) {

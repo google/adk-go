@@ -126,7 +126,12 @@ func TestExecutor_Execute(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
-				a2a.NewSubmittedTask(task, hiMsg),
+				func() *a2a.Task {
+					// The executor marks every task it emits with the ADK A2A extension key.
+					submitted := a2a.NewSubmittedTask(task, hiMsg)
+					submitted.Metadata = map[string]any{ADKExtensionURI: true}
+					return submitted
+				}(),
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),

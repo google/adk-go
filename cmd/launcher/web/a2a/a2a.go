@@ -110,9 +110,15 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 				ProtocolVersion: a2av0.Version,
 			},
 		},
-		Version:      "2.0.0",
-		Skills:       adka2a.BuildAgentSkills(rootAgent),
-		Capabilities: a2acore.AgentCapabilities{Streaming: true},
+		Version: "2.0.0",
+		Skills:  adka2a.BuildAgentSkills(rootAgent),
+		Capabilities: a2acore.AgentCapabilities{
+			Streaming: true,
+			Extensions: []a2acore.AgentExtension{{
+				URI:         adka2a.ADKExtensionURI,
+				Description: "Content is spread across task artifacts and the status message, which carries long-running function calls.",
+			}},
+		},
 	}
 
 	compatProducer := a2av0.NewStaticAgentCardProducer(agentCard)
