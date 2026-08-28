@@ -86,6 +86,7 @@ type ServerConfig struct {
 
 // DebugAPIConfig contains parameters for the debug API.
 type DebugAPIConfig struct {
+	// Controls if [routers.NewDebugAPIRouter] is included
 	IncludeDebugAPI bool
 }
 
