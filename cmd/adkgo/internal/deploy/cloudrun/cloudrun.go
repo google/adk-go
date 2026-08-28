@@ -110,7 +110,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
-	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.debugAPI, "debug_api", false, "Enable Debug API - requires '-api'")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.debugAPI, "debug_api", false, "Enable Debug API - requires '--api'")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.pubsub, "pubsub", false, "Enable PubSub subrouter")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRetries, "pubsub_max_retries", 3, "Maximum retries for HTTP 429 errors from PubSub triggers")

@@ -56,7 +56,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	}
-	if cfg.DebugApiConfig.IncludeDebugAPI {
+	if cfg.DebugAPIConfig.IncludeDebugAPI {
 		subrouters = append(subrouters, routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)))
 	}
 
@@ -81,7 +81,7 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
-	DebugApiConfig  DebugAPIConfig
+	DebugAPIConfig  DebugAPIConfig
 }
 
 // DebugAPIConfig contains parameters for the debug API.

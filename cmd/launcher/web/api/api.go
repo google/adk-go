@@ -86,7 +86,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		DebugConfig: adkrest.DebugTelemetryConfig{
 			TraceCapacity: a.config.traceCapacity,
 		},
-		DebugApiConfig: adkrest.DebugAPIConfig{
+		DebugAPIConfig: adkrest.DebugAPIConfig{
 			IncludeDebugAPI: a.config.includeDebugAPI,
 		},
 	})
