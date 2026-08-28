@@ -665,14 +665,18 @@ func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
+	var count int
 	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
 	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
-		if ev != nil {
-			t.Errorf("expected nil event, got %v", ev)
+		if ev == nil {
+			t.Errorf("unexpected nil event")
 		}
+		count++
+	}
+	if count != 0 {
+		t.Errorf("expected 0 events, got %d", count)
 	}
 }
-
