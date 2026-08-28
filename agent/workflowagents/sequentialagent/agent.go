@@ -28,9 +28,8 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-// New creates a SequentialAgent.
-//
-// SequentialAgent executes its sub-agents once, in the order they are listed.
+// seqAgent is the agent returned by New; it augments the base agent with the
+// live-mode entry point.
 type seqAgent struct {
 	agent.Agent
 	*agentinternal.State
@@ -41,11 +40,14 @@ func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return s.impl.RunLive(ctx)
 }
 
-// New creates a SequentialAgent, which runs its sub-agents in a fixed, strict
-// order. Use it when you want the execution to occur sequentially.
+// New creates a SequentialAgent.
+//
+// SequentialAgent executes its sub-agents once, in the order they are listed.
+// Use the SequentialAgent when you want the execution to occur in a fixed,
+// strict order.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
-		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
+		return nil, fmt.Errorf("SequentialAgent doesn't allow custom Run implementations")
 	}
 
 	sequentialAgentImpl := &sequentialAgent{}

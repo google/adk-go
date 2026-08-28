@@ -118,6 +118,9 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("load_artifacts tool requires an artifact service to be configured")
+	}
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -159,14 +162,18 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	if lastContent == nil || len(lastContent.Parts) == 0 {
 		return nil
 	}
-	firstPart := lastContent.Parts[0]
-	if firstPart.FunctionResponse == nil {
-		return nil
+	var functionResponse *genai.FunctionResponse
+	// Iterate over all parts in the last content turn to find load_artifacts responses.
+	// Note: adk-python only checks parts[0]; scanning all parts is intentional in Go to
+	// support parallel/multi-tool turns where load_artifacts may not be the first part.
+	for _, part := range lastContent.Parts {
+		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+			functionResponse = part.FunctionResponse
+			// Keep only the first load_artifacts response if multiple exist in one turn.
+			break
+		}
 	}
-
-	functionResponse := firstPart.FunctionResponse
-
-	if functionResponse.Name != "load_artifacts" {
+	if functionResponse == nil {
 		return nil
 	}
 	artifactNamesRaw, ok := functionResponse.Response["artifact_names"]

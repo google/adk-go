@@ -339,6 +339,164 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
+// TestLoadArtifactsTool_ProcessRequest_NilArtifacts verifies that ProcessRequest
+// returns a descriptive error instead of panicking when no artifact service is
+// configured (see https://github.com/google/adk-go/issues/283).
+func TestLoadArtifactsTool_ProcessRequest_NilArtifacts(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	// Construct a context with no artifact service configured.
+	invocationCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tc := agent.NewToolContext(invocationCtx, "", nil, nil)
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	llmRequest := &model.LLMRequest{}
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("ProcessRequest should return an error when no artifact service is configured, but got nil")
+	}
+	if !strings.Contains(err.Error(), "artifact service") {
+		t.Errorf("error should mention the missing artifact service, got: %v", err)
+	}
+}
+
+// TestLoadArtifactsTool_ProcessRequest_NilArtifacts_WithFunctionCall verifies
+// that the nil-artifact guard in ProcessRequest also covers the
+// processLoadArtifactsFunctionCall path, not only appendInitialInstructions:
+// with a request whose last content is a load_artifacts function response,
+// ProcessRequest must still return the descriptive error instead of panicking
+// on the unguarded ctx.Artifacts() read in that path.
+func TestLoadArtifactsTool_ProcessRequest_NilArtifacts_WithFunctionCall(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	// Construct a context with no artifact service configured.
+	invocationCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tc := agent.NewToolContext(invocationCtx, "", nil, nil)
+
+	functionResponse := &genai.FunctionResponse{
+		Name: "load_artifacts",
+		Response: map[string]any{
+			"artifact_names": []any{"doc1.txt"},
+		},
+	}
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse(functionResponse.Name, functionResponse.Response),
+				},
+			},
+		},
+	}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("ProcessRequest should return an error when no artifact service is configured, but got nil")
+	}
+	if !strings.Contains(err.Error(), "artifact service") {
+		t.Errorf("error should mention the missing artifact service, got: %v", err)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t *testing.T) {
+	otherFR := &genai.FunctionResponse{
+		Name: "other_function",
+		Response: map[string]any{
+			"status": "ok",
+		},
+	}
+	loadArtifactsFR := &genai.FunctionResponse{
+		Name: "load_artifacts",
+		Response: map[string]any{
+			"artifact_names": []string{"doc1.txt"},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+	}{
+		{
+			name: "load_artifacts after other function",
+			parts: []*genai.Part{
+				genai.NewPartFromFunctionResponse(otherFR.Name, otherFR.Response),
+				genai.NewPartFromFunctionResponse(loadArtifactsFR.Name, loadArtifactsFR.Response),
+			},
+		},
+		{
+			name: "load_artifacts before other function",
+			parts: []*genai.Part{
+				genai.NewPartFromFunctionResponse(loadArtifactsFR.Name, loadArtifactsFR.Response),
+				genai.NewPartFromFunctionResponse(otherFR.Name, otherFR.Response),
+			},
+		},
+		{
+			name: "nil part alongside load_artifacts",
+			parts: []*genai.Part{
+				nil,
+				genai.NewPartFromFunctionResponse(loadArtifactsFR.Name, loadArtifactsFR.Response),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loadArtifactsTool := loadartifactstool.New()
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", &genai.Part{Text: "This is the content of doc1.txt"}); err != nil {
+				t.Fatalf("Failed to save artifact: %v", err)
+			}
+
+			llmRequest := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role:  genai.RoleUser,
+						Parts: tt.parts,
+					},
+				},
+			}
+
+			requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+			}
+
+			err := requestProcessor.ProcessRequest(tc, llmRequest)
+			if err != nil {
+				t.Fatalf("ProcessRequest failed: %v", err)
+			}
+
+			if len(llmRequest.Contents) != 2 {
+				t.Fatalf("Expected 2 contents, but got: %v", len(llmRequest.Contents))
+			}
+
+			appendedContent := llmRequest.Contents[1]
+			if appendedContent.Role != genai.RoleUser {
+				t.Errorf("Appended Content Role: got %v, want %v", appendedContent.Role, genai.RoleUser)
+			}
+			if len(appendedContent.Parts) != 2 {
+				t.Fatalf("Expected 2 parts in appended content, but got: %v", len(appendedContent.Parts))
+			}
+			if appendedContent.Parts[0].Text != "Artifact doc1.txt is:" {
+				t.Errorf("First part of appended content: got %v, want 'Artifact doc1.txt is:'", appendedContent.Parts[0].Text)
+			}
+			if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
+				t.Errorf("Second part of appended content: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
+			}
+		})
+	}
+}
+
 func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
 
