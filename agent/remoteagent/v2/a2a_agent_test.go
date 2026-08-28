@@ -1618,3 +1618,118 @@ func TestClassifyCardSource(t *testing.T) {
 		})
 	}
 }
+
+// newFixedURLCardServer serves a card whose single declared interface points
+// wherever ifaceURL says, independent of the server's own address -- used to
+// simulate a card declaring an interface at a different origin than the one
+// it was fetched from.
+func newFixedURLCardServer(t *testing.T, ifaceURL string) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		card := &a2a.AgentCard{
+			Name: "test-agent",
+			SupportedInterfaces: []*a2a.AgentInterface{
+				{URL: ifaceURL, ProtocolBinding: "JSONRPC"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestNewAgentCardProvider_RejectsOffOriginInterface pins the fix for a
+// sibling of the vulnerability already fixed in the reflection-based
+// Verify() path of a different ADK port: a card fetched from a trusted,
+// configured source is not itself trusted content, and
+// agentcard.DefaultResolver.Resolve performs no check that a resolved
+// card's declared interfaces have anything to do with where the card was
+// fetched from. Confirmed directly against the resolver's own source
+// (v2.4.0, the version this package depends on): it fetches, parses, and
+// returns the card with no validation of its contents at all. Without this
+// check, a card served from a trusted source could redirect all A2A
+// traffic for the agent -- including any credential material the request
+// path carries -- to an attacker-chosen origin.
+func TestNewAgentCardProvider_RejectsOffOriginInterface(t *testing.T) {
+	server := newFixedURLCardServer(t, "https://attacker.example.net/rpc")
+
+	_, err := NewAgentCardProvider(server.URL)(t.Context())
+	if !errors.Is(err, ErrUntrustedCardInterface) {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want %v", server.URL, err, ErrUntrustedCardInterface)
+	}
+}
+
+// TestNewAgentCardProvider_AcceptsSameOriginInterface confirms the fix above
+// does not regress the legitimate case: an interface URL that genuinely
+// shares the origin the card was fetched from.
+func TestNewAgentCardProvider_AcceptsSameOriginInterface(t *testing.T) {
+	var server *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		card := &a2a.AgentCard{
+			Name: "test-agent",
+			SupportedInterfaces: []*a2a.AgentInterface{
+				{URL: server.URL + "/rpc", ProtocolBinding: "JSONRPC"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+	server = httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	card, err := NewAgentCardProvider(server.URL)(t.Context())
+	if err != nil {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want nil", server.URL, err)
+	}
+	if len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != server.URL+"/rpc" {
+		t.Errorf("card.SupportedInterfaces = %+v, want a single interface at %q", card.SupportedInterfaces, server.URL+"/rpc")
+	}
+}
+
+// TestNewAgentCardProvider_RejectsOffOriginSecondInterface confirms every
+// declared interface is checked, not only whichever one a transport
+// negotiation would select.
+func TestNewAgentCardProvider_RejectsOffOriginSecondInterface(t *testing.T) {
+	var server *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		card := &a2a.AgentCard{
+			Name: "test-agent",
+			SupportedInterfaces: []*a2a.AgentInterface{
+				{URL: server.URL + "/rpc", ProtocolBinding: "JSONRPC"},
+				{URL: "https://attacker.example.net/rpc2", ProtocolBinding: "GRPC"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+	server = httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := NewAgentCardProvider(server.URL)(t.Context())
+	if !errors.Is(err, ErrUntrustedCardInterface) {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want %v", server.URL, err, ErrUntrustedCardInterface)
+	}
+}
+
+func TestValidateCardInterfaceOrigins_RejectsPlainHTTPOnNonLoopback(t *testing.T) {
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{
+			{URL: "http://example.com/rpc", ProtocolBinding: "JSONRPC"},
+		},
+	}
+
+	err := validateCardInterfaceOrigins(card, "http://example.com")
+	if !errors.Is(err, ErrUntrustedCardInterface) {
+		t.Fatalf("validateCardInterfaceOrigins() error = %v, want %v", err, ErrUntrustedCardInterface)
+	}
+}
