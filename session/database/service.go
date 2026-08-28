@@ -111,12 +111,16 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		// apply state delta
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly: an unset time.Time serializes to
+			// a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
@@ -378,8 +382,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
@@ -399,12 +403,16 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly (see Create): an unset time.Time
+			// serializes to a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
