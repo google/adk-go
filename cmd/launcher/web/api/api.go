@@ -37,6 +37,7 @@ type apiConfig struct {
 	pathPrefix      string
 	sseWriteTimeout time.Duration
 	traceCapacity   int
+	includeDebugAPI bool
 }
 
 // apiLauncher can launch ADK REST API
@@ -84,6 +85,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		PluginConfig:    config.PluginConfig,
 		DebugConfig: adkrest.DebugTelemetryConfig{
 			TraceCapacity: a.config.traceCapacity,
+		},
+		DebugAPIConfig: adkrest.DebugAPIConfig{
+			IncludeDebugAPI: a.config.includeDebugAPI,
 		},
 	})
 	if err != nil {
@@ -143,6 +147,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
+	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true.")
 
 	return &apiLauncher{
 		config: config,
