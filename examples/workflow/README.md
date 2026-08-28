@@ -37,6 +37,7 @@ export GOOGLE_CLOUD_LOCATION=your-region
 | [`dynamic/basic`](./dynamic/basic) | Dynamic | Orchestrate children imperatively in Go via `NewDynamicNode` + `RunNode` | No |
 | [`dynamic/hitl`](./dynamic/hitl) | Dynamic | Dynamic orchestrator that pauses for human input and resumes | No |
 | [`dynamic/llm`](./dynamic/llm) | Dynamic | Dynamic orchestrator invoking an `LlmAgent` node via `RunNode` | Yes |
+| [`dynamic/use_as_output`](./dynamic/use_as_output) | Dynamic | Promote a child's output to the orchestrator's own with `WithUseAsOutput` | Yes |
 
 ## Core concepts at a glance
 

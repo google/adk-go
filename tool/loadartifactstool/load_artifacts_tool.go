@@ -118,6 +118,9 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("load_artifacts tool requires an artifact service to be configured")
+	}
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -173,9 +176,21 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	if !ok {
 		return nil
 	}
-	artifactNames, ok := artifactNamesRaw.([]string)
-	if !ok {
-		return fmt.Errorf("invalid artifact names type: %T, expected []string", artifactNamesRaw)
+	var artifactNames []string
+	switch names := artifactNamesRaw.(type) {
+	case []string:
+		artifactNames = names
+	case []any:
+		artifactNames = make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			artifactNames[i] = s
+		}
+	default:
+		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
 	}
 	if len(artifactNames) == 0 {
 		return nil
