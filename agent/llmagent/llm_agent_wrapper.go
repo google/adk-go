@@ -12,31 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package workflowinternal provides utilities for running an LlmAgent as
-// a workflow node. Per-mode behaviour:
-//
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
-//     agent with a single user-content event derived from nodeInput,
-//     drives one Agent.Run, post-processes the model reply into the
-//     terminal Output, then returns.
-//   - task: the wrapper drives Agent.Run and watches for the
-//     finish_task FunctionCall; once the matching FinishTaskTool
-//     FunctionResponse signals success, the wrapper promotes the FC
-//     args (or the wrapped value) as the terminal Output and returns.
-//     Non-success FRs let the LLM see the validation error and retry.
-//   - chat: the wrapper runs an outer dispatch loop. Before re-entering
-//     Agent.Run on each iteration it scans the session for unresolved
-//     task delegations (task FCs from this coordinator without a
-//     matching FR), dispatches each via workflow.RunNode under a
-//     stable WithRunID(fc.ID), and synthesises a user-role FR event so
-//     the LLM sees the task result on the next round. The loop ends
-//     when the LLM finishes without delegating. transfer_to_agent is
-//     handled in-process by llmagent.Run (forwarded through the same
-//     iterator via base_flow.go:639-651) so a single runner.Run call
-//     returns both the coordinator's transfer event AND the
-//     transferred-to sub-agent's first response. See the package
-//     comment block in runChat below for why this differs from
-//     adk-python's "exit-and-re-pick-next-turn" model.
 package llmagent
 
 import (
@@ -62,6 +37,30 @@ import (
 )
 
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
+// Per-mode behaviour:
+//
+//   - single_turn: the wrapper forces IncludeContents=none, seeds the
+//     agent with a single user-content event derived from nodeInput,
+//     drives one Agent.Run, post-processes the model reply into the
+//     terminal Output, then returns.
+//   - task: the wrapper drives Agent.Run and watches for the
+//     finish_task FunctionCall; once the matching FinishTaskTool
+//     FunctionResponse signals success, the wrapper promotes the FC
+//     args (or the wrapped value) as the terminal Output and returns.
+//     Non-success FRs let the LLM see the validation error and retry.
+//   - chat: the wrapper runs an outer dispatch loop. Before re-entering
+//     Agent.Run on each iteration it scans the session for unresolved
+//     task delegations (task FCs from this coordinator without a
+//     matching FR), dispatches each via workflow.RunNode under a
+//     stable WithRunID(fc.ID), and synthesises a user-role FR event so
+//     the LLM sees the task result on the next round. The loop ends
+//     when the LLM finishes without delegating. transfer_to_agent is
+//     handled in-process by llmagent.Run (forwarded through the same
+//     iterator via base_flow.go:639-651) so a single runner.Run call
+//     returns both the coordinator's transfer event AND the
+//     transferred-to sub-agent's first response. See the package
+//     comment block in runChat below for why this differs from
+//     adk-python's "exit-and-re-pick-next-turn" model.
 func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmA, ok := a.(llminternal.Agent)

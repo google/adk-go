@@ -239,7 +239,7 @@ func (s *streamingAgentRunWithEventsHandler) run(ctx context.Context, req *model
 		AutoCreateSession: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner: %v", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
 	// The path mirrors Python AdkApp.streaming_agent_run_with_events,

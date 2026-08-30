@@ -4,6 +4,7 @@ We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
 -   [Branches](#branches)
+-   [Multi-Module Development](#multi-module-development)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
     -   [Review our community guidelines](#review-our-community-guidelines)
@@ -42,6 +43,31 @@ To work on a 1.x fix, base your branch on `v1`:
 ```bash
 git switch -c my-fix origin/v1
 ```
+
+## Multi-Module Development
+
+**Policy**: New integrations with heavy or optional dependencies must be created as separate Go modules.
+
+**Local Development**: Contributors should use `go work init && go work use -r .` to set up their local workspaces.
+
+**Steps to Add a New Module (e.g., `plugin/myplugin`)**:
+1. Navigate into the directory: `cd <module_directory_path>`
+2. Initialize the module: `go mod init google.golang.org/adk/<module_directory_path>`
+3. Add your Go code, dependencies, and tests.
+4. Tidy the module: `go mod tidy`
+5. Return to the repo root.
+6. Tidy the root module: `go mod tidy`
+7. Add the module to your workspace: `go work use ./<module_directory_path>`
+8. Verify everything builds and tests from the root: `go build work && go test work`. The CI will automatically pick up the new module on the PR.
+
+**Release Tagging**:
+- **Core Module**: Tags remain `vX.Y.Z` (e.g., `v2.1.0`).
+- **Submodules**: Tags are prefixed with the full module path directory, e.g., `plugin/agentanalytics/v0.1.0`. This is the standard Go way to version modules not at the repo root.
+- **go get / go install**: Consumers will use:
+  - `go get google.golang.org/adk/v2@v2.1.0`
+  - `go get google.golang.org/adk/plugin/agentanalytics@v0.1.0`
+- **Version Coupling**: Each submodule's `go.mod` will specify the minimum version of `google.golang.org/adk/v2` it depends on. Submodules can be released independently of the core module and each other.
+- **go.work Impact**: `go.work` is for local development only and does not affect how modules are versioned, tagged, or fetched by consumers.
 
 ## Before you begin
 

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package functiontool provides a tool that wraps a Go function.
 package functiontool
 
 import (

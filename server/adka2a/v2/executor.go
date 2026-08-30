@@ -158,8 +158,11 @@ func NewExecutor(config ExecutorConfig) *Executor {
 	return &Executor{config: config}
 }
 
+// Execute runs the agent for the given request, yielding the resulting events.
 func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		yield = withADKExtensionMeta(yield)
+
 		msg := execCtx.Message
 		if msg == nil {
 			yield(nil, fmt.Errorf("message not provided"))
@@ -239,13 +242,17 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 	}
 }
 
+// Cancel cancels the in-progress execution, yielding a cancellation status event.
 func (e *Executor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		yield = withADKExtensionMeta(yield)
+
 		event := a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil)
 		yield(event, nil)
 	}
 }
 
+// Cleanup releases resources associated with a completed request.
 func (e *Executor) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext, result a2a.SendMessageResult, cause error) {
 	cfg, err := e.createRunnerConfig(ctx, execCtx)
 	if err != nil {

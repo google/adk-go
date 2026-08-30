@@ -49,7 +49,7 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
 }
 
-// RunAgent executes a non-streaming agent run for a given session and message.
+// RunHandler executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
@@ -244,6 +244,8 @@ func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	return runAgentRequest, nil
 }
 
+// RunLiveHandler upgrades the request to a WebSocket and streams a live agent
+// session.
 func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.Request) error {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,

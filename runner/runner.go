@@ -58,11 +58,14 @@ type Config struct {
 	AutoCreateSession bool
 }
 
+// PluginConfig configures the plugins a [Runner] applies and how long it waits
+// for them to close.
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
 }
 
+// RunOption customizes a single run invocation.
 type RunOption func(*runOptions)
 
 type runOptions struct {
@@ -415,6 +418,8 @@ func (s *closedLiveSession) Close() error {
 	return nil
 }
 
+// RunLive starts a live, bidirectional agent session, returning the session
+// and a stream of events from the agents.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	options := runOptions{}
 	for _, opt := range opts {

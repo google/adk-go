@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package agentengine brings functionality of serving commands for AgentEngine-deployed code
+// Package agentengine brings functionality of serving commands for AgentEngine-deployed code.
 package agentengine
 
 import (
@@ -42,13 +42,13 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listNonStreamHandlers(config, agentEngineID))
 	if err != nil {
-		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %v", err)
+		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %w", err)
 	}
 
 	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listStreamHandlers(config, agentEngineID))
 	if err != nil {
-		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %v", err)
+		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %w", err)
 	}
 
 	setupRouter(router,
@@ -58,7 +58,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 
 	methods, err := ListClassMethods()
 	if err != nil {
-		return nil, fmt.Errorf("ListClassMethods() failed: %v", err)
+		return nil, fmt.Errorf("ListClassMethods() failed: %w", err)
 	}
 
 	log.Println("Supported methods:")
@@ -66,7 +66,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		sb := &strings.Builder{}
 		err = json.NewEncoder(sb).Encode(m)
 		if err != nil {
-			return nil, fmt.Errorf("json.NewEncoder failed: %v", err)
+			return nil, fmt.Errorf("json.NewEncoder failed: %w", err)
 		}
 		log.Println(sb.String())
 	}
