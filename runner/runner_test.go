@@ -17,11 +17,13 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -678,5 +680,288 @@ func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected 0 events, got %d", count)
+	}
+}
+
+// TestRunner_NilEventDoesNotTruncateStream pins that a skipped nil event only
+// drops that event: everything after it must still reach the caller. Without
+// this, replacing the skip with a break or a return still passes the suite.
+func TestRunner_NilEventDoesNotTruncateStream(t *testing.T) {
+	t.Parallel()
+
+	textEvent := func(text string) *session.Event {
+		ev := &session.Event{Author: "agent"}
+		ev.LLMResponse.Content = &genai.Content{Parts: []*genai.Part{{Text: text}}}
+		return ev
+	}
+
+	tests := []struct {
+		name      string
+		yielded   []*session.Event
+		wantTexts []string
+	}{
+		{
+			name:      "leading nil",
+			yielded:   []*session.Event{nil, textEvent("a")},
+			wantTexts: []string{"a"},
+		},
+		{
+			name:      "nil between events",
+			yielded:   []*session.Event{textEvent("a"), nil, textEvent("b")},
+			wantTexts: []string{"a", "b"},
+		},
+		{
+			name:      "trailing nil",
+			yielded:   []*session.Event{textEvent("a"), nil},
+			wantTexts: []string{"a"},
+		},
+		{
+			name:      "consecutive nils",
+			yielded:   []*session.Event{nil, nil, textEvent("a"), nil, nil},
+			wantTexts: []string{"a"},
+		},
+		{
+			name:      "only nils",
+			yielded:   []*session.Event{nil, nil},
+			wantTexts: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := agent.New(agent.Config{
+				Name: "nil_yielder",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for _, ev := range tt.yielded {
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+
+			r, err := New(Config{
+				AppName:           "test_app",
+				Agent:             a,
+				SessionService:    session.InMemoryService(),
+				AutoCreateSession: true,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			var gotTexts []string
+			msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+			for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					continue
+				}
+				if ev == nil {
+					t.Error("runner yielded a nil event")
+					continue
+				}
+				gotTexts = append(gotTexts, ev.LLMResponse.Content.Parts[0].Text)
+			}
+
+			if diff := cmp.Diff(tt.wantTexts, gotTexts); diff != "" {
+				t.Errorf("delivered events mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRunner_NilEventRunIsBounded pins that an agent yielding nil without end
+// cannot trap the caller. The skip never calls yield, so the consumer's break
+// is unreachable and cancelling the context from inside the range statement is
+// not possible: the loop has to terminate on its own.
+func TestRunner_NilEventRunIsBounded(t *testing.T) {
+	t.Parallel()
+
+	produced := 0
+	a, err := agent.New(agent.Config{
+		Name: "endless_nil_yielder",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for {
+					produced++
+					if !yield(nil, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:           "test_app",
+		Agent:             a,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var gotErr error
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
+		if ev != nil {
+			t.Errorf("runner yielded an event, want none")
+		}
+		gotErr = err
+	}
+
+	if gotErr == nil {
+		t.Fatal("Runner.Run() error = nil, want an error naming the agent")
+	}
+	if !strings.Contains(gotErr.Error(), "endless_nil_yielder") {
+		t.Errorf("Runner.Run() error = %q, want it to name the offending agent", gotErr)
+	}
+	if produced > maxNilEventsBetweenDeliveries+1 {
+		t.Errorf("agent produced %d nil events, want at most %d", produced, maxNilEventsBetweenDeliveries+1)
+	}
+}
+
+// TestRunner_NilEventCounterResetsOnDelivery pins that the bound only resets
+// when an event actually reaches the consumer, so a stream that keeps making
+// progress is never cut off however many nils it carries in total.
+func TestRunner_NilEventCounterResetsOnDelivery(t *testing.T) {
+	t.Parallel()
+
+	realEvent := func() *session.Event {
+		ev := &session.Event{Author: "agent"}
+		ev.LLMResponse.Content = &genai.Content{Parts: []*genai.Part{{Text: "ok"}}}
+		return ev
+	}
+
+	a, err := agent.New(agent.Config{
+		Name: "chatty_nil_yielder",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Far more nils in total than the bound, but never in one run.
+				for range 5 {
+					for range maxNilEventsBetweenDeliveries {
+						if !yield(nil, nil) {
+							return
+						}
+					}
+					if !yield(realEvent(), nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:           "test_app",
+		Agent:             a,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got := 0
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+			continue
+		}
+		if ev == nil {
+			t.Error("runner yielded a nil event")
+			continue
+		}
+		got++
+	}
+
+	if got != 5 {
+		t.Errorf("delivered %d events, want 5", got)
+	}
+}
+
+// TestRunner_NilBoundIgnoresUndeliveredEvents pins that the nil bound resets on
+// DELIVERY, not on merely observing a non-nil event. A plugin that rejects every
+// event means nothing reaches the consumer, so an interleaved stream must still
+// trip the bound instead of riding it forever.
+func TestRunner_NilBoundIgnoresUndeliveredEvents(t *testing.T) {
+	t.Parallel()
+
+	realEvent := func() *session.Event {
+		ev := &session.Event{Author: "agent"}
+		ev.LLMResponse.Content = &genai.Content{Parts: []*genai.Part{{Text: "ok"}}}
+		return ev
+	}
+
+	a, err := agent.New(agent.Config{
+		Name: "interleaving_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for {
+					for range maxNilEventsBetweenDeliveries {
+						if !yield(nil, nil) {
+							return
+						}
+					}
+					if !yield(realEvent(), nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	// The plugin fails every event, so no event is ever delivered.
+	rejectAll, err := plugin.New(plugin.Config{
+		Name: "reject_all",
+		OnEventCallback: func(_ agent.InvocationContext, _ *session.Event) (*session.Event, error) {
+			return nil, errors.New("rejected")
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:           "test_app",
+		Agent:             a,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      PluginConfig{Plugins: []*plugin.Plugin{rejectAll}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var lastErr error
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
+		if ev != nil {
+			t.Errorf("runner delivered an event, want none")
+		}
+		lastErr = err
+	}
+
+	if lastErr == nil || !strings.Contains(lastErr.Error(), "interleaving_agent") {
+		t.Errorf("Runner.Run() last error = %v, want the nil bound to name the agent", lastErr)
 	}
 }

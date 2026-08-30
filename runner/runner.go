@@ -316,6 +316,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		nilEventLogged, nilsSinceDelivery := false, 0
 		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
 				if !yield(event, err) {
@@ -325,6 +326,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
+				nilsSinceDelivery++
+				if nilsSinceDelivery > maxNilEventsBetweenDeliveries {
+					yield(nil, fmt.Errorf("agent %q event stream produced %d nil events without delivering one", r.rootAgent.Name(), nilsSinceDelivery))
+					return
+				}
+				if !nilEventLogged {
+					nilEventLogged = true
+					log.Printf("Nil event from agent %q, skipping", r.rootAgent.Name())
+				}
 				continue
 			}
 
@@ -360,9 +370,26 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+			// Reset on delivery, never on merely observing a non-nil event.
+			nilsSinceDelivery = 0
 		}
 	}
 }
+
+// maxNilEventsBetweenDeliveries bounds how many nil events a run tolerates
+// without handing an event to the consumer.
+//
+// A nil event is always an agent contract violation. Skipping one keeps a
+// single bug from killing the run, but skipping never calls yield, and a
+// consumer's break is only expressible as yield returning false. An agent that
+// only ever yields nil would therefore trap the caller in a loop it has no way
+// to leave. Counting nil events since the last delivery bounds that, and the
+// error names the agent so the contract violation is findable.
+//
+// The counter resets on delivery rather than on any non-nil event, because
+// RunLive can consume an event without yielding it (transcription buffering);
+// resetting there would let an interleaved stream ride the bound forever.
+const maxNilEventsBetweenDeliveries = 1000
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -515,6 +542,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 		var bufferedEvents []*session.Event
 		isTranscribing := false
+		nilEventLogged, nilsSinceDelivery := false, 0
 
 		for event, err := range innerIter {
 			if err != nil {
@@ -525,6 +553,15 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if event == nil {
+				nilsSinceDelivery++
+				if nilsSinceDelivery > maxNilEventsBetweenDeliveries {
+					yield(nil, fmt.Errorf("agent %q event stream produced %d nil events without delivering one", agentToRun.Name(), nilsSinceDelivery))
+					return
+				}
+				if !nilEventLogged {
+					nilEventLogged = true
+					log.Printf("Nil event from agent %q, skipping", agentToRun.Name())
+				}
 				continue
 			}
 
@@ -583,6 +620,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					if !yield(event, nil) {
 						return
 					}
+					nilsSinceDelivery = 0
 
 					for _, bufferedEvent := range bufferedEvents {
 						if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
@@ -594,6 +632,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 						if !yield(bufferedEvent, nil) {
 							return
 						}
+						nilsSinceDelivery = 0
 					}
 					bufferedEvents = nil
 					continue
@@ -612,6 +651,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			if !yield(event, nil) {
 				return
 			}
+			nilsSinceDelivery = 0
 		}
 	}
 
