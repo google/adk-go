@@ -48,14 +48,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
-	setupRouter(router,
+
+	subrouters := []routers.Router{
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
 		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
-		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
 		&routers.EvalAPIRouter{},
-	)
+	}
+	if cfg.DebugAPIConfig.IncludeDebugAPI {
+		subrouters = append(subrouters, routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)))
+	}
+
+	setupRouter(router, subrouters...)
 	return &Server{
 		router:         router,
 		telemetryStore: debugTelemetry,
@@ -76,6 +81,13 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
+	DebugAPIConfig  DebugAPIConfig
+}
+
+// DebugAPIConfig contains parameters for the debug API.
+type DebugAPIConfig struct {
+	// Controls if [routers.NewDebugAPIRouter] is included
+	IncludeDebugAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.
