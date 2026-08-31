@@ -51,6 +51,16 @@ type Config struct {
 	// permissions block.
 	GitHubToken string
 
+	// BotLogin is the login the bot's own issues are authored under, used to
+	// recognize them during duplicate detection.
+	//
+	// It is configured rather than discovered because the discovery does not work
+	// where it matters: GET /user is a user-to-server endpoint, and the workflow's
+	// GITHUB_TOKEN is an installation token, so the lookup always fails in CI.
+	// Left empty, the bot falls back to the API lookup (useful for a local run
+	// with a PAT) and then to "authored by some GitHub App", which is weaker.
+	BotLogin string
+
 	// GeminiAPIKey authenticates the Gemini (AI Studio) model.
 	GeminiAPIKey string
 
@@ -139,6 +149,7 @@ func loadConfig(args []string) (*Config, error) {
 		TargetOwner:         envString("TARGET_OWNER", owner),
 		TargetRepo:          envString("TARGET_REPO", repo),
 		GitHubToken:         os.Getenv("GITHUB_TOKEN"),
+		BotLogin:            strings.TrimSpace(os.Getenv("BOT_LOGIN")),
 		GeminiAPIKey:        firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
 		Model:               envString("LLM_MODEL_NAME", defaultModel),
 		StartTag:            strings.TrimSpace(*startTag),

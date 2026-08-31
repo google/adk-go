@@ -108,18 +108,26 @@ func NewGitHubClient(ctx context.Context, cfg *Config, log *slog.Logger) *GitHub
 		filed: make(map[string]fileOutcome),
 	}
 
-	// Resolve identity once, under a short timeout so a hanging API call cannot
-	// stall startup. The built-in Actions GITHUB_TOKEN is an app installation
-	// token and this call fails for it; that is expected and handled by
-	// trustedCreator, which then falls back to the account type.
+	// A configured login wins and skips the lookup entirely. GET /user is a
+	// user-to-server endpoint and the workflow's GITHUB_TOKEN is an installation
+	// token, so the call cannot succeed in CI -- spending the timeout on it and
+	// then falling back would be strictly worse than being told the answer.
+	if cfg.BotLogin != "" {
+		c.selfLogin = cfg.BotLogin
+		log.Info("using the configured bot identity", "login", c.selfLogin)
+		return c
+	}
+
+	// No configured login: try the API, which does work for a local run with a
+	// PAT. Under a short timeout so a hanging call cannot stall startup.
 	idCtx, cancel := context.WithTimeout(ctx, resolveIdentityTimeout)
 	defer cancel()
 	if u, _, err := c.rest.Users.Get(idCtx, ""); err == nil {
 		c.selfLogin = u.GetLogin()
 		log.Info("resolved bot identity", "login", c.selfLogin)
 	} else {
-		log.Warn("could not resolve bot identity; duplicate detection will accept any App-authored issue "+
-			"carrying the marker", "error", err)
+		log.Warn("no BOT_LOGIN configured and the identity lookup failed; duplicate detection will accept "+
+			"any App-authored issue carrying the marker", "error", err)
 	}
 	return c
 }
@@ -440,12 +448,11 @@ func (c *GitHubClient) isOwnMarkedIssue(iss *github.Issue, marker string) bool {
 
 // trustedCreator reports whether an issue's author may be treated as this bot.
 //
-// With a resolved identity the check is exact. Without one -- the built-in
-// Actions token cannot read its own user -- it falls back to "some GitHub App
-// wrote this", which still excludes every ordinary user account. The residual
-// gap is an App installed on the target repository, which is a far higher bar
-// than opening an issue, and it costs a suppressed issue rather than a wrong
-// mutation.
+// With an identity -- configured via BOT_LOGIN, or resolved from the API on a
+// local run -- the check is exact. Without one it falls back to "some GitHub App
+// wrote this", which still excludes every ordinary user account but would accept
+// another App's issue. The workflow sets BOT_LOGIN precisely so that fallback is
+// not the production path.
 func (c *GitHubClient) trustedCreator(u *github.User) bool {
 	if u == nil {
 		return false

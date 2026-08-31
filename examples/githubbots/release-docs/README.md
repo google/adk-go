@@ -97,10 +97,13 @@ checked matter:
 - Accepting any author would let a stranger open an issue carrying the marker and
   suppress the release that way.
 
-When the identity lookup fails — the built-in Actions token cannot read its own
-user — authorship falls back to "written by a GitHub App", which still excludes
-every ordinary account. The residual gap is an App installed on the target
-repository, which costs a suppressed issue rather than a wrong mutation.
+Authorship is established from `BOT_LOGIN`, which the workflow sets. It is
+configured rather than discovered because the discovery cannot work where it
+matters: `GET /user` is a user-to-server endpoint and the workflow's
+`GITHUB_TOKEN` is an installation token, so the lookup always fails in CI. Left
+unset, the bot tries that lookup anyway (it works for a local run with a PAT) and
+then falls back to "written by some GitHub App" — which still excludes every
+ordinary account, but would accept another App's issue carrying the marker.
 
 ## Choosing the tag pair
 
@@ -159,6 +162,7 @@ go run . -start-tag v2.2.0 -end-tag v2.3.0
 | Variable / flag | Default | Description |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | — (required) | Token with `issues: write` on the **target** repository. |
+| `BOT_LOGIN` | (empty) | The login the bot's issues are authored under, used to recognize them. The workflow sets `github-actions[bot]`. |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key (or use Vertex AI). |
 | `OWNER` | — (required) | Source repository owner. |
 | `REPO` | — (required) | Source repository name. |

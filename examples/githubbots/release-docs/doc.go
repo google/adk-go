@@ -44,8 +44,9 @@
 //
 //   - Before any model token is spent, the bot looks for an issue it already
 //     filed for the same tag pair, identified by an exact marker on the first
-//     line of the body and by the issue's author -- not by its title, so a
-//     maintainer retitling it during triage does not cause a duplicate. Two probes run: an
+//     line of the body and by the issue's author (BOT_LOGIN) -- not by its
+//     title, so a maintainer retitling it during triage does not cause a
+//     duplicate. Two probes run: an
 //     immediately-consistent scan of the target repository's recent issues,
 //     which is what catches a re-run moments after a successful run, and a
 //     search-index query by the deterministic title, which covers issues older

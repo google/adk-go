@@ -31,7 +31,7 @@ func setRequired(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "")
 	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "")
 	for _, k := range []string{
-		"TARGET_OWNER", "TARGET_REPO", "LLM_MODEL_NAME", "START_TAG", "END_TAG",
+		"TARGET_OWNER", "TARGET_REPO", "LLM_MODEL_NAME", "START_TAG", "END_TAG", "BOT_LOGIN",
 		"MAX_FILES", "MAX_PATCH_BYTES", "MAX_COMMITS", "FILES_PER_GROUP",
 		"MAX_FINDINGS_PER_GROUP", "RUN_BUDGET", "GROUP_TIMEOUT", "DRY_RUN",
 	} {
@@ -196,6 +196,25 @@ func TestLoadConfigClampsNonsensicalOverrides(t *testing.T) {
 	}
 	if cfg.RunBudget != defaultRunBudget || cfg.GroupTimeout != defaultGroupTimeout {
 		t.Errorf("non-positive budgets were not clamped: %v / %v", cfg.RunBudget, cfg.GroupTimeout)
+	}
+}
+
+// BOT_LOGIN reaches the config only through the environment; the workflow is
+// the only caller that sets it, and no flag exposes it.
+//
+// Mutation that must fail this test: drop the BotLogin assignment in loadConfig.
+func TestLoadConfigReadsBotLoginFromEnv(t *testing.T) {
+	setRequired(t)
+	if cfg, err := loadConfig(nil); err != nil || cfg.BotLogin != "" {
+		t.Fatalf("default BotLogin = %q (err %v), want empty", cfg.BotLogin, err)
+	}
+	t.Setenv("BOT_LOGIN", "  github-actions[bot]  ")
+	cfg, err := loadConfig(nil)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.BotLogin != "github-actions[bot]" {
+		t.Errorf("BotLogin = %q, want it read and trimmed", cfg.BotLogin)
 	}
 }
 

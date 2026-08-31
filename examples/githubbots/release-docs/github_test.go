@@ -1159,3 +1159,83 @@ func TestAnnotateWarningReachesTheActionsUI(t *testing.T) {
 		t.Errorf("the annotation lost its message: %q", got)
 	}
 }
+
+// GET /user is a user-to-server endpoint and the workflow's GITHUB_TOKEN is an
+// installation token, so the identity lookup cannot succeed in CI. Duplicate
+// detection still worked without it — the fallback is "authored by some GitHub
+// App", and the bot's own issues are — but that fallback would also accept
+// ANOTHER App's issue carrying the marker. Configuring the login makes the exact
+// check the production path.
+//
+// Mutation that must fail this test: ignore cfg.BotLogin in NewGitHubClient.
+func TestConfiguredBotLoginIsUsedWithoutAnAPICall(t *testing.T) {
+	// A cancelled context: if the constructor reached the API at all, this is
+	// what it would have to fall back from.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := testConfig()
+	cfg.BotLogin = "github-actions[bot]"
+	c := NewGitHubClient(ctx, cfg, discardLogger())
+	if c.selfLogin != "github-actions[bot]" {
+		t.Fatalf("selfLogin = %q, want the configured login", c.selfLogin)
+	}
+
+	// With the login known, another App's issue is no longer accepted.
+	marker := bodyMarker("v1.0.0", "v1.1.0")
+	for _, tc := range []struct {
+		name  string
+		login string
+		want  bool
+	}{
+		{"the bot's own issue", "github-actions[bot]", true},
+		{"another App's issue carrying the same marker", "some-other-app[bot]", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "[" + issueJSONTitled(9, tc.login, "Bot", issueTitle("v1.1.0"), marker+"\n\nbody") + "]"
+			probe := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/search/") {
+					_, _ = io.WriteString(w, `{"total_count":1,"items":`+body+`}`)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			probe.selfLogin = cfg.BotLogin
+			_, found, err := probe.FindExistingIssue(context.Background(), "v1.1.0", marker)
+			if err != nil {
+				t.Fatalf("FindExistingIssue: %v", err)
+			}
+			if found != tc.want {
+				t.Errorf("found = %v, want %v", found, tc.want)
+			}
+		})
+	}
+}
+
+// Without a configured login the bot must still recognize its own issue, because
+// that is what the guarantee "one issue per release" rests on and the identity
+// lookup fails in CI. This is the state the bot shipped in before BOT_LOGIN, and
+// it must not regress into "no identity means no match".
+//
+// Mutation that must fail this test: make trustedCreator return false when
+// selfLogin is empty.
+func TestDuplicateDetectionSurvivesAnUnresolvedIdentity(t *testing.T) {
+	marker := bodyMarker("v1.0.0", "v1.1.0")
+	body := "[" + issueJSONTitled(7, "github-actions[bot]", "Bot", issueTitle("v1.1.0"), marker+"\n\nfiled last week") + "]"
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	c.selfLogin = "" // what the installation token actually leaves behind
+
+	n, found, err := c.FindExistingIssue(context.Background(), "v1.1.0", marker)
+	if err != nil {
+		t.Fatalf("FindExistingIssue: %v", err)
+	}
+	if !found || n != 7 {
+		t.Errorf("FindExistingIssue = (%d, %v), want (7, true): a re-run would file a second issue", n, found)
+	}
+}

@@ -85,6 +85,12 @@ jobs:
         working-directory: examples/githubbots/release-docs
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # The login the bot's own issues are authored under. It is configured
+          # rather than discovered: GET /user is a user-to-server endpoint and
+          # github.token is an installation token, so the lookup cannot succeed
+          # here. Without this, duplicate detection falls back to "authored by
+          # some GitHub App", which would accept another App's issue.
+          BOT_LOGIN: 'github-actions[bot]'
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # github.repository is "owner/name" and is populated on every event, so
           # it is the single reliable source for both OWNER and REPO.
