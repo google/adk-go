@@ -181,6 +181,21 @@ const (
 	flagSucceeded               // the write landed
 )
 
+// claimBarrier is called inside markFlagged's critical section, between reading
+// the issue's current outcome and writing the claim. It is nil in production,
+// where it costs one nil check under a mutex the caller already holds.
+//
+// It exists because the regression worth catching here is not deleting the
+// lock, which any test would notice. It is SHORTENING the hold: read under the
+// lock, evaluate the outcome outside it, re-lock to record. That reads like a
+// tidy-up and it reintroduces check-then-act, so two callers both see an
+// unclaimed issue and both post the alert comment. Racing 64 callers and
+// counting the writes catches that 2 times in 15 fresh processes -- a coin
+// flip, not a pin. A hook here makes the mutex itself the assertion: while the
+// lock is held across the read and the write, exactly one caller can ever be
+// inside this window, and a test can say so without racing anything.
+var claimBarrier func()
+
 // markFlagged claims the single flag attempt allowed for an issue this run. It
 // reports whether this call won the claim, and — when it did not — what the
 // previous attempt's outcome was.
@@ -204,6 +219,9 @@ func (c *GitHubClient) markFlagged(number int) (won bool, previous flagOutcome) 
 	}
 	if prev := c.flagged[number]; prev != flagUnattempted {
 		return false, prev
+	}
+	if claimBarrier != nil {
+		claimBarrier()
 	}
 	c.flagged[number] = flagInFlight
 	return true, flagUnattempted

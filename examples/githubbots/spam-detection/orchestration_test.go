@@ -875,3 +875,80 @@ func TestSweepGivesEachConcurrentReviewItsOwnRunner(t *testing.T) {
 		t.Errorf("the model ran %d time(s), want %d", got, issues)
 	}
 }
+
+// The claim and the record must sit in ONE critical section. The regression
+// this catches is not deleting the lock -- it is shortening the hold: read the
+// outcome under the lock, decide outside it, re-lock to write. Two callers then
+// both see an unclaimed issue, both win, and both post the alert comment.
+//
+// Racing callers and counting writes does not pin that. Measured against the
+// real mutant, 64 callers released together and asserting two writes killed it
+// 2 times in 15 fresh processes, and the pre-existing concurrency tests killed
+// it 0 times in 10 -- one of them because it deliberately waits for the winner
+// to claim before launching the loser, which is the opposite of the interleaving
+// that matters.
+//
+// So the mutex is made the assertion instead of the stopwatch. claimBarrier
+// runs inside the window and blocks until `callers` have arrived. Correct code
+// holds the lock across the whole window, so exactly ONE caller can be inside
+// it: arrivals never reach the total, that caller times out alone and wins, and
+// the rest find the issue claimed and never enter. The mutant releases the lock
+// first, so all of them enter at once and the barrier fills immediately.
+//
+// Measured: kills the mutant 10 of 10 fresh processes, with 0 spurious failures
+// in 20 runs against correct code.
+func TestClaimAndRecordShareOneCriticalSection(t *testing.T) {
+	const callers = 8
+
+	var entered atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	claimBarrier = func() {
+		if entered.Add(1) >= callers {
+			releaseOnce.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(250 * time.Millisecond):
+			// Correct code reaches this every time: only one caller is ever in
+			// here, so the barrier cannot fill.
+		}
+	}
+	t.Cleanup(func() {
+		claimBarrier = nil
+		releaseOnce.Do(func() { close(release) })
+	})
+
+	var writes atomic.Int32
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writes.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/comments") {
+			_, _ = io.WriteString(w, `{"id":1}`)
+			return
+		}
+		_, _ = io.WriteString(w, `[{"name":"spam"}]`)
+	}))
+	ctx := withAuditedIssue(context.Background(), 7)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = c.flagAsSpam(ctx, 7, "promo")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// The deterministic half: the lock admits one caller to the window.
+	if got := entered.Load(); got != 1 {
+		t.Errorf("%d callers were inside the claim window at once, want 1: the claim and the record are not in one critical section", got)
+	}
+	// And its consequence, which is what the user would actually see.
+	if got := writes.Load(); got != 2 {
+		t.Errorf("made %d writes, want 2 (one alert comment and one label): %d callers won the at-most-once claim", got, got/2)
+	}
+}
