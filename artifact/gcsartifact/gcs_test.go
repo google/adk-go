@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -62,6 +63,139 @@ func TestGCSArtifactService(t *testing.T) {
 		return newGCSArtifactServiceForTesting("new")
 	}
 	tests.TestArtifactService(t, "GCS", factory)
+}
+
+func TestGCSArtifactVersionFields(t *testing.T) {
+	firstCreateTime := time.Date(2026, time.August, 31, 12, 34, 56, 0, time.UTC)
+	secondCreateTime := firstCreateTime.Add(time.Minute)
+	recreateTime := secondCreateTime.Add(time.Minute)
+
+	for _, tc := range []struct {
+		name          string
+		fileName      string
+		saveSessionID string
+		getSessionID  string
+		uriPrefix     string
+	}{
+		{
+			name:          "session scoped",
+			fileName:      "file.txt",
+			saveSessionID: "session",
+			getSessionID:  "session",
+			uriPrefix:     "gs://bucket/app/user/session/file.txt/",
+		},
+		{
+			name:          "user scoped",
+			fileName:      "user:file.txt",
+			saveSessionID: "save-session",
+			getSessionID:  "irrelevant-session",
+			uriPrefix:     "gs://bucket/app/user/user/user:file.txt/",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("bucket")
+			fb := svc.bucket.(*fakeBucket)
+			fb.now = func() time.Time { return firstCreateTime }
+			metadata := map[string]any{
+				"string":  "value",
+				"number":  42,
+				"enabled": true,
+			}
+			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
+				Part: genai.NewPartFromBytes([]byte("data"), "image/png"), CustomMetadata: metadata,
+			}); err != nil {
+				t.Fatalf("Save(v1) failed: %v", err)
+			}
+			metadata["string"] = "changed after save"
+
+			fb.now = func() time.Time { return secondCreateTime }
+			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
+				Part: genai.NewPartFromText("text"),
+			}); err != nil {
+				t.Fatalf("Save(v2) failed: %v", err)
+			}
+
+			latest, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion(latest) failed: %v", err)
+			}
+			wantLatest := &artifact.ArtifactVersion{
+				Version:        2,
+				CanonicalURI:   tc.uriPrefix + "2",
+				CustomMetadata: map[string]any{},
+				CreateTime:     secondCreateTime,
+				MimeType:       "text/plain",
+			}
+			if diff := cmp.Diff(wantLatest, latest.ArtifactVersion); diff != "" {
+				t.Errorf("GetArtifactVersion(latest) mismatch (-want +got):\n%s", diff)
+			}
+
+			first, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion(v1) failed: %v", err)
+			}
+			wantFirst := &artifact.ArtifactVersion{
+				Version:      1,
+				CanonicalURI: tc.uriPrefix + "1",
+				CustomMetadata: map[string]any{
+					"string":  "value",
+					"number":  "42",
+					"enabled": "true",
+				},
+				CreateTime: firstCreateTime,
+				MimeType:   "image/png",
+			}
+			if diff := cmp.Diff(wantFirst, first.ArtifactVersion); diff != "" {
+				t.Errorf("GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+			}
+
+			first.ArtifactVersion.CustomMetadata["string"] = "changed after read"
+			again, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+			})
+			if err != nil {
+				t.Fatalf("second GetArtifactVersion(v1) failed: %v", err)
+			}
+			if diff := cmp.Diff(wantFirst, again.ArtifactVersion); diff != "" {
+				t.Errorf("second GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+			}
+
+			if err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName,
+			}); err != nil {
+				t.Fatalf("Delete() failed: %v", err)
+			}
+			fb.now = func() time.Time { return recreateTime }
+			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
+				Part: genai.NewPartFromBytes([]byte("new"), "application/octet-stream"),
+			}); err != nil {
+				t.Fatalf("Save(recreated) failed: %v", err)
+			}
+			recreated, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion(recreated) failed: %v", err)
+			}
+			wantRecreated := &artifact.ArtifactVersion{
+				Version:        1,
+				CanonicalURI:   tc.uriPrefix + "1",
+				CustomMetadata: map[string]any{},
+				CreateTime:     recreateTime,
+				MimeType:       "application/octet-stream",
+			}
+			if diff := cmp.Diff(wantRecreated, recreated.ArtifactVersion); diff != "" {
+				t.Errorf("GetArtifactVersion(recreated) mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 // TestGCSArtifactServiceConcurrentSave checks that concurrent saves of the same
@@ -148,12 +282,23 @@ func TestSaveExhaustsRetriesOnPersistentConflict(t *testing.T) {
 	svc := newGCSServiceForTesting("errtest")
 	fb := svc.bucket.(*fakeBucket)
 	fb.closeErr = &googleapi.Error{Code: http.StatusPreconditionFailed}
+	wantMetadata := map[string]string{"key": "value"}
+	req := saveReq()
+	req.CustomMetadata = map[string]any{"key": "value"}
 
-	if _, err := svc.Save(t.Context(), saveReq()); !errors.Is(err, ErrVersionConflict) {
+	if _, err := svc.Save(t.Context(), req); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("Save() err = %v, want ErrVersionConflict", err)
 	}
 	if got := fb.closeCalls; got != maxSaveAttempts {
 		t.Errorf("write attempts = %d, want %d", got, maxSaveAttempts)
+	}
+	if got := len(fb.metadataCalls); got != maxSaveAttempts {
+		t.Fatalf("SetMetadata calls = %d, want %d", got, maxSaveAttempts)
+	}
+	for i, got := range fb.metadataCalls {
+		if diff := cmp.Diff(wantMetadata, got); diff != "" {
+			t.Errorf("SetMetadata call %d mismatch (-want +got):\n%s", i, diff)
+		}
 	}
 }
 
@@ -319,6 +464,7 @@ func newFakeClient() gcsClient {
 	return &fakeClient{
 		inMemoryBucket: &fakeBucket{
 			blobs: make(map[string]*fakeBlob),
+			now:   time.Now,
 		},
 	}
 }
@@ -332,11 +478,14 @@ func (c *fakeClient) bucket(name string) gcsBucket {
 type fakeBucket struct {
 	mu    sync.Mutex
 	blobs map[string]*fakeBlob
+	now   func() time.Time
 
 	// Test hooks (guarded by mu): closeErr, when set, makes every writer Close
 	// return it (a simulated write failure); closeCalls counts Close calls.
 	closeErr   error
 	closeCalls int
+	// metadataCalls records the metadata set on every write attempt.
+	metadataCalls []map[string]string
 
 	// attrsErr, when set, is returned by every object's attrs() call in place
 	// of the default not-found/found behavior. Used to simulate the GCS
@@ -390,6 +539,8 @@ type fakeBlob struct {
 	exists      bool
 	data        []byte
 	contentType string
+	metadata    map[string]string
+	created     time.Time
 }
 
 // fakeObject is a handle to a fakeBlob, optionally carrying a does-not-exist
@@ -425,7 +576,12 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	if !b.exists {
 		return nil, storage.ErrObjectNotExist
 	}
-	return &storage.ObjectAttrs{Name: b.name, Created: time.Now(), ContentType: b.contentType}, nil
+	return &storage.ObjectAttrs{
+		Name:        b.name,
+		Created:     b.created,
+		ContentType: b.contentType,
+		Metadata:    maps.Clone(b.metadata),
+	}, nil
 }
 
 // delete removes the object from the in-memory store.
@@ -435,6 +591,9 @@ func (o *fakeObject) delete(ctx context.Context) error {
 	defer b.mu.Unlock()
 	b.exists = false
 	b.data = nil
+	b.contentType = ""
+	b.metadata = nil
+	b.created = time.Time{}
 	return nil
 }
 
@@ -454,6 +613,7 @@ type fakeWriter struct {
 	obj         *fakeObject
 	buffer      *bytes.Buffer
 	contentType string
+	metadata    map[string]string
 }
 
 func (w *fakeWriter) Write(p []byte) (n int, err error) {
@@ -464,10 +624,12 @@ func (w *fakeWriter) Write(p []byte) (n int, err error) {
 // that loses the race sees the winner's data and returns HTTP 412 like GCS. A
 // bucket-level closeErr hook lets tests force a write failure.
 func (w *fakeWriter) Close() error {
+	now := time.Now
 	if bkt := w.obj.bucket; bkt != nil {
 		bkt.mu.Lock()
 		bkt.closeCalls++
 		forced := bkt.closeErr
+		now = bkt.now
 		bkt.mu.Unlock()
 		if forced != nil {
 			return forced
@@ -482,6 +644,8 @@ func (w *fakeWriter) Close() error {
 	}
 	b.data = w.buffer.Bytes()
 	b.contentType = w.contentType
+	b.metadata = maps.Clone(w.metadata)
+	b.created = now()
 	b.exists = true
 	return nil
 }
@@ -489,6 +653,15 @@ func (w *fakeWriter) Close() error {
 // SetContentType implements the final piece of the interface.
 func (w *fakeWriter) SetContentType(cType string) {
 	w.contentType = cType
+}
+
+func (w *fakeWriter) SetMetadata(metadata map[string]string) {
+	w.metadata = maps.Clone(metadata)
+	if bkt := w.obj.bucket; bkt != nil {
+		bkt.mu.Lock()
+		bkt.metadataCalls = append(bkt.metadataCalls, maps.Clone(metadata))
+		bkt.mu.Unlock()
+	}
 }
 
 // fakeObjectIterator returns attribute snapshots taken at list time.
