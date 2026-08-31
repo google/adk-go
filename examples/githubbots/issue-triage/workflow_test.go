@@ -16,6 +16,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -104,8 +105,11 @@ func TestWorkflowEnvProducesTheIntendedConfig(t *testing.T) {
 		}
 	}
 
-	if budget := time.Duration(cfg.IssueCount) * cfg.IssueTimeout; budget > cfg.SweepTimeout {
-		t.Errorf("ISSUE_COUNT x ISSUE_TIMEOUT = %s exceeds SWEEP_TIMEOUT %s: a full sweep cannot finish inside its own budget",
+	// The run budget funds choosing the work set as well as triaging it, so the
+	// fetch has to be in the sum. Leaving it out is how the arithmetic came to
+	// look sound while a full sweep could still exhaust its own budget.
+	if budget := time.Duration(cfg.IssueCount)*cfg.IssueTimeout + fetchTimeout; budget > cfg.SweepTimeout {
+		t.Errorf("ISSUE_COUNT x ISSUE_TIMEOUT + the work-set fetch = %s exceeds SWEEP_TIMEOUT %s: a full sweep cannot finish inside its own budget",
 			budget, cfg.SweepTimeout)
 	}
 }
@@ -180,5 +184,187 @@ func TestWorkflowSuppliesEveryKeyTheConfigRequires(t *testing.T) {
 				t.Errorf("loadConfig() without %s = nil error; the workflow supplying it would be pointless", key)
 			}
 		})
+	}
+}
+
+// runBlock extracts the workflow step's `run:` script.
+//
+// The script is where the two inputs an operator or an attacker controls are
+// turned into behavior -- the dry-run switch and the issue number -- and no
+// other gate executes it. actionlint with shellcheck checks that it parses and
+// quotes correctly; neither evaluates a branch.
+var runBlock = regexp.MustCompile(`(?s)\n        run: \|\n(.*?)\n\n  ?\w|(?s)\n        run: \|\n(.*)$`)
+
+func workflowScript(t *testing.T) string {
+	t.Helper()
+	raw := readWorkflow(t)
+	m := runBlock.FindStringSubmatch(raw)
+	if m == nil {
+		t.Fatal("could not find the step's run: block; the workflow changed shape")
+	}
+	body := m[1]
+	if body == "" {
+		body = m[2]
+	}
+	// Strip the block's YAML indentation.
+	var out []string
+	for line := range strings.SplitSeq(body, "\n") {
+		out = append(out, strings.TrimPrefix(line, "          "))
+	}
+	script := strings.Join(out, "\n")
+	if !strings.Contains(script, "set -euo pipefail") {
+		t.Fatalf("the extracted script does not look like the workflow's:\n%s", script)
+	}
+	return script
+}
+
+// execScript runs the real script under bash with `go` replaced by a shim that
+// prints its arguments, and returns what the shim saw plus the exit status.
+func execScript(t *testing.T, env map[string]string) (goArgs, dryRun string, err error) {
+	t.Helper()
+	bash, lookErr := exec.LookPath("bash")
+	if lookErr != nil {
+		t.Skipf("bash is not available: %v", lookErr)
+	}
+
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "go")
+	// The shim also reports DRY_RUN, which the script exports rather than
+	// passing on the command line.
+	if writeErr := os.WriteFile(shim, []byte("#!/bin/sh\necho \"ARGS:$*\"\necho \"DRY_RUN:$DRY_RUN\"\n"), 0o755); writeErr != nil {
+		t.Fatalf("write go shim: %v", writeErr)
+	}
+
+	cmd := exec.Command(bash, "-c", workflowScript(t))
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	out, err := cmd.CombinedOutput()
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(line, "ARGS:"); ok {
+			goArgs = rest
+		}
+		if rest, ok := strings.CutPrefix(line, "DRY_RUN:"); ok {
+			dryRun = rest
+		}
+	}
+	t.Logf("script output:\n%s", out)
+	return goArgs, dryRun, err
+}
+
+// The dry-run switch, executed. An input GitHub can deliver but the declared
+// default does not cover -- the empty string a REST dispatch produces -- must
+// resolve to a rehearsal, and anything unrecognised must stop the run rather
+// than be guessed at.
+//
+// Killing mutation: change the `"")` arm of the DRY_RUN case to false, or
+// delete the `*)` arm.
+func TestWorkflowScriptResolvesDryRun(t *testing.T) {
+	for _, tc := range []struct {
+		event, input string
+		want         string
+		wantErr      bool
+	}{
+		{"workflow_dispatch", "true", "true", false},
+		{"workflow_dispatch", "false", "false", false},
+		// GitHub applies an input's declared default only when the key is
+		// ABSENT. A REST dispatch carrying "dry_run": "" is present-but-empty.
+		{"workflow_dispatch", "", "true", false},
+		{"workflow_dispatch", "TRUE", "", true},
+		{"workflow_dispatch", "yes", "", true},
+		{"workflow_dispatch", "1", "", true},
+		// The bot doing its job, not a rehearsal.
+		{"issues", "", "false", false},
+		{"schedule", "", "false", false},
+	} {
+		t.Run(tc.event+"/"+tc.input, func(t *testing.T) {
+			_, got, err := execScript(t, map[string]string{
+				"GH_REPOSITORY": "google/adk-go",
+				"EVENT_NAME":    tc.event,
+				"DRY_RUN_INPUT": tc.input,
+				"ISSUE_INPUT":   "",
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("dry_run=%q was accepted, want the script to refuse it", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("script failed: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("DRY_RUN = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The issue-number guard, executed. A grep would match per LINE, so an input
+// carrying a newline would pass it.
+//
+// Killing mutation: replace the `case` with the original
+// `printf '%s' "$ISSUE_INPUT" | grep -Eq '^[0-9]+$'`.
+func TestWorkflowScriptValidatesTheIssueNumber(t *testing.T) {
+	for _, tc := range []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"", "run .", false}, // no -issue: a sweep
+		{"42", "run . -issue 42", false},
+		{"010", "run . -issue 010", false}, // the Go side reads this as decimal 10
+		{"abc", "", true},
+		{"4 2", "", true},
+		{"-5", "", true},
+		{"42x", "", true},
+		{"42\nrm -rf /", "", true},
+	} {
+		t.Run(strings.ReplaceAll(tc.input, "\n", `\n`), func(t *testing.T) {
+			args, _, err := execScript(t, map[string]string{
+				"GH_REPOSITORY": "google/adk-go",
+				"EVENT_NAME":    "schedule",
+				"DRY_RUN_INPUT": "",
+				"ISSUE_INPUT":   tc.input,
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("issue input %q was accepted, want the script to refuse it", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("script failed: %v", err)
+			}
+			if args != tc.want {
+				t.Errorf("go was invoked with %q, want %q", args, tc.want)
+			}
+		})
+	}
+}
+
+// OWNER and REPO are derived from github.repository, not configured, so a
+// change to the derivation would silently point the bot elsewhere.
+func TestWorkflowScriptDerivesOwnerAndRepo(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash is not available: %v", err)
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "go")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\necho \"OWNER:$OWNER REPO:$REPO\"\n"), 0o755); err != nil {
+		t.Fatalf("write go shim: %v", err)
+	}
+	cmd := exec.Command(bash, "-c", workflowScript(t))
+	cmd.Env = append(os.Environ(),
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GH_REPOSITORY=google/adk-go", "EVENT_NAME=schedule", "DRY_RUN_INPUT=", "ISSUE_INPUT=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "OWNER:google REPO:adk-go") {
+		t.Errorf("the script derived %q, want OWNER:google REPO:adk-go", out)
 	}
 }

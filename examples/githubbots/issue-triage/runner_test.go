@@ -58,10 +58,17 @@ func (m *scriptedModel) GenerateContent(context.Context, *model.LLMRequest, bool
 }
 
 func toolCall(name string, args map[string]any) *genai.Content {
-	return &genai.Content{
-		Role:  genai.RoleModel,
-		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name, Args: args}}},
+	return toolCalls(genai.FunctionCall{Name: name, Args: args})
+}
+
+// toolCalls builds one turn carrying several function calls, which is how the
+// framework is asked to execute them concurrently.
+func toolCalls(calls ...genai.FunctionCall) *genai.Content {
+	parts := make([]*genai.Part, 0, len(calls))
+	for _, c := range calls {
+		parts = append(parts, &genai.Part{FunctionCall: &c})
 	}
+	return &genai.Content{Role: genai.RoleModel, Parts: parts}
 }
 
 func finalText(s string) *genai.Content {
@@ -114,7 +121,8 @@ func (g *githubStub) handler(t *testing.T) http.Handler {
 			g.mu.Unlock()
 			if g.notFound {
 				_, _ = w.Write([]byte(`{"data":{"repository":{"issue":null}},
-					"errors":[{"type":"NOT_FOUND","message":"Could not resolve to an Issue"}]}`))
+					"errors":[{"type":"NOT_FOUND","path":["repository","issue"],
+					"message":"Could not resolve to an Issue"}]}`))
 				return
 			}
 			num, _ := req.Variables["number"].(float64)
@@ -431,5 +439,70 @@ func TestRunInDryRunWritesNothing(t *testing.T) {
 	}
 	if len(writes) != 0 {
 		t.Errorf("dry-run wrote %v, want nothing", writes)
+	}
+}
+
+// The claim exists because the framework executes a turn's tool calls
+// concurrently -- handleFunctionCalls builds one task per call and hands them
+// to platform.RunTasks, a goroutine per task by default. Every other test
+// demonstrates the MITIGATION with goroutines the test itself spawns. This one
+// enters the framework's own concurrency: until it existed, every scripted turn
+// carried exactly one function call, so that path was never taken.
+//
+// Four duplicate calls for the same field in one turn. Exactly one write may
+// reach GitHub, and the run must stay green, because a refused duplicate is
+// data for the model rather than a failure.
+//
+// Killing mutation: make claimType return (true, true) unconditionally. Note
+// that a check-then-act SPLIT of claimType is not killed here either -- see
+// TestDoChangeTypeConcurrentSingleWrite for why no test in this suite catches
+// that, and what does.
+func TestOneTurnWithSeveralCallsForOneFieldWritesOnce(t *testing.T) {
+	stub := newStub(42)
+	writes, turns, err := driveRun(t, runSpec{stub: stub, turns: []*genai.Content{
+		toolCalls(
+			genai.FunctionCall{Name: "change_issue_type", Args: map[string]any{"issue_number": 42, "issue_type": "Bug"}},
+			genai.FunctionCall{Name: "change_issue_type", Args: map[string]any{"issue_number": 42, "issue_type": "Feature"}},
+			genai.FunctionCall{Name: "change_issue_type", Args: map[string]any{"issue_number": 42, "issue_type": "Task"}},
+			genai.FunctionCall{Name: "change_issue_type", Args: map[string]any{"issue_number": 42, "issue_type": "Bug"}},
+		),
+		finalText("done"),
+	}})
+	if err != nil {
+		t.Fatalf("run() = %v, want nil: a refused duplicate is data, not a failure", err)
+	}
+	if turns != 2 {
+		t.Fatalf("the model was asked for %d turns, want 2", turns)
+	}
+	stub.mu.Lock()
+	patched := len(stub.patched)
+	stub.mu.Unlock()
+	if patched != 1 {
+		t.Errorf("four calls for one field produced %d writes, want exactly 1 (writes: %v)", patched, writes)
+	}
+}
+
+// The same turn asking for both fields at once, which IS legitimate: they are
+// independent claims and both must land.
+func TestOneTurnCanFillBothFields(t *testing.T) {
+	stub := newStub(42)
+	_, _, err := driveRun(t, runSpec{stub: stub, turns: []*genai.Content{
+		toolCalls(
+			genai.FunctionCall{Name: "change_issue_type", Args: map[string]any{"issue_number": 42, "issue_type": "Bug"}},
+			genai.FunctionCall{Name: "add_label_to_issue", Args: map[string]any{"issue_number": 42, "label": "bug"}},
+		),
+		finalText("done"),
+	}})
+	if err != nil {
+		t.Fatalf("run() = %v, want nil", err)
+	}
+	stub.mu.Lock()
+	gotType, gotLabel := stub.patched[42], stub.labelled[42]
+	stub.mu.Unlock()
+	if gotType != "Bug" {
+		t.Errorf("issue #42 type = %q, want Bug", gotType)
+	}
+	if gotLabel != "bug" {
+		t.Errorf("issue #42 label = %q, want bug", gotLabel)
 	}
 }

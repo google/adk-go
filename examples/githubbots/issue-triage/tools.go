@@ -48,14 +48,27 @@ func okResult(format string, a ...any) actionResult {
 	return actionResult{Status: "success", Message: fmt.Sprintf(format, a...)}
 }
 
-// checkIssueArg runs the two checks every mutating tool shares: the session must
-// be scoped to this issue, and the number must be a plausible issue number.
-func checkIssueArg(ctx context.Context, number int) (string, bool) {
+// checkIssueArg runs the checks every mutating tool shares: the session must be
+// scoped to this issue, the number must be a plausible issue number, and the
+// session must not have spent its attempt budget.
+//
+// A refusal is logged rather than only returned. The model's own summary is the
+// only other record of it, and that summary is attacker-influenced -- so an
+// operator reading the Actions log would otherwise have no server-side trace of
+// the one event this whole design exists to stop.
+func (c *Client) checkIssueArg(ctx context.Context, number int) (string, bool) {
 	if msg, ok := authorizeIssue(ctx, number); !ok {
+		c.log.Warn("refused a tool call outside the session's issue scope", "requested", number, "reason", msg)
 		return msg, false
 	}
 	if number <= 0 {
 		return fmt.Sprintf("invalid issue number %d", number), false
+	}
+	if !c.attempt(number) {
+		c.log.Warn("refused a tool call: the issue's attempt budget is spent",
+			"issue", number, "cap", maxAttemptsPerIssue)
+		return fmt.Sprintf("issue #%d has had its %d tool calls for this run; make no further attempts",
+			number, maxAttemptsPerIssue), false
 	}
 	return "", true
 }
@@ -67,7 +80,12 @@ func checkIssueArg(ctx context.Context, number int) (string, bool) {
 // Any claim the caller consumed stays consumed. See errNotApplied for why a
 // failed write does not re-open it.
 func (c *Client) toolFailed(err error) (actionResult, error) {
-	c.recordToolError()
+	// An expired budget is not an infrastructure failure. Recording it would
+	// join a phantom "one or more tool calls failed" onto a run whose only
+	// problem is that it ran out of time, which is already reported.
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.recordToolError()
+	}
 	return actionResult{}, err
 }
 
@@ -116,7 +134,7 @@ func authorizeIssue(ctx context.Context, requested int) (string, bool) {
 // authorization failures are returned as model-readable errResults (nil Go
 // error); only I/O failures return a Go error.
 func (c *Client) doChangeType(ctx context.Context, number int, issueType string) (actionResult, error) {
-	if msg, ok := checkIssueArg(ctx, number); !ok {
+	if msg, ok := c.checkIssueArg(ctx, number); !ok {
 		return errResult("%s", msg), nil
 	}
 	canonical, ok := canonicalType(issueType)
@@ -168,7 +186,7 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 // doAddLabel validates and applies a label addition, with the same error
 // conventions as doChangeType.
 func (c *Client) doAddLabel(ctx context.Context, number int, label string) (actionResult, error) {
-	if msg, ok := checkIssueArg(ctx, number); !ok {
+	if msg, ok := c.checkIssueArg(ctx, number); !ok {
 		return errResult("%s", msg), nil
 	}
 	canonical, ok := canonicalLabel(label, c.cfg.AllowedLabels)

@@ -370,9 +370,15 @@ func TestTriageOneRevokesTheAuthorizationWhenTheSessionEnds(t *testing.T) {
 		Issue{Number: 7, Title: "t", Body: "b"},
 		func(ictx context.Context, _ string) error {
 			ran = true
-			// Authorized while the session is live.
-			if _, authorized := c.claimType(7); !authorized {
+			// Authorized, with both fields open, while the session is live.
+			// Deliberately does NOT claim anything: consuming a need here would
+			// make the post-return checks below pass whether or not revoke ran.
+			open, authorized := c.peek(7)
+			if !authorized {
 				t.Error("issue #7 was not authorized during its own session")
+			}
+			if !open.typ || !open.label {
+				t.Errorf("issue #7's needs during its session = %+v, want both open", open)
 			}
 			return nil
 		})

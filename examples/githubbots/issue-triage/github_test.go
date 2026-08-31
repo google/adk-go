@@ -226,6 +226,7 @@ func TestGetIssueNotFoundError(t *testing.T) {
 	// A PR number or non-existent issue yields a NOT_FOUND error (not a null
 	// issue) from GitHub's GraphQL API.
 	const body = `{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND",` +
+		`"path":["repository","issue"],` +
 		`"message":"Could not resolve to an Issue with the number of 1005."}]}`
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, body)

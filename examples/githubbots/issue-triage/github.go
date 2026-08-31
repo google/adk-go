@@ -86,7 +86,20 @@ type Client struct {
 	// error during the run, so the program can exit non-zero and CI fails loudly
 	// even though such errors are also handed back to the model as data.
 	toolErrored bool
+	// attempts counts the tool calls made against each issue, so an
+	// attacker-steered model cannot spend unbounded GitHub reads. See
+	// maxAttemptsPerIssue.
+	attempts map[int]int
 }
+
+// maxAttemptsPerIssue caps how many mutating tool calls one issue's session may
+// make. A well-behaved run makes at most two, one per field. The model is
+// attacker-controlled by assumption and nothing bounds how many calls it emits
+// in a turn, and each one that clears the allow-list spends a GitHub read
+// (confirmStillNeeded) before the claim refuses it -- enough of them and the
+// repository's shared API budget goes, and the resulting rate-limit error reds
+// the job. The cap is generous enough that no honest run reaches it.
+const maxAttemptsPerIssue = 8
 
 // NewClient builds an authenticated GitHub client.
 func NewClient(cfg *Config, log *slog.Logger) *Client {
@@ -95,6 +108,7 @@ func NewClient(cfg *Config, log *slog.Logger) *Client {
 		cfg:        cfg,
 		log:        log,
 		authorized: make(map[int]need),
+		attempts:   make(map[int]int),
 	}
 }
 
@@ -190,6 +204,18 @@ func (c *Client) revoke(number int) {
 	}
 }
 
+// attempt records one mutating tool call against an issue and reports whether
+// it is within the per-issue cap.
+func (c *Client) attempt(number int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempts == nil {
+		c.attempts = make(map[int]int)
+	}
+	c.attempts[number]++
+	return c.attempts[number] <= maxAttemptsPerIssue
+}
+
 // recordToolError flags that a tool hit an infrastructure error this run.
 func (c *Client) recordToolError() {
 	c.mu.Lock()
@@ -241,8 +267,17 @@ var issueByNumberQuery = `query($owner: String!, $name: String!, $number: Int!) 
 }`
 
 type graphQLError struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type    string   `json:"type"`
+	Message string   `json:"message"`
+	Path    []string `json:"path"`
+}
+
+// isIssueNotFound reports whether e says the ISSUE could not be resolved, as
+// opposed to the repository. GitHub returns type NOT_FOUND for both, and
+// reading a repository-level one as "the issue vanished" would turn a wrong
+// OWNER/REPO into a permanently green run that triages nothing.
+func (e graphQLError) isIssueNotFound() bool {
+	return e.Type == "NOT_FOUND" && len(e.Path) > 0 && e.Path[len(e.Path)-1] == "issue"
 }
 
 type issueNode struct {
@@ -403,9 +438,11 @@ func (c *Client) GetIssue(ctx context.Context, number int) (Issue, error) {
 	}
 	if len(resp.Errors) > 0 {
 		// GitHub returns a NOT_FOUND error (not a null issue) when the number
-		// does not exist or refers to a pull request.
+		// does not exist or refers to a pull request. It returns the same type
+		// for an unresolvable repository, which is a configuration failure and
+		// must stay loud, so the path decides which one this is.
 		for _, e := range resp.Errors {
-			if e.Type == "NOT_FOUND" {
+			if e.isIssueNotFound() {
 				return Issue{}, fmt.Errorf("issue #%d: %w", number, ErrIssueNotFound)
 			}
 		}
@@ -475,12 +512,15 @@ func (c *Client) AddLabel(ctx context.Context, number int, label string) error {
 		}
 	}
 	// Absent from a list that is at the page cap proves nothing: the add may
-	// have landed on a later page. Reporting a failure there would red the job
-	// on every successful add to a heavily labelled issue.
+	// have landed on a later page. Rather than report a failure we cannot
+	// substantiate -- or a success we have not confirmed -- ask GraphQL, which
+	// fetches labelPageSize labels rather than this endpoint's fixed page.
 	if !applied && len(labels) >= labelResponsePage {
-		c.log.Warn("could not confirm the label was applied; the response was a full page of labels",
-			"issue", number, "label", label, "labels_returned", len(labels))
-		return nil
+		fresh, err := c.GetIssue(ctx, number)
+		if err != nil {
+			return fmt.Errorf("confirm label %q on issue #%d after a full-page response: %w", label, number, err)
+		}
+		_, applied = canonicalLabel(label, fresh.Labels)
 	}
 	if !applied {
 		return fmt.Errorf("add label %q to issue #%d (the token likely lacks push access): %w", label, number, errNotApplied)

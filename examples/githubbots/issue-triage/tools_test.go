@@ -15,8 +15,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -236,10 +239,20 @@ func TestAuthorizeDoesNotResurrectConsumedNeed(t *testing.T) {
 }
 
 func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
-	// ADK executes a turn's tool calls concurrently (one goroutine per call). If
-	// the model emits change_issue_type twice for the same issue, exactly one
-	// call must reach the API; the other must be refused without a write, so the
-	// no-overwrite guarantee holds under concurrency, not just sequentially.
+	// ADK executes a turn's tool calls concurrently: handleFunctionCalls builds
+	// one task per call and hands them to platform.RunTasks, whose default
+	// runner is a goroutine per task (adk/v2 internal/llminternal/base_flow.go
+	// and platform/exec.go). So if the model emits change_issue_type twice for
+	// one issue, exactly one call must reach the API.
+	//
+	// What this test does and does not establish. It establishes the OUTCOME
+	// under real contention: 64 goroutines released together produce one write
+	// and one success. It does NOT reliably kill a check-then-act split of
+	// claimType -- measured 0 kills in 5 runs against exactly that mutation,
+	// because the window between an unlocked read and an unlocked write is a few
+	// nanoseconds and the goroutines serialize on the first mutex anyway. The
+	// atomicity itself is established by reading claimType: one Lock, one
+	// deferred Unlock, spanning the whole read-modify-write.
 	var calls atomic.Int64
 	c := writeClient(t, testConfig(), untriagedIssueJSON, func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -247,15 +260,20 @@ func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
 	})
 	c.authorize(7, need{typ: true})
 
-	const goroutines = 8
+	// Released together from a barrier, and enough of them to make the
+	// interleaving likely: without the barrier the goroutines are staggered by
+	// their own startup and a check-then-act split can go unobserved.
+	const goroutines = 64
 	var (
 		wg        sync.WaitGroup
 		successes atomic.Int64
+		start     = make(chan struct{})
 	)
 	for range goroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			res, err := c.doChangeType(scoped(7), 7, "Bug")
 			if err != nil {
 				return
@@ -265,6 +283,7 @@ func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 
 	if got := calls.Load(); got != 1 {
@@ -275,6 +294,8 @@ func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
 	}
 }
 
+// The same for the label field. See TestDoChangeTypeConcurrentSingleWrite for
+// what this establishes and what it does not.
 func TestDoAddLabelConcurrentSingleWrite(t *testing.T) {
 	var calls atomic.Int64
 	c := writeClient(t, testConfig(), untriagedIssueJSON, func(w http.ResponseWriter, _ *http.Request) {
@@ -283,15 +304,17 @@ func TestDoAddLabelConcurrentSingleWrite(t *testing.T) {
 	})
 	c.authorize(7, need{label: true})
 
-	const goroutines = 8
+	const goroutines = 64
 	var (
 		wg        sync.WaitGroup
 		successes atomic.Int64
+		start     = make(chan struct{})
 	)
 	for range goroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			res, err := c.doAddLabel(scoped(7), 7, "bug")
 			if err != nil {
 				return
@@ -301,6 +324,7 @@ func TestDoAddLabelConcurrentSingleWrite(t *testing.T) {
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 
 	if got := calls.Load(); got != 1 {
@@ -507,33 +531,129 @@ func TestAFailedWriteDoesNotReopenTheClaim(t *testing.T) {
 // The pre-write revalidation read must be reported when it fails, and must cost
 // nothing. A read is unambiguous -- if it failed, no mutation was attempted --
 // so unlike a failed write it must not burn the issue's one write for the run.
-// That is why the read happens before the claim.
+// That is why the read happens before the claim, in BOTH tools: pinning only
+// the type path left "move claimLabel above confirmStillNeeded" surviving the
+// whole suite.
 //
-// Killing mutation: move the claimType call above the confirmStillNeeded call.
+// Killing mutation: move the claim above the confirmStillNeeded call, in either
+// doChangeType or doAddLabel.
 func TestARevalidationFailureIsReportedAndCostsNoClaim(t *testing.T) {
-	var writes int
+	for _, tc := range []struct {
+		name    string
+		act     func(*Client) (actionResult, error)
+		claimed func(*Client) bool
+	}{
+		{
+			"doChangeType",
+			func(c *Client) (actionResult, error) { return c.doChangeType(scoped(7), 7, "Bug") },
+			func(c *Client) bool { claimed, _ := c.claimType(7); return claimed },
+		},
+		{
+			"doAddLabel",
+			func(c *Client) (actionResult, error) { return c.doAddLabel(scoped(7), 7, "bug") },
+			func(c *Client) bool { claimed, _ := c.claimLabel(7); return claimed },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes int
+			c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/graphql" {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"message":"boom"}`)
+					return
+				}
+				writes++
+			}))
+			c.authorized = make(map[int]need)
+			c.authorize(7, need{typ: true, label: true})
+
+			if _, err := tc.act(c); err == nil {
+				t.Fatalf("%s = nil error, want the revalidation failure surfaced", tc.name)
+			}
+			if !c.hadToolError() {
+				t.Error("the failed read was not recorded, so the run would exit 0")
+			}
+			if writes != 0 {
+				t.Errorf("made %d mutating calls, want 0: the write must not proceed on an unverified read", writes)
+			}
+			if !tc.claimed(c) {
+				t.Error("a failed READ consumed the claim; nothing was written, so the field must stay open")
+			}
+		})
+	}
+}
+
+// The label add-response is one page, so a label missing from a FULL page
+// proves nothing about whether the add landed. The code asks GraphQL, which
+// fetches labelPageSize labels, rather than guessing in either direction.
+//
+// Killing mutation: delete the full-page branch from AddLabel, or make it
+// `return nil` without confirming.
+func TestAFullPageLabelResponseIsConfirmedNotGuessed(t *testing.T) {
+	// Thirty labels, none of them ours: exactly the ambiguous case.
+	var page []string
+	for i := range labelResponsePage {
+		page = append(page, fmt.Sprintf(`{"name":"area/%d"}`, i))
+	}
+	fullPage := "[" + strings.Join(page, ",") + "]"
+
+	for _, tc := range []struct {
+		name      string
+		confirmed string
+		wantErr   bool
+	}{
+		{
+			"the add did land, GraphQL sees it",
+			`{"data":{"repository":{"issue":{"number":7,"issueType":null,"labels":{"nodes":[{"name":"bug"}]}}}}}`,
+			false,
+		},
+		{
+			"the add did not land, GraphQL agrees",
+			`{"data":{"repository":{"issue":{"number":7,"issueType":null,"labels":{"nodes":[{"name":"area/1"}]}}}}}`,
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/graphql" {
+					_, _ = io.WriteString(w, tc.confirmed)
+					return
+				}
+				_, _ = io.WriteString(w, fullPage)
+			}))
+			err := c.AddLabel(context.Background(), 7, "bug")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("AddLabel = nil, want the unconfirmed add reported as not applied")
+				}
+				if !errors.Is(err, errNotApplied) {
+					t.Errorf("AddLabel = %v, want errNotApplied", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("AddLabel = %v, want nil: GraphQL confirmed the label is present", err)
+			}
+		})
+	}
+}
+
+// A short response is decisive on its own; the confirming read must not happen.
+func TestAShortLabelResponseNeedsNoConfirmation(t *testing.T) {
+	var reads int
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/graphql" {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = io.WriteString(w, `{"message":"boom"}`)
+			reads++
+			_, _ = io.WriteString(w, `{"data":{"repository":{"issue":null}}}`)
 			return
 		}
-		writes++
+		_, _ = io.WriteString(w, `[{"name":"go"}]`)
 	}))
-	c.authorized = make(map[int]need)
-	c.authorize(7, need{typ: true})
-
-	if _, err := c.doChangeType(scoped(7), 7, "Bug"); err == nil {
-		t.Fatal("doChangeType = nil error, want the revalidation failure surfaced")
+	if err := c.AddLabel(context.Background(), 7, "bug"); !errors.Is(err, errNotApplied) {
+		t.Fatalf("AddLabel = %v, want errNotApplied", err)
 	}
-	if !c.hadToolError() {
-		t.Error("the failed read was not recorded, so the run would exit 0")
-	}
-	if writes != 0 {
-		t.Errorf("made %d mutating calls, want 0: the write must not proceed on an unverified read", writes)
-	}
-	if claimed, _ := c.claimType(7); !claimed {
-		t.Error("a failed READ consumed the claim; nothing was written, so the field must stay open")
+	if reads != 0 {
+		t.Errorf("made %d confirming reads for a response that was already decisive", reads)
 	}
 }
 
@@ -662,6 +782,32 @@ func TestToolsEnforceTheSessionScopeThroughTheRealWrapper(t *testing.T) {
 	}
 }
 
+// A NOT_FOUND about the REPOSITORY is a configuration failure, not a vanished
+// issue, and must stay loud. GitHub uses the same error type for both, so only
+// the path distinguishes them -- and reading a wrong OWNER/REPO as "the issue
+// vanished" would leave the bot exiting 0 forever while triaging nothing.
+//
+// Killing mutation: drop the path check from graphQLError.isIssueNotFound.
+func TestAMissingRepositoryIsAFailure(t *testing.T) {
+	var writes int
+	c := writeClient(t, testConfig(),
+		`{"data":{"repository":null},"errors":[{"type":"NOT_FOUND",`+
+			`"path":["repository"],"message":"Could not resolve to a Repository with the name 'acme/typo'"}]}`,
+		func(http.ResponseWriter, *http.Request) { writes++ })
+	c.authorize(7, need{typ: true})
+
+	res, err := c.doChangeType(scoped(7), 7, "Bug")
+	if err == nil {
+		t.Fatalf("doChangeType = (%+v, nil); a missing repository must surface as an error", res)
+	}
+	if !c.hadToolError() {
+		t.Error("a missing repository was not recorded, so the run would exit 0")
+	}
+	if writes != 0 {
+		t.Errorf("made %d mutating calls against a repository that does not resolve", writes)
+	}
+}
+
 // An issue deleted, transferred or converted to a discussion between the sweep
 // selecting it and the tool acting on it is not an infrastructure failure. It
 // must be reported to the model as data and leave the run green -- otherwise
@@ -680,7 +826,8 @@ func TestAVanishedIssueIsNotAFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var writes int
 			c := writeClient(t, testConfig(),
-				`{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","message":"gone"}]}`,
+				`{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND",`+
+					`"path":["repository","issue"],"message":"Could not resolve to an Issue"}]}`,
 				func(http.ResponseWriter, *http.Request) { writes++ })
 			c.authorize(7, need{typ: true, label: true})
 
@@ -698,5 +845,87 @@ func TestAVanishedIssueIsNotAFailure(t *testing.T) {
 				t.Errorf("made %d mutating calls for an issue that does not exist", writes)
 			}
 		})
+	}
+}
+
+// The model is attacker-controlled by assumption and nothing bounds how many
+// tool calls it emits in a turn. Each call that clears the allow-list spends a
+// GitHub read before the claim refuses it, so an unbounded fan-out burns the
+// repository's shared API budget and the resulting rate-limit error reds the
+// job. The per-issue cap bounds that, and refusals past it cost no network.
+//
+// Killing mutation: delete the c.attempt check from checkIssueArg.
+func TestAnIssueGetsABoundedNumberOfAttempts(t *testing.T) {
+	var reads, writes int
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			reads++
+			// Always still needing a type, so nothing but the cap can stop the
+			// model retrying.
+			_, _ = io.WriteString(w, untriagedIssueJSON)
+			return
+		}
+		writes++
+		// Report the type as unset, so the write is judged not applied and the
+		// model has a reason to keep trying.
+		_, _ = io.WriteString(w, `{"number":7}`)
+	}))
+	c.authorized = make(map[int]need)
+	c.attempts = make(map[int]int)
+	c.authorize(7, need{typ: true, label: true})
+
+	var refusals int
+	for range maxAttemptsPerIssue * 3 {
+		res, err := c.doChangeType(scoped(7), 7, "Bug")
+		if err != nil {
+			continue // the not-applied write, expected
+		}
+		if strings.Contains(res.Message, "tool calls for this run") {
+			refusals++
+		}
+	}
+
+	if refusals == 0 {
+		t.Fatal("the attempt cap never fired; a model can spend unbounded GitHub reads")
+	}
+	readsAtCap := reads
+	// Every further call must be refused without touching the network.
+	for range 5 {
+		if _, err := c.doChangeType(scoped(7), 7, "Bug"); err != nil {
+			t.Fatalf("a capped call returned a Go error: %v", err)
+		}
+	}
+	if reads != readsAtCap {
+		t.Errorf("calls past the cap made %d further reads, want 0", reads-readsAtCap)
+	}
+	if writes > 1 {
+		t.Errorf("made %d writes, want at most 1: the claim is one-shot", writes)
+	}
+}
+
+// A refused out-of-scope call must leave a server-side trace. The model's own
+// summary is the only other record and it is attacker-influenced, so without
+// this an operator reading the Actions log sees nothing.
+//
+// Killing mutation: delete the c.log.Warn from checkIssueArg's scope branch.
+func TestAnOutOfScopeRefusalIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	c := &Client{
+		cfg:        testConfig(),
+		log:        slog.New(slog.NewTextHandler(&buf, nil)),
+		authorized: make(map[int]need),
+		attempts:   make(map[int]int),
+	}
+	c.authorize(99, need{typ: true})
+
+	if _, err := c.doChangeType(scoped(5), 99, "Bug"); err != nil {
+		t.Fatalf("doChangeType returned a Go error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "outside the session's issue scope") {
+		t.Errorf("the refusal left no trace in the log; got %q", got)
+	}
+	if !strings.Contains(got, "requested=99") {
+		t.Errorf("the log does not name the issue the model asked for; got %q", got)
 	}
 }
