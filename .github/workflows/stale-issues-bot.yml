@@ -1,0 +1,134 @@
+# Audits open issues that are waiting on their author: marks one stale after a
+# threshold, closes it after a further one, clears the stale label when the
+# author comes back, and alerts a maintainer on a silent description edit.
+#
+# The bot runs a model over issue text any stranger can write while holding a
+# token scoped `issues: write`, so the model is treated as attacker-controlled:
+# every mutation is gated in Go against state the bot computed from API
+# metadata. See examples/githubbots/stale-issues/README.md for the authority
+# limits and how they are enforced.
+name: Stale Issues Bot
+
+on:
+  schedule:
+    # 07:00 UTC daily. The sweep is idempotent, so a missed run costs a day.
+    - cron: '0 7 * * *'
+
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Audit only this issue number. Leave blank to sweep the whole backlog.'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 'Log the intended actions without labeling, commenting or closing.'
+        type: boolean
+        required: false
+        default: true
+
+# The workflow needs nothing by default. The single job that writes issues asks
+# for that scope itself, so nothing else can inherit it -- on a scheduled run
+# the repository default would otherwise be write-capable.
+permissions: {}
+
+# Two overlapping sweeps each keep their own per-(issue, action) claim map, so
+# both could post the same warning comment on the same issue. Queue rather than
+# cancel: a cancelled run may already have written to some issues.
+concurrency:
+  group: stale-issues-bot
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    # A fork inherits the schedule. Without this guard a fork's daily run would
+    # audit the fork's own tracker using this repository's maintainer list.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    # Must stay above RUN_BUDGET below, so an overrun is reported by the bot
+    # rather than the runner killing the job mid-sweep with nothing in the log.
+    timeout-minutes: 40
+    permissions:
+      contents: read # check out the bot's source
+      issues: write # label, comment on, and close issues
+    steps:
+      - name: Check out the bot
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/githubbots/stale-issues/go.mod
+          cache-dependency-path: examples/githubbots/stale-issues/go.sum
+
+      - name: Audit stale issues
+        working-directory: examples/githubbots/stale-issues
+        env:
+          # Caller-supplied values reach the script through the environment.
+          # Interpolated into `run:` they would be spliced into the command
+          # itself rather than passed to it.
+          ISSUE: ${{ inputs.issue }}
+          # A scheduled sweep writes for real. Only a manual dispatch can ask
+          # for a dry run, and that is what it defaults to.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          # The maintainer set cannot be discovered at runtime: the built-in
+          # GITHUB_TOKEN cannot list collaborators. Supply it as the
+          # STALE_BOT_MAINTAINERS repository variable, comma-separated.
+          MAINTAINERS: ${{ vars.STALE_BOT_MAINTAINERS }}
+          REPOSITORY: ${{ github.repository }}
+          # The login the bot posts under, so it recognizes its own comments.
+          # It is set rather than discovered: GET /user is a user-to-server
+          # endpoint and GITHUB_TOKEN here is an installation token, so the
+          # discovery call is refused on every run.
+          BOT_LOGIN: 'github-actions[bot]'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Below the job's timeout-minutes, so the process diagnoses its own
+          # overrun instead of being killed.
+          RUN_BUDGET: 30m
+          ISSUE_TIMEOUT: 5m
+          CONCURRENCY_LIMIT: '3'
+        run: |
+          set -euo pipefail
+
+          # An empty maintainer list is not a degraded run, it is a silent
+          # no-op: with nobody classified as a maintainer, no comment can put
+          # the ball in the author's court, so nothing is ever marked stale.
+          # The bot trims each entry and drops the blanks, so " ", "," and ", ,"
+          # all reduce to zero maintainers and have to be caught here too. The
+          # test is for an alphanumeric rather than for non-whitespace, because
+          # the shell's [:space:] and Go's unicode.IsSpace disagree — a stray
+          # non-breaking space would pass a whitespace test and still leave the
+          # bot with nobody classified as a maintainer. Every GitHub login
+          # contains at least one alphanumeric.
+          if ! printf '%s' "${MAINTAINERS}" | grep -q '[A-Za-z0-9]'; then
+            echo "::error::the STALE_BOT_MAINTAINERS repository variable is empty or holds no logins; without it no issue can ever be marked stale"
+            exit 1
+          fi
+
+          OWNER="${REPOSITORY%%/*}"
+          REPO="${REPOSITORY#*/}"
+          export OWNER REPO
+
+          if [ -n "${ISSUE}" ]; then
+            # Validated in the step that uses it, so the guarantee cannot be
+            # skipped by an earlier step's `if:` condition. Zero is excluded
+            # deliberately: the bot reads -issue 0 as "no single issue" and
+            # sweeps the whole backlog, so a digits-only guard would turn a
+            # request to audit one issue into a live sweep of every issue.
+            # `case` rather than grep, because grep matches per LINE and a
+            # dispatch input may contain a newline, so "abc\n123" would pass a
+            # line-oriented check. The value is not echoed back: it would land
+            # in the log unescaped, where ::-prefixed text is a workflow command.
+            case "${ISSUE}" in
+              ''|0*|*[!0-9]*)
+                echo "::error::issue must be a positive integer with no leading zero"
+                exit 1
+                ;;
+            esac
+            go run -mod=readonly . -issue "${ISSUE}"
+          else
+            go run -mod=readonly .
+          fi
