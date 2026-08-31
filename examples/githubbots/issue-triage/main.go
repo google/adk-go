@@ -132,21 +132,23 @@ func run(ctx context.Context, log *slog.Logger, args []string) error {
 		return nil
 	}
 
-	if err := sweep(runCtx, issues, cfg.SweepTimeout, log, func(ctx context.Context, iss Issue) error {
+	err = sweep(runCtx, issues, cfg.SweepTimeout, log, func(ctx context.Context, iss Issue) error {
 		return triageOne(ctx, client, cfg, log, iss, func(ictx context.Context, prompt string) error {
 			return runAgent(ictx, r, sessions, log.With("issue", iss.Number), prompt)
 		})
-	}); err != nil {
-		return err
-	}
+	})
 
 	// Tool errors are handed back to the model as data (so it can react), which
 	// means a failed mutation would otherwise leave the process exiting 0. Fail
 	// loudly so scheduled/CI runs surface infrastructure problems.
+	//
+	// Joined rather than checked only on success: returning the sweep error
+	// first would hide a real infrastructure failure behind an exhausted budget,
+	// which is the one case where both are likely at once.
 	if client.hadToolError() {
-		return errors.New("one or more tool calls failed; see logs above")
+		err = errors.Join(err, errors.New("one or more tool calls failed; see logs above"))
 	}
-	return nil
+	return err
 }
 
 // sweep runs triageFn over every issue, continuing past a failure and stopping
@@ -207,6 +209,11 @@ func triageOne(ctx context.Context, client *Client, cfg *Config, log *slog.Logge
 	// touched, and authorize decides WHICH FIELDS of it are still missing.
 	ictx = withAuditedIssue(ictx, iss.Number)
 	client.authorize(iss.Number, n)
+	// The authorization must not outlive the session that justified it. Without
+	// this it would sit in the map for the rest of the sweep, so a future call
+	// site that forgot the scope check could write to every issue the run had
+	// touched rather than to one.
+	defer client.revoke(iss.Number)
 
 	return runFn(ictx, prompt)
 }
@@ -327,11 +334,7 @@ func runAgent(ctx context.Context, r *runner.Runner, sessions session.Service, l
 		if event.Content == nil {
 			continue
 		}
-		var b strings.Builder
-		for _, p := range event.Content.Parts {
-			b.WriteString(p.Text)
-		}
-		if text := strings.TrimSpace(b.String()); text != "" {
+		if text := joinText(event.Content.Parts); text != "" {
 			summary = text
 		}
 	}
@@ -339,4 +342,21 @@ func runAgent(ctx context.Context, r *runner.Runner, sessions session.Service, l
 		log.Info("triage complete", "summary", summary)
 	}
 	return runErr
+}
+
+// joinText concatenates an event's text parts.
+//
+// Parts is []*genai.Part, so a null entry in the model's response decodes to a
+// nil element. Dereferencing it would panic, and nothing here recovers: the
+// panic would escape sweep's continue-on-error loop and take every issue behind
+// this one with it.
+func joinText(parts []*genai.Part) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if p == nil {
+			continue
+		}
+		b.WriteString(p.Text)
+	}
+	return strings.TrimSpace(b.String())
 }

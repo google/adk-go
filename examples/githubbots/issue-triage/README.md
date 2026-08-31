@@ -21,10 +21,14 @@ whatever an attacker asks, and read what the Go code still refuses:
 - **A per-session issue scope.** `withAuditedIssue` binds the session to one
   issue number and every mutating tool checks it first, so issue A's body cannot
   make a tool act on issue B.
-- **An atomic need-claim.** The precondition ("this field is still empty") and
-  the reservation are taken in one critical section, so of several concurrent
-  calls for the same issue exactly one reaches the API. A field a human already
-  set is never overwritten.
+- **An atomic need-claim, and a re-read before the write.** The precondition
+  ("this field is still empty") and the reservation are taken in one critical
+  section, so of several concurrent calls for the same issue exactly one reaches
+  the API, and the claim is never re-opened — one write per field per run,
+  whatever the response says. Because a sweep can reach its last issue up to
+  `SWEEP_TIMEOUT` after reading it, the issue is re-read immediately before the
+  write as well, so a field a maintainer filled inside that window is not
+  clobbered by a decision taken against a stale snapshot.
 - **Allow-listed values.** The type must be one of `Bug`/`Feature`/`Task` and
   the label one of the configured allowlist, matched case-insensitively and sent
   to GitHub in the allowlist's own spelling.
@@ -33,8 +37,10 @@ whatever an attacker asks, and read what the Go code still refuses:
   `crypto/rand` marker per field per issue, so a body cannot write its own
   closing marker and have the text after it read as instructions. A failure to
   draw the nonce aborts the issue rather than falling back to a fixed marker.
-- **One dry-run chokepoint.** Every mutation passes through `shouldSkip`, so
-  `-dry-run` cannot be forgotten on a new call site.
+- **One dry-run chokepoint that cannot fail open.** Every mutation passes
+  through `shouldSkip`, so `-dry-run` cannot be forgotten on a new call site,
+  and a malformed `DRY_RUN` aborts at startup rather than falling back to the
+  default — which is "act for real".
 - **A pinned tool inventory.** A test asserts the exact tool set, so an ungated
   tool reaching the same state cannot be added silently.
 
@@ -112,6 +118,11 @@ go run . -issue 123
 | `-dry-run` / `DRY_RUN` | `false` | Log intended actions without mutating. |
 | `-issue` | `0` | Triage only this issue (0 = sweep). |
 
+A value the bot cannot parse is a startup error, not a silent fall back to the
+default. `DRY_RUN=yes` is the case that matters — `strconv.ParseBool` rejects
+it, and defaulting would mean live writes for an operator who asked for a
+rehearsal.
+
 Instead of an API key you can use Vertex AI via Application Default Credentials
 (`GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`).
 
@@ -140,17 +151,27 @@ concurrent processes would each see an unset field and both write it — which i
 exactly what a per-issue group would allow between a scheduled sweep and an
 event run for an issue that sweep is already processing.
 
-The job holds `issues: write` and `contents: read`, and nothing else. Note that
+The job holds `issues: write` and `contents: read`, and nothing else. The
+workflow also overrides three of the defaults below, because the sweep budget
+has to hold: `ISSUE_COUNT=5`, `ISSUE_TIMEOUT=3m`, `SWEEP_TIMEOUT=18m`, under a
+job `timeout-minutes: 25`. Five issues at three minutes each is fifteen, inside
+the eighteen-minute process budget, which is itself inside the job limit — so an
+ordinary busy sweep finishes rather than reporting an exhausted budget, and a
+genuine overrun stops and says what it left instead of being killed silently.
+
+**One thing to confirm on the first live run.**
 [GitHub requires *push* access to set an issue's type or
 labels](https://docs.github.com/en/rest/issues/issues#update-an-issue) and
 silently drops the change otherwise. Whether the job token's `issues: write`
-satisfies that has not been confirmed on a live run here. The bot reads each
-write back and **fails the run** if it did not land, so a permissions gap
-surfaces loudly on the first live run rather than passing silently. If types or
-labels are being dropped, widen the job to `contents: write`.
+satisfies that has not been confirmed here. The bot reads each write back and
+**fails the run** if it did not land, so the gap surfaces loudly rather than
+passing silently. Do not reach for `contents: write` as the reflex remedy: it
+grants repository push authority to a job whose highest-volume trigger anyone on
+the internet can fire, and it is not clear it changes issue-type authority at
+all. Confirm what the token can actually do first.
 
 Before enabling the schedule, run the workflow manually once with `dry_run: true`
-and then once against a single issue for real, to confirm the token can write.
+and then once against a single issue for real.
 
 ## Tests
 
@@ -179,3 +200,9 @@ go test ./...
   `adk_triaging_agent` are intentionally omitted. Both are natural extensions,
   but assignment in particular hands an attacker-influenced decision a much
   larger blast radius, so it would need its own allow-list of assignable logins.
+- **There is no per-actor rate limit.** Anyone can open issues, and each one
+  costs a model call. The bounds that exist are the constant concurrency group
+  (one run at a time) and `ISSUE_COUNT` per sweep, which cap the spend but do
+  not attribute it. A burst also pushes some event runs out of the queue, and
+  because the sweep takes the newest issues first, a sustained burst can leave
+  older untriaged issues unreached.

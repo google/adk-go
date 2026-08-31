@@ -60,31 +60,33 @@ func checkIssueArg(ctx context.Context, number int) (string, bool) {
 	return "", true
 }
 
-// errResult is a *model-readable* failure: the tool call succeeded as a Go
-// call, but the requested action was rejected (e.g. a disallowed label). It is
-// returned with a nil Go error so the model receives it as data and can correct
-// itself. Reserve real Go errors for infrastructure failures (network, API).
-// writeFailed handles a failed mutation for both tools.
+// writeFailed records a failed mutation and surfaces it as a real Go error, so
+// the run exits non-zero even though the framework also hands the error back to
+// the model as data.
 //
-// The need is released only for a write GitHub demonstrably did not apply. After
-// a transport error the request may have landed and only its response been lost,
-// and releasing would let the model claim the need again with a DIFFERENT value
-// — two labels, or a second type write.
-func (c *Client) writeFailed(err error, number int, release func(int)) (actionResult, error) {
-	if errors.Is(err, errNotApplied) {
-		release(number)
-	}
+// The claim the caller consumed stays consumed. See errNotApplied for why a
+// failed write does not re-open it.
+func (c *Client) writeFailed(err error) (actionResult, error) {
 	c.recordToolError()
 	return actionResult{}, err
 }
 
+// errResult is a *model-readable* failure: the tool call succeeded as a Go
+// call, but the requested action was rejected (e.g. a disallowed label). It is
+// returned with a nil Go error so the model receives it as data and can correct
+// itself. Reserve real Go errors for infrastructure failures (network, API).
 func errResult(format string, a ...any) actionResult {
 	return actionResult{Status: "error", Message: fmt.Sprintf(format, a...)}
 }
 
-// auditedIssueKey scopes a session to a single issue number. The runner builds
-// the invocation context from the context passed to Run (which embeds it), so a
-// value set here is visible to every tool via ctx.Value.
+// auditedIssueKey scopes a session to a single issue number.
+//
+// The runner's invocation context embeds the context.Context passed to Run
+// (adk/v2 internal/context/invocation_context.go builds it with Context: ctx,
+// and runner.Runner.Run hands it the caller's context), and agent.Context
+// embeds that in turn, so a value set here is visible to every tool through
+// ctx.Value. TestToolsRefuseAnOutOfScopeIssueThroughTheRealToolWrapper pins the
+// half of that chain this module owns.
 type auditedIssueKey struct{}
 
 // withAuditedIssue binds the issue this session is allowed to mutate.
@@ -130,8 +132,17 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 	if !claimed {
 		return errResult("issue #%d already has a type; not overwriting", number), nil
 	}
+	// Re-read before writing: the need was computed when the work set was
+	// fetched, and a maintainer may have set the type since.
+	fresh, err := c.confirmStillNeeded(ctx, number)
+	if err != nil {
+		return c.writeFailed(err)
+	}
+	if !fresh.typ {
+		return errResult("issue #%d now has a type; not overwriting", number), nil
+	}
 	if err := c.SetType(ctx, number, canonical); err != nil {
-		return c.writeFailed(err, number, c.releaseType)
+		return c.writeFailed(err)
 	}
 	return okResult("set issue #%d type to %s", number, canonical), nil
 }
@@ -156,8 +167,17 @@ func (c *Client) doAddLabel(ctx context.Context, number int, label string) (acti
 	if !claimed {
 		return errResult("issue #%d already has a categorization label; not adding another", number), nil
 	}
+	// Re-read before writing, for the same reason as the type: a maintainer may
+	// have added a categorization label since the work set was fetched.
+	fresh, err := c.confirmStillNeeded(ctx, number)
+	if err != nil {
+		return c.writeFailed(err)
+	}
+	if !fresh.label {
+		return errResult("issue #%d now has a categorization label; not adding another", number), nil
+	}
 	if err := c.AddLabel(ctx, number, canonical); err != nil {
-		return c.writeFailed(err, number, c.releaseLabel)
+		return c.writeFailed(err)
 	}
 	return okResult("added label %q to issue #%d", canonical, number), nil
 }

@@ -36,7 +36,34 @@ func testConfig() *Config {
 		Repo:          "adk-go",
 		AllowedLabels: defaultAllowedLabels,
 		IssueCount:    3,
+		// Non-zero on purpose. With a zero IssueTimeout every
+		// context.WithTimeout in triageOne yields an already-expired context, so
+		// a test could observe a dead context and never notice.
+		IssueTimeout: time.Minute,
+		SweepTimeout: 5 * time.Minute,
 	}
+}
+
+// untriagedIssueJSON is what the pre-write revalidation read (confirmStillNeeded
+// -> GetIssue) sees when issue #7 still needs both fields.
+const untriagedIssueJSON = `{"data":{"repository":{"issue":` +
+	`{"number":7,"title":"t","body":"b","issueType":null,"labels":{"nodes":[]}}}}}`
+
+// writeClient returns a client whose handler answers the pre-write revalidation
+// read (a POST to /graphql) with fresh, and routes the mutation itself to
+// mutate. Every write path re-reads the issue first, so a handler that only
+// knows about the mutation would fail the read instead.
+func writeClient(t *testing.T, cfg *Config, fresh string, mutate http.HandlerFunc) *Client {
+	t.Helper()
+	c := testClient(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			_, _ = io.WriteString(w, fresh)
+			return
+		}
+		mutate(w, r)
+	}))
+	c.authorized = make(map[int]need)
+	return c
 }
 
 func testClient(t *testing.T, cfg *Config, h http.Handler) *Client {
@@ -301,5 +328,102 @@ func TestDryRunMakesNoMutatingCalls(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("dry-run made %d HTTP calls, want 0", calls)
+	}
+}
+
+// An issue whose position shifts between cursor fetches can appear on two
+// pages. Without the dedupe each copy gets its own agent session -- a wasted
+// model call, and one fewer distinct issue triaged than count promises.
+//
+// Killing mutation: delete the `seen` check in ListUntriaged.
+func TestListUntriagedDedupesAcrossPages(t *testing.T) {
+	page1 := `{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"C2"},
+		"nodes":[{"number":1,"issueType":null,"labels":{"nodes":[]}}]}}}`
+	// #1 shifted onto page 2 as well; #2 is the genuinely new one.
+	page2 := `{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":""},
+		"nodes":[{"number":1,"issueType":null,"labels":{"nodes":[]}},
+		         {"number":2,"issueType":null,"labels":{"nodes":[]}}]}}}`
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables struct {
+				After string `json:"after"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables.After == "" {
+			_, _ = io.WriteString(w, page1)
+			return
+		}
+		_, _ = io.WriteString(w, page2)
+	}))
+	issues, err := c.ListUntriaged(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("ListUntriaged() error = %v", err)
+	}
+	if len(issues) != 2 || issues[0].Number != 1 || issues[1].Number != 2 {
+		t.Fatalf("got %+v, want issues 1 and 2 exactly once each", issues)
+	}
+}
+
+// A response claiming another page but carrying no cursor would otherwise make
+// the loop re-request the same page until maxSearchPages, returning the same
+// issues over and over.
+//
+// Killing mutation: drop the `|| ...EndCursor == ""` clause.
+func TestListUntriagedStopsOnAMissingCursor(t *testing.T) {
+	var pages int
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pages++
+		_, _ = io.WriteString(w, `{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":""},
+			"nodes":[{"number":1,"issueType":null,"labels":{"nodes":[]}}]}}}`)
+	}))
+	issues, err := c.ListUntriaged(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("ListUntriaged() error = %v", err)
+	}
+	if pages != 1 {
+		t.Errorf("fetched %d pages, want 1: a page with no cursor must end the walk", pages)
+	}
+	if len(issues) != 1 {
+		t.Errorf("got %d issues, want 1", len(issues))
+	}
+}
+
+// confirmStillNeeded is what stands between a stale snapshot and a clobbered
+// field, so it must report the CURRENT state rather than the one the sweep read.
+func TestConfirmStillNeededReflectsCurrentState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want need
+	}{
+		{
+			"nothing set yet",
+			`{"data":{"repository":{"issue":{"number":7,"issueType":null,"labels":{"nodes":[]}}}}}`,
+			need{typ: true, label: true},
+		},
+		{
+			"a human set both since the fetch",
+			`{"data":{"repository":{"issue":{"number":7,"issueType":{"name":"Bug"},"labels":{"nodes":[{"name":"bug"}]}}}}}`,
+			need{},
+		},
+		{
+			"only the label landed",
+			`{"data":{"repository":{"issue":{"number":7,"issueType":null,"labels":{"nodes":[{"name":"question"}]}}}}}`,
+			need{typ: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			got, err := c.confirmStillNeeded(context.Background(), 7)
+			if err != nil {
+				t.Fatalf("confirmStillNeeded() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("confirmStillNeeded() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

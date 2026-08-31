@@ -32,9 +32,18 @@ import (
 var ErrIssueNotFound = errors.New("issue not found")
 
 // errNotApplied reports a write GitHub accepted (HTTP 200) but did not apply,
-// which happens when the token lacks push access. It is distinguishable from a
-// transport error on purpose: only this case is safe to retry, because after a
-// transport error the write may have landed and only its response was lost.
+// which happens when the token lacks push access. It is a distinct sentinel so
+// the log names the likely cause rather than reporting a bare failure.
+//
+// It deliberately does NOT re-open the need. Deciding a write did not land is a
+// judgement about a response, and every version of that judgement has been
+// wrong in some case: the label read-back reports one page of an issue's labels,
+// so a successful add to a heavily labelled issue looks dropped, and a response
+// carrying no body at all decodes to a zero value that looks the same as a
+// dropped type. Re-opening on a write that did land lets the model claim the
+// need again with a DIFFERENT value, which is two labels on one issue. A claim
+// is therefore one-shot per (issue, field) per run, and a genuinely transient
+// failure is picked up by the next scheduled sweep.
 var errNotApplied = errors.New("github did not apply the change")
 
 // GraphQL page sizes. Named so the query and its variables cannot drift apart,
@@ -62,11 +71,10 @@ type Client struct {
 	log  *slog.Logger
 
 	// authorized maps each issue number the agent may mutate to the fields it
-	// still needs. It is the defense against prompt injection: a malicious issue
-	// body cannot make the agent act on an arbitrary issue, because only issues
-	// the bot legitimately targeted (the single -issue, or those returned by
-	// list_untriaged_issues) are authorized — and only for the fields that are
-	// actually missing, so an already-set type or label can't be overwritten.
+	// still needs. It is the second of the two gates in front of every mutation:
+	// only an issue the bot itself selected (the single -issue, or one the sweep
+	// picked) is in the map, and only for the fields that were missing when it
+	// was read, so an already-set type or label cannot be overwritten.
 	// Guarded by mu because the framework may execute tool calls concurrently.
 	mu         sync.Mutex
 	authorized map[int]need
@@ -87,9 +95,13 @@ func NewClient(cfg *Config, log *slog.Logger) *Client {
 }
 
 // authorize records that an issue may be mutated, for the given missing fields.
-// It merges with any existing authorization so a repeated list cannot resurrect
-// a need already satisfied this run (which would re-enable an overwrite): a field
-// stays needed only if it was needed before and still is.
+//
+// It merges rather than overwrites, so a second call for an issue cannot
+// resurrect a need already satisfied this run and re-enable an overwrite: a
+// field stays needed only if it was needed before and still is. triageOne is
+// the only caller and runs once per issue over a deduplicated work set, so the
+// merge is defense in depth against a future second call site rather than a
+// path exercised today.
 func (c *Client) authorize(number int, n need) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -108,8 +120,10 @@ func (c *Client) authorize(number int, n need) {
 // reservation (the type was still needed and is now marked satisfied). Reserving
 // before the network write is what makes the no-overwrite guarantee hold under
 // the framework's concurrent tool execution: of several same-issue calls in one
-// turn, exactly one can claim the need and reach the API. If the subsequent
-// write fails, the caller must releaseType so the field can be retried.
+// turn, exactly one can claim the need and reach the API.
+//
+// A claim is never returned. See errNotApplied for why a failed write does not
+// re-open it.
 func (c *Client) claimType(number int) (claimed, authorized bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,16 +137,6 @@ func (c *Client) claimType(number int) (claimed, authorized bool) {
 	n.typ = false
 	c.authorized[number] = n
 	return true, true
-}
-
-// releaseType restores a type need reserved by claimType, after a failed write.
-func (c *Client) releaseType(number int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if n, ok := c.authorized[number]; ok {
-		n.typ = true
-		c.authorized[number] = n
-	}
 }
 
 // claimLabel atomically reserves an issue's label need for a single mutation,
@@ -152,14 +156,16 @@ func (c *Client) claimLabel(number int) (claimed, authorized bool) {
 	return true, true
 }
 
-// releaseLabel restores a label need reserved by claimLabel, after a failed add.
-func (c *Client) releaseLabel(number int) {
+// revoke drops an issue's authorization entirely. triageOne calls it when the
+// session for that issue ends, so an authorization cannot outlive the session
+// that justified it and sit in the map for the rest of the sweep. The
+// per-session context scope already refuses a later cross-issue call, but
+// leaving stale entries would mean any future call site that forgot the scope
+// check could write to every issue the run had touched rather than to one.
+func (c *Client) revoke(number int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if n, ok := c.authorized[number]; ok {
-		n.label = true
-		c.authorized[number] = n
-	}
+	delete(c.authorized, number)
 }
 
 // recordToolError flags that a tool hit an infrastructure error this run.
@@ -291,7 +297,9 @@ func (c *Client) graphQL(ctx context.Context, query string, vars map[string]any,
 
 // ListUntriaged returns up to count open issues (newest first) that need an
 // issue type and/or a categorization label, optionally restricted to a
-// freshness window. Pull requests are excluded by querying type:ISSUE.
+// freshness window. Pull requests are excluded by the is:issue qualifier in the
+// search query; the number == 0 check below is a backstop for a node that did
+// not match the ... on Issue fragment.
 func (c *Client) ListUntriaged(ctx context.Context, count int) ([]Issue, error) {
 	q := fmt.Sprintf("repo:%s/%s is:issue is:open sort:created-desc", c.cfg.Owner, c.cfg.Repo)
 	if c.cfg.FreshnessWindow > 0 {
@@ -303,7 +311,7 @@ func (c *Client) ListUntriaged(ctx context.Context, count int) ([]Issue, error) 
 		out   []Issue
 		after string
 	)
-	// Dedupe across pages, as both siblings do. An issue whose position shifts
+	// Dedupe across pages. An issue whose position shifts
 	// between cursor fetches can appear on two pages, and each copy would get its
 	// own agent session -- a wasted model call, and one fewer distinct issue
 	// triaged than `count` promises.
@@ -346,6 +354,23 @@ func (c *Client) ListUntriaged(ctx context.Context, count int) ([]Issue, error) 
 	return out, nil
 }
 
+// confirmStillNeeded re-reads an issue and reports which fields are still
+// missing, immediately before a write.
+//
+// The work set is chosen once, and a sweep can reach the last issue up to
+// SweepTimeout after it was read. Deciding against that snapshot alone would
+// let the bot clobber a type a maintainer set inside that window -- the
+// no-overwrite guarantee would hold only against itself. This narrows the
+// window to one round trip, which is as close to a conditional update as the
+// GitHub issues API gets.
+func (c *Client) confirmStillNeeded(ctx context.Context, number int) (need, error) {
+	iss, err := c.GetIssue(ctx, number)
+	if err != nil {
+		return need{}, err
+	}
+	return needsTriage(iss, c.cfg.AllowedLabels), nil
+}
+
 // GetIssue fetches a single issue by number. It returns ErrIssueNotFound if the
 // issue does not exist or is a pull request.
 func (c *Client) GetIssue(ctx context.Context, number int) (Issue, error) {
@@ -381,7 +406,7 @@ func (c *Client) SetType(ctx context.Context, number int, issueType string) erro
 	u := fmt.Sprintf("repos/%s/%s/issues/%d", c.cfg.Owner, c.cfg.Repo, number)
 	req, err := c.rest.NewRequest("PATCH", u, map[string]any{"type": issueType})
 	if err != nil {
-		return fmt.Errorf("build set-type request (nothing was sent): %w: %w", errNotApplied, err)
+		return fmt.Errorf("build set-type request (nothing was sent): %w", err)
 	}
 	// Setting a type requires push access; without it GitHub returns 200 with the
 	// issue unchanged, silently dropping the type. Read back the response and

@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/model"
 )
 
@@ -128,16 +130,30 @@ func TestMutatingToolsRefuseOutOfScopeIssue(t *testing.T) {
 	}
 }
 
-// With no scope in the context at all the tools must fail closed.
+// With no scope in the context at all both tools must fail closed.
 func TestMutatingToolsRefuseUnscopedSession(t *testing.T) {
-	c := &Client{cfg: testConfig(), log: discardLogger()}
-	c.authorize(5, need{typ: true, label: true})
-	res, err := c.doChangeType(context.Background(), 5, "Bug")
-	if err != nil {
-		t.Fatalf("doChangeType error = %v", err)
-	}
-	if res.Status != "error" || !strings.Contains(res.Message, "no issue is authorized") {
-		t.Errorf("doChangeType = %+v, want a fail-closed refusal", res)
+	for _, tc := range []struct {
+		name string
+		act  func(*Client) (actionResult, error)
+	}{
+		{"doChangeType", func(c *Client) (actionResult, error) {
+			return c.doChangeType(context.Background(), 5, "Bug")
+		}},
+		{"doAddLabel", func(c *Client) (actionResult, error) {
+			return c.doAddLabel(context.Background(), 5, "bug")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{cfg: testConfig(), log: discardLogger()}
+			c.authorize(5, need{typ: true, label: true})
+			res, err := tc.act(c)
+			if err != nil {
+				t.Fatalf("%s error = %v", tc.name, err)
+			}
+			if res.Status != "error" || !strings.Contains(res.Message, "no issue is authorized") {
+				t.Errorf("%s = %+v, want a fail-closed refusal", tc.name, res)
+			}
+		})
 	}
 }
 
@@ -191,11 +207,32 @@ func TestSweepStopsWhenBudgetExhausted(t *testing.T) {
 	}
 }
 
-// The happy path must return nil, not an empty joined error.
+// The happy path must return nil, not an empty joined error. Asserting the
+// callback ran matters: without it the test also passes when sweep never
+// iterates at all.
 func TestSweepReturnsNilWhenAllSucceed(t *testing.T) {
+	ran := 0
 	if err := sweep(context.Background(), []Issue{{Number: 1}}, time.Minute, discardLogger(),
-		func(context.Context, Issue) error { return nil }); err != nil {
+		func(context.Context, Issue) error { ran++; return nil }); err != nil {
 		t.Errorf("sweep() = %v, want nil", err)
+	}
+	if ran != 1 {
+		t.Errorf("triageFn ran %d times, want 1", ran)
+	}
+}
+
+// Parts is []*genai.Part, so a null entry in the model's response arrives as a
+// nil element. Dereferencing it would panic out of sweep's continue-on-error
+// loop and take every remaining issue with it.
+//
+// Killing mutation: drop the nil check from joinText.
+func TestJoinTextSkipsNilParts(t *testing.T) {
+	got := joinText([]*genai.Part{nil, {Text: "  hello"}, nil, {Text: " world  "}, nil})
+	if got != "hello world" {
+		t.Errorf("joinText() = %q, want %q", got, "hello world")
+	}
+	if got := joinText(nil); got != "" {
+		t.Errorf("joinText(nil) = %q, want empty", got)
 	}
 }
 
@@ -206,7 +243,8 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 	base := func() *Config {
 		return &Config{
 			GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
-			IssueCount: 3, IssueTimeout: 5 * time.Minute, SweepTimeout: 15 * time.Minute,
+			AllowedLabels: defaultAllowedLabels,
+			IssueCount:    3, IssueTimeout: 5 * time.Minute, SweepTimeout: 15 * time.Minute,
 		}
 	}
 	if err := base().validate(); err != nil {
@@ -220,6 +258,12 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		{"zero sweep", func(c *Config) { c.SweepTimeout = 0 }, "SWEEP_TIMEOUT"},
 		{"negative issue", func(c *Config) { c.IssueTimeout = -1 }, "ISSUE_TIMEOUT"},
 		{"sweep below issue", func(c *Config) { c.SweepTimeout = time.Minute }, "at least"},
+		{"zero count", func(c *Config) { c.IssueCount = 0 }, "ISSUE_COUNT"},
+		{"negative freshness", func(c *Config) { c.FreshnessWindow = -time.Hour }, "FRESHNESS_WINDOW_DAYS"},
+		// Only SingleIssue > 0 selects single-issue mode, so a negative value
+		// would otherwise turn "triage issue -5" into a full backlog sweep.
+		{"negative single issue", func(c *Config) { c.SingleIssue = -5 }, "-issue"},
+		{"no usable labels", func(c *Config) { c.AllowedLabels = nil }, "ALLOWED_LABELS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := base()
@@ -275,6 +319,10 @@ func TestRunBudgetCoversModelConstruction(t *testing.T) {
 // Drives the REAL triageOne. The previous version re-executed its two lines by
 // hand, so the mutation it claimed to catch -- opening the authorize argument --
 // never touched anything the test ran.
+//
+// The assertions run INSIDE runFn because the authorization is scoped to the
+// session: triageOne revokes it on return, and checking afterwards would be
+// checking the wrong moment.
 func TestTriageOneAuthorizesOnlyTheMissingFields(t *testing.T) {
 	c := &Client{cfg: testConfig(), log: discardLogger()}
 	// A human already set the type; only the label is missing.
@@ -288,6 +336,21 @@ func TestTriageOneAuthorizesOnlyTheMissingFields(t *testing.T) {
 			if msg, ok := authorizeIssue(ictx, iss.Number); !ok {
 				t.Errorf("session was not scoped to issue #%d: %s", iss.Number, msg)
 			}
+			// The per-issue timeout must be live, not already spent. With a zero
+			// IssueTimeout this context would arrive dead and nothing would say so.
+			if _, ok := ictx.Deadline(); !ok {
+				t.Error("the session context carries no deadline; IssueTimeout was not applied")
+			}
+			if ictx.Err() != nil {
+				t.Errorf("the session context is already done: %v", ictx.Err())
+			}
+			// The human-set type must be refused, the missing label still claimable.
+			if claimed, authorized := c.claimType(7); claimed || !authorized {
+				t.Errorf("claimType(7) = (%t, %t), want (false, true): a human set the type", claimed, authorized)
+			}
+			if claimed, _ := c.claimLabel(7); !claimed {
+				t.Error("the label need should be open")
+			}
 			return nil
 		})
 	if err != nil {
@@ -296,17 +359,34 @@ func TestTriageOneAuthorizesOnlyTheMissingFields(t *testing.T) {
 	if sawPrompt == "" {
 		t.Fatal("runFn was never called")
 	}
+}
 
-	// The human-set type must be refused, the missing label still claimable.
-	res, err := c.doChangeType(scoped(7), 7, "Feature")
+// An authorization must not outlive the session that justified it. Leaving it
+// in the map for the rest of the sweep would mean a future call site that
+// forgot the scope check could write to every issue the run had touched.
+//
+// Killing mutation: delete the `defer client.revoke(...)` from triageOne.
+func TestTriageOneRevokesTheAuthorizationWhenTheSessionEnds(t *testing.T) {
+	c := &Client{cfg: testConfig(), log: discardLogger()}
+	ran := false
+	err := triageOne(context.Background(), c, c.cfg, discardLogger(),
+		Issue{Number: 7, Title: "t", Body: "b"},
+		func(ictx context.Context, _ string) error {
+			ran = true
+			// Authorized while the session is live.
+			if _, authorized := c.claimType(7); !authorized {
+				t.Error("issue #7 was not authorized during its own session")
+			}
+			return nil
+		})
 	if err != nil {
-		t.Fatalf("doChangeType returned a Go error: %v", err)
+		t.Fatalf("triageOne: %v", err)
 	}
-	if res.Status != "error" || !strings.Contains(res.Message, "not overwriting") {
-		t.Errorf("doChangeType = %+v, want a refusal: a human set the type", res)
+	if !ran {
+		t.Fatal("runFn was never called")
 	}
-	if claimed, _ := c.claimLabel(7); !claimed {
-		t.Error("the label need should still be open")
+	if _, authorized := c.claimLabel(7); authorized {
+		t.Error("issue #7 is still authorized after its session ended")
 	}
 }
 

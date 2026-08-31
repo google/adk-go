@@ -16,9 +16,11 @@ package main
 
 import "strings"
 
-// Issue is the normalized view of a GitHub issue used for triage decisions and
-// returned to the model. It is deliberately small: only the fields needed to
-// classify and act. The json tags shape what the model sees.
+// Issue is the normalized view of a GitHub issue used for triage decisions. It
+// is deliberately small: only the fields needed to classify and act. The struct
+// is never handed to the model as JSON -- the title and body reach it only
+// through the fenced prompt buildIssuePrompt renders -- but the tags keep the
+// GraphQL decode and this view named consistently.
 type Issue struct {
 	Number int      `json:"number"`
 	Title  string   `json:"title"`
@@ -88,8 +90,12 @@ func canonicalType(t string) (string, bool) {
 }
 
 // truncate shortens s to at most n runes, appending an ellipsis marker when it
-// trims. Keeps very long issue bodies from bloating the prompt.
+// trims. Keeps very long issue bodies from bloating the prompt. A non-positive
+// n truncates to nothing rather than panicking on the slice.
 func truncate(s string, n int) string {
+	if n <= 0 {
+		return "\n…[truncated]"
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s

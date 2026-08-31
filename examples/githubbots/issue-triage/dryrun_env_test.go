@@ -14,13 +14,16 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// DRY_RUN is the ONLY channel the reusable workflow uses to request a dry run:
-// it sets the environment variable and never passes the -dry-run flag. The rest
-// of the config suite asserts dry-run through the flag, so severing the env var
-// from the flag default leaves those tests green while a caller's
-// `dry_run: true` silently mutates live issues. This test pins the env path.
+// DRY_RUN is the ONLY channel the workflow uses to request a dry run: it sets
+// the environment variable and never passes the -dry-run flag. The rest of the
+// config suite asserts dry-run through the flag, so severing the env var from
+// the flag default would leave those tests green while a `dry_run: true`
+// dispatch silently mutated live issues. This test pins the env path.
 func TestLoadConfigDryRunFromEnv(t *testing.T) {
 	for _, tc := range []struct {
 		env  string
@@ -29,6 +32,8 @@ func TestLoadConfigDryRunFromEnv(t *testing.T) {
 		{"true", true},
 		{"false", false},
 		{"", false},
+		{"1", true},
+		{"0", false},
 	} {
 		t.Run("DRY_RUN="+tc.env, func(t *testing.T) {
 			setRequired(t)
@@ -39,6 +44,38 @@ func TestLoadConfigDryRunFromEnv(t *testing.T) {
 			}
 			if cfg.DryRun != tc.want {
 				t.Errorf("DRY_RUN=%q gave DryRun=%v, want %v", tc.env, cfg.DryRun, tc.want)
+			}
+		})
+	}
+}
+
+// A malformed DRY_RUN must abort, not fall back to the default. The default is
+// "act for real", so an operator who writes DRY_RUN=yes -- which
+// strconv.ParseBool rejects -- would otherwise get live writes having asked for
+// a rehearsal. The same reasoning covers the bounds: a malformed
+// FRESHNESS_WINDOW_DAYS would silently widen the sweep to the whole backlog.
+//
+// Killing mutation: return the default instead of recording the error in any
+// envReader method.
+func TestLoadConfigRejectsAMalformedEnvValue(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"DRY_RUN", "yes"},
+		{"DRY_RUN", "on"},
+		{"ISSUE_COUNT", "many"},
+		{"FRESHNESS_WINDOW_DAYS", "7d"},
+		{"ISSUE_TIMEOUT", "5min"},
+		{"SWEEP_TIMEOUT", "15"},
+		{"GOOGLE_GENAI_USE_VERTEXAI", "yes"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(tc.key, tc.value)
+			cfg, err := loadConfig(nil)
+			if err == nil {
+				t.Fatalf("loadConfig() = %+v, nil error; want a rejection of %s=%q", cfg, tc.key, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("loadConfig() = %v, want the error to name %s", err, tc.key)
 			}
 		})
 	}

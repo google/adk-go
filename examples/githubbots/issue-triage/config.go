@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -62,13 +63,23 @@ type Config struct {
 	DryRun bool
 	// SingleIssue, when > 0, triages only that issue instead of sweeping.
 	SingleIssue int
+	// UseVertexAI reports whether the genai SDK should reach Vertex AI through
+	// Application Default Credentials instead of a Gemini API key.
+	UseVertexAI bool
 }
 
 // loadConfig parses configuration from flags (args) and environment variables.
 // args is injectable so tests can exercise flag parsing.
 func loadConfig(args []string) (*Config, error) {
+	// Read the environment through a reader that collects parse failures rather
+	// than substituting the default. Falling back on a malformed value turns
+	// DRY_RUN=yes -- which strconv.ParseBool rejects -- into "act for real",
+	// the opposite of what the operator asked for, and it turns
+	// FRESHNESS_WINDOW_DAYS=7d into a sweep of the entire backlog instead of a
+	// week. A control that degrades to "off" on a typo is not a control.
+	env := &envReader{}
 	fs := flag.NewFlagSet("issue-triage", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "Log intended actions without modifying any issues.")
+	dryRun := fs.Bool("dry-run", env.boolean("DRY_RUN", false), "Log intended actions without modifying any issues.")
 	singleIssue := fs.Int("issue", 0, "Triage only this issue number (0 = sweep untriaged issues).")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -84,12 +95,16 @@ func loadConfig(args []string) (*Config, error) {
 		GeminiAPIKey:    firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
 		Model:           envString("LLM_MODEL_NAME", "gemini-flash-latest"),
 		AllowedLabels:   splitList(envString("ALLOWED_LABELS", strings.Join(defaultAllowedLabels, ","))),
-		IssueCount:      envInt("ISSUE_COUNT", 3),
-		FreshnessWindow: envDays("FRESHNESS_WINDOW_DAYS", 0),
-		IssueTimeout:    envDuration("ISSUE_TIMEOUT", 5*time.Minute),
-		SweepTimeout:    envDuration("SWEEP_TIMEOUT", 15*time.Minute),
+		IssueCount:      env.integer("ISSUE_COUNT", 3),
+		FreshnessWindow: env.days("FRESHNESS_WINDOW_DAYS", 0),
+		IssueTimeout:    env.duration("ISSUE_TIMEOUT", 5*time.Minute),
+		SweepTimeout:    env.duration("SWEEP_TIMEOUT", 15*time.Minute),
 		DryRun:          *dryRun,
 		SingleIssue:     *singleIssue,
+		UseVertexAI:     env.boolean("GOOGLE_GENAI_USE_VERTEXAI", false),
+	}
+	if err := env.err(); err != nil {
+		return nil, err
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -111,7 +126,7 @@ func (c *Config) validate() error {
 	// A Gemini API key is the simplest path, but Vertex AI via ADC is also
 	// supported; in that case the genai SDK reads its configuration from the
 	// environment (GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT, ...).
-	if c.GeminiAPIKey == "" && !envBool("GOOGLE_GENAI_USE_VERTEXAI", false) {
+	if c.GeminiAPIKey == "" && !c.UseVertexAI {
 		missing = append(missing, "GEMINI_API_KEY (or set GOOGLE_GENAI_USE_VERTEXAI=true for Vertex AI)")
 	}
 	if len(missing) > 0 {
@@ -128,10 +143,19 @@ func (c *Config) validate() error {
 		return fmt.Errorf("SWEEP_TIMEOUT (%s) must be at least ISSUE_TIMEOUT (%s)", c.SweepTimeout, c.IssueTimeout)
 	}
 	if c.IssueCount < 1 {
-		c.IssueCount = 1
+		return fmt.Errorf("ISSUE_COUNT must be at least 1, got %d", c.IssueCount)
+	}
+	if c.FreshnessWindow < 0 {
+		return fmt.Errorf("FRESHNESS_WINDOW_DAYS must not be negative, got %s", c.FreshnessWindow)
+	}
+	// A negative -issue is neither a valid issue number nor a request to sweep.
+	// Only SingleIssue > 0 selects single-issue mode, so letting a negative
+	// through would quietly turn "triage issue -5" into a full backlog sweep.
+	if c.SingleIssue < 0 {
+		return fmt.Errorf("-issue must not be negative, got %d", c.SingleIssue)
 	}
 	if len(c.AllowedLabels) == 0 {
-		c.AllowedLabels = defaultAllowedLabels
+		return errors.New("ALLOWED_LABELS is set but contains no usable label")
 	}
 	return nil
 }
@@ -166,50 +190,66 @@ func splitList(s string) []string {
 	return out
 }
 
-func envInt(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
+// envReader reads typed environment variables, recording a parse failure rather
+// than silently returning the default. Every value it reads is either a safety
+// switch (DRY_RUN) or a bound on how much the bot does, so "malformed" must not
+// collapse into "absent".
+type envReader struct{ errs []error }
+
+func (e *envReader) fail(key, value string, err error) {
+	e.errs = append(e.errs, fmt.Errorf("%s=%q is not valid: %w", key, value, err))
 }
 
-func envBool(key string, def bool) bool {
+func (e *envReader) err() error { return errors.Join(e.errs...) }
+
+func (e *envReader) boolean(key string, def bool) bool {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		e.fail(key, v, err)
 		return def
 	}
 	return b
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
+func (e *envReader) integer(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		e.fail(key, v, err)
+		return def
+	}
+	return n
+}
+
+func (e *envReader) duration(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		e.fail(key, v, err)
 		return def
 	}
 	return d
 }
 
-// envDays reads a (possibly fractional) number of days and returns a Duration.
-func envDays(key string, def time.Duration) time.Duration {
+// days reads a (possibly fractional) number of days and returns a Duration.
+func (e *envReader) days(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	days, err := strconv.ParseFloat(v, 64)
 	if err != nil {
+		e.fail(key, v, err)
 		return def
 	}
 	return time.Duration(days * float64(24*time.Hour))
