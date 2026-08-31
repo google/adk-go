@@ -1000,3 +1000,123 @@ func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
 		t.Errorf("model called %d times, want %d; the consecutive-turn count did not reset on the non-final turn", m.calls, want)
 	}
 }
+
+// TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
+// when the last event from runOneStep has Partial=true.
+// This is a regression test for https://github.com/google/adk-go/issues/600.
+func TestFlowRunPartialLastEvent(t *testing.T) {
+	tests := []struct {
+		name              string
+		modelResponses    []*model.LLMResponse
+		requestProcessors []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
+		wantTexts         []string
+	}{
+		{
+			name: "single partial response completes without error",
+			modelResponses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts: []string{"Hello"},
+		},
+		{
+			name: "multiple partial responses complete without error",
+			modelResponses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+				{
+					Content: genai.NewContentFromText(" World", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts: []string{"Hello", " World"},
+		},
+		{
+			name: "trailing partial from sub-agent completes without error",
+			requestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
+				func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "sub-agent"
+						ev.LLMResponse = model.LLMResponse{
+							Content: genai.NewContentFromText("I am a sub-agent", genai.RoleModel),
+							Partial: true,
+						}
+						yield(ev, nil)
+					}
+				},
+			},
+			wantTexts: []string{"I am a sub-agent"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockAgent, err := agent.New(agent.Config{Name: "test-agent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+				StreamingMode: runconfig.StreamingModeSSE,
+			})
+
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Agent: mockAgent,
+			})
+
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.modelResponses {
+							if !yield(r, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+
+			f := &Flow{
+				Model:             m,
+				RequestProcessors: tc.requestProcessors,
+			}
+
+			var gotTexts []string
+			var gotErr error
+			// Bound the consumer so a regression fails the test instead of hanging it.
+			const safetyLimit = 50
+			eventsCount := 0
+			for ev, err := range f.Run(invCtx) {
+				if err != nil {
+					gotErr = err
+					break
+				}
+				eventsCount++
+				if eventsCount > safetyLimit {
+					t.Fatalf("Flow.Run() did not terminate: yielded >%d events", safetyLimit)
+				}
+				if ev != nil && ev.Content != nil {
+					for _, p := range ev.Content.Parts {
+						if p.Text != "" {
+							gotTexts = append(gotTexts, p.Text)
+						}
+					}
+				}
+			}
+
+			if gotErr != nil {
+				t.Errorf("Flow.Run() returned unexpected error: %v", gotErr)
+			}
+
+			if diff := cmp.Diff(tc.wantTexts, gotTexts); diff != "" {
+				t.Errorf("Flow.Run() text mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
