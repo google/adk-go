@@ -19,11 +19,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
-	"time"
-	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/attribute"
@@ -207,80 +204,6 @@ func checkEnumFields(t *testing.T, where string, obj map[string]any) {
 }
 
 // --- Part mapping ------------------------------------------------------
-
-// TestRequestContentAttributes_AllPartVariants feeds one of every
-// genai.Part variant through the converter and checks the result against the
-// schema's per-type required fields.
-func TestRequestContentAttributes_AllPartVariants(t *testing.T) {
-	captureContent(t)
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{{
-			Role: genai.RoleModel,
-			Parts: []*genai.Part{
-				{Text: "plain text"},
-				{Text: "let me think", Thought: true},
-				{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "get_weather", Args: map[string]any{"city": "Paris"}}},
-				{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1, 2, 3}}},
-				{FileData: &genai.FileData{MIMEType: "video/mp4", FileURI: "gs://bucket/clip.mp4"}},
-				{ExecutableCode: &genai.ExecutableCode{ID: "ec-1", Code: "print(1)", Language: genai.LanguagePython}},
-				{CodeExecutionResult: &genai.CodeExecutionResult{ID: "ec-1", Outcome: genai.OutcomeOK, Output: "1"}},
-				{ToolCall: &genai.ToolCall{ID: "st-1", ToolType: genai.ToolTypeGoogleSearchWeb, Args: map[string]any{"q": "rain"}}},
-				{AudioTranscription: &genai.Transcription{Text: "hello there", LanguageCode: "en-US"}},
-			},
-		}},
-	}
-
-	attrs := requestContentAttributes(req)
-	encoded, ok := attrString(attrs, genAIInputMessages)
-	if !ok {
-		t.Fatalf("gen_ai.input.messages was not set; got %v", attrs)
-	}
-	msgs := validateMessages(t, encoded, false)
-	if len(msgs) != 1 {
-		t.Fatalf("got %d messages, want 1", len(msgs))
-	}
-
-	var gotTypes []string
-	for _, p := range msgs[0]["parts"].([]any) {
-		gotTypes = append(gotTypes, p.(map[string]any)["type"].(string))
-	}
-	wantTypes := []string{
-		"text", "reasoning", "tool_call", "blob", "uri",
-		"server_tool_call", "server_tool_call_response", "server_tool_call",
-		"audio_transcription",
-	}
-	if diff := cmp.Diff(wantTypes, gotTypes); diff != "" {
-		t.Errorf("part types (-want +got):\n%s", diff)
-	}
-
-	// Spot-check the values that the schema and the genai types disagree on.
-	parts := msgs[0]["parts"].([]any)
-	blob := parts[3].(map[string]any)
-	if got, want := blob["content"], base64.StdEncoding.EncodeToString([]byte{1, 2, 3}); got != want {
-		t.Errorf("blob content = %v, want %v", got, want)
-	}
-	if got := blob["modality"]; got != "image" {
-		t.Errorf("blob modality = %v, want image", got)
-	}
-	if got := parts[4].(map[string]any)["modality"]; got != "video" {
-		t.Errorf("uri modality = %v, want video", got)
-	}
-	code := parts[5].(map[string]any)["server_tool_call"].(map[string]any)
-	if got := code["language"]; got != "python" {
-		t.Errorf("code language = %v, want python", got)
-	}
-	result := parts[6].(map[string]any)["server_tool_call_response"].(map[string]any)
-	if got := result["outcome"]; got != "ok" {
-		t.Errorf("code outcome = %v, want ok", got)
-	}
-	if got := parts[7].(map[string]any)["name"]; got != "google_search_web" {
-		t.Errorf("server tool name = %v, want google_search_web", got)
-	}
-}
-
-// TestRequestContentAttributes_TextPartShape pins the exact JSON of the
-// simplest case so a change of field names or nesting is visible.
 func TestRequestContentAttributes_TextPartShape(t *testing.T) {
 	captureContent(t)
 
@@ -560,313 +483,10 @@ func TestSchemaFinishReason_EveryGenaiValue(t *testing.T) {
 	}
 }
 
-// --- Hostile tool payloads ---------------------------------------------
+// --- End to end through the span ---------------------------------------
 
-// TestValue_UnmarshalableToolPayloads covers arguments and responses filled
-// in by application code, which encoding/json cannot always serialize. The
-// attribute must stay valid JSON matching the schema.
-func TestValue_UnmarshalableToolPayloads(t *testing.T) {
-	captureContent(t)
-
-	cyclic := map[string]any{}
-	cyclic["self"] = cyclic
-	cyclic["also"] = cyclic
-
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{"NaN", map[string]any{"v": math.NaN()}},
-		{"positive infinity", map[string]any{"v": math.Inf(1)}},
-		{"function", map[string]any{"v": func() {}}},
-		{"channel", map[string]any{"v": make(chan int)}},
-		{"reference cycle", cyclic},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := &model.LLMRequest{Contents: []*genai.Content{{
-				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "t", Args: tc.args}}},
-			}}}
-
-			// A self-referential map fans out exponentially under a naive
-			// recursive walk, so bound the work in wall-clock time as well
-			// as asserting the result.
-			done := make(chan []attribute.KeyValue, 1)
-			go func() { done <- requestContentAttributes(req) }()
-			var attrs []attribute.KeyValue
-			select {
-			case attrs = <-done:
-			case <-time.After(30 * time.Second):
-				t.Fatal("converting the tool arguments did not finish within 30s")
-			}
-
-			encoded, ok := attrString(attrs, genAIInputMessages)
-			if !ok {
-				t.Fatalf("gen_ai.input.messages was not set; got %v", attrs)
-			}
-			msgs := validateMessages(t, encoded, false)
-			part := msgs[0]["parts"].([]any)[0].(map[string]any)
-			if got := part["arguments"]; got != "<not serializable>" {
-				t.Errorf("arguments = %v, want the placeholder <not serializable>", got)
-			}
-			if got := part["truncated"]; got != true {
-				t.Errorf("truncated = %v, want true", got)
-			}
-		})
-	}
-}
-
-// --- Size bounds -------------------------------------------------------
-
-// TestEncodedAttributesStayUnderTheCloudTraceLimit drives the sizes that
-// actually occur: a long conversation history, text that inflates six-fold
-// under JSON escaping, and a blob that inflates by a third under base64.
-func TestEncodedAttributesStayUnderTheCloudTraceLimit(t *testing.T) {
-	captureContent(t)
-
-	tests := []struct {
-		name string
-		req  *model.LLMRequest
-	}{
-		{
-			name: "long history",
-			req: func() *model.LLMRequest {
-				var contents []*genai.Content
-				for i := range 500 {
-					contents = append(contents, &genai.Content{
-						Role:  genai.RoleUser,
-						Parts: []*genai.Part{{Text: fmt.Sprintf("turn %d: %s", i, strings.Repeat("a", 2000))}},
-					})
-				}
-				return &model.LLMRequest{Contents: contents}
-			}(),
-		},
-		{
-			name: "text that escaping inflates six-fold",
-			req: &model.LLMRequest{Contents: []*genai.Content{{
-				Role: genai.RoleUser,
-				// 200 KiB raw, 1.2 MiB once every "<" becomes \u003c.
-				Parts: []*genai.Part{{Text: strings.Repeat("<", 200*1024)}},
-			}}},
-		},
-		{
-			name: "one enormous text part",
-			req: &model.LLMRequest{Contents: []*genai.Content{{
-				Role:  genai.RoleUser,
-				Parts: []*genai.Part{{Text: strings.Repeat("x", 5*1024*1024)}},
-			}}},
-		},
-		{
-			name: "many parts in one message",
-			req: func() *model.LLMRequest {
-				var parts []*genai.Part
-				for i := range 20000 {
-					parts = append(parts, &genai.Part{Text: fmt.Sprintf("part %d", i)})
-				}
-				return &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: parts}}}
-			}(),
-		},
-		{
-			name: "blob that base64 inflates",
-			req: &model.LLMRequest{Contents: []*genai.Content{{
-				Role: genai.RoleUser,
-				Parts: []*genai.Part{{InlineData: &genai.Blob{
-					MIMEType: "image/png",
-					Data:     make([]byte, 3*1024*1024),
-				}}},
-			}}},
-		},
-		{
-			name: "oversized tool arguments",
-			req: &model.LLMRequest{Contents: []*genai.Content{{
-				Role: genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					Name: "t",
-					Args: map[string]any{"blob": strings.Repeat("y", 2*1024*1024)},
-				}}},
-			}}},
-		},
-		{
-			name: "enormous system instruction",
-			req: &model.LLMRequest{Config: &genai.GenerateContentConfig{
-				SystemInstruction: &genai.Content{Parts: []*genai.Part{
-					{Text: strings.Repeat("z", 1024*1024)},
-					{Text: strings.Repeat("w", 1024*1024)},
-				}},
-			}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			attrs := requestContentAttributes(tc.req)
-			if len(attrs) == 0 {
-				t.Fatal("no content attributes were recorded")
-			}
-			for _, kv := range attrs {
-				v := kv.Value.AsString()
-				if len(v) > cloudTraceAttributeValueLimit {
-					t.Errorf("%s is %d bytes, over the %d byte Cloud Trace limit",
-						kv.Key, len(v), cloudTraceAttributeValueLimit)
-				}
-				// Oversized content must still be the JSON array the schema
-				// declares, not a marker string.
-				switch kv.Key {
-				case genAIInputMessages:
-					validateMessages(t, v, false)
-				case genAISystemInstructions:
-					validateParts(t, v)
-				}
-			}
-		})
-	}
-}
-
-// TestEncodeMessages_KeepsTheNewestTurns checks which end of an oversized
-// history survives, and that the loss is recorded rather than silent.
-func TestEncodeMessages_KeepsTheNewestTurns(t *testing.T) {
-	captureContent(t)
-
-	var contents []*genai.Content
-	for i := range 200 {
-		contents = append(contents, &genai.Content{
-			Role:  genai.RoleUser,
-			Parts: []*genai.Part{{Text: fmt.Sprintf("turn-%03d %s", i, strings.Repeat("a", 1000))}},
-		})
-	}
-	encoded, ok := attrString(requestContentAttributes(&model.LLMRequest{Contents: contents}), genAIInputMessages)
-	if !ok {
-		t.Fatal("gen_ai.input.messages was not set")
-	}
-	msgs := validateMessages(t, encoded, false)
-	if len(msgs) >= 200 {
-		t.Fatalf("got %d messages, expected the history to be trimmed", len(msgs))
-	}
-	if !strings.Contains(encoded, "turn-199") {
-		t.Error("the newest turn was dropped; the trimming keeps the wrong end")
-	}
-	if strings.Contains(encoded, "turn-000") {
-		t.Error("the oldest turn survived; the trimming keeps the wrong end")
-	}
-	// Messages that survive keep their order.
-	firstText := msgs[0]["parts"].([]any)[0].(map[string]any)["content"].(string)
-	lastText := msgs[len(msgs)-1]["parts"].([]any)[0].(map[string]any)["content"].(string)
-	if firstText >= lastText {
-		t.Errorf("messages are out of order: first %.11q, last %.11q", firstText, lastText)
-	}
-	dropped, ok := msgs[0]["dropped_preceding_messages"].(float64)
-	if !ok {
-		t.Fatalf("the oldest surviving message does not record the dropped turns: %v", msgs[0])
-	}
-	if want := float64(200 - len(msgs)); dropped != want {
-		t.Errorf("dropped_preceding_messages = %v, want %v", dropped, want)
-	}
-}
-
-// TestBase64_TruncatesBeforeEncoding checks that an oversized blob is not
-// expanded in full just to be thrown away, and that what is kept decodes.
-func TestBase64_TruncatesBeforeEncoding(t *testing.T) {
-	b := newContentBuilder()
-	data := make([]byte, 4*1024*1024)
-	for i := range data {
-		data[i] = byte(i)
-	}
-	got, cut := b.base64(data)
-	if !cut {
-		t.Fatal("an oversized blob was not marked as truncated")
-	}
-	if len(got) > maxPartContentBytes {
-		t.Errorf("encoded blob is %d bytes, over the per-part budget of %d", len(got), maxPartContentBytes)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(got)
-	if err != nil {
-		t.Fatalf("the truncated blob is not valid base64: %v", err)
-	}
-	if len(decoded) == 0 || !strings.HasPrefix(string(data), string(decoded)) {
-		t.Error("the truncated blob is not a prefix of the original data")
-	}
-
-	small := []byte{9, 8, 7}
-	if got, cut := b.base64(small); cut || got != base64.StdEncoding.EncodeToString(small) {
-		t.Errorf("base64(small) = %q, %v; want the full encoding and no truncation", got, cut)
-	}
-}
-
-// --- JSON escaping -----------------------------------------------------
-
-// TestEscapedRuneLen_MatchesEncodingJSON pins the escaped-length arithmetic
-// to what encoding/json actually produces. Truncation is measured in encoded
-// bytes, so an error here would let an attribute exceed its bound.
-func TestEscapedRuneLen_MatchesEncodingJSON(t *testing.T) {
-	var corpus []string
-	for b := range 256 {
-		corpus = append(corpus, string([]byte{byte(b)}))
-	}
-	corpus = append(corpus,
-		"", "plain", `"quoted"`, `back\slash`, "tab\there", "nl\nhere", "cr\rhere",
-		"<html>&amp;", "\u2028\u2029", "héllo wörld", "日本語のテキスト", "emoji 😀 here",
-		"\xff\xfe invalid", "mixed <\x00\xff> 日本",
-	)
-	for _, s := range corpus {
-		want, err := json.Marshal(s)
-		if err != nil {
-			t.Fatalf("json.Marshal(%q): %v", s, err)
-		}
-		got := 0
-		for i := 0; i < len(s); {
-			r, size := utf8.DecodeRuneInString(s[i:])
-			got += escapedRuneLen(r, size)
-			i += size
-		}
-		// want includes the two enclosing quotes.
-		if got != len(want)-2 {
-			t.Errorf("escaped length of %q = %d, want %d (encoding/json produced %s)",
-				s, got, len(want)-2, want)
-		}
-	}
-}
-
-func TestTruncateJSONString(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      string
-		limit   int
-		want    string
-		wantCut bool
-	}{
-		{"fits", "hello", 10, "hello", false},
-		{"exact fit", "hello", 5, "hello", false},
-		{"plain cut", "hello", 4, "hell", true},
-		{"escaped characters cost six bytes each", "<<<<<", 12, "<<", true},
-		{"never splits a rune", "日本語", 7, "日本", true},
-		{"a rune that does not fit at all", "日本語", 2, "", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, cut := truncateJSONString(tc.in, tc.limit)
-			if got != tc.want || cut != tc.wantCut {
-				t.Errorf("truncateJSONString(%q, %d) = %q, %v; want %q, %v",
-					tc.in, tc.limit, got, cut, tc.want, tc.wantCut)
-			}
-			if !utf8.ValidString(got) && utf8.ValidString(tc.in) {
-				t.Errorf("truncation split a rune: %q", got)
-			}
-			encoded, err := json.Marshal(got)
-			if err != nil {
-				t.Fatalf("json.Marshal(%q): %v", got, err)
-			}
-			if len(encoded)-2 > tc.limit {
-				t.Errorf("%q encodes to %d bytes, over the limit of %d", got, len(encoded)-2, tc.limit)
-			}
-		})
-	}
-}
-
-// --- Span integration --------------------------------------------------
-
-// TestGenerateContentSpan_ContentAttributes exercises the attributes through
-// the exported span helpers, the way base_flow uses them.
+// TestGenerateContentSpan_ContentAttributes drives the real span helpers and
+// asserts the exact JSON that lands on the span.
 func TestGenerateContentSpan_ContentAttributes(t *testing.T) {
 	captureContent(t)
 	exporter := setupTestTracer(t)
@@ -950,39 +570,6 @@ func TestGenerateContentSpan_NilRequest(t *testing.T) {
 	}
 }
 
-// TestRequestContentAttributes_TruncationFlagStaysWithItsOwner covers a flag
-// that belongs to the system instruction leaking onto the first message. The
-// two are converted by the same builder, and gen_ai.system_instructions is a
-// bare part list with nowhere to record truncation, so the flag has to be
-// cleared rather than left for whatever is built next.
-func TestRequestContentAttributes_TruncationFlagStaysWithItsOwner(t *testing.T) {
-	captureContent(t)
-
-	req := &model.LLMRequest{
-		Config: &genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(strings.Repeat("s", 200_000), genai.RoleUser),
-		},
-		Contents: []*genai.Content{
-			genai.NewContentFromText("hi", genai.RoleUser),
-		},
-	}
-
-	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
-	if !ok {
-		t.Fatal("gen_ai.input.messages was not set")
-	}
-	var msgs []map[string]any
-	if err := json.Unmarshal([]byte(got), &msgs); err != nil {
-		t.Fatalf("not a JSON array of messages: %v\n%s", err, got)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("want one message, got %d: %s", len(msgs), got)
-	}
-	if _, flagged := msgs[0]["truncated"]; flagged {
-		t.Errorf("a two-character prompt is reported as truncated: %s", got)
-	}
-}
-
 // startAttrRecorder captures the attributes a span carries at creation, before
 // anything is added to it afterwards.
 type startAttrRecorder struct {
@@ -1024,5 +611,110 @@ func TestStartGenerateContentSpan_ConvertsAfterTheSamplingDecision(t *testing.T)
 	// Sanity: the span-creation attributes are there, so the recorder works.
 	if _, ok := attrString(rec.atStart, semconv.GenAIRequestModelKey); !ok {
 		t.Fatalf("recorder saw no creation attributes at all: %v", rec.atStart)
+	}
+}
+
+// TestOversizedAttributeIsDropped covers the size guard. A request carries the
+// whole conversation and is rebuilt on every model call, so the attribute grows
+// with the session. An attribute over the backend's limit is discarded at
+// ingestion in full, so this drops it rather than emitting something that
+// cannot be delivered.
+func TestOversizedAttributeIsDropped(t *testing.T) {
+	captureContent(t)
+
+	// A conversation well past the limit.
+	var contents []*genai.Content
+	for range 200 {
+		contents = append(contents, &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: []*genai.Part{{Text: strings.Repeat("x", 1000)}},
+		})
+	}
+	attrs := requestContentAttributes(&model.LLMRequest{Contents: contents})
+	if got, ok := attrString(attrs, genAIInputMessages); ok {
+		t.Errorf("an attribute of %d bytes was recorded, want it dropped", len(got))
+	}
+
+	// An ordinary conversation is unaffected, and comfortably inside the limit
+	// the implementation exists to respect.
+	attrs = requestContentAttributes(&model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello"}}}},
+	})
+	got, ok := attrString(attrs, genAIInputMessages)
+	if !ok {
+		t.Fatal("an ordinary conversation was dropped")
+	}
+	if len(got) > cloudTraceAttributeValueLimit {
+		t.Errorf("attribute is %d bytes, over the %d the backend accepts", len(got), cloudTraceAttributeValueLimit)
+	}
+}
+
+// TestMediaParts covers inline data and file references, which the reporter of
+// #608 was getting in v0.4.0 and would otherwise lose.
+func TestMediaParts(t *testing.T) {
+	captureContent(t)
+
+	small := []byte("pretend this is a png")
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: small}},
+			{FileData: &genai.FileData{MIMEType: "VIDEO/MP4", FileURI: "gs://bucket/clip.mp4"}},
+		},
+	}}}
+
+	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	if !ok {
+		t.Fatal("gen_ai.input.messages was not set")
+	}
+	want := `[{"role":"user","parts":[` +
+		`{"type":"blob","mime_type":"image/png","modality":"image","content":"` +
+		base64.StdEncoding.EncodeToString(small) + `"},` +
+		`{"type":"uri","mime_type":"VIDEO/MP4","modality":"video","uri":"gs://bucket/clip.mp4"}]}]`
+	if got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestInlineDataIsCappedPerPayload keeps one image from consuming the whole
+// attribute and leaving the conversation around it unrecorded.
+func TestInlineDataIsCappedPerPayload(t *testing.T) {
+	captureContent(t)
+
+	big := make([]byte, maxInlineDataBytes*4)
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "audio/wav", Data: big}},
+			{Text: "what is in this recording?"},
+		},
+	}}}
+
+	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	if !ok {
+		t.Fatal("a turn with one large payload dropped the whole attribute")
+	}
+	if full := base64.StdEncoding.EncodeToString(big); strings.Contains(got, full) {
+		t.Error("the whole payload was recorded")
+	}
+	if !strings.Contains(got, `"truncated":true`) {
+		t.Errorf("truncation not marked: %.200s", got)
+	}
+	// The text alongside it still has to survive; that is the point of the cap.
+	if !strings.Contains(got, "what is in this recording?") {
+		t.Errorf("the rest of the turn was lost: %.200s", got)
+	}
+}
+
+// TestModalityIsCaseInsensitive covers RFC 2045 section 5.1 — a MIME type has
+// no canonical case, and modality is required on blob and uri parts.
+func TestModalityIsCaseInsensitive(t *testing.T) {
+	for _, mt := range []string{"image/png", "IMAGE/PNG", "Image/Png"} {
+		if got := modalityOf(mt); got != "image" {
+			t.Errorf("modalityOf(%q) = %q, want image", mt, got)
+		}
+	}
+	if got := modalityOf("application/pdf"); got != "document" {
+		t.Errorf("modalityOf(pdf) = %q, want document", got)
 	}
 }

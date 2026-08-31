@@ -117,7 +117,7 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				// tool result "user"; the schema calls it "tool".
 				"gen_ai.input.messages": `[{"role":"user","parts":[{"type":"text","content":"hello"}]},` +
 					`{"role":"assistant","parts":[{"type":"tool_call","name":"some_tool","arguments":{"arg1":"val1"}}]},` +
-					`{"role":"tool","parts":[{"type":"tool_call_response","response":{"result":"processed val1"}}]}]`,
+					`{"role":"tool","parts":[{"type":"tool_call_response","name":"some_tool","response":{"result":"processed val1"}}]}]`,
 				"gen_ai.output.messages": `[{"role":"assistant","parts":[` +
 					`{"type":"text","content":"text response"}],"finish_reason":"stop"}]`,
 			},
