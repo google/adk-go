@@ -52,7 +52,16 @@ func (stubLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) i
 // This is live on any real sweep: CONCURRENCY_LIMIT defaults to 3 and the search
 // routinely returns more than one candidate.
 func TestConcurrentAuditsDoNotShareAgentState(t *testing.T) {
-	issues := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	// 32 workers, not 8. The racing window is two instructions — a read of the
+	// agent's mode and the write that follows it — so the odds rest on how many
+	// pairs hit it at once. Measured with the factory hoisted out of
+	// perIssueRunFn's closure: 8 workers caught it in 4 of 5 fresh processes,
+	// 32 in 10 of 10. The work is a stub model and no I/O, so the extra workers
+	// cost nothing.
+	issues := make([]int, 32)
+	for i := range issues {
+		issues[i] = i + 1
+	}
 	cfg := baseCfg()
 	cfg.Concurrency = len(issues) // every worker must be able to run at once
 	cfg.IssueTimeout = time.Minute
@@ -81,16 +90,17 @@ func TestConcurrentAuditsDoNotShareAgentState(t *testing.T) {
 		close(start)
 	}()
 
+	// perIssueRunFn is what audit() actually fans out over. Wrapping it rather
+	// than rebuilding it is what makes this a pin: a test that assembles its own
+	// equivalent closure keeps passing after production's regresses, which is
+	// how an identical race went unpinned in a sibling bot.
+	production := perIssueRunFn(cfg, stubLLM{}, nil, log)
 	err := auditAll(context.Background(), cfg, log, issues,
 		func(ictx context.Context, n int) error {
-			r, ss, err := newAuditRunner(cfg, stubLLM{}, nil, log)
-			if err != nil {
-				return err
-			}
 			ran.Add(1)
 			arrived <- struct{}{}
 			<-start
-			return runAudit(ictx, r, ss, log, n)
+			return production(ictx, n)
 		})
 	if err != nil {
 		t.Fatalf("auditAll: %v", err)

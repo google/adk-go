@@ -147,13 +147,7 @@ func audit(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	// infrastructure errors (handed back to the model as data, tracked on the
 	// client) so a scheduled/CI run exits non-zero instead of silently reporting
 	// success when nothing worked.
-	auditErr := auditAll(ctx, cfg, log, issues, func(ictx context.Context, n int) error {
-		r, ss, err := newAuditRunner(cfg, m, tools, log)
-		if err != nil {
-			return fmt.Errorf("issue #%d: %w", n, err)
-		}
-		return runAudit(ictx, r, ss, log, n)
-	})
+	auditErr := auditAll(ctx, cfg, log, issues, perIssueRunFn(cfg, m, tools, log))
 	if auditErr != nil {
 		return fmt.Errorf("one or more audits failed: %w", auditErr)
 	}
@@ -161,6 +155,28 @@ func audit(ctx context.Context, cfg *Config, log *slog.Logger) error {
 		return errors.New("one or more tool calls failed; see logs above")
 	}
 	return nil
+}
+
+// perIssueRunFn returns the function auditAll fans out over. It exists as a
+// named function, rather than a closure written inline at the call site, so a
+// test can drive the wiring PRODUCTION uses.
+//
+// That distinction is the whole point. A test that builds its own equivalent
+// closure keeps passing after this one regresses, and the regression is a
+// one-line edit that looks like a tidy-up: lift the newAuditRunner call out of
+// the returned closure and every issue shares one agent again, which is the
+// data race. Measured — with the factory hoisted out of the old inline closure,
+// the entire suite stayed green.
+func perIssueRunFn(cfg *Config, m model.LLM, tools []tool.Tool, log *slog.Logger) func(context.Context, int) error {
+	return func(ictx context.Context, n int) error {
+		// Inside the closure, so it runs once per issue rather than once per
+		// sweep.
+		r, ss, err := newAuditRunner(cfg, m, tools, log)
+		if err != nil {
+			return fmt.Errorf("issue #%d: %w", n, err)
+		}
+		return runAudit(ictx, r, ss, log, n)
+	}
 }
 
 // newAuditRunner builds the agent, session service and runner for ONE issue
