@@ -15,7 +15,6 @@
 package utils_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -26,7 +25,7 @@ import (
 )
 
 func TestGenerateFunctionCallIDUsesProvider(t *testing.T) {
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "fixed" })
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return "fixed" })
 
 	got := utils.GenerateFunctionCallID(ctx)
 
@@ -41,8 +40,8 @@ func TestGenerateFunctionCallIDUsesProvider(t *testing.T) {
 }
 
 func TestGenerateFunctionCallIDDefaultIsUnique(t *testing.T) {
-	first := utils.GenerateFunctionCallID(context.Background())
-	second := utils.GenerateFunctionCallID(context.Background())
+	first := utils.GenerateFunctionCallID(t.Context())
+	second := utils.GenerateFunctionCallID(t.Context())
 
 	if first == second {
 		t.Errorf("GenerateFunctionCallID() returned %q twice; want unique values", first)
@@ -50,7 +49,7 @@ func TestGenerateFunctionCallIDDefaultIsUnique(t *testing.T) {
 }
 
 func TestPopulateClientFunctionCallIDUsesProvider(t *testing.T) {
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "generated" })
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return "generated" })
 
 	content := &genai.Content{
 		Parts: []*genai.Part{

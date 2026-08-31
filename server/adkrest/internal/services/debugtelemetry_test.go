@@ -30,7 +30,7 @@ import (
 )
 
 func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	type testCase struct {
 		name             string
@@ -50,14 +50,14 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 				childCtx, childSpan := tracer.Start(rootCtx, "child-span")
 				childLog := log.Record{}
-				childLog.SetBody(log.StringValue("child-log-body"))
+				childLog.SetBody(attribute.StringValue("child-log-body"))
 				childLog.SetEventName("child-log-event")
 				childLog.SetTimestamp(time.Now())
 				logger.Emit(childCtx, childLog)
 				childSpan.End()
 
 				rootLog := log.Record{}
-				rootLog.SetBody(log.StringValue("root-log-body"))
+				rootLog.SetBody(attribute.StringValue("root-log-body"))
 				rootLog.SetEventName("root-log-event")
 				rootLog.SetTimestamp(time.Now())
 				logger.Emit(rootCtx, rootLog)
@@ -106,7 +106,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				rootSpan.End()
 
 				// Create another trace with a different session ID (should not be returned).
-				_, rootSpan3 := tracer.Start(context.Background(), "root-3", trace.WithAttributes(
+				_, rootSpan3 := tracer.Start(t.Context(), "root-3", trace.WithAttributes(
 					semconv.GenAIConversationID("test-session-id-1"),
 				))
 				rootSpan3.End()
@@ -199,7 +199,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			name: "log without span",
 			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
 				var logRecord log.Record
-				logRecord.SetBody(log.StringValue("test body"))
+				logRecord.SetBody(attribute.StringValue("test body"))
 				logRecord.SetEventName("test_event")
 				logRecord.SetTimestamp(time.Now())
 
@@ -225,7 +225,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			}
 
 			cmpOpts := []cmp.Option{
-				cmpopts.IgnoreUnexported(log.Value{}),
+				cmpopts.IgnoreUnexported(attribute.Value{}),
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "TraceID", "SpanID", "ParentSpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
 				cmpopts.SortSlices(compareDebugSpans),
@@ -242,7 +242,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 }
 
 func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	type testCase struct {
 		name           string
@@ -262,7 +262,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				defer span.End()
 
 				var r log.Record
-				r.SetBody(log.StringValue("test body"))
+				r.SetBody(attribute.StringValue("test body"))
 				r.SetEventName("test_event")
 				r.SetTimestamp(time.Now())
 
@@ -337,7 +337,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 			name: "log without span",
 			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
 				var r log.Record
-				r.SetBody(log.StringValue("test body"))
+				r.SetBody(attribute.StringValue("test body"))
 				r.SetEventName("test_event")
 				r.SetTimestamp(time.Now())
 
@@ -363,7 +363,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 			}
 
 			cmpOpts := []cmp.Option{
-				cmpopts.IgnoreUnexported(log.Value{}),
+				cmpopts.IgnoreUnexported(attribute.Value{}),
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "ParentSpanID", "TraceID", "SpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
 				cmpopts.SortSlices(compareDebugSpans),

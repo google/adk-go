@@ -136,7 +136,7 @@ func TestWorkflowAgent(t *testing.T) {
 	}
 
 	mockCtx := &MockInvocationContext{
-		Context: context.TODO(),
+		Context: t.Context(),
 		sess:    MockSession{},
 		userContent: &genai.Content{
 			Parts: []*genai.Part{{Text: "hello"}},

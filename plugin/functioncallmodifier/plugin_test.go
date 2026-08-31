@@ -15,7 +15,6 @@
 package functioncallmodifier_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -259,7 +258,7 @@ func TestAfterModelCallback(t *testing.T) {
 				t.Fatalf("New plugin failed: %v", err)
 			}
 			service := session.InMemoryService()
-			sesResp, err := service.Create(context.Background(), &session.CreateRequest{AppName: "test", UserID: "user", SessionID: "ses1"})
+			sesResp, err := service.Create(t.Context(), &session.CreateRequest{AppName: "test", UserID: "user", SessionID: "ses1"})
 			if err != nil {
 				t.Fatalf("Failed to create session: %v", err)
 			}

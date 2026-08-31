@@ -58,7 +58,7 @@ func TestWrapYield(t *testing.T) {
 		return true
 	}
 
-	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
+	_, span := noop.NewTracerProvider().Tracer("test").Start(t.Context(), "test")
 	wrappedYield, endSpan := WrapYield(span, yieldFn, finalizeFn)
 
 	if !wrappedYield("test", errTest) {
@@ -90,7 +90,7 @@ func TestWrapYield_MultipleCalls(t *testing.T) {
 		return true
 	}
 
-	_, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "test")
+	_, span := noop.NewTracerProvider().Tracer("test").Start(t.Context(), "test")
 	wrappedYield, endSpan := WrapYield(span, yieldFn, finalizeFn)
 
 	wrappedYield("first", nil)

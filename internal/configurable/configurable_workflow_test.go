@@ -153,7 +153,7 @@ edges:
 		t.Fatalf("failed to write temp workflow: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, configPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed: %v", err)
@@ -208,7 +208,7 @@ edges:
 		t.Fatalf("failed to write temp routing workflow: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, configPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed: %v", err)
@@ -284,7 +284,7 @@ edges:
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, workflowPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed for complex workflow: %v", err)
@@ -398,7 +398,7 @@ edges:
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, workflowPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed for workflow with sub-agent: %v", err)
@@ -466,7 +466,7 @@ edges:
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, workflowPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed for join workflow: %v", err)
@@ -549,7 +549,7 @@ edges:
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ag, err := FromConfig(ctx, workflowPath)
 	if err != nil {
 		t.Fatalf("FromConfig failed for tool workflow: %v", err)

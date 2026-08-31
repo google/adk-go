@@ -30,7 +30,7 @@ var _ Context = (*fakeToolContext)(nil)
 
 func TestStrictContextMock_ValueDelegatesToCtx(t *testing.T) {
 	type key struct{}
-	ctx := context.WithValue(context.Background(), key{}, "v")
+	ctx := context.WithValue(t.Context(), key{}, "v")
 
 	f := &fakeToolContext{StrictContextMock{Ctx: ctx}}
 
@@ -40,7 +40,7 @@ func TestStrictContextMock_ValueDelegatesToCtx(t *testing.T) {
 }
 
 func TestStrictContextMock_ADKMethodPanics(t *testing.T) {
-	f := &fakeToolContext{StrictContextMock{Ctx: context.Background()}}
+	f := &fakeToolContext{StrictContextMock{Ctx: t.Context()}}
 
 	defer func() {
 		if r := recover(); r == nil {

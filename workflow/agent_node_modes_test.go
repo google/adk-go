@@ -152,7 +152,7 @@ func TestAgentNode_ParallelAgentAsNode_NoMultipleOutputs(t *testing.T) {
 func newRunnableNodeContext(t *testing.T, a agent.Agent) agent.Context {
 	t.Helper()
 	svc := session.InMemoryService()
-	resp, err := svc.Create(context.Background(), &session.CreateRequest{
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{
 		AppName: "app",
 		UserID:  "u",
 	})

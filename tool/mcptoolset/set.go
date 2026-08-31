@@ -17,10 +17,12 @@ package mcptoolset
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -47,12 +49,49 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
+	transport, err := buildTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, cfg.Transport),
+		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 	}, nil
+}
+
+// buildTransport resolves the MCP transport from cfg. When Transport is nil and
+// Endpoint is set, it builds a streamable HTTP transport to that URL. When
+// Config.Auth is set, it wraps the transport's HTTP client with a per-request
+// auth RoundTripper, which requires a streamable HTTP transport.
+func buildTransport(cfg Config) (mcp.Transport, error) {
+	transport := cfg.Transport
+	if transport == nil && cfg.Endpoint != "" {
+		transport = &mcp.StreamableClientTransport{Endpoint: cfg.Endpoint}
+	}
+	if cfg.Auth == nil {
+		return transport, nil
+	}
+	st, ok := transport.(*mcp.StreamableClientTransport)
+	if !ok {
+		return nil, fmt.Errorf("mcptoolset: Config.Auth requires a streamable HTTP transport; "+
+			"set Config.Endpoint or pass a *mcp.StreamableClientTransport (got %T)", transport)
+	}
+	stCopy := *st
+	stCopy.HTTPClient = authHTTPClient(st.HTTPClient, cfg.Auth)
+	return &stCopy, nil
+}
+
+// authHTTPClient returns a shallow copy of base whose Transport applies provider
+// to every request. base may be nil.
+func authHTTPClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
+	c := &http.Client{}
+	if base != nil {
+		*c = *base
+	}
+	c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+	return c
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -61,6 +100,23 @@ type Config struct {
 	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
+
+	// Endpoint, when set and Transport is nil, builds a streamable HTTP
+	// transport (mcp.StreamableClientTransport) targeting this URL. Ignored when
+	// Transport is set.
+	Endpoint string
+
+	// Auth, when set, resolves and applies a credential to every outgoing MCP
+	// HTTP request via a context-aware RoundTripper. It requires a streamable
+	// HTTP transport: set Endpoint, or pass a *mcp.StreamableClientTransport.
+	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
+	// configuration error. See package google.golang.org/adk/v2/auth.
+	//
+	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
+	// Auth is applied last and overwrites the Authorization header, so the two
+	// would fight over the same request.
+	Auth auth.CredentialProvider
+
 	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
 	// If ToolFilter is nil, then all tools are returned.

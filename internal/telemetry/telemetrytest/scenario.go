@@ -15,7 +15,6 @@
 package telemetrytest
 
 import (
-	"context"
 	"testing"
 
 	"google.golang.org/genai"
@@ -41,7 +40,7 @@ import (
 // Mirrors functional_test_helpers.run_agent_scenario in adk-python.
 func RunScenario(t *testing.T, rootAgent agent.Agent, prompt string) error {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	sessSvc := session.InMemoryService()
 	r, err := runner.New(runner.Config{

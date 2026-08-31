@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -81,7 +80,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -121,7 +120,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -147,7 +146,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -179,7 +178,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -197,7 +196,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 func TestCreateFinalModelResponseEvent(t *testing.T) {
 	// Setup context
 	a := utils.Must(agent.New(agent.Config{Name: "TestAgent"}))
-	invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Agent: a,
 	})
 
@@ -313,7 +312,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	}
 
 	t.Run("RunSuccess", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
@@ -327,7 +326,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
@@ -338,7 +337,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}

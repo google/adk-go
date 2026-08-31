@@ -256,10 +256,10 @@ func TestAudioCacheManager(t *testing.T) {
 			mgr := NewAudioCacheManager()
 
 			for _, in := range tt.inputs {
-				mgr.CacheInput(context.Background(), in.data, in.mime)
+				mgr.CacheInput(t.Context(), in.data, in.mime)
 			}
 			for _, out := range tt.outputs {
-				mgr.CacheOutput(context.Background(), out.data, out.mime)
+				mgr.CacheOutput(t.Context(), out.data, out.mime)
 			}
 
 			mockArt := &audioMockArtifacts{}

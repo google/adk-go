@@ -292,7 +292,7 @@ End few-shot
 				Model: tc.model,
 			}
 			ctx := &mockToolContext{
-				Context:     context.Background(),
+				Context:     t.Context(),
 				userContent: tc.userContent,
 			}
 

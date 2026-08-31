@@ -15,7 +15,6 @@
 package apigee
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,7 +53,7 @@ func TestNewModelWithValidModelStrings(t *testing.T) {
 		"apigee/gemini/v1/gemini-1.5-flash",
 		"apigee/vertex_ai/v1beta/gemini-1.5-flash",
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	for _, modelName := range validModelStrings {
 		t.Run(modelName, func(t *testing.T) {
@@ -101,7 +100,7 @@ func TestNewModelWithInvalidModelStrings(t *testing.T) {
 		"apigee/vertex_ai/v1/model/extra",
 		"apigee/unknown/model",
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	for _, modelName := range invalidModelStrings {
 		t.Run(modelName, func(t *testing.T) {
@@ -203,7 +202,7 @@ func TestParseModelName(t *testing.T) {
 }
 
 func TestNewModelWithCustomHeaders(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	headers := http.Header{}
 	headers.Set("X-Custom-Header", "custom-value")
@@ -214,7 +213,7 @@ func TestNewModelWithCustomHeaders(t *testing.T) {
 }
 
 func TestNewModelWithoutProxyURL(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	if err := os.Unsetenv(apigeeProxyURLEnvVar); err != nil {
 		t.Errorf("failed to unset %s: %v", apigeeProxyURLEnvVar, err)
@@ -232,7 +231,7 @@ func TestNewModelWithoutProxyURL(t *testing.T) {
 }
 
 func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	t.Setenv(googleGenaiUseVertexAIEnvVar, "true")
 	if err := os.Unsetenv(projectEnvVar); err != nil {
@@ -255,7 +254,7 @@ func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 
 // test GenerateContent
 func TestGenerateContent(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	t.Setenv(googleGenaiUseVertexAIEnvVar, "true")
 	t.Setenv(projectEnvVar, "test-project")

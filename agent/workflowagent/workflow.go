@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package workflowagent adapts a workflow.Workflow (a node/graph
+// workflow) to the agent.Agent interface, so a graph can be run by a
+// runner.Runner like any other agent.
 package workflowagent
 
 import (

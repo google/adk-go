@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool defines internal-only interfaces and logic for tools.
+// Package toolutils provides public helpers for packing tool declarations
+// into a model.LLMRequest. It allows external code to consolidate tool
+// function declarations the same way the built-in ADK tools do, without
+// re-implementing the logic.
 package toolutils
 
 import (
@@ -23,31 +26,33 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// Tool is implemented by any tool that can be packed into a
+// model.LLMRequest via PackTool.
 type Tool interface {
 	Name() string
 	Declaration() *genai.FunctionDeclaration
 }
 
-// The PackTool ensures that in case there is a usage of multiple function tools,
+// PackTool ensures that in case there is a usage of multiple function tools,
 // all of them are consolidated into one genai tool that has all the function declarations
 // provided by the tools. So, if there is already a tool with a function declaration,
 // it appends another to it; otherwise, it creates a new genai tool.
-func PackTool(req *model.LLMRequest, tool Tool) error {
+func PackTool(req *model.LLMRequest, t Tool) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
 	}
 
-	name := tool.Name()
+	name := t.Name()
 
 	if _, ok := req.Tools[name]; ok {
 		return fmt.Errorf("duplicate tool: %q", name)
 	}
-	req.Tools[name] = tool
+	req.Tools[name] = t
 
 	if req.Config == nil {
 		req.Config = &genai.GenerateContentConfig{}
 	}
-	if decl := tool.Declaration(); decl == nil {
+	if decl := t.Declaration(); decl == nil {
 		return nil
 	}
 	// Find an existing genai.Tool with FunctionDeclarations
@@ -60,10 +65,10 @@ func PackTool(req *model.LLMRequest, tool Tool) error {
 	}
 	if funcTool == nil {
 		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{tool.Declaration()},
+			FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
 		})
 	} else {
-		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, tool.Declaration())
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
 	}
 	return nil
 }

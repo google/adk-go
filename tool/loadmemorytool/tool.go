@@ -24,10 +24,10 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/toolinternal"
-	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 const memoryInstructions = `You have memory. You can use it to answer questions. If any questions need

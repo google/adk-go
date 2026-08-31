@@ -15,7 +15,6 @@
 package runner
 
 import (
-	"context"
 	"iter"
 	"strings"
 	"testing"
@@ -42,7 +41,7 @@ func (d *dummyLiveSession) Send(req agent.LiveRequest) error { return nil }
 func (d *dummyLiveSession) Close() error                     { return nil }
 
 func TestRunner_RunLive_Callbacks(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName, userID, sessionID := "testApp", "testUser", "testSession"
 
 	sessionService := session.InMemoryService()
@@ -121,7 +120,7 @@ func TestRunner_RunLive_Callbacks(t *testing.T) {
 }
 
 func TestRunner_RunLive_EarlyExit(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName, userID, sessionID := "testApp", "testUser", "testSession2"
 
 	sessionService := session.InMemoryService()
@@ -202,7 +201,7 @@ func TestRunner_RunLive_EarlyExit(t *testing.T) {
 }
 
 func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	appName, userID, sessionID := "testApp", "testUser", "testSession3"
 
 	sessionService := session.InMemoryService()

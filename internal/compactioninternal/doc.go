@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package llmagent provides an LLM-based agent.
-// LLM agents use large language models to perform tasks based on instructions, user input,
-// deciding on actions to take, and executing actions using available tools or
-// delegating to sub agents.
-package llmagent
+// Package compactioninternal implements the context-compaction algorithms:
+// choosing which events to summarize, substituting summaries into a prompt, and
+// recovering function calls that a summary swallowed.
+//
+// These are mechanics rather than API. The user-facing surface is
+// [google.golang.org/adk/v2/session/compaction], which holds the configuration
+// and the Summarizer extension point. Keeping the algorithms here lets them
+// change without breaking anyone.
+package compactioninternal

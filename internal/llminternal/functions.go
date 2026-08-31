@@ -43,16 +43,18 @@ func generateRequestConfirmationEvent(
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCallParts := make(map[string]*genai.Part, len(functionCallEvent.Content.Parts))
-	for _, part := range functionCallEvent.Content.Parts {
-		if part.FunctionCall != nil {
-			functionCallParts[part.FunctionCall.ID] = part
-		}
-	}
 
-	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalPart, ok := functionCallParts[funcID]
-		if !ok || originalPart.FunctionCall == nil {
+	// Emit confirmations in the order their function calls appear in the model
+	// response, mirroring adk-python. Iterating Content.Parts (an ordered slice)
+	// rather than ranging RequestedToolConfirmations (a map, whose iteration
+	// order Go randomizes) keeps the emitted order deterministic and aligned
+	// with execution flow.
+	for _, originalPart := range functionCallEvent.Content.Parts {
+		if originalPart.FunctionCall == nil {
+			continue
+		}
+		confirmation, ok := functionResponseEvent.Actions.RequestedToolConfirmations[originalPart.FunctionCall.ID]
+		if !ok {
 			continue
 		}
 
