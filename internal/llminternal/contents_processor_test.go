@@ -1141,6 +1141,39 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"confirmed": false},
 	}
 
+	// Late async completion: a long-running call whose final response arrives
+	// as the latest event, after an unrelated tool exchange.
+	fcAsyncPlan := &genai.FunctionCall{
+		ID:   "async_plan_1",
+		Name: "plan_tool",
+		Args: map[string]any{"feature": "Q"},
+	}
+	frAsyncPlanAck := &genai.FunctionResponse{
+		ID:       "async_plan_1",
+		Name:     "plan_tool",
+		Response: map[string]any{"status": "accepted"},
+	}
+	frAsyncPlanFinal := &genai.FunctionResponse{
+		ID:       "async_plan_1",
+		Name:     "plan_tool",
+		Response: map[string]any{"status": "completed", "plan": "add the flag, then wire it up"},
+	}
+	fcAsyncStatus := &genai.FunctionCall{
+		ID:   "async_status_1",
+		Name: "status_tool",
+		Args: map[string]any{"job": "plan"},
+	}
+	frAsyncStatus := &genai.FunctionResponse{
+		ID:       "async_status_1",
+		Name:     "status_tool",
+		Response: map[string]any{"status": "running", "elapsed": "21s"},
+	}
+	fcAsyncUnanswered := &genai.FunctionCall{
+		ID:   "async_unanswered_1",
+		Name: "notify_tool",
+		Args: map[string]any{"channel": "ops"},
+	}
+
 	// Error Call/Response
 	frOrphaned := &genai.FunctionResponse{
 		ID:       "no_matching_call",
@@ -1210,12 +1243,59 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
 			},
+			// The unrelated search exchange survives (the property #767
+			// established) but sits before the completion, so the freshest
+			// response is the final content.
 			want: []*genai.Content{
 				genai.NewContentFromText("Run long process and search", "user"),
-				NewContentFromFunctionCall(fcLRO, "model"),
-				NewContentFromFunctionResponse(frLROFinal, "user"),
 				NewContentFromFunctionCall(fcBasic, "model"),
 				NewContentFromFunctionResponse(frBasic, "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			// Regression test for #1181: the completion of a long-running tool
+			// must stay the final content, not be dragged back next to its much
+			// earlier call while a stale status exchange takes the tail.
+			name: "Late async completion stays the final content",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("I dispatched the planning task.", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("What is the status?", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncStatus, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncStatus, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still running.", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncStatus, "model"),
+				NewContentFromFunctionResponse(frAsyncStatus, "user"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+			},
+		},
+		{
+			// A call that never receives a response is reachable: base_flow
+			// creates no response event for a long-running tool or a deferring
+			// ResponseDeferrer. The unanswered call keeps its place in history
+			// and the completed pair still ends the contents.
+			name: "Late async completion stays final with an unanswered call in history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
 			},
 		},
 		{
