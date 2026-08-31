@@ -1,0 +1,117 @@
+httprr trace v1
+1099 3079
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 847
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:50 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3944
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 2,"b": 3},"id": "okz0loqw"},"thoughtSignature": "EqYGCqMGAb4+9vv52GL4uROrsj4WLU0dMpALbUuH2pF13Xi6KloBtUSDw1WJLbPldKOEU1Zqf0jO7rthZuoAl7jGZTuQpRDIRkhwuVY8mKIUzgeBR6Z68wVty1jQf9j+XVxJ7l/axwicTn6cOJOzZ66K3AeFqeWM2jNE/5eoJezmWCOAxgg/Cf70AwChH7YgetDR4F+VvWav91zlx95scApzG9LaS+ihvoRzjSKRPyR2WQgtUvi+m+PvzBaLUNcYR0XZZaKXWMzLI5vnw+NeJq0h04gNTJmAHJOsQ5DjVWp703Aoh5fN8z56UO6HgMrYrIr91fJhGI2bVDKq7G5CeFj1HiFD4z4na+xmgndsEZHrj6/6JKu+2Xe2LL7iTVdi9vsv/yeQCLDC6eIbEDT7Mpda3e61Q1x+LwhMEP7LMp8lTBzcQuNxXBAcRglHC+6wIifmWwlKK1UbyEg1Fz+PctdShrhZBfs/GHPsVZdGRyzgTxa3E0cEHEfbBThtkFMmaCLUAzLXBQMs92+HpgJmXRj3iSOjlePh2PutnlHxsKLI2rs7oKOoc8XSqZt2PAoO5T6l7cgjjKbEPhKtHyKlCCekyFUggwOt1ju4U30ztmnsFM6wB0K/qA9PoQrD7AdrtdUENI0Oe/rISTj6qTviNzvMOWuRlv0L3DWsqwdAfhrseXbuTCndAixDuLMIaUsApIyqIG1/0qF1KjJRo/VXjGKyFr027Io1LjZXrHkyRrRgXntU1/v2Ys0K6SfhbluRkUFOV8AuOhm/z5UVdfObKx0GEnyOXnY9megaOnCKBmYnpv5TXyddeS+b6wEXRMaf/6eXM1Yjvvpq3iXw18cgk+z0U1LsI9u2Doq2tozBMoqEGM/bzIAVwt9nsZakcbGgUX8Y7gu+PZlTJVsrAYLsCkKD//6pxE7UdCYPdeyGIxwqefxF2LD/DugQIL7y+HgES2IgFSjyTnRjzV2pyXGtxiBBxDoT7sIMaUJciNlpwgwVmS2c5PYDOIp1Dmbw6zc8k2R3xapBFYZOqBJHu8bGWm5zsI/lmFZ0uYo7EDElbhyvQBuifbnAKDk="}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 16,"totalTokenCount": 381,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 204},"modelVersion": "gemini-3.1-pro-preview","responseId": "ciS5aZnUG9KqkdUP5eK_kAY"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"b": 5,"a": 4},"id": "55jh6i4d"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 32,"totalTokenCount": 397,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 204},"modelVersion": "gemini-3.1-pro-preview","responseId": "ciS5aZnUG9KqkdUP5eK_kAY"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 6,"b": 7},"id": "c3oxmvnd"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 48,"totalTokenCount": 413,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 204},"modelVersion": "gemini-3.1-pro-preview","responseId": "ciS5aZnUG9KqkdUP5eK_kAY"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 48,"totalTokenCount": 413,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 204},"modelVersion": "gemini-3.1-pro-preview","responseId": "ciS5aZnUG9KqkdUP5eK_kAY"}
+
+2682 2324
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2429
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"okz0loqw","name":"sum"},"thoughtSignature":"EqYGCqMGAb4+9vv52GL4uROrsj4WLU0dMpALbUuH2pF13Xi6KloBtUSDw1WJLbPldKOEU1Zqf0jO7rthZuoAl7jGZTuQpRDIRkhwuVY8mKIUzgeBR6Z68wVty1jQf9j+XVxJ7l/axwicTn6cOJOzZ66K3AeFqeWM2jNE/5eoJezmWCOAxgg/Cf70AwChH7YgetDR4F+VvWav91zlx95scApzG9LaS+ihvoRzjSKRPyR2WQgtUvi+m+PvzBaLUNcYR0XZZaKXWMzLI5vnw+NeJq0h04gNTJmAHJOsQ5DjVWp703Aoh5fN8z56UO6HgMrYrIr91fJhGI2bVDKq7G5CeFj1HiFD4z4na+xmgndsEZHrj6/6JKu+2Xe2LL7iTVdi9vsv/yeQCLDC6eIbEDT7Mpda3e61Q1x+LwhMEP7LMp8lTBzcQuNxXBAcRglHC+6wIifmWwlKK1UbyEg1Fz+PctdShrhZBfs/GHPsVZdGRyzgTxa3E0cEHEfbBThtkFMmaCLUAzLXBQMs92+HpgJmXRj3iSOjlePh2PutnlHxsKLI2rs7oKOoc8XSqZt2PAoO5T6l7cgjjKbEPhKtHyKlCCekyFUggwOt1ju4U30ztmnsFM6wB0K/qA9PoQrD7AdrtdUENI0Oe/rISTj6qTviNzvMOWuRlv0L3DWsqwdAfhrseXbuTCndAixDuLMIaUsApIyqIG1/0qF1KjJRo/VXjGKyFr027Io1LjZXrHkyRrRgXntU1/v2Ys0K6SfhbluRkUFOV8AuOhm/z5UVdfObKx0GEnyOXnY9megaOnCKBmYnpv5TXyddeS+b6wEXRMaf/6eXM1Yjvvpq3iXw18cgk+z0U1LsI9u2Doq2tozBMoqEGM/bzIAVwt9nsZakcbGgUX8Y7gu+PZlTJVsrAYLsCkKD//6pxE7UdCYPdeyGIxwqefxF2LD/DugQIL7y+HgES2IgFSjyTnRjzV2pyXGtxiBBxDoT7sIMaUJciNlpwgwVmS2c5PYDOIp1Dmbw6zc8k2R3xapBFYZOqBJHu8bGWm5zsI/lmFZ0uYo7EDElbhyvQBuifbnAKDk="},{"functionCall":{"args":{"a":4,"b":5},"id":"55jh6i4d","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"c3oxmvnd","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"okz0loqw","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"55jh6i4d","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"c3oxmvnd","name":"sum","response":{"sum":13}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:53 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2570
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "Here are the results of your additions:\n* 2 +"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 13,"totalTokenCount": 324,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}],"thoughtsTokenCount": 75},"modelVersion": "gemini-3.1-pro-preview","responseId": "dSS5ab-cA-vgnsEP8_61wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 3 = 5\n* 4 + 5 = 9\n* 6 + 7 = "}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 37,"totalTokenCount": 348,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}],"thoughtsTokenCount": 75},"modelVersion": "gemini-3.1-pro-preview","responseId": "dSS5ab-cA-vgnsEP8_61wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "13"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 39,"totalTokenCount": 350,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}],"thoughtsTokenCount": 75},"modelVersion": "gemini-3.1-pro-preview","responseId": "dSS5ab-cA-vgnsEP8_61wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "","thoughtSignature": "EsICCr8CAb4+9vvi0hPdbkZGP+O32Dk8jBZLVhTDxNt/Wg68DhD2sv8f2czbtpO2pwTh4nbLUfEWwG8RZqdJ3O5HZHBgesXVAFgGwmkAIMGLMaLQeuuSOjg91/ejYt4RlyEHPzO9bxVY7BxidtbUv2MkvEx2v9aLs8HwqvMNKy+me6Hy2SOZdeceMKHLBS6Or19NCY1bznX2AG0l3T/uDs2lFWmGlgEXYsIFNeXQvXKID1pkagWC9OiMVWPCYOKN6s7OdrAx/oyrK8Anm9WdtCB7HCuIqAcx9L75S8VtHrFfHd8dr/Pj5Lnwb1VBDxvLU/7251WQgeAgm0CjFNR7RICmFzMHyR2i2mMxeFKI7SQScoXb71nb4HehJxcHAYNwpDUWq4Q5E5Ehhyrz8dCpBooTdoVl1d5Pjw2L7W0in6AiyhA7yg=="}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 440,"candidatesTokenCount": 39,"totalTokenCount": 554,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 440}],"thoughtsTokenCount": 75},"modelVersion": "gemini-3.1-pro-preview","responseId": "dSS5ab-cA-vgnsEP8_61wAQ"}
+
+3362 2765
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3109
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"okz0loqw","name":"sum"},"thoughtSignature":"EqYGCqMGAb4+9vv52GL4uROrsj4WLU0dMpALbUuH2pF13Xi6KloBtUSDw1WJLbPldKOEU1Zqf0jO7rthZuoAl7jGZTuQpRDIRkhwuVY8mKIUzgeBR6Z68wVty1jQf9j+XVxJ7l/axwicTn6cOJOzZ66K3AeFqeWM2jNE/5eoJezmWCOAxgg/Cf70AwChH7YgetDR4F+VvWav91zlx95scApzG9LaS+ihvoRzjSKRPyR2WQgtUvi+m+PvzBaLUNcYR0XZZaKXWMzLI5vnw+NeJq0h04gNTJmAHJOsQ5DjVWp703Aoh5fN8z56UO6HgMrYrIr91fJhGI2bVDKq7G5CeFj1HiFD4z4na+xmgndsEZHrj6/6JKu+2Xe2LL7iTVdi9vsv/yeQCLDC6eIbEDT7Mpda3e61Q1x+LwhMEP7LMp8lTBzcQuNxXBAcRglHC+6wIifmWwlKK1UbyEg1Fz+PctdShrhZBfs/GHPsVZdGRyzgTxa3E0cEHEfbBThtkFMmaCLUAzLXBQMs92+HpgJmXRj3iSOjlePh2PutnlHxsKLI2rs7oKOoc8XSqZt2PAoO5T6l7cgjjKbEPhKtHyKlCCekyFUggwOt1ju4U30ztmnsFM6wB0K/qA9PoQrD7AdrtdUENI0Oe/rISTj6qTviNzvMOWuRlv0L3DWsqwdAfhrseXbuTCndAixDuLMIaUsApIyqIG1/0qF1KjJRo/VXjGKyFr027Io1LjZXrHkyRrRgXntU1/v2Ys0K6SfhbluRkUFOV8AuOhm/z5UVdfObKx0GEnyOXnY9megaOnCKBmYnpv5TXyddeS+b6wEXRMaf/6eXM1Yjvvpq3iXw18cgk+z0U1LsI9u2Doq2tozBMoqEGM/bzIAVwt9nsZakcbGgUX8Y7gu+PZlTJVsrAYLsCkKD//6pxE7UdCYPdeyGIxwqefxF2LD/DugQIL7y+HgES2IgFSjyTnRjzV2pyXGtxiBBxDoT7sIMaUJciNlpwgwVmS2c5PYDOIp1Dmbw6zc8k2R3xapBFYZOqBJHu8bGWm5zsI/lmFZ0uYo7EDElbhyvQBuifbnAKDk="},{"functionCall":{"args":{"a":4,"b":5},"id":"55jh6i4d","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"c3oxmvnd","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"okz0loqw","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"55jh6i4d","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"c3oxmvnd","name":"sum","response":{"sum":13}}}],"role":"user"},{"parts":[{"text":"Here are the results of your additions:\n* 2 + 3 = 5\n* 4 + 5 = 9\n* 6 + 7 = 13"},{"thoughtSignature":"EsICCr8CAb4+9vvi0hPdbkZGP+O32Dk8jBZLVhTDxNt/Wg68DhD2sv8f2czbtpO2pwTh4nbLUfEWwG8RZqdJ3O5HZHBgesXVAFgGwmkAIMGLMaLQeuuSOjg91/ejYt4RlyEHPzO9bxVY7BxidtbUv2MkvEx2v9aLs8HwqvMNKy+me6Hy2SOZdeceMKHLBS6Or19NCY1bznX2AG0l3T/uDs2lFWmGlgEXYsIFNeXQvXKID1pkagWC9OiMVWPCYOKN6s7OdrAx/oyrK8Anm9WdtCB7HCuIqAcx9L75S8VtHrFfHd8dr/Pj5Lnwb1VBDxvLU/7251WQgeAgm0CjFNR7RICmFzMHyR2i2mMxeFKI7SQScoXb71nb4HehJxcHAYNwpDUWq4Q5E5Ehhyrz8dCpBooTdoVl1d5Pjw2L7W0in6AiyhA7yg=="}],"role":"model"},{"parts":[{"text":"Great, now can you add 10 and 20? Also 40 and 50? And 60 and 70?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:56 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3577
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 10,"b": 20},"id": "cxk8o6f8"},"thoughtSignature": "ErcECrQEAb4+9vsZQeAMGNLLD6TBwEoFKx96WY+FK1pPtIvlrhOPDj2iojUru29Bzxj8Qfx77fx4594Oqs+C1+yYTt9kTxsFxt1SXRjepUUKjm0WLYs0LpkP46czdNaaR7rGdlgs3RJ85TNi2Sz11qrBnet4Jyl+O+Hbq49czNjl+dKpN4DhqnOPZqsaWN9m5uIGhlt17Q5CibXZApNTEUy/SqQKKzEvjbTUo4Z99f4Pw4cxw6YttaJEUiyVutnFQ+l0hoQu5HgQzKsSu4oOX6JsyQSktECvQI4R+LU2z64WgcIbv7TlcpDxmcyH7huWfNRnSCZ2UCIBZp5IUOjJIPQwpD+ElwcenyBVY6Mfk0kLex0O909631z5rump25yZlN5R330RmuNav7eXeFs6UMoiq1DsGWUipwzG4PAPEWUJPChgzttUdBPgxleTArdOw2+c1+rS7OUcaHRpmu9BfGEZgvFEff4yCwlC6Hw9dHDRgTDTuXF0AXQOT4mipXBNpaCo0JqNzFf63TALLS80Qh98uqyhHSfXYzQRTd5VBUpwIDQkB5P/7IPrkMlKGeweKOHNK2JtBlAuqBQTmXalWo3UMX9IZf0W/Q+UCRJHGoMHa7Q9xzP/bmSkO897H3VS+FbEVR4eKL0fQaHO6D4LsEGBPfUZVuc+BiCDjyRzavdXm1CYuGqwZK9LyRLEsG20+fgccDXSFCFVVi0eaUKGt3Ws+h9ALL9KrAjgSBSrFG0M8/caAXczwmk8"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 309,"candidatesTokenCount": 18,"totalTokenCount": 481,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 309}],"thoughtsTokenCount": 154},"modelVersion": "gemini-3.1-pro-preview","responseId": "eCS5adbAKNC9kdUPwpj9gAI"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 40,"b": 50},"id": "f801pusn"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 309,"candidatesTokenCount": 36,"totalTokenCount": 499,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 309}],"thoughtsTokenCount": 154},"modelVersion": "gemini-3.1-pro-preview","responseId": "eCS5adbAKNC9kdUPwpj9gAI"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 60,"b": 70},"id": "szrp1it3"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 309,"candidatesTokenCount": 54,"totalTokenCount": 517,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 309}],"thoughtsTokenCount": 154},"modelVersion": "gemini-3.1-pro-preview","responseId": "eCS5adbAKNC9kdUPwpj9gAI"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 309,"candidatesTokenCount": 54,"totalTokenCount": 517,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 309}],"thoughtsTokenCount": 154},"modelVersion": "gemini-3.1-pro-preview","responseId": "eCS5adbAKNC9kdUPwpj9gAI"}
+
+4633 2335
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 4380
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"okz0loqw","name":"sum"},"thoughtSignature":"EqYGCqMGAb4+9vv52GL4uROrsj4WLU0dMpALbUuH2pF13Xi6KloBtUSDw1WJLbPldKOEU1Zqf0jO7rthZuoAl7jGZTuQpRDIRkhwuVY8mKIUzgeBR6Z68wVty1jQf9j+XVxJ7l/axwicTn6cOJOzZ66K3AeFqeWM2jNE/5eoJezmWCOAxgg/Cf70AwChH7YgetDR4F+VvWav91zlx95scApzG9LaS+ihvoRzjSKRPyR2WQgtUvi+m+PvzBaLUNcYR0XZZaKXWMzLI5vnw+NeJq0h04gNTJmAHJOsQ5DjVWp703Aoh5fN8z56UO6HgMrYrIr91fJhGI2bVDKq7G5CeFj1HiFD4z4na+xmgndsEZHrj6/6JKu+2Xe2LL7iTVdi9vsv/yeQCLDC6eIbEDT7Mpda3e61Q1x+LwhMEP7LMp8lTBzcQuNxXBAcRglHC+6wIifmWwlKK1UbyEg1Fz+PctdShrhZBfs/GHPsVZdGRyzgTxa3E0cEHEfbBThtkFMmaCLUAzLXBQMs92+HpgJmXRj3iSOjlePh2PutnlHxsKLI2rs7oKOoc8XSqZt2PAoO5T6l7cgjjKbEPhKtHyKlCCekyFUggwOt1ju4U30ztmnsFM6wB0K/qA9PoQrD7AdrtdUENI0Oe/rISTj6qTviNzvMOWuRlv0L3DWsqwdAfhrseXbuTCndAixDuLMIaUsApIyqIG1/0qF1KjJRo/VXjGKyFr027Io1LjZXrHkyRrRgXntU1/v2Ys0K6SfhbluRkUFOV8AuOhm/z5UVdfObKx0GEnyOXnY9megaOnCKBmYnpv5TXyddeS+b6wEXRMaf/6eXM1Yjvvpq3iXw18cgk+z0U1LsI9u2Doq2tozBMoqEGM/bzIAVwt9nsZakcbGgUX8Y7gu+PZlTJVsrAYLsCkKD//6pxE7UdCYPdeyGIxwqefxF2LD/DugQIL7y+HgES2IgFSjyTnRjzV2pyXGtxiBBxDoT7sIMaUJciNlpwgwVmS2c5PYDOIp1Dmbw6zc8k2R3xapBFYZOqBJHu8bGWm5zsI/lmFZ0uYo7EDElbhyvQBuifbnAKDk="},{"functionCall":{"args":{"a":4,"b":5},"id":"55jh6i4d","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"c3oxmvnd","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"okz0loqw","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"55jh6i4d","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"c3oxmvnd","name":"sum","response":{"sum":13}}}],"role":"user"},{"parts":[{"text":"Here are the results of your additions:\n* 2 + 3 = 5\n* 4 + 5 = 9\n* 6 + 7 = 13"},{"thoughtSignature":"EsICCr8CAb4+9vvi0hPdbkZGP+O32Dk8jBZLVhTDxNt/Wg68DhD2sv8f2czbtpO2pwTh4nbLUfEWwG8RZqdJ3O5HZHBgesXVAFgGwmkAIMGLMaLQeuuSOjg91/ejYt4RlyEHPzO9bxVY7BxidtbUv2MkvEx2v9aLs8HwqvMNKy+me6Hy2SOZdeceMKHLBS6Or19NCY1bznX2AG0l3T/uDs2lFWmGlgEXYsIFNeXQvXKID1pkagWC9OiMVWPCYOKN6s7OdrAx/oyrK8Anm9WdtCB7HCuIqAcx9L75S8VtHrFfHd8dr/Pj5Lnwb1VBDxvLU/7251WQgeAgm0CjFNR7RICmFzMHyR2i2mMxeFKI7SQScoXb71nb4HehJxcHAYNwpDUWq4Q5E5Ehhyrz8dCpBooTdoVl1d5Pjw2L7W0in6AiyhA7yg=="}],"role":"model"},{"parts":[{"text":"Great, now can you add 10 and 20? Also 40 and 50? And 60 and 70?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":10,"b":20},"id":"cxk8o6f8","name":"sum"},"thoughtSignature":"ErcECrQEAb4+9vsZQeAMGNLLD6TBwEoFKx96WY+FK1pPtIvlrhOPDj2iojUru29Bzxj8Qfx77fx4594Oqs+C1+yYTt9kTxsFxt1SXRjepUUKjm0WLYs0LpkP46czdNaaR7rGdlgs3RJ85TNi2Sz11qrBnet4Jyl+O+Hbq49czNjl+dKpN4DhqnOPZqsaWN9m5uIGhlt17Q5CibXZApNTEUy/SqQKKzEvjbTUo4Z99f4Pw4cxw6YttaJEUiyVutnFQ+l0hoQu5HgQzKsSu4oOX6JsyQSktECvQI4R+LU2z64WgcIbv7TlcpDxmcyH7huWfNRnSCZ2UCIBZp5IUOjJIPQwpD+ElwcenyBVY6Mfk0kLex0O909631z5rump25yZlN5R330RmuNav7eXeFs6UMoiq1DsGWUipwzG4PAPEWUJPChgzttUdBPgxleTArdOw2+c1+rS7OUcaHRpmu9BfGEZgvFEff4yCwlC6Hw9dHDRgTDTuXF0AXQOT4mipXBNpaCo0JqNzFf63TALLS80Qh98uqyhHSfXYzQRTd5VBUpwIDQkB5P/7IPrkMlKGeweKOHNK2JtBlAuqBQTmXalWo3UMX9IZf0W/Q+UCRJHGoMHa7Q9xzP/bmSkO897H3VS+FbEVR4eKL0fQaHO6D4LsEGBPfUZVuc+BiCDjyRzavdXm1CYuGqwZK9LyRLEsG20+fgccDXSFCFVVi0eaUKGt3Ws+h9ALL9KrAjgSBSrFG0M8/caAXczwmk8"},{"functionCall":{"args":{"a":40,"b":50},"id":"f801pusn","name":"sum"}},{"functionCall":{"args":{"a":60,"b":70},"id":"szrp1it3","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"cxk8o6f8","name":"sum","response":{"sum":30}}},{"functionResponse":{"id":"f801pusn","name":"sum","response":{"sum":90}}},{"functionResponse":{"id":"szrp1it3","name":"sum","response":{"sum":130}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:59 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2791
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "Here are the results for those additions:\n* 10 +"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 393,"candidatesTokenCount": 14,"totalTokenCount": 487,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 393}],"thoughtsTokenCount": 80},"modelVersion": "gemini-3.1-pro-preview","responseId": "eyS5aY3aJf65nsEPzPaAoQM"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 20 = 30\n* 40 + 50 = 90\n* 6"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 393,"candidatesTokenCount": 38,"totalTokenCount": 511,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 393}],"thoughtsTokenCount": 80},"modelVersion": "gemini-3.1-pro-preview","responseId": "eyS5aY3aJf65nsEPzPaAoQM"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "0 + 70 = 130"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 393,"candidatesTokenCount": 48,"totalTokenCount": 521,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 393}],"thoughtsTokenCount": 80},"modelVersion": "gemini-3.1-pro-preview","responseId": "eyS5aY3aJf65nsEPzPaAoQM"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "","thoughtSignature": "EsMCCsACAb4+9vsz1Lyx7TgiQyKVq3Bd/Zp4Yb+u7+COuc+BrIYdmHit3Af7++ds/aicQ51M+mD7+7TQySuE96fsb2a7Iv/xCMzWdAqBJs2Ynpox7MQQxACeVOX34ozgPfAC60LSDkNQYbnwYq1PHjV0T0Ig67+UUjucfh+pfiDriZNRRmLHEXJIn2m5PU53nnyr2dQIUU08ebT8G4SqdOI0PLFab4RELwRWJ3i5RlWxrKYwJJohefG5xDtZMWAjJHcqN8FuyQ/D74dW/0X/qPHGVq/NkVFVH0LUMq5+yB2hOrXgjGATrKg1nu+GF6vOEo+QmGOnyLv4rtmQ2bTj6Tfw/sFkhLwHs9vVOCAnohW/fkXFkCXpq9zcab1a/Q/v+TwMqy5WF0UTuPcJ/3cL+TUhfTSQqT6Pa8zTDVh0yVBXPSrQ78E="}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 547,"candidatesTokenCount": 48,"totalTokenCount": 675,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 547}],"thoughtsTokenCount": 80},"modelVersion": "gemini-3.1-pro-preview","responseId": "eyS5aY3aJf65nsEPzPaAoQM"}
+

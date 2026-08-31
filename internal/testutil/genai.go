@@ -20,8 +20,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"testing"
 
-	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/httprr"
 )
 
 // NewGeminiTransport returns the genai.ClientConfig configured for record and replay.
@@ -55,4 +58,21 @@ func scrubGeminiRequest(req *http.Request) error {
 		}
 	}
 	return nil
+}
+
+// NewGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
+func NewGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
+	t.Helper()
+	rr, err := NewGeminiTransport(rrfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiKey := ""
+	if recording, _ := httprr.Recording(rrfile); !recording {
+		apiKey = "fakekey"
+	}
+	return &genai.ClientConfig{
+		HTTPClient: &http.Client{Transport: rr},
+		APIKey:     apiKey,
+	}
 }

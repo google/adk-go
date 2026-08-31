@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Adkgo is a CLI tool to help deploy and test an ADK application.
+// adkgo is a CLI tool to help deploy and test an ADK application.
 package main
 
 import (
-	_ "google.golang.org/adk/cmd/adkgo/internal/deploy/cloudrun"
-	"google.golang.org/adk/cmd/adkgo/internal/root"
+	_ "google.golang.org/adk/v2/cmd/adkgo/internal/deploy/agentengine"
+	_ "google.golang.org/adk/v2/cmd/adkgo/internal/deploy/cloudrun"
+	"google.golang.org/adk/v2/cmd/adkgo/internal/root"
 )
 
 func main() {

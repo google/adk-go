@@ -17,6 +17,7 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"reflect"
 	"slices"
 	"sort"
@@ -24,51 +25,65 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		// Do nothing.
-		return nil // In python, no error is yielded.
-	}
-	fn := buildContentsDefault // "" or "default".
-	if llmAgent.internal().IncludeContents == "none" {
-		// Include current turn context only (no conversation history)
-		fn = buildContentsCurrentTurnContextOnly
-	}
-	var events []*session.Event
-	if ctx.Session() != nil {
-		for e := range ctx.Session().Events().All() {
-			events = append(events, e)
+func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			// Do nothing.
+			return // In python, no error is yielded.
+		}
+		state := llmAgent.internal()
+		fn := buildContentsDefault // "" or "default".
+		if state.IncludeContents == "none" {
+			// Include current turn context only (no conversation history)
+			fn = buildContentsCurrentTurnContextOnly
+		}
+		var events []*session.Event
+		if ctx.Session() != nil {
+			for e := range ctx.Session().Events().All() {
+				events = append(events, e)
+			}
+		}
+		isSingleTurn := state.Mode == ModeSingleTurn
+		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		req.Contents = append(req.Contents, contents...)
+		// If the conversation history concludes on a model turn, inject a synthetic user
+		// continuation turn so the model keeps producing output rather than returning an
+		// empty response. (Mirrors maybeAppendUserContent in model/gemini and
+		// adk-python's _maybe_append_user_content.)
+		if len(req.Contents) > 0 {
+			if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
+				req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+			}
 		}
 	}
-	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
-	if err != nil {
-		return err
-	}
-	req.Contents = append(req.Contents, contents...)
-	return nil
 }
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, invocationBranch string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
-		// by model.
-		// e.g. events purely for mutating session states.
-		if content == nil || content.Role == "" || len(content.Parts) == 0 {
+		// by model, UNLESS they have transcriptions.
+		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -79,7 +94,14 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
-		if isAuthEvent(ev) {
+		// Skip events outside the agent's isolation scope. Unlike branch
+		// (where empty is universally visible), isolation scope is an
+		// exact match: a scoped agent sees only its own scope, an
+		// unscoped agent sees only unscoped events.
+		if ev.IsolationScope != isolationScope {
+			continue
+		}
+		if shouldExcludeEvent(ev) {
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
@@ -88,6 +110,53 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			filtered = append(filtered, ev)
 		}
 	}
+
+	// Aggregate transcription events (convert to text parts on the fly)
+	var processedEvents []*session.Event
+	var accumulatedInputTranscription string
+	var accumulatedOutputTranscription string
+
+	for i := 0; i < len(filtered); i++ {
+		ev := filtered[i]
+		content := utils.Content(ev)
+		if content == nil || len(content.Parts) == 0 {
+			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
+				accumulatedInputTranscription += ev.LLMResponse.InputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.InputTranscription != nil &&
+					filtered[i+1].LLMResponse.InputTranscription.Text != "" {
+					continue
+				}
+				// Create a new event with content
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.InputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: accumulatedInputTranscription}},
+				}
+				ev = newEv
+				accumulatedInputTranscription = ""
+			} else if ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "" {
+				accumulatedOutputTranscription += ev.LLMResponse.OutputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.OutputTranscription != nil &&
+					filtered[i+1].LLMResponse.OutputTranscription.Text != "" {
+					continue
+				}
+				// Create a new event with content
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.OutputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: accumulatedOutputTranscription}},
+				}
+				ev = newEv
+				accumulatedOutputTranscription = ""
+			}
+		}
+		processedEvents = append(processedEvents, ev)
+	}
+	filtered = processedEvents
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
@@ -119,11 +188,24 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
+
+	// For scoped agents (task / single_turn), prepend a synthetic user
+	// content built from the originating FC's args. The FC lives in an
+	// UNSCOPED parent event (e.g. the coordinator's task-delegation FC)
+	// which the strict isolation filter above just excluded, so we
+	// re-derive it directly from the (pre-filter) events slice we were
+	// handed. This becomes the agent's first turn: "your task is X"
+	// instead of starting cold from the system instruction only.
+	if isolationScope != "" {
+		if leading := buildTaskInputUserContent(events, isolationScope, isSingleTurn, userContent); leading != nil {
+			contents = append([]*genai.Content{leading}, contents...)
+		}
+	}
 	return contents, nil
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
-	if invocationBranch == "" {
+	if invocationBranch == "" || event.Branch == "" {
 		return true
 	}
 	if event.Branch == invocationBranch {
@@ -147,7 +229,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 	}
 
 	lastEvent := events[len(events)-1]
-	lastResponses := listFunctionResponsesFromEvent(lastEvent)
+	lastResponses := utils.FunctionResponses(lastEvent.Content)
 	// No need to process, since the latest event is not function_response.
 	if len(lastResponses) == 0 {
 		return events, nil
@@ -161,7 +243,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	// Check if its already in the correct position
 	prevEvent := events[len(events)-2]
-	prevCalls := listFunctionCallsFromEvent(prevEvent)
+	prevCalls := utils.FunctionCalls(prevEvent.Content)
 	if len(prevCalls) > 0 {
 		for _, call := range prevCalls {
 			if _, found := responseIDs[call.ID]; found {
@@ -178,7 +260,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 SearchLoop: // A label to allow breaking out of the nested loop
 	for idx := len(events) - 2; idx >= 0; idx-- {
 		event := events[idx]
-		calls := listFunctionCallsFromEvent(event)
+		calls := utils.FunctionCalls(event.Content)
 
 		if len(calls) > 0 {
 			for _, call := range calls {
@@ -221,11 +303,19 @@ SearchLoop: // A label to allow breaking out of the nested loop
 		)
 	}
 
-	// Collect all function response events *between* the call and the last response.
+	// Collect function response events related to the matching call while
+	// preserving unrelated tool events that happened in between.
 	var responseEventsToMerge []*session.Event
+	resultEvents := events[:functionCallEventIdx+1]
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
-		responses := listFunctionResponsesFromEvent(event)
+		calls := utils.FunctionCalls(event.Content)
+		if len(calls) > 0 {
+			resultEvents = append(resultEvents, event)
+			continue
+		}
+
+		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
 			continue
 		}
@@ -241,13 +331,14 @@ SearchLoop: // A label to allow breaking out of the nested loop
 
 		if isRelated {
 			responseEventsToMerge = append(responseEventsToMerge, event)
+		} else {
+			resultEvents = append(resultEvents, event)
 		}
 	}
 
 	// Add the final response event itself to the list to be merged.
 	responseEventsToMerge = append(responseEventsToMerge, events[len(events)-1])
 
-	resultEvents := events[:functionCallEventIdx+1]
 	mergedEvent, err := mergeFunctionResponseEvents(responseEventsToMerge)
 	if err != nil {
 		return nil, err
@@ -276,7 +367,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	// Create a map to store the index of the event containing each function response.
 	callIDToResponseEventIndex := make(map[string]int)
 	for i, event := range events {
-		responses := listFunctionResponsesFromEvent(event)
+		responses := utils.FunctionResponses(event.Content)
 
 		if len(responses) > 0 {
 			for _, res := range responses {
@@ -291,11 +382,11 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	for _, event := range events {
 		// If the event contains responses, skip it. It will be handled
 		// when we process its corresponding call event.
-		if len(listFunctionResponsesFromEvent(event)) > 0 {
+		if len(utils.FunctionResponses(event.Content)) > 0 {
 			continue
 		}
 
-		calls := listFunctionCallsFromEvent(event)
+		calls := utils.FunctionCalls(event.Content)
 		if len(calls) == 0 {
 			// This is a regular event (e.g., user message). Just append it.
 			resultEvents = append(resultEvents, event)
@@ -438,17 +529,30 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
-func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		// Events from a sibling branch are not part of this agent's
+		// current turn. In parallel delegations, a sibling may append its
+		// response after this agent's user input; treating that response as
+		// the pivot would slice the input out of the request.
+		if !eventBelongsToBranch(branch, event) {
+			continue
+		}
+		// An out-of-scope event cannot start this agent's turn: it is
+		// invisible to the agent, so skip it as a pivot (matching
+		// adk-python's _should_include_event_in_context gate here).
+		if event.IsolationScope != isolationScope {
+			continue
+		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, events[i:])
+			return buildContentsDefault(agentName, branch, isolationScope, events[i:], isSingleTurn, userContent)
 		}
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
-	return buildContentsDefault(agentName, branch, events)
+	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
@@ -478,11 +582,11 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
+				Text: fmt.Sprintf("[%s] called tool `%s` with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
 			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
+				Text: fmt.Sprintf("[%s] `%s` tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
 			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
@@ -504,46 +608,97 @@ func stringify(v any) string {
 
 // requestEUCFunctionCallName is a special function to handle credential
 // request.
-const requestEUCFunctionCallName = "adk_request_credential"
+const (
+	requestEUCFunctionCallName = "adk_request_credential"
+)
 
-func isAuthEvent(ev *session.Event) bool {
+func shouldExcludeEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
 	if c == nil {
 		return false
 	}
 	for _, p := range c.Parts {
-		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {
-			return true
+		if p.FunctionCall != nil {
+			switch p.FunctionCall.Name {
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+				return true
+			}
 		}
-		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
-			return true
+		if p.FunctionResponse != nil {
+			switch p.FunctionResponse.Name {
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func listFunctionCallsFromEvent(e *session.Event) []*genai.FunctionCall {
-	funcCalls := make([]*genai.FunctionCall, 0)
-	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
-		for _, part := range e.LLMResponse.Content.Parts {
-			if part.FunctionCall != nil {
-				funcCalls = append(funcCalls, part.FunctionCall)
-			}
-		}
-	}
-	return funcCalls
-}
+// SingleTurnNudge is appended as a second user-content text part for
+// single_turn agents.
+const SingleTurnNudge = "Important: You will not receive any user replies or clarifications." +
+	" Complete the task using only the information provided above."
 
-func listFunctionResponsesFromEvent(e *session.Event) []*genai.FunctionResponse {
-	funcResponses := make([]*genai.FunctionResponse, 0)
-	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
-		for _, part := range e.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
-				funcResponses = append(funcResponses, part.FunctionResponse)
+// buildTaskInputUserContent finds the originating task-delegation FC in
+// events and converts its args into a user-role Content for use as the
+// first turn of a scoped (task / single_turn) agent.
+//
+// A task agent runs under isolation_scope == <fc_id>, where fc_id
+// matches the FunctionCall.ID that delegated to it. The FC itself
+// lives on a parent (coordinator) event that is filtered out of the
+// agent's view by the strict isolation_scope match, so this helper
+// rebuilds it here.
+//
+// When no matching FC is found (workflow-node task case — task agent
+// dispatched directly by a Workflow, not via FC delegation), falls
+// back to userContent (set on the InvocationContext by the wrapper to
+// the rendered node input). Returns nil if neither source yields
+// content.
+//
+// When isSingleTurn is true, appends singleTurnNudge as an additional
+// user-content text part.
+func buildTaskInputUserContent(events []*session.Event, isolationScope string, isSingleTurn bool, userContent *genai.Content) *genai.Content {
+	if isolationScope == "" {
+		return nil
+	}
+	for _, ev := range events {
+		content := utils.Content(ev)
+		if content == nil || len(content.Parts) == 0 {
+			continue
+		}
+		for _, p := range content.Parts {
+			if p == nil || p.FunctionCall == nil {
+				continue
 			}
+			fc := p.FunctionCall
+			if fc.ID != isolationScope || len(fc.Args) == 0 {
+				continue
+			}
+			// Render args as JSON — the same shape an LLM would emit.
+			text, err := json.Marshal(fc.Args)
+			var argText string
+			if err != nil {
+				argText = fmt.Sprint(fc.Args)
+			} else {
+				argText = string(text)
+			}
+			parts := []*genai.Part{{Text: argText}}
+			if isSingleTurn {
+				parts = append(parts, &genai.Part{Text: SingleTurnNudge})
+			}
+			return &genai.Content{Role: genai.RoleUser, Parts: parts}
 		}
 	}
-	return funcResponses
+
+	if userContent == nil || len(userContent.Parts) == 0 {
+		return nil
+	}
+	parts := make([]*genai.Part, 0, len(userContent.Parts)+1)
+	parts = append(parts, userContent.Parts...)
+	if isSingleTurn {
+		parts = append(parts, &genai.Part{Text: SingleTurnNudge})
+	}
+	return &genai.Content{Role: genai.RoleUser, Parts: parts}
 }
 
 func cloneEvent(e *session.Event) *session.Event {
@@ -553,12 +708,13 @@ func cloneEvent(e *session.Event) *session.Event {
 
 	// 1. Create a new Event instance
 	newEvent := &session.Event{
-		ID:           e.ID,
-		Timestamp:    e.Timestamp,
-		InvocationID: e.InvocationID,
-		Branch:       e.Branch,
-		Author:       e.Author,
-		Actions:      e.Actions,
+		ID:             e.ID,
+		Timestamp:      e.Timestamp,
+		InvocationID:   e.InvocationID,
+		Branch:         e.Branch,
+		IsolationScope: e.IsolationScope,
+		Author:         e.Author,
+		Actions:        e.Actions,
 	}
 
 	// 2. Deep copy the LongRunningToolIDs slice

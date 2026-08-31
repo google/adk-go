@@ -21,17 +21,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/agenttool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/agenttool"
 )
 
 func TestAgentTool_Declaration(t *testing.T) {
@@ -214,7 +212,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 			{
 				Parts: []*genai.Part{
 					{Text: "First text part is returned"},
-					{Text: "This should be ignored"},
+					{Text: " This should not be ignored"},
 				},
 				Role: genai.RoleModel,
 			},
@@ -234,7 +232,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{"result": "First text part is returned"}
+	want := map[string]any{"result": "First text part is returned This should not be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}
@@ -348,7 +346,7 @@ func createAgentWithModel(t *testing.T, inputSchema, outputSchema *genai.Schema,
 	return agent
 }
 
-func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
+func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 	t.Helper()
 
 	sessionService := session.InMemoryService()
@@ -360,12 +358,10 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
 	}
-	s := createResponse.Session
-	sessionImpl := sessioninternal.NewMutableSession(sessionService, s)
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-		Session: sessionImpl,
+		Session: createResponse.Session,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", &session.EventActions{})
+	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
 }

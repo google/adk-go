@@ -8,16 +8,25 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - google.golang.org/adk
+        - google.golang.org/adk/v2
     gofumpt:
       extra-rules: true
-      module-path: google.golang.org/adk
+      module-path: google.golang.org/adk/v2
 
 linters:
   enable:
     - goheader
-  
+    - revive
+
   settings:
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+
     
     goheader:
       values:
@@ -53,6 +62,7 @@ linters:
         # Changes to the default config:
         - -QF1001 # Exclude "Apply De Morgan's law"
         - -QF1008 # Exclude "Omit embedded fields from selector expression"
+        - -SA1019 # Exclude to keep the old a2a compatibility, can remove for ADK v2
   
   exclusions:
     rules:
@@ -61,3 +71,10 @@ linters:
           - goheader
           - errcheck
           - staticcheck
+      # Don't enforce doc comments on internal (non-importable) packages or on
+      # examples (demonstration code, not an importable API surface), while
+      # keeping any other revive rules active there.
+      - path: '(^|/)(internal|examples)/'
+        linters:
+          - revive
+        text: '^(exported|package-comments):'

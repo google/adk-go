@@ -15,18 +15,16 @@
 package llminternal
 
 import (
-	"context"
 	"strings"
 	"testing"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestInjectSessionState(t *testing.T) {
@@ -71,7 +69,7 @@ func TestInjectSessionState(t *testing.T) {
 			template:   "Hello {missing_key}!",
 			state:      map[string]any{"user_name": "Foo"},
 			wantErr:    true,
-			wantErrMsg: "failed to get key \"missing_key\" from state: state key does not exist",
+			wantErrMsg: "state key does not exist",
 		},
 		// Corresponds to: test_inject_session_state_with_missing_artifact_raises_key_error
 		{
@@ -179,7 +177,6 @@ And another optional artifact:
 			if err != nil {
 				t.Fatalf("Failed to create session: %v", err)
 			}
-			sess := sessioninternal.NewMutableSession(sessionService, createResp.Session)
 
 			// Setup Artifacts
 			var artifacts agent.Artifacts
@@ -197,9 +194,9 @@ And another optional artifact:
 				}
 			}
 			// Create invocation context
-			ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				Artifacts: artifacts,
-				Session:   sess,
+				Session:   createResp.Session,
 			})
 
 			// --- Execution ---

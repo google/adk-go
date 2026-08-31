@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a coding workflow agent that runs sub-agents sequentially.
 package main
 
 import (
@@ -21,18 +22,18 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/model/gemini"
 )
 
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("failed to create model: %s", err)
 	}
@@ -80,7 +81,7 @@ Provide your feedback as a concise, bulleted list. Focus on the most important p
 If the code is excellent and requires no changes, simply state: "No major issues found."
 Output *only* the review comments or the "No major issues" statement.`,
 		Description: "Reviews code and provides feedback.",
-		OutputKey:   "review_comments", // Stores output in state["review_comments"]
+		OutputKey:   "temp:review_comments", // Stores output in state["temp:review_comments"]
 	})
 	if err != nil {
 		log.Fatalf("failed to create codeReviewerAgent: %s", err)
@@ -100,7 +101,7 @@ Your goal is to improve the given Python code based on the provided review comme
 '''
 
 **Review Comments:**
-{review_comments}
+{temp:review_comments}
 
 **Task:**
 Carefully apply the suggestions from the review comments to refactor the original code.

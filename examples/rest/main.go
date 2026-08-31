@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This example demonstrates how to use the ADK REST API handler directly
-// with the standard net/http package, without relying on any specific router.
+// Package provides an example ADK REST API server with an ADK agent.
 package main
 
 import (
@@ -21,24 +20,24 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/adkrest"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/geminitool"
 )
 
 func main() {
 	ctx := context.Background()
 
 	// Create a Gemini model
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -59,21 +58,22 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	// Configure the ADK REST API
-	config := &launcher.Config{
-		AgentLoader:    agent.NewSingleLoader(a),
-		SessionService: session.InMemoryService(),
+	// Configure the ADK REST API Server
+	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
+		AgentLoader:     agent.NewSingleLoader(a),
+		SessionService:  session.InMemoryService(),
+		SSEWriteTimeout: 120 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create REST API server: %v", err)
 	}
-
-	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config)
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()
 
 	// Register the API handler at the /api/ path
 	// You can use any HTTP server or router here - not tied to gorilla/mux
-	mux.Handle("/api/", http.StripPrefix("/api", apiHandler))
+	mux.Handle("/api/", http.StripPrefix("/api", restServer))
 
 	// Add a simple health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

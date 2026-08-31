@@ -16,15 +16,19 @@
 package functiontool
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
+	"runtime/debug"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/typeutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // FunctionTool: borrow implementation from MCP go.
@@ -43,17 +47,48 @@ type Config struct {
 	OutputSchema *jsonschema.Schema
 	// IsLongRunning makes a FunctionTool a long-running operation.
 	IsLongRunning bool
+
+	// RequireConfirmation flags whether this tool must always ask for user confirmation
+	// before execution. If set to true, the ADK framework will automatically initiate
+	// a Human-in-the-Loop (HITL) confirmation request when this tool is invoked.
+	RequireConfirmation bool
+
+	// RequireConfirmationProvider allows for dynamic determination of whether
+	// user confirmation is needed. This field is a function called at runtime to decide if
+	// a confirmation request should be sent. The function takes the tool's input parameters as arguments.
+	// This provider offers more flexibility than the static RequireConfirmation flag,
+	// enabling conditional confirmation based on the invocation details.
+	// If set, this often takes precedence over the RequireConfirmation flag.
+	//
+	// Required signature for a provider function:
+	// func(toolInput ToolArgs) (bool)
+	// where ToolArgs is the input type of your go function
+	// Returning true means confirmation is required.
+	RequireConfirmationProvider any
 }
 
 // Func represents a Go function that can be wrapped in a tool.
-// It takes a tool.Context and a generic argument type, and returns a generic result type.
-type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
+// It takes a agent.Context and a generic argument type, and returns a generic result type.
+type Func[TArgs, TResults any] func(agent.Context, TArgs) (TResults, error)
+
+// ErrInvalidArgument indicates the input parameter type is invalid.
+var ErrInvalidArgument = errors.New("invalid argument")
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
-	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+	// https://github.com/modelcontextprotocol/go-sdk/discussions/37
+
+	var zeroArgs TArgs
+	argsType := reflect.TypeOf(zeroArgs)
+	for argsType != nil && argsType.Kind() == reflect.Pointer {
+		argsType = argsType.Elem()
+	}
+	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
+		return nil, fmt.Errorf("input must be a struct or a map or a pointer to those types, but received: %v: %w", argsType, ErrInvalidArgument)
+	}
+
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer input schema: %w", err)
@@ -63,11 +98,24 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
+	var confirmWrapper func(TArgs) bool
+
+	if cfg.RequireConfirmationProvider != nil {
+		// Attempt to cast the interface directly to the function signature
+		fn, ok := cfg.RequireConfirmationProvider.(func(TArgs) bool)
+		if !ok {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must be a function with signature func(%T) bool", *new(TArgs))
+		}
+		confirmWrapper = fn
+	}
+
 	return &functionTool[TArgs, TResults]{
-		cfg:          cfg,
-		inputSchema:  ischema,
-		outputSchema: oschema,
-		handler:      handler,
+		cfg:                         cfg,
+		inputSchema:                 ischema,
+		outputSchema:                oschema,
+		handler:                     handler,
+		requireConfirmation:         cfg.RequireConfirmation,
+		requireConfirmationProvider: confirmWrapper,
 	}, nil
 }
 
@@ -82,6 +130,10 @@ type functionTool[TArgs, TResults any] struct {
 
 	// handler is the Go function.
 	handler Func[TArgs, TResults]
+
+	requireConfirmation bool
+
+	requireConfirmationProvider func(TArgs) bool
 }
 
 // Description implements tool.Tool.
@@ -100,7 +152,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -130,9 +182,14 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
-	// TODO: Handle panic -> convert to error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+		}
+	}()
+
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -141,6 +198,32 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[str
 	if err != nil {
 		return nil, err
 	}
+
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
+		}
+	} else {
+		requireConfirmation := f.requireConfirmation
+
+		// Only run the potentially expensive provider if the static flag didn't already trigger it
+		// Provider takes precedence/overrides:
+		if f.requireConfirmationProvider != nil {
+			requireConfirmation = f.requireConfirmationProvider(input)
+		}
+
+		if requireConfirmation {
+			err := ctx.RequestConfirmation(
+				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					f.Name()), nil)
+			if err != nil {
+				return nil, err
+			}
+			ctx.Actions().SkipSummarization = true
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
+		}
+	}
+
 	output, err := f.handler(ctx, input)
 	if err != nil {
 		return nil, err
@@ -174,7 +257,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[str
 //    function can return an error, that needs to be included in the output
 //    json schema. And for function that never returns an error, I think it
 //    gets less uglier.
-//  * MCP ToolHandler expects mcp.ServerSession. types.ToolContext may be close
+//  * MCP ToolHandler expects mcp.ServerSession. agent.Context may be close
 //    to it, but we don't need to expose this to user function
 //    (similar to ADK Python FunctionTool [2])
 // References

@@ -12,31 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package console provides a simple way to interact with an agent from console application
+// Package console provides a simple way to interact with an agent from console application.
 package console
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/signal"
+	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
+	"google.golang.org/adk/v2/cmd/launcher/universal"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 )
 
 // consoleConfig contains command-line params for console launcher
 type consoleConfig struct {
 	streamingMode       agent.StreamingMode
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
+	otelToCloud         bool
+	shutdownTimeout     time.Duration
 }
 
 // consoleLauncher allows to interact with an agent in console
@@ -50,14 +59,30 @@ func NewLauncher() launcher.SubLauncher {
 	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
-	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
+	fs.StringVar(&config.streamingModeString, "streaming_mode", "",
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
-
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 2*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	return &consoleLauncher{config: config, flags: fs}
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
 func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+
+	telemetry, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, l.config.otelToCloud)
+	if err != nil {
+		return fmt.Errorf("telemetry initialization failed: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), l.config.shutdownTimeout)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown failed: %v", err)
+		}
+	}()
+
 	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"
 
@@ -76,72 +101,187 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	rootAgent := config.AgentLoader.RootAgent()
 
-	session := resp.Session
+	sess := resp.Session
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
 		Agent:           rootAgent,
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
+		PluginConfig:    config.PluginConfig,
+		MemoryService:   config.MemoryService,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create runner: %v", err)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	inputChan := make(chan string)
+	readErrChan := make(chan error, 1)
 
-	for {
-		fmt.Print("\nUser -> ")
-
-		userInput, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
-
-		streamingMode := l.config.streamingMode
-		if streamingMode == "" {
-			streamingMode = agent.StreamingModeSSE
-		}
-		fmt.Print("\nAgent -> ")
-		prevText := ""
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
-			StreamingMode: streamingMode,
-		}) {
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			userInput, err := reader.ReadString('\n')
 			if err != nil {
-				fmt.Printf("\nAGENT_ERROR: %v\n", err)
-			} else {
-				if event.LLMResponse.Content == nil {
-					continue
-				}
-
-				text := ""
-				for _, p := range event.LLMResponse.Content.Parts {
-					text += p.Text
-				}
-
-				if streamingMode != agent.StreamingModeSSE {
-					fmt.Print(text)
-					continue
-				}
-
-				// In SSE mode, always print partial responses and capture them.
-				if !event.IsFinalResponse() {
-					fmt.Print(text)
-					prevText += text
-					continue
-				}
-
-				// Only print final response if it doesn't match previously captured text.
-				if text != prevText {
-					fmt.Print(text)
-				}
-
-				prevText = ""
+				readErrChan <- err
+				return
 			}
+			inputChan <- userInput
+		}
+	}()
+	// Print an initial newline to work around PTY/exec buffering issues in some environments.
+	fmt.Println()
+
+	fmt.Print("\nUser -> ")
+
+	// Resolve "auto" streaming mode once per session (stdout TTY-ness doesn't change).
+	defaultStreamingMode := l.config.streamingMode
+	if defaultStreamingMode == "" {
+		// Stdlib-only terminal heuristic: stdout is a character device.
+		// Avoids adding golang.org/x/term dependency (golangci-lint failed to load its export data in CI).
+		if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+			defaultStreamingMode = agent.StreamingModeSSE
+		} else {
+			defaultStreamingMode = agent.StreamingModeNone
 		}
 	}
+
+	// pendingInterrupts carries human-input prompts the agent
+	// emitted on the previous turn. While non-empty, the next
+	// stdin read is interpreted as the answer to its head; once
+	// every prompt has an answer the assembled FunctionResponse
+	// content is sent as the next "user message" turn.
+	var pendingInterrupts []pendingInterrupt
+	var pendingResponses []*genai.Part
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-readErrChan:
+			if errors.Is(err, io.EOF) {
+				fmt.Println("\nEOF detected, exiting...")
+				return nil
+			}
+			log.Fatal(err)
+		case userInput := <-inputChan:
+			// Drop the line terminator the reader keeps, so the message
+			// matches what the web UI submits (no trailing newline).
+			userInput = strings.TrimRight(userInput, "\r\n")
+
+			var userMsg *genai.Content
+			if len(pendingInterrupts) > 0 {
+				// Answer the head of the queue; loop back if more
+				// prompts remain.
+				current := pendingInterrupts[0]
+				pendingInterrupts = pendingInterrupts[1:]
+				pendingResponses = append(pendingResponses, buildInterruptResponse(current, userInput))
+				if len(pendingInterrupts) > 0 {
+					renderInterruptPrompt(pendingInterrupts[0])
+					continue
+				}
+				// All answers collected. Bundle every
+				// FunctionResponse into one user Content; the
+				// workflow runtime routes each to its waiting
+				// node by FunctionResponse.ID.
+				// TODO: legacy non-workflow agents still pick
+				// one agent from the first FunctionResponse.ID
+				// and drop the rest.
+				userMsg = &genai.Content{
+					Role:  string(genai.RoleUser),
+					Parts: pendingResponses,
+				}
+				pendingResponses = nil
+			} else {
+				userMsg = genai.NewContentFromText(userInput, genai.RoleUser)
+			}
+
+			streamingMode := l.config.streamingMode
+			if streamingMode == "" {
+				streamingMode = defaultStreamingMode
+			}
+
+			fmt.Print("\nAgent -> ")
+			prevText := ""
+			printedContent := false
+			var finalOutput any
+			var collectedEvents []*session.Event
+			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
+				StreamingMode: streamingMode,
+			}) {
+				if err != nil {
+					fmt.Printf("\nAGENT_ERROR: %v\n", err)
+				} else {
+					collectedEvents = append(collectedEvents, event)
+					if event.LLMResponse.Content == nil {
+						// Function/terminal nodes carry their result in
+						// Event.Output, not model content; keep the latest
+						// so a content-less turn still surfaces a result.
+						if event.Output != nil {
+							finalOutput = event.Output
+						}
+						continue
+					}
+
+					text := ""
+					for _, p := range event.LLMResponse.Content.Parts {
+						text += p.Text
+					}
+					if text != "" {
+						printedContent = true
+					}
+
+					if streamingMode != agent.StreamingModeSSE {
+						fmt.Print(text)
+						continue
+					}
+
+					// In SSE mode, always print partial responses and capture them.
+					if !event.IsFinalResponse() {
+						fmt.Print(text)
+						prevText += text
+						continue
+					}
+
+					// Only print final response if it doesn't match previously captured text.
+					if text != prevText {
+						fmt.Print(text)
+					}
+
+					prevText = ""
+				}
+			}
+
+			// If the turn paused on any long-running interrupts,
+			// render the first prompt; the next stdin read will
+			// be its answer.
+			pendingInterrupts = collectPendingInterrupts(collectedEvents)
+			if len(pendingInterrupts) > 0 {
+				fmt.Println()
+				renderInterruptPrompt(pendingInterrupts[0])
+				continue
+			}
+			// A workflow whose terminal node returns a value rather than
+			// model content streams no text; surface that result so the
+			// turn isn't silent.
+			if !printedContent && finalOutput != nil {
+				fmt.Print(renderOutput(finalOutput))
+			}
+			fmt.Print("\nUser -> ")
+		}
+	}
+}
+
+// renderOutput formats a node's Output value for the console: strings
+// as-is, anything else as compact JSON.
+func renderOutput(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprint(v)
 }
 
 // Parse implements launcher.SubLauncher. After parsing console-specific
@@ -151,7 +291,8 @@ func (l *consoleLauncher) Parse(args []string) ([]string, error) {
 	if err != nil || !l.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
-	if l.config.streamingModeString != string(agent.StreamingModeNone) &&
+	if l.config.streamingModeString != "" &&
+		l.config.streamingModeString != string(agent.StreamingModeNone) &&
 		l.config.streamingModeString != string(agent.StreamingModeSSE) {
 		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", l.config.streamingModeString,
 			agent.StreamingModeNone, agent.StreamingModeSSE)

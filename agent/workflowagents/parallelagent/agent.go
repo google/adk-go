@@ -16,15 +16,16 @@
 package parallelagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
 	"golang.org/x/sync/errgroup"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/session"
 )
 
 // Config defines the configuration for a ParallelAgent.
@@ -67,8 +68,13 @@ func New(cfg Config) (agent.Agent, error) {
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	curAgent := ctx.Agent()
 
+	// Cancelable so an early consumer stop aborts each sub-agent's in-flight Run
+	// promptly. Teardown still runs to completion and the iterator waits for it
+	// (see the deferred cleanup), so a sub-agent that blocks in teardown blocks run.
+	subAgentsCtx, cancelSubAgents := context.WithCancel(ctx)
+
 	var (
-		errGroup, errGroupCtx = errgroup.WithContext(ctx)
+		errGroup, errGroupCtx = errgroup.WithContext(subAgentsCtx)
 		doneChan              = make(chan bool)
 		resultsChan           = make(chan result)
 	)
@@ -81,13 +87,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		subAgent := sa
 		errGroup.Go(func() error {
 			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
-				Artifacts:   ctx.Artifacts(),
-				Memory:      ctx.Memory(),
-				Session:     ctx.Session(),
-				Branch:      branch,
-				Agent:       subAgent,
-				UserContent: ctx.UserContent(),
-				RunConfig:   ctx.RunConfig(),
+				Artifacts:    ctx.Artifacts(),
+				Memory:       ctx.Memory(),
+				Session:      ctx.Session(),
+				Branch:       branch,
+				Agent:        subAgent,
+				UserContent:  ctx.UserContent(),
+				RunConfig:    ctx.RunConfig(),
+				InvocationID: ctx.InvocationID(),
 			})
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
@@ -99,15 +106,36 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}
 
 	go func() {
-		_ = errGroup.Wait() // this error is already sent to the user via iterator
+		if err := errGroup.Wait(); err != nil {
+			select {
+			case resultsChan <- result{err: err}:
+			case <-doneChan:
+			}
+		}
 		close(resultsChan)
 	}()
 
 	return func(yield func(*session.Event, error) bool) {
-		defer close(doneChan)
+		// Await sub-agent goroutines (incl. their deferred teardown) before
+		// returning, even on early stop: cancel them, then drain resultsChan, which
+		// the funnel closes only after errGroup.Wait(). Otherwise teardown can
+		// outlive the run and touch an already-ended context.
+		defer func() {
+			cancelSubAgents()
+			close(doneChan)
+			for range resultsChan { // drain until the funnel closes resultsChan
+			}
+		}()
 
 		for res := range resultsChan {
-			if !yield(res.event, res.err) {
+			shouldContinue := yield(res.event, res.err)
+
+			// Signal sub-agent that event processing (including session append) is complete
+			if res.ackChan != nil {
+				close(res.ackChan)
+			}
+
+			if !shouldContinue {
 				break
 			}
 		}
@@ -116,23 +144,28 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 
 func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- result, done <-chan bool) error {
 	for event, err := range agent.Run(ctx) {
+		if err != nil {
+			return err
+		}
+
+		ackChan := make(chan struct{})
+
 		select {
 		case <-done:
 			return nil
 		case <-ctx.Done():
-			select {
-			case <-done:
-			case results <- result{
-				err: ctx.Err(),
-			}:
-			}
 			return ctx.Err()
 		case results <- result{
-			event: event,
-			err:   err,
+			event:   event,
+			ackChan: ackChan,
 		}:
-			if err != nil {
-				return err
+			// Wait for runner to finish processing before continuing to next iteration
+			select {
+			case <-ackChan:
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -140,6 +173,7 @@ func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- 
 }
 
 type result struct {
-	event *session.Event
-	err   error
+	event   *session.Event
+	err     error
+	ackChan chan struct{}
 }

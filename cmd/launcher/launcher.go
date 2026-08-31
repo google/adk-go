@@ -12,18 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package launcher provides ways to interact with agents
+// Package launcher provides ways to interact with agents.
 package launcher
 
 import (
 	"context"
 
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/telemetry"
 )
 
 // Launcher is the main interface for running an ADK application.
@@ -54,9 +56,11 @@ type SubLauncher interface {
 
 // Config contains parameters for web & console execution: sessions, artifacts, agents etc
 type Config struct {
-	SessionService  session.Service
-	ArtifactService artifact.Service
-	MemoryService   memory.Service
-	AgentLoader     agent.Loader
-	A2AOptions      []a2asrv.RequestHandlerOption
+	SessionService   session.Service
+	ArtifactService  artifact.Service
+	MemoryService    memory.Service
+	AgentLoader      agent.Loader
+	A2AOptions       []a2asrv.RequestHandlerOption
+	PluginConfig     runner.PluginConfig
+	TelemetryOptions []telemetry.Option
 }

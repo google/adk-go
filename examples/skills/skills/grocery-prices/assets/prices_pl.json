@@ -1,0 +1,22 @@
+[
+  {
+    "item": "Milk",
+    "price": 4.00,
+    "category": "Dairy"
+  },
+  {
+    "item": "Bread",
+    "price": 5.00,
+    "category": "Bakery"
+  },
+  {
+    "item": "Beer",
+    "price": 12.00,
+    "category": "Alcohol"
+  },
+  {
+    "item": "Headphones",
+    "price": 200.00,
+    "category": "Electronics"
+  }
+]

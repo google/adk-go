@@ -31,7 +31,9 @@ const (
 	TypeLoopAgent       Type = "LoopAgent"
 	TypeSequentialAgent Type = "SequentialAgent"
 	TypeParallelAgent   Type = "ParallelAgent"
+	TypeWorkflowAgent   Type = "WorkflowAgent"
 	TypeCustomAgent     Type = "CustomAgent"
+	TypeRemoteAgent     Type = "RemoteAgent"
 )
 
 func (s *State) internal() *State { return s }

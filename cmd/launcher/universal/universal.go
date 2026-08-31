@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Package universal provides an umbrella over launchers (console and web).
-// It allowes to choose one launcher by command-line parameters and uses it to parse the rest of arguments and then execute the launcher
+// It allowes to choose one launcher by command-line parameters and uses
+// it to parse the rest of arguments and then execute the launcher
 package universal
 
 import (
@@ -21,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher"
 )
 
 // uniLauncher contains information about sublaunchers

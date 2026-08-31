@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package webui provides a sublauncher that adds ADK Web UI to the web server (using url /ui/)
+// Package webui provides a sublauncher that adds ADK Web UI capabilities.
 package webui
 
 import (
@@ -25,10 +25,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	weblauncher "google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/adkrest/controllers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	weblauncher "google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
 // webUIConfig contains parameters for launching ADK Web UI

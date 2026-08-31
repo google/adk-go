@@ -20,8 +20,8 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
@@ -29,6 +29,7 @@ type ArtifactsAPIController struct {
 	artifactService artifact.Service
 }
 
+// NewArtifactsAPIController creates an ArtifactsAPIController backed by the given artifact service.
 func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
 	return &ArtifactsAPIController{artifactService: artifactService}
 }

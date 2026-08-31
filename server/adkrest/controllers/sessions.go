@@ -17,12 +17,14 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 // TODO: Confirm error handling and target semantic for REST API.
@@ -37,7 +39,7 @@ func NewSessionsAPIController(service session.Service) *SessionsAPIController {
 	return &SessionsAPIController{service: service}
 }
 
-// CreateSesssionHTTP is a HTTP handler for the create session API.
+// CreateSessionHandler is an HTTP handler for the create session API.
 func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
@@ -46,10 +48,9 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		return
 	}
 	createSessionRequest := models.CreateSessionRequest{}
-	// No state and no events, fails to decode req.Body failing with "EOF"
-	if req.ContentLength > 0 {
+	if req.Body != nil {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -81,7 +82,7 @@ func (c *SessionsAPIController) createSession(ctx context.Context, sessionID mod
 	return models.FromSession(session.Session)
 }
 
-// DeleteSession handles deleting a specific session.
+// DeleteSessionHandler handles deleting a specific session.
 func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
@@ -106,7 +107,7 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 	EncodeJSONResponse(nil, http.StatusOK, rw)
 }
 
-// GetSession retrieves a specific session by its ID.
+// GetSessionHandler retrieves a specific session by its ID.
 func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
@@ -135,7 +136,7 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 	EncodeJSONResponse(session, http.StatusOK, rw)
 }
 
-// ListSessions handles listing all sessions for a given app and user.
+// ListSessionsHandler handles listing all sessions for a given app and user.
 func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)

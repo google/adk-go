@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -32,6 +33,9 @@ type Service interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
+	// Implementations that assign versions optimistically may fail to claim one
+	// while other writers save the same artifact; that failure is transient and
+	// the call can be retried.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
@@ -42,6 +46,8 @@ type Service interface {
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
+	// GetArtifactVersion gets the metadata for a specific version of an artifact.
+	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
 }
 
 // requiredField is an internal type to use on validate operations
@@ -101,6 +107,18 @@ func (req *SaveRequest) Validate() error {
 	if req.Part.Text == "" && req.Part.InlineData == nil {
 		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFileName(name string) error {
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("invalid name: filename cannot contain path separators")
+	}
 	return nil
 }
 
@@ -134,6 +152,12 @@ func (req *LoadRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -168,6 +192,12 @@ func (req *DeleteRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -222,10 +252,64 @@ func (req *VersionsRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // VersionsResponse is the parameter for [ArtifactService.Versions].
 type VersionsResponse struct {
 	Versions []int64
+}
+
+// ArtifactVersion contains metadata describing a specific version of an artifact.
+type ArtifactVersion struct {
+	Version        int64
+	CanonicalURI   string
+	CustomMetadata map[string]any
+	CreateTime     time.Time
+	MimeType       string
+}
+
+// GetArtifactVersionRequest is the parameter for [ArtifactService.GetArtifactVersion].
+type GetArtifactVersionRequest struct {
+	AppName, UserID, SessionID, FileName string
+
+	// Below are optional fields.
+	Version int64
+}
+
+// Validate checks if the struct is valid or if it is missing a field.
+func (req *GetArtifactVersionRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// GetArtifactVersionResponse is the return type of [ArtifactService.GetArtifactVersion].
+type GetArtifactVersionResponse struct {
+	ArtifactVersion *ArtifactVersion
 }

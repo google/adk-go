@@ -18,14 +18,12 @@ package exitlooptool
 import (
 	"fmt"
 
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-// EmptyArgs is an empty struct used as an argument for the exitLoop tool.
-type EmptyArgs struct{}
-
-func exitLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
@@ -35,7 +33,7 @@ func exitLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
 func New() (tool.Tool, error) {
 	exitLoopTool, err := functiontool.New(functiontool.Config{
 		Name:        "exit_loop",
-		Description: "Exits the loop.\nCall this function only when you are instructed to do so.\n",
+		Description: "Exits the loop.\n\nCall this function only when you are instructed to do so.\n",
 	}, exitLoop)
 	if err != nil {
 		return nil, fmt.Errorf("error creating exit loop tool: %w", err)

@@ -15,14 +15,16 @@
 package database
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // storageSession corresponds to the 'sessions' table.
@@ -31,11 +33,11 @@ type storageSession struct {
 	UserID     string `gorm:"primaryKey;"`
 	ID         string `gorm:"primaryKey;"`
 	State      stateMap
-	CreateTime time.Time
-	UpdateTime time.Time
+	CreateTime time.Time `gorm:"precision:6"`
+	UpdateTime time.Time `gorm:"precision:6"`
 
 	// Has-Many relationship: A session has many events.
-	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID"`
+	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID;constraint:OnDelete:CASCADE"`
 }
 
 // TableName explicitly sets the table name for the storageSession struct.
@@ -44,14 +46,15 @@ func (storageSession) TableName() string {
 }
 
 // Helper to map from internal struct to GORM struct
-func createStorageSession(s *localSession) (*storageSession, error) {
+func createStorageSession(ctx context.Context, s *localSession) (*storageSession, error) {
+	now := platform.Now(ctx)
 	return &storageSession{
 		UserID:     s.userID,
 		AppName:    s.appName,
 		ID:         s.sessionID,
 		State:      s.state,
-		CreateTime: time.Now(),
-		UpdateTime: time.Now(),
+		CreateTime: now,
+		UpdateTime: now,
 	}, nil
 }
 
@@ -79,8 +82,13 @@ type storageEvent struct {
 	// equivalent. Unpickling would require a custom library or service.
 	Actions                []byte
 	LongRunningToolIDsJSON dynamicJSON
+	RoutesJSON             dynamicJSON
+	OutputJSON             dynamicJSON
+	NodeInfoJSON           dynamicJSON
+	RequestedInputJSON     dynamicJSON
 	Branch                 *string
-	Timestamp              time.Time
+	IsolationScope         *string
+	Timestamp              time.Time `gorm:"precision:6"`
 
 	// Fields from llm_response
 	Content           dynamicJSON
@@ -135,10 +143,45 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 		storageEv.LongRunningToolIDsJSON = toolIDsJSON
 	}
 
+	if len(event.Routes) > 0 {
+		routesJSON, err := json.Marshal(event.Routes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal event route: %w", err)
+		}
+		storageEv.RoutesJSON = routesJSON
+	}
+
+	if event.Output != nil {
+		outputJSON, err := json.Marshal(event.Output)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal output: %w", err)
+		}
+		storageEv.OutputJSON = outputJSON
+	}
+
+	if event.NodeInfo != nil {
+		nodeInfoJSON, err := json.Marshal(event.NodeInfo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal node info: %w", err)
+		}
+		storageEv.NodeInfoJSON = nodeInfoJSON
+	}
+
+	if event.RequestedInput != nil {
+		reqInputJSON, err := json.Marshal(event.RequestedInput)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal requested input: %w", err)
+		}
+		storageEv.RequestedInputJSON = reqInputJSON
+	}
+
 	// Handle optional fields by taking the address of the value.
 	// An empty string from the event becomes a nil pointer in storage.
 	if event.Branch != "" {
 		storageEv.Branch = &event.Branch
+	}
+	if event.IsolationScope != "" {
+		storageEv.IsolationScope = &event.IsolationScope
 	}
 	if event.ErrorCode != "" {
 		storageEv.ErrorCode = &event.ErrorCode
@@ -250,9 +293,38 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		}
 	}
 
+	var routes []string
+	if se.RoutesJSON != nil {
+		if err := json.Unmarshal([]byte(se.RoutesJSON), &routes); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal event route: %w", err)
+		}
+	}
+
+	var output any
+	if se.OutputJSON != nil {
+		if err := json.Unmarshal([]byte(se.OutputJSON), &output); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal output: %w", err)
+		}
+	}
+
+	var nodeInfo *session.NodeInfo
+	if se.NodeInfoJSON != nil {
+		if err := json.Unmarshal([]byte(se.NodeInfoJSON), &nodeInfo); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal node info: %w", err)
+		}
+	}
+
+	var requestedInput *session.RequestInput
+	if se.RequestedInputJSON != nil {
+		if err := json.Unmarshal([]byte(se.RequestedInputJSON), &requestedInput); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal requested input: %w", err)
+		}
+	}
+
 	// --- Handle simple pointer fields (dereference or use zero value) ---
 	// Use the helper to safely get the value or its zero-value default
 	branch := derefOrZero(se.Branch)
+	isolationScope := derefOrZero(se.IsolationScope)
 	errorCode := derefOrZero(se.ErrorCode)
 	errorMessage := derefOrZero(se.ErrorMessage)
 	partial := derefOrZero(se.Partial)
@@ -267,7 +339,12 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		Timestamp:          se.Timestamp,
 		Actions:            actions,
 		LongRunningToolIDs: toolIDs,
+		Routes:             routes,
 		Branch:             branch,
+		IsolationScope:     isolationScope,
+		Output:             output,
+		NodeInfo:           nodeInfo,
+		RequestedInput:     requestedInput,
 		LLMResponse: model.LLMResponse{
 			Content:           content,
 			GroundingMetadata: groundingMetadata,
@@ -289,7 +366,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 type storageAppState struct {
 	AppName    string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time
+	UpdateTime time.Time `gorm:"precision:6"`
 }
 
 // TableName explicitly sets the table name for the AppState struct.
@@ -302,7 +379,7 @@ type storageUserState struct {
 	AppName    string `gorm:"primaryKey;"`
 	UserID     string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time
+	UpdateTime time.Time `gorm:"precision:6"`
 }
 
 // TableName explicitly sets the table name for the UserState struct.

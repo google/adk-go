@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"iter"
 
-	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 // Config defines the configuration for a LoopAgent.
@@ -85,7 +85,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 						return
 					}
 
-					if event.Actions.Escalate {
+					if event != nil && event.Actions.Escalate {
 						shouldExit = true
 					}
 				}

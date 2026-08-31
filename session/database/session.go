@@ -17,11 +17,12 @@ package database
 import (
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 	"sync"
 	"time"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // TODO localSession is identical to session.session. Move to sessioninternal
@@ -75,13 +76,12 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	processedEvent := trimTempDeltaState(event)
-	if err := updateSessionState(s, processedEvent); err != nil {
+	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("failed to update localSession state: %w", err)
 	}
 
-	s.events = append(s.events, event)
-	s.updatedAt = event.Timestamp
+	processedEvent := trimTempDeltaState(event)
+	s.events = append(s.events, processedEvent)
 	return nil
 }
 
@@ -126,18 +126,17 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
+	s.mu.RLock()
+	// Create a copy of the state to iterate over it without holding the lock.
+	stateCopy := maps.Clone(s.state)
+	s.mu.RUnlock()
 
-		for k, v := range s.state {
-			s.mu.RUnlock()
+	return func(yield func(key string, val any) bool) {
+		for k, v := range stateCopy {
 			if !yield(k, v) {
 				return
 			}
-			s.mu.RLock()
 		}
-
-		s.mu.RUnlock()
 	}
 }
 
@@ -163,10 +162,16 @@ func trimTempDeltaState(event *session.Event) *session.Event {
 		}
 	}
 
-	// Replace the old map with the newly filtered one.
-	event.Actions.StateDelta = filteredStateDelta
+	// If no keys were filtered out, return the original event without copying.
+	if len(filteredStateDelta) == len(event.Actions.StateDelta) {
+		return event
+	}
 
-	return event
+	// Create a copy of the event to avoid mutating the original.
+	eventCopy := *event
+	eventCopy.Actions.StateDelta = filteredStateDelta
+
+	return &eventCopy
 }
 
 // updateSessionState updates the session state based on the event state delta.
@@ -180,12 +185,7 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 		sess.state = make(map[string]any)
 	}
 
-	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, session.KeyPrefixTemp) {
-			continue
-		}
-		sess.state[key] = value
-	}
+	maps.Copy(sess.state, event.Actions.StateDelta)
 
 	return nil
 }

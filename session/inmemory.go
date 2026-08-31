@@ -25,11 +25,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
-	"google.golang.org/adk/internal/sessionutils"
+	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/platform"
 )
 
 type stateMap map[string]any
@@ -50,7 +50,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 
 	sessionID := req.SessionID
 	if sessionID == "" {
-		sessionID = uuid.NewString()
+		sessionID = platform.NewUUID(ctx)
 	}
 
 	key := id{
@@ -60,8 +60,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	}
 
 	encodedKey := key.Encode()
-	_, ok := s.sessions.Get(encodedKey)
-	if ok {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions.Get(encodedKey); ok {
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
@@ -72,11 +74,8 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	val := &session{
 		id:        key,
 		state:     state,
-		updatedAt: time.Now(),
+		updatedAt: platform.Now(ctx),
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.sessions.Set(encodedKey, val)
 	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
@@ -208,7 +207,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	sess, ok := curSession.(*session)
 	if !ok {
-		return fmt.Errorf("unexpected session type %T", sess)
+		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
 	}
 
 	s.mu.Lock()
@@ -224,8 +223,31 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	eventCopy := &Event{
+		ID:             event.ID,
+		InvocationID:   event.InvocationID,
+		Timestamp:      event.Timestamp,
+		Author:         event.Author,
+		Branch:         event.Branch,
+		IsolationScope: event.IsolationScope,
+		Actions: EventActions{
+			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
+			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			TransferToAgent:            event.Actions.TransferToAgent,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+		},
+		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
+		Routes:             slices.Clone(event.Routes),
+		RequestedInput:     event.RequestedInput,
+		LLMResponse:        event.LLMResponse,
+		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
+	}
+
 	// update the in-memory session service
-	stored_session.events = append(stored_session.events, event)
+	stored_session.events = append(stored_session.events, eventCopy)
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
@@ -315,6 +337,8 @@ func (s *session) State() State {
 }
 
 func (s *session) Events() Events {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return events(s.events)
 }
 
@@ -330,12 +354,15 @@ func (s *session) appendEvent(event *Event) error {
 		return nil
 	}
 
-	processedEvent := trimTempDeltaState(event)
-	if err := updateSessionState(s, processedEvent); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("error on appendEvent: %w", err)
 	}
+	processedEvent := trimTempDeltaState(event)
 
-	s.events = append(s.events, event)
+	s.events = append(s.events, processedEvent)
 	s.updatedAt = event.Timestamp
 	return nil
 }
@@ -381,18 +408,17 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
+	s.mu.RLock()
+	// Create a copy of the state to iterate over it without holding the lock.
+	stateCopy := maps.Clone(s.state)
+	s.mu.RUnlock()
 
-		for k, v := range s.state {
-			s.mu.RUnlock()
+	return func(yield func(key string, val any) bool) {
+		for k, v := range stateCopy {
 			if !yield(k, v) {
 				return
 			}
-			s.mu.RLock()
 		}
-
-		s.mu.RUnlock()
 	}
 }
 
@@ -418,10 +444,16 @@ func trimTempDeltaState(event *Event) *Event {
 		}
 	}
 
-	// Replace the old map with the newly filtered one.
-	event.Actions.StateDelta = filteredStateDelta
+	// If no keys were filtered out, return the original event without copying.
+	if len(filteredStateDelta) == len(event.Actions.StateDelta) {
+		return event
+	}
 
-	return event
+	// Create a copy of the event to avoid mutating the original.
+	eventCopy := *event
+	eventCopy.Actions.StateDelta = filteredStateDelta
+
+	return &eventCopy
 }
 
 // updateSessionState updates the session state based on the event state delta.
@@ -435,16 +467,7 @@ func updateSessionState(session *session, event *Event) error {
 		session.state = make(map[string]any)
 	}
 
-	state := session.State()
-	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, KeyPrefixTemp) {
-			continue
-		}
-		err := state.Set(key, value)
-		if err != nil {
-			return fmt.Errorf("error on updateSessionState state: %w", err)
-		}
-	}
+	maps.Copy(session.state, event.Actions.StateDelta)
 	return nil
 }
 

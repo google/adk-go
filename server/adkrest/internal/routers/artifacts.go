@@ -17,7 +17,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
 // ArtifactsAPIRouter defines the routes for the Artifacts API.
@@ -46,7 +46,7 @@ func (r *ArtifactsAPIRouter) Routes() Routes {
 			HandlerFunc: r.artifactsController.LoadArtifactHandler,
 		},
 		Route{
-			Name:        "LoadArtifact",
+			Name:        "LoadArtifactVersion",
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}/versions/{version}",
 			HandlerFunc: r.artifactsController.LoadArtifactVersionHandler,

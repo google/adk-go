@@ -15,14 +15,15 @@
 package utils
 
 import (
+	"context"
 	"strings"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // TODO: split in proper files/packages.
@@ -33,12 +34,19 @@ const afFunctionCallIDPrefix = "adk-"
 // Since the ID field is optional, some models don't fill the field, but
 // the LLMAgent depends on the IDs to map FunctionCall and FunctionResponse events
 // in the event stream.
-func PopulateClientFunctionCallID(c *genai.Content) {
+func PopulateClientFunctionCallID(ctx context.Context, c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
 		if fn.ID == "" {
-			fn.ID = afFunctionCallIDPrefix + uuid.NewString()
+			fn.ID = GenerateFunctionCallID(ctx)
 		}
 	}
+}
+
+// GenerateFunctionCallID generates a new function call ID. The ID is obtained
+// through the platform package, so a UUID provider installed on ctx (see
+// platform.WithUUIDProvider) controls it.
+func GenerateFunctionCallID(ctx context.Context) string {
+	return afFunctionCallIDPrefix + platform.NewUUID(ctx)
 }
 
 // RemoveClientFunctionCallID removes the function call ID field that was set
@@ -126,6 +134,7 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// AppendInstructions appends instructions to the [genai.GenerateContentConfig.SystemInstruction] system instruction.
 func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	if len(instructions) == 0 {
 		return
@@ -139,7 +148,11 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 
 	if r.Config.SystemInstruction == nil {
 		r.Config.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
-	} else {
-		r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
+		return
 	}
+	if len(r.Config.SystemInstruction.Parts) > 0 && r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text != "" {
+		r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text += "\n\n" + inst
+		return
+	}
+	r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
 }

@@ -27,8 +27,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"google.golang.org/adk/cmd/adkgo/internal/deploy"
-	"google.golang.org/adk/internal/cli/util"
+	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
+	"google.golang.org/adk/v2/internal/cli/util"
 )
 
 type gCloudFlags struct {
@@ -36,13 +36,25 @@ type gCloudFlags struct {
 	projectName string
 }
 
+type triggerConfigFlags struct {
+	maxRetries int
+	baseDelay  time.Duration
+	maxDelay   time.Duration
+	maxRuns    int
+}
+
 type cloudRunServiceFlags struct {
 	serviceName     string
 	serverPort      int
 	a2aAgentCardURL string
 	a2a             bool // enable a2a or not
-	api             bool // enable api or not
+	api             bool // enable REST API or not
+	debugAPI        bool // enable debug in REST API or not
 	webui           bool // enable webui or not
+	pubsub          bool // enable pubsub trigger or not
+	pubsubTrigger   triggerConfigFlags
+	eventarc        bool // enable eventarc trigger or not
+	eventarcTrigger triggerConfigFlags
 }
 
 type localProxyFlags struct {
@@ -98,13 +110,28 @@ func init() {
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.debugAPI, "debug_api", false, "Enable Debug API - requires '--api'")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.pubsub, "pubsub", false, "Enable PubSub subrouter")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRetries, "pubsub_max_retries", 3, "Maximum retries for HTTP 429 errors from PubSub triggers")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.baseDelay, "pubsub_base_delay", 1*time.Second, "Base delay for PubSub trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.maxDelay, "pubsub_max_delay", 10*time.Second, "Maximum delay for PubSub trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRuns, "pubsub_max_concurrent_runs", 100, "Maximum concurrent PubSub trigger runs")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.eventarc, "eventarc", false, "Enable Eventarc subrouter")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRetries, "eventarc_max_retries", 3, "Maximum retries for HTTP 429 errors from Eventarc triggers")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.baseDelay, "eventarc_base_delay", 1*time.Second, "Base delay for Eventarc trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.maxDelay, "eventarc_max_delay", 10*time.Second, "Maximum delay for Eventarc trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRuns, "eventarc_max_concurrent_runs", 100, "Maximum concurrent Eventarc trigger runs")
 }
 
 // computeFlags uses command line arguments to create a full config
 func (f *deployCloudRunFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
+			if f.cloudRun.debugAPI && !f.cloudRun.api {
+				return fmt.Errorf("cannot enable Debug API without having enabled API")
+			}
+
 			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
@@ -189,14 +216,32 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 
 			if flags.cloudRun.api {
 				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)
+
+				if flags.cloudRun.debugAPI {
+					b.WriteString(`, "-include_debug_api"`)
+				}
 			}
 			if flags.cloudRun.a2a {
 				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.cloudRun.a2aAgentCardURL + `"`)
 			}
 			if flags.cloudRun.webui {
-				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
-				`)
+				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"`)
 			}
+			if flags.cloudRun.pubsub {
+				b.WriteString(`, "pubsub"`)
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.pubsubTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns)
+			}
+			if flags.cloudRun.eventarc {
+				b.WriteString(`, "eventarc"`)
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.eventarcTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.eventarcTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.eventarcTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.eventarcTrigger.maxRuns)
+			}
+			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
 }

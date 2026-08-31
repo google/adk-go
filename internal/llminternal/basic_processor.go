@@ -16,34 +16,48 @@ package llminternal
 
 import (
 	"fmt"
+	"iter"
 	"reflect"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return // do nothing.
+		}
 
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil // do nothing.
+		state := llmAgent.internal()
+
+		req.Config = clone(state.GenerateContentConfig)
+		if req.Config == nil {
+			req.Config = &genai.GenerateContentConfig{}
+		}
+
+		// Set OutputSchema directly if no tools are present or native combo support exists.
+		// Otherwise, OutputSchemaRequestProcessor will be used to provide a tool-based workaround.
+		//
+		// Task-mode agents skip OutputSchema configuration entirely:
+		// structured output for tasks is collected via the FinishTaskTool's
+		// declaration (the model emits the value inside the finish_task
+		// FC args, not as a structured text response).
+		if state.Mode != ModeTask && state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
+			req.Config.ResponseSchema = state.OutputSchema
+			req.Config.ResponseMIMEType = "application/json"
+		}
+
+		// TODO: missing features
+		//  populate LLMRequest LiveConnectConfig setting
 	}
-	req.Config = clone(llmAgent.internal().GenerateContentConfig)
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if llmAgent.internal().OutputSchema != nil {
-		req.Config.ResponseSchema = llmAgent.internal().OutputSchema
-		req.Config.ResponseMIMEType = "application/json"
-	}
-	// TODO: missing features
-	//  populate LLMRequest LiveConnectConfig setting
-	return nil
 }
 
 // clone returns a deep copy of the src.
@@ -52,12 +66,12 @@ func clone[M any](src M) M {
 	val := reflect.ValueOf(src)
 
 	// Handle nil pointers
-	if val.Kind() == reflect.Ptr && val.IsNil() {
+	if val.Kind() == reflect.Pointer && val.IsNil() {
 		var zero M
 		return zero
 	}
 
-	srcIsPointer := val.Kind() == reflect.Ptr
+	srcIsPointer := val.Kind() == reflect.Pointer
 
 	// Dereference pointer to get the underlying value
 	if srcIsPointer {
@@ -115,7 +129,7 @@ func deepCopy(src, dst reflect.Value) {
 			deepCopy(src.MapIndex(key), valCopy)
 			dst.SetMapIndex(keyCopy, valCopy)
 		}
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if src.IsNil() {
 			return
 		}

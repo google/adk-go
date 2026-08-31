@@ -24,15 +24,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowinternal"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // agentTool implements a tool that allows an agent to call another agent.
@@ -83,41 +85,13 @@ func (t *agentTool) IsLongRunning() bool {
 // If the agent does not have an input schema, a default schema with a
 // "request" string parameter is used.
 func (t *agentTool) Declaration() *genai.FunctionDeclaration {
-	decl := &genai.FunctionDeclaration{
-		Name:        t.Name(),
-		Description: t.Description(),
-	}
-
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	if ok && llmAgent != nil {
-		// TODO - understand what build_function_declaration does in python and apply if needed.
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
-
-	if agentInputSchema != nil {
-		decl.Parameters = agentInputSchema
-	} else {
-		decl.Parameters = &genai.Schema{
-			Type: "OBJECT",
-			Properties: map[string]*genai.Schema{
-				"request": {Type: "STRING"},
-			},
-			Required: []string{"request"},
-		}
-	}
-	// TODO - understand how _api_variant affects response type.
-	return decl
+	return workflowinternal.MakeFunctionDeclaration(t.agent)
 }
 
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result.
-func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
+func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
@@ -206,6 +180,9 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
+		if event.ErrorCode != "" || event.ErrorMessage != "" {
+			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
+		}
 		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
@@ -247,38 +224,6 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
-func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	// TODO extract this function somewhere else, simillar operations are done for
-	// other tools with function declaration.
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
-	}
-
-	name := t.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = t
-
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if decl := t.Declaration(); decl == nil {
-		return nil
-	}
-	var funcTool *genai.Tool
-	for _, tool := range req.Config.Tools {
-		if tool != nil && tool.FunctionDeclarations != nil {
-			funcTool = tool
-			break
-		}
-	}
-	if funcTool == nil {
-		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
-		})
-	} else {
-		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
-	}
-	return nil
+func (t *agentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
 }

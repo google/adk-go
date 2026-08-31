@@ -3,6 +3,8 @@
 We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
+-   [Branches](#branches)
+-   [Multi-Module Development](#multi-module-development)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
     -   [Review our community guidelines](#review-our-community-guidelines)
@@ -17,12 +19,67 @@ We'd love to accept your patches and contributions to this project.
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
 
+## Branches
+
+ADK Go uses two long-lived branches:
+
+-   **`main`** — the actively developed 2.x line. This is the default branch and
+    the base for new pull requests.
+-   **`v1`** — the maintenance branch for the 1.x line. Target this branch only
+    for fixes that need to ship to 1.x.
+
+The `v1` branch is a snapshot of the 1.x line, branched from `main` before the
+2.0 work landed. `main` then continued forward as the 2.x line (the 2.0 release
+was merged into it), so its history is unbroken — old clones fast-forward
+cleanly. There is no need to re-sync or rename anything locally:
+
+```bash
+git switch main
+git pull            # fast-forwards onto the 2.x line
+```
+
+To work on a 1.x fix, base your branch on `v1`:
+
+```bash
+git switch -c my-fix origin/v1
+```
+
+## Multi-Module Development
+
+**Policy**: New integrations with heavy or optional dependencies must be created as separate Go modules.
+
+**Local Development**: Contributors should use `go work init && go work use -r .` to set up their local workspaces.
+
+**Steps to Add a New Module (e.g., `plugin/myplugin`)**:
+1. Navigate into the directory: `cd <module_directory_path>`
+2. Initialize the module: `go mod init google.golang.org/adk/<module_directory_path>`
+3. Add your Go code, dependencies, and tests.
+4. Tidy the module: `go mod tidy`
+5. Return to the repo root.
+6. Tidy the root module: `go mod tidy`
+7. Add the module to your workspace: `go work use ./<module_directory_path>`
+8. Verify everything builds and tests from the root: `go build work && go test work`. The CI will automatically pick up the new module on the PR.
+
+**Release Tagging**:
+- **Core Module**: Tags remain `vX.Y.Z` (e.g., `v2.1.0`).
+- **Submodules**: Tags are prefixed with the full module path directory, e.g., `plugin/agentanalytics/v0.1.0`. This is the standard Go way to version modules not at the repo root.
+- **go get / go install**: Consumers will use:
+  - `go get google.golang.org/adk/v2@v2.1.0`
+  - `go get google.golang.org/adk/plugin/agentanalytics@v0.1.0`
+- **Version Coupling**: Each submodule's `go.mod` will specify the minimum version of `google.golang.org/adk/v2` it depends on. Submodules can be released independently of the core module and each other.
+- **go.work Impact**: `go.work` is for local development only and does not affect how modules are versioned, tagged, or fetched by consumers.
+
 ## Before you begin
 
 ### Sign our Contributor License Agreement
 
-Contributions to this project must be accompanied by a
-[Contributor License Agreement](https://cla.developers.google.com/about) (CLA).
+All submissions to this project need to follow Google’s [Contributor
+License Agreement (CLA)](https://cla.developers.google.com/about), which
+covers any original work of authorship included in the submission. This
+doesn't prohibit the use of coding assistance tools, including tool-,
+AI-, or machine-generated code, as long as these submissions abide by the
+CLA's requirements.
+
 You (or your employer) retain the copyright to your contribution; this simply
 gives us permission to use and redistribute your contributions as part of the
 project.
@@ -116,6 +173,15 @@ Depending on your change:
         runner setup.
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
+
+# ADK Web
+
+## Updating ADK web version to latest
+
+-   Run `./scripts/adk-web/update-adk-web.sh` to update the web UI to the latest version from [GitHub](https://github.com/google/adk-web).
+-   Run `docker run -it adk-web-builder:latest sh -c "<COMMAND>"` to start the container and debug the build, e.g.:
+    -   `docker run -it adk-web-builder:latest sh -c "ls -alh dist/agent_framework_web/browser"` to view the built files.
+    -   `docker run -it adk-web-builder:latest sh -c "npm run build"` to debug the build output.
 
 ### Documentation
 

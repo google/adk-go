@@ -24,14 +24,14 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestNewLoopAgent(t *testing.T) {
@@ -63,6 +63,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -83,6 +84,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -103,6 +105,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 				{
 					Author: "custom_agent_1",
@@ -114,6 +117,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -129,6 +133,10 @@ func TestNewLoopAgent(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_0",
@@ -136,7 +144,9 @@ func TestNewLoopAgent(t *testing.T) {
 						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
 					},
 					Actions: session.EventActions{
-						Escalate: true,
+						Escalate:      true,
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 				{
@@ -148,6 +158,10 @@ func TestNewLoopAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -164,6 +178,10 @@ func TestNewLoopAgent(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_0",
@@ -173,6 +191,8 @@ func TestNewLoopAgent(t *testing.T) {
 					Actions: session.EventActions{
 						Escalate:          true,
 						SkipSummarization: true,
+						StateDelta:        map[string]any{},
+						ArtifactDelta:     map[string]int64{},
 					},
 				},
 			},
@@ -234,7 +254,6 @@ func TestNewLoopAgent(t *testing.T) {
 
 			ignoreFields := []cmp.Option{
 				cmpopts.IgnoreFields(session.Event{}, "ID", "InvocationID", "Timestamp"),
-				cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 			}
@@ -287,13 +306,13 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 
 type EmptyArgs struct{}
 
-func exampleFunctionThatEscalates(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalates(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = false
 	return map[string]string{}, nil
 }
 
-func exampleFunctionThatEscalatesAndSkips(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalatesAndSkips(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
