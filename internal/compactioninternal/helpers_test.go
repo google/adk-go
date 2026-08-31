@@ -188,6 +188,13 @@ func slidingWindowStored(ctx context.Context, cfg *compaction.Config, sess sessi
 }
 
 // tailRetentionStored is slidingWindowStored for the tail-retention strategy.
+func tailRetentionStored(ctx context.Context, cfg *compaction.Config, sess session.Session, scope TurnScope, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
+	ev, finish, err := TailRetention(ctx, cfg, sess, scope, estimate, progress)
+	finish(err, "")
+	return ev, err
+}
+
+// excl is a shorthand for the reference a test fixture excludes.
 func excl(invocationID string, ts int) session.EventRef {
 	return session.EventRef{InvocationID: invocationID, Timestamp: at(ts)}
 }
