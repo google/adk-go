@@ -190,13 +190,13 @@ and then once against a single issue for real.
 
 ## Tests
 
-Nine files, all against the real functions rather than copies of them:
+Ten files, all against the real functions rather than copies of them:
 
 | file | what it covers |
 | --- | --- |
 | `runner_test.go` | Drives the **real `runner.Runner`** with a scripted model and a local GitHub: the happy path for both tools, the `-issue` path, a vanished issue, dry-run, a failing tool call, and the prompt-injection case where the model asks for an issue outside the session scope. |
 | `workflow_test.go` | Binds the workflow to the config. Reads the real `.github/workflows/issue-triage-bot.yml`, replays its environment through the real `loadConfig`, and checks the budget arithmetic and the job timeout. A renamed variable on either side fails here. |
-| `tools_test.go` | The allowlist, session-scope and need-claim gates: rejections that make no HTTP call, exactly one writer under 8 concurrent goroutines, the pre-write re-read, and the one-shot claim. Also drives both tools through the real `functiontool` wrapper. |
+| `tools_test.go` | The allowlist, session-scope and need-claim gates: rejections that make no HTTP call, exactly one writer under 64 concurrent goroutines, the pre-write re-read, and the one-shot claim. Also drives both tools through the real `functiontool` wrapper. |
 | `main_test.go` | The sweep loop, the nonce fence and its fail-closed path, the run budget, and authorization scoped to a session. |
 | `chokepoint_test.go` | Reads the package's own source and fails when any function issues a mutating request without passing through `shouldSkip` — the structural counterpart to the pinned tool inventory, so a third mutation cannot be added without the dry-run gate — including one routed through the GraphQL transport, hidden in a function literal, or gated by a `shouldSkip` whose result is discarded. |
 | `github_test.go` | The client against `httptest`: GraphQL pagination, cross-page dedupe, PR/NOT_FOUND handling, silent-drop detection, dry-run. |
@@ -204,6 +204,12 @@ Nine files, all against the real functions rather than copies of them:
 
 Most non-trivial tests name, in a comment, the one-line mutation to production
 code that makes them fail.
+
+Two of these read files outside the module — `workflow_test.go` reads the
+workflow, and it and `chokepoint_test.go` shell out to `bash`. Both skip rather
+than fail when what they need is absent, so a copy of this directory taken out
+of the repository loses that coverage silently. In this tree they run: the gate
+log records 0 skipped.
 
 ```bash
 go test ./...

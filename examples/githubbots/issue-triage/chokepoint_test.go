@@ -50,12 +50,14 @@ var readOnlyQueries = map[string]bool{
 // package's own source and fails when a function reaches GitHub without
 // passing through shouldSkip.
 //
-// It is deliberately strict in three ways, because a pin that is easy to
-// satisfy wrongly is worse than none. Any call rooted at the REST client counts
-// as reaching GitHub, rather than a list of method names that a write could be
-// spelled around. A call to the GraphQL transport counts unless the document is
-// a known read. And shouldSkip only counts when its result actually decides
-// whether the function returns, so a bare call cannot be used to silence this.
+// It is deliberately strict in four ways, because a pin that is easy to satisfy
+// wrongly is worse than none. Any call rooted at the REST client counts as
+// reaching GitHub, rather than a list of method names a write could be spelled
+// around. A call to the GraphQL transport counts unless the document is a known
+// read. shouldSkip only counts when its result decides whether the function
+// returns, so a bare call cannot silence this. And it must be the FIRST
+// statement of the function: a guard anywhere in the body would let a write
+// placed above it, or on a branch the guard does not cover, pass unnoticed.
 //
 // Killing mutations, all verified: delete the shouldSkip call from SetType or
 // AddLabel; add a new client method that writes; route a write through
@@ -132,13 +134,16 @@ func functionBodies(file *ast.File) map[string]*ast.BlockStmt {
 }
 
 // reachesGitHub reports how a body reaches GitHub (empty if it does not), and
-// whether a shouldSkip call decides whether the function returns.
+// whether its FIRST statement is a shouldSkip guard that returns.
 func reachesGitHub(body *ast.BlockStmt) (why string, gated bool) {
-	ast.Inspect(body, func(n ast.Node) bool {
-		if ifStmt, ok := n.(*ast.IfStmt); ok && condCalls(ifStmt.Cond, "shouldSkip") && bodyReturns(ifStmt.Body) {
-			gated = true
-			return true
+	// The guard must come first, so nothing can precede it. Checking for one
+	// anywhere in the body would accept a write above it.
+	if len(body.List) > 0 {
+		if ifStmt, ok := body.List[0].(*ast.IfStmt); ok {
+			gated = condCalls(ifStmt.Cond, "shouldSkip") && bodyReturns(ifStmt.Body)
 		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
