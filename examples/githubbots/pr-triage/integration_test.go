@@ -375,3 +375,79 @@ func TestRealAgentStackRunsUnderThePerPullRequestDeadline(t *testing.T) {
 		t.Errorf("scoped deadline = %v, want a positive value no greater than %v", seen, cfg.PRTimeout)
 	}
 }
+
+// Batch mode runs several pull requests concurrently, and each worker drives the
+// REAL ADK stack. This is production's exact shape: triageAll → scopeSession →
+// triageOne → runAgent, with more than one candidate and Concurrency > 1.
+//
+// Sharing one agent across those workers is a genuine data race, not a
+// theoretical one. runner.Run lazily initializes the agent's mode
+// (adk v2.3.0 runner/runner.go:579-581 reads llmInternalState.Mode and assigns
+// ModeChat when it is empty), and that state is embedded in the agent value, so
+// two concurrent Run calls read-modify-write it unsynchronized. Under -race this
+// test fails within a few hundred milliseconds if newAgentStack is collapsed
+// back into a single shared stack built in run().
+//
+// Nothing else in the suite covers it: every other concurrency test substitutes
+// a stub for the agent turn, and every test that drives the real runner is
+// single-threaded. That gap is why a green -race gate did not catch this.
+func TestBatchModeDoesNotShareAnAgentAcrossWorkers(t *testing.T) {
+	cfg := testConfig()
+	cfg.SinglePR = 0 // batch mode, which is the only path that runs concurrently
+	// Eight candidates at a limit of eight. The size is measured, not chosen:
+	// with the fix reverted this configuration reported WARNING: DATA RACE in
+	// 12 of 12 independent runs. A two-candidate test is the trap here — the
+	// window is the lazy Mode write at the very start of Run, so too little
+	// overlap can miss it and be read as "this bot is unaffected".
+	cfg.Concurrency = 8
+
+	rec := newRecordingHandler()
+	gh := graphQLThen(t, cfg, eligiblePRBody, rec)
+
+	llm := &scriptedLLM{}
+	tools, err := gh.tools()
+	if err != nil {
+		t.Fatalf("tools(): %v", err)
+	}
+
+	prs := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	// triageWithFreshAgent is the real worker body run() dispatches, so this
+	// drives production's wiring rather than re-assembling it here.
+	triageAll(context.Background(), cfg, discardLogger(), prs, func(ictx context.Context, number int) {
+		triageWithFreshAgent(ictx, gh, cfg, llm, tools, discardLogger(), number)
+	})
+
+	// Without this the test passes when nothing concurrent ever happened.
+	if llm.requests == 0 {
+		t.Fatal("the model was never invoked; this test proves nothing about the real stack")
+	}
+	for _, n := range prs {
+		if !gh.isEligible(n) {
+			t.Errorf("pull request %d was never authorized; a worker was lost", n)
+		}
+	}
+}
+
+// Two stacks must genuinely be two, or the fix is cosmetic.
+func TestEachAgentStackIsIndependent(t *testing.T) {
+	cfg := testConfig()
+	gh := graphQLThen(t, cfg, eligiblePRBody, newRecordingHandler())
+	tools, err := gh.tools()
+	if err != nil {
+		t.Fatalf("tools(): %v", err)
+	}
+	a, err := newAgentStack(cfg, &scriptedLLM{}, tools, discardLogger())
+	if err != nil {
+		t.Fatalf("newAgentStack(): %v", err)
+	}
+	b, err := newAgentStack(cfg, &scriptedLLM{}, tools, discardLogger())
+	if err != nil {
+		t.Fatalf("newAgentStack(): %v", err)
+	}
+	if a.runner == b.runner {
+		t.Error("two calls returned the same runner")
+	}
+	if a.sessions == b.sessions {
+		t.Error("two calls returned the same session service")
+	}
+}

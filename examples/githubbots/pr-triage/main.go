@@ -86,38 +86,9 @@ func run(ctx context.Context, log *slog.Logger, args []string) error {
 		return fmt.Errorf("create model: %w", err)
 	}
 
-	triager, err := llmagent.New(llmagent.Config{
-		Name:        "pr_triager",
-		Model:       mdl,
-		Description: "Routes an incoming GitHub pull request to a component owner.",
-		Instruction: renderPrompt(cfg),
-		Tools:       tools,
-		// Temperature 0 keeps routing deterministic across runs.
-		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0)},
-		// A tool error is otherwise only serialized back to the model. Returning
-		// (nil, nil) here means "observe only": log the failure but don't replace
-		// the result, so the model still sees the error and can react.
-		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-			func(_ agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
-				log.Error("tool call failed", "tool", t.Name(), "args", args, "error", err)
-				return nil, nil
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("create agent: %w", err)
-	}
-
-	sessions := session.InMemoryService()
-	r, err := runner.New(runner.Config{
-		AppName:        appName,
-		Agent:          triager,
-		SessionService: sessions,
-	})
-	if err != nil {
-		return fmt.Errorf("create runner: %w", err)
-	}
-
+	// The agent, runner and session service are built PER PULL REQUEST, by
+	// newAgentStack below, not once here. See its doc comment: sharing one agent
+	// across the concurrent batch workers is a real data race.
 	prs, err := candidatePRs(ctx, gh, cfg)
 	if err != nil {
 		return err
@@ -129,9 +100,7 @@ func run(ctx context.Context, log *slog.Logger, args []string) error {
 	log.Info("triaging pull requests", "count", len(prs))
 
 	triageAll(ctx, cfg, log, prs, func(ictx context.Context, number int) {
-		triageOne(ictx, gh, cfg, log, number, func(actx context.Context, n int, prompt string) string {
-			return runAgent(actx, r, sessions, gh, log.With("pr", n), prompt)
-		})
+		triageWithFreshAgent(ictx, gh, cfg, mdl, tools, log, number)
 	})
 
 	return runOutcome(ctx, gh, cfg.RunBudget)
@@ -152,6 +121,89 @@ func runOutcome(ctx context.Context, gh *GitHubClient, budget time.Duration) err
 		return errors.New("one or more pull requests failed to process; see logs above")
 	}
 	return nil
+}
+
+// triageWithFreshAgent is the unit of work a batch worker runs: one pull
+// request, triaged with an agent stack built inside this call.
+//
+// It is a named function rather than a closure in run() so a test can drive the
+// real thing through triageAll. A test that re-assembled this wiring itself
+// would keep passing after run() was changed to share one stack again, which is
+// exactly the defect this shape exists to prevent.
+func triageWithFreshAgent(
+	ictx context.Context,
+	gh *GitHubClient,
+	cfg *Config,
+	mdl model.LLM,
+	tools []tool.Tool,
+	log *slog.Logger,
+	number int,
+) {
+	triageOne(ictx, gh, cfg, log, number, func(actx context.Context, n int, prompt string) string {
+		l := log.With("pr", n)
+		stack, err := newAgentStack(cfg, mdl, tools, l)
+		if err != nil {
+			l.Error("create agent stack", "error", err)
+			gh.recordError()
+			return ""
+		}
+		return runAgent(actx, stack.runner, stack.sessions, gh, l, prompt)
+	})
+}
+
+// agentStack is one pull request's private agent, runner and session service.
+type agentStack struct {
+	runner   *runner.Runner
+	sessions session.Service
+}
+
+// newAgentStack builds a private agent stack for a single pull request.
+//
+// It is per pull request rather than per run because runner.Run mutates the
+// AGENT, not just the runner. On the LlmAgent path it lazily initializes the
+// agent's mode -- adk v2.3.0 runner/runner.go:579-581 reads
+// llmInternalState.Mode and, when empty, assigns ModeChat -- and that state is
+// embedded in the agent value. Two batch workers calling Run on one shared agent
+// are therefore an unsynchronized read-modify-write. The race detector confirms
+// it: TestBatchModeDoesNotShareAnAgentAcrossWorkers reproduces it in a few
+// hundred milliseconds if this is collapsed back to one shared stack.
+//
+// The model and the toolset stay shared on purpose. The model wraps an HTTP
+// client, so one per pull request would multiply connections for nothing, and
+// the function tools hold no state a call can write. Only the agent, the runner
+// and the session service are per pull request.
+func newAgentStack(cfg *Config, mdl model.LLM, tools []tool.Tool, log *slog.Logger) (*agentStack, error) {
+	triager, err := llmagent.New(llmagent.Config{
+		Name:        "pr_triager",
+		Model:       mdl,
+		Description: "Routes an incoming GitHub pull request to a component owner.",
+		Instruction: renderPrompt(cfg),
+		Tools:       tools,
+		// Temperature 0 keeps routing deterministic across runs.
+		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0)},
+		// A tool error is otherwise only serialized back to the model. Returning
+		// (nil, nil) here means "observe only": log the failure but don't replace
+		// the result, so the model still sees the error and can react.
+		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			func(_ agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				log.Error("tool call failed", "tool", t.Name(), "args", args, "error", err)
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent: %w", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:        appName,
+		Agent:          triager,
+		SessionService: sessions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create runner: %w", err)
+	}
+	return &agentStack{runner: r, sessions: sessions}, nil
 }
 
 // newModel builds the Gemini model. If a Gemini API key is configured it is used
