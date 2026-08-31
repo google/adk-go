@@ -168,12 +168,27 @@ func (c *Config) validate() error {
 	// configuration that cannot fit its own worst case exhausts the budget on
 	// an ordinary busy sweep and reports issues untriaged, which reads as a
 	// failure on a run that behaved exactly as designed.
-	if worst := time.Duration(c.IssueCount)*c.IssueTimeout + fetchTimeout; worst > c.SweepTimeout {
-		return fmt.Errorf("ISSUE_COUNT (%d) x ISSUE_TIMEOUT (%s) plus the %s work-set fetch is %s, which exceeds SWEEP_TIMEOUT (%s)",
-			c.IssueCount, c.IssueTimeout, fetchTimeout, worst, c.SweepTimeout)
+	//
+	// A single-issue run triages one issue whatever ISSUE_COUNT says, so
+	// charging it the sweep's worst case would refuse budgets that are provably
+	// sufficient -- and every `issues: opened` run takes that path.
+	issues := c.IssueCount
+	if c.SingleIssue > 0 {
+		issues = 1
+	}
+	if worst := time.Duration(issues)*c.IssueTimeout + fetchTimeout; worst > c.SweepTimeout {
+		return fmt.Errorf("%d issue(s) x ISSUE_TIMEOUT (%s) plus the %s work-set fetch is %s, which exceeds SWEEP_TIMEOUT (%s)",
+			issues, c.IssueTimeout, fetchTimeout, worst, c.SweepTimeout)
 	}
 	if c.IssueCount < 1 {
 		return fmt.Errorf("ISSUE_COUNT must be at least 1, got %d", c.IssueCount)
+	}
+	// Bounded before it is multiplied below: the product is a time.Duration, so
+	// an absurd count would wrap int64 and land back inside the accepted range,
+	// letting a configuration through that the budget check exists to reject.
+	// The sweep cannot see more than this many issues anyway.
+	if maxSweep := maxSearchPages * searchPageSize; c.IssueCount > maxSweep {
+		return fmt.Errorf("ISSUE_COUNT (%d) exceeds the %d issues one sweep can read", c.IssueCount, maxSweep)
 	}
 	if c.FreshnessWindow < 0 {
 		return fmt.Errorf("FRESHNESS_WINDOW_DAYS must not be negative, got %s", c.FreshnessWindow)

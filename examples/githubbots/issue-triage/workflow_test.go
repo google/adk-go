@@ -81,9 +81,9 @@ func TestWorkflowEnvProducesTheIntendedConfig(t *testing.T) {
 	}
 
 	// The values the workflow deliberately overrides, and the arithmetic between
-	// them. ISSUE_COUNT x ISSUE_TIMEOUT must fit inside SWEEP_TIMEOUT, or an
-	// ordinary busy sweep exhausts its budget and the job goes red having
-	// behaved exactly as designed.
+	// them: ISSUE_COUNT x ISSUE_TIMEOUT plus the work-set fetch must fit inside
+	// SWEEP_TIMEOUT, or an ordinary busy sweep exhausts its budget and the job
+	// goes red having behaved exactly as designed.
 	for key, want := range map[string]any{
 		"ISSUE_COUNT":   5,
 		"ISSUE_TIMEOUT": 3 * time.Minute,

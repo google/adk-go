@@ -82,9 +82,11 @@ jobs:
           # payload asked for a rehearsal.
           EVENT_NAME: ${{ github.event_name }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
-          # These three must satisfy ISSUE_COUNT x ISSUE_TIMEOUT <= SWEEP_TIMEOUT,
-          # or an ordinary busy sweep exhausts its budget and the job goes red on
-          # a run that behaved exactly as designed. 5 x 3m = 15m, inside 18m.
+          # These three must satisfy ISSUE_COUNT x ISSUE_TIMEOUT plus the one
+          # minute for choosing the work set <= SWEEP_TIMEOUT, or an ordinary
+          # busy sweep exhausts its budget and the job goes red on a run that
+          # behaved exactly as designed. 5 x 3m + 1m = 16m, inside 18m. The bot
+          # refuses to start on a configuration that fails this.
           ISSUE_COUNT: '5'
           ISSUE_TIMEOUT: 3m
           # The process-side budget: below timeout-minutes above, so the sweep

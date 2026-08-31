@@ -262,6 +262,9 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		// configuration that cannot fit its own worst case reports issues
 		// untriaged on a run that behaved exactly as designed.
 		{"sweep cannot fit its own worst case", func(c *Config) { c.IssueCount = 4 }, "exceeds SWEEP_TIMEOUT"},
+		// Bounded before the multiplication: the product is an int64 duration,
+		// and an absurd count would wrap back into the accepted range.
+		{"count beyond what a sweep can read", func(c *Config) { c.IssueCount = 61489147 }, "one sweep can read"},
 		{"zero count", func(c *Config) { c.IssueCount = 0 }, "ISSUE_COUNT"},
 		{"negative freshness", func(c *Config) { c.FreshnessWindow = -time.Hour }, "FRESHNESS_WINDOW_DAYS"},
 		{"no usable labels", func(c *Config) { c.AllowedLabels = nil }, "ALLOWED_LABELS"},
@@ -292,8 +295,12 @@ func TestRunBudgetCoversModelConstruction(t *testing.T) {
 	setRequired(t)
 	t.Setenv("ISSUE_COUNT", "1")
 	t.Setenv("ISSUE_TIMEOUT", "200ms")
-	// Must clear the work-set fetch too, which validate() now requires.
-	t.Setenv("SWEEP_TIMEOUT", "61s")
+	t.Setenv("SWEEP_TIMEOUT", "500ms")
+	// The budget invariant counts the work-set fetch, whose default minute
+	// would force a minute-long budget and a minute-long test.
+	origFetch := fetchTimeout
+	fetchTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { fetchTimeout = origFetch })
 
 	// A constructor that never returns on its own: only the budget can end it.
 	orig := newModelFn
@@ -304,7 +311,9 @@ func TestRunBudgetCoversModelConstruction(t *testing.T) {
 	t.Cleanup(func() { newModelFn = orig })
 
 	done := make(chan error, 1)
-	go func() { done <- run(context.Background(), discardLogger(), nil) }()
+	// -issue exempts the run from the sweep's worst-case budget check, so the
+	// budget under test can be short enough to keep the suite fast.
+	go func() { done <- run(context.Background(), discardLogger(), []string{"-issue", "42"}) }()
 
 	select {
 	case err := <-done:
@@ -314,7 +323,7 @@ func TestRunBudgetCoversModelConstruction(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("run() = %v, want it to wrap context.DeadlineExceeded", err)
 		}
-	case <-time.After(90 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("run() never returned: the run budget does not cover model construction")
 	}
 }

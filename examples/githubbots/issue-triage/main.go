@@ -45,10 +45,12 @@ const (
 	maxBodyRunes = 4000
 	// maxTitleRunes bounds how much issue title is sent to the model.
 	maxTitleRunes = 200
-
-	// fetchTimeout bounds choosing the work set.
-	fetchTimeout = time.Minute
 )
+
+// fetchTimeout bounds choosing the work set. A variable so a test can shrink
+// it and still satisfy the budget invariant validate() enforces, which counts
+// this minute against SWEEP_TIMEOUT.
+var fetchTimeout = time.Minute
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -58,16 +60,23 @@ func main() {
 	}
 }
 
+// loadDotEnv loads a local .env when running outside GitHub Actions.
+//
+// Local convenience only. In Actions the configuration comes from the workflow,
+// and a .env that reached a runner would silently override it -- ALLOWED_LABELS
+// in particular, which is the one authority-bearing setting the workflow does
+// not pin. A separate function so a test can drive the guard.
+func loadDotEnv() {
+	if os.Getenv("GITHUB_ACTIONS") != "" {
+		return
+	}
+	_ = godotenv.Load()
+}
+
 func run(ctx context.Context, log *slog.Logger, args []string) error {
 	// Best-effort: load a local .env when present (for local runs). Ignored in
 	// CI, where configuration comes from the environment.
-	// Local convenience only. In Actions the configuration comes from the
-	// workflow, and a .env that reached a runner would silently override it --
-	// ALLOWED_LABELS in particular, which is the one authority-bearing setting
-	// the workflow does not pin.
-	if os.Getenv("GITHUB_ACTIONS") == "" {
-		_ = godotenv.Load()
-	}
+	loadDotEnv()
 
 	cfg, err := loadConfig(args)
 	if err != nil {

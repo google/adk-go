@@ -15,6 +15,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -243,6 +245,58 @@ func TestEnvReaderDaysAcceptsARealWindow(t *testing.T) {
 			}
 			if got != want {
 				t.Errorf("days(%q) = %v, want %v", v, got, want)
+			}
+		})
+	}
+}
+
+// A single-issue run triages one issue whatever ISSUE_COUNT says, and every
+// `issues: opened` run takes that path. Charging it the sweep's worst case
+// would refuse budgets that are provably sufficient.
+//
+// Killing mutation: drop the SingleIssue exemption from validate().
+func TestSingleIssueRunIsNotChargedTheSweepBudget(t *testing.T) {
+	setRequired(t)
+	t.Setenv("ISSUE_COUNT", "5")
+	t.Setenv("ISSUE_TIMEOUT", "3m")
+	// Enough for one issue plus the fetch (4m), nowhere near enough for five.
+	t.Setenv("SWEEP_TIMEOUT", "5m")
+
+	if _, err := loadConfig([]string{"-issue", "42"}); err != nil {
+		t.Errorf("loadConfig(-issue 42) = %v, want it accepted: one issue fits this budget", err)
+	}
+	if _, err := loadConfig(nil); err == nil {
+		t.Error("loadConfig() for a sweep was accepted, but five issues do not fit this budget")
+	}
+}
+
+// The guard that stops a .env on a runner overriding the workflow. ALLOWED_LABELS
+// is the one authority-bearing setting the workflow does not pin, so a .env that
+// reached CI would widen the value allow-list.
+//
+// Killing mutation: drop the GITHUB_ACTIONS check from loadDotEnv.
+func TestDotEnvIsNotLoadedUnderGitHubActions(t *testing.T) {
+	for _, tc := range []struct{ name, actions, probe, want string }{
+		{"under Actions", "true", "DOTENV_PROBE_CI", ""},
+		{"outside Actions", "", "DOTENV_PROBE_LOCAL", "from-dot-env"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A distinct variable per case, never pre-set: godotenv does not
+			// override a variable that already exists, so setting it -- even to
+			// the empty string -- would make the local case pass for the wrong
+			// reason and hide a broken guard.
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(tc.probe+"=from-dot-env\n"), 0o600); err != nil {
+				t.Fatalf("write .env: %v", err)
+			}
+			t.Chdir(dir)
+			t.Setenv("GITHUB_ACTIONS", tc.actions)
+			t.Cleanup(func() { _ = os.Unsetenv(tc.probe) })
+
+			loadDotEnv()
+
+			if got := os.Getenv(tc.probe); got != tc.want {
+				t.Errorf("with GITHUB_ACTIONS=%q the .env value is %q, want %q", tc.actions, got, tc.want)
 			}
 		})
 	}

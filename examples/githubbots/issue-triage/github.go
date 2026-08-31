@@ -529,6 +529,17 @@ func (c *Client) AddLabel(ctx context.Context, number int, label string) error {
 			return fmt.Errorf("confirm label %q on issue #%d after a full-page response: %w", label, number, err)
 		}
 		_, applied = canonicalLabel(label, fresh.Labels)
+		// GraphQL reads labelPageSize labels, so at that cap it is truncated
+		// too and absence still proves nothing. Reporting a failure here would
+		// blame the token for a write that landed, on a public log. Say what is
+		// known and let the write stand -- an issue with this many labels
+		// almost certainly already carried an allow-listed one and would not
+		// have been selected.
+		if !applied && len(fresh.Labels) >= labelPageSize {
+			c.log.Warn("could not confirm the label was applied; the issue carries more labels than either read returns",
+				"issue", number, "label", label, "labels_seen", len(fresh.Labels))
+			applied = true
+		}
 	}
 	if !applied {
 		return fmt.Errorf("add label %q to issue #%d (the token likely lacks push access): %w", label, number, errNotApplied)

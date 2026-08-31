@@ -549,10 +549,7 @@ func TestRunReportsAnExpiredPerIssueBudget(t *testing.T) {
 	if err == nil {
 		t.Fatal("run() = nil after a per-issue deadline expired mid-write: the issue's write is spent and the job is green")
 	}
-	// Either route is acceptable: the runner may surface the cancellation
-	// itself, or triageOne's own check catches it when the runner does not.
-	// Which one fires is timing-dependent, which is exactly why the check
-	// exists -- measured before it, run() returned nil.
+	// The runner is the only thing that reports this -- see the comment above.
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("run() = %v, want it to wrap context.DeadlineExceeded", err)
 	}
