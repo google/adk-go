@@ -1049,3 +1049,54 @@ func TestDefaultSummarizerDoesNotRefuseItsOwnBudget(t *testing.T) {
 		t.Errorf("an all-default summarizer refused a window it should have shrunk: %v", err)
 	}
 }
+
+func TestDefaultPromptRequiresFactsBeCarriedForwardVerbatim(t *testing.T) {
+	t.Parallel()
+
+	// Tail retention re-summarizes its own summary, so the default prompt has
+	// to tell the model to copy concrete values forward rather than compress
+	// them into their labels. Without it, a value stated early survives only
+	// until some pass decides "the deployment region" is a good enough stand-in
+	// for "europe-west4", after which nothing can recover it: the next pass
+	// sees only the previous summary and the retained tail.
+	//
+	// This asserts on the prompt the summarizer actually sends, so it covers
+	// the defaulting path as well as the template text.
+	prompt := promptFor(t,
+		LLMSummarizerConfig{Model: &fakeModel{responses: []*model.LLMResponse{summaryResponse("done")}}},
+		[]*session.Event{textEvent("u", "inv1", 1, "the region is europe-west4")},
+	)
+
+	for _, want := range []string{
+		"Durable facts",   // the values need somewhere to live
+		"verbatim",        // copied, not paraphrased
+		"carried forward", // across re-summarization, not just this pass
+		"generalize",      // the specific failure mode being forbidden
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("default prompt is missing %q, so a rolling summary may drop early values\nprompt:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestCustomPromptTemplateIsUsedVerbatim(t *testing.T) {
+	t.Parallel()
+
+	// The fact-carrying instructions belong to the default template only. A
+	// caller supplying their own template gets exactly that template, so this
+	// pins that the default is not quietly appended to it.
+	prompt := promptFor(t,
+		LLMSummarizerConfig{
+			Model:          &fakeModel{responses: []*model.LLMResponse{summaryResponse("done")}},
+			PromptTemplate: "summarize: " + ConversationHistoryPlaceholder,
+		},
+		[]*session.Event{textEvent("u", "inv1", 1, "the region is europe-west4")},
+	)
+
+	if !strings.HasPrefix(prompt, "summarize: ") {
+		t.Errorf("custom template was not used\nprompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Durable facts") {
+		t.Errorf("default template leaked into a custom one\nprompt:\n%s", prompt)
+	}
+}
