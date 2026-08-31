@@ -52,26 +52,51 @@ func (stubLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) i
 // This is live on any real sweep: CONCURRENCY_LIMIT defaults to 3 and the search
 // routinely returns more than one candidate.
 func TestConcurrentAuditsDoNotShareAgentState(t *testing.T) {
+	issues := []int{1, 2, 3, 4, 5, 6, 7, 8}
 	cfg := baseCfg()
-	cfg.Concurrency = 8
+	cfg.Concurrency = len(issues) // every worker must be able to run at once
 	cfg.IssueTimeout = time.Minute
 	log := discardLogger()
 
-	var ran atomic.Int64
-	err := auditAll(context.Background(), cfg, log, []int{1, 2, 3, 4, 5, 6, 7, 8},
+	// Hold every worker until all of them hold a runner, then release them into
+	// Run together. The mode write is the first thing Run does, so without the
+	// barrier the workers file past it one at a time and the detector sees
+	// nothing: measured with the fix reverted, 1 reproduction in 5 fresh
+	// processes without the barrier against 5 in 5 with it. A pin that fires a
+	// fifth of the time is not a pin.
+	var (
+		ran     atomic.Int64
+		arrived = make(chan struct{}, len(issues))
+		start   = make(chan struct{})
+	)
+	go func() {
+		for range issues {
+			select {
+			case <-arrived:
+			case <-time.After(30 * time.Second):
+				close(start) // never wedge the suite if a worker dies
+				return
+			}
+		}
+		close(start)
+	}()
+
+	err := auditAll(context.Background(), cfg, log, issues,
 		func(ictx context.Context, n int) error {
 			r, ss, err := newAuditRunner(cfg, stubLLM{}, nil, log)
 			if err != nil {
 				return err
 			}
 			ran.Add(1)
+			arrived <- struct{}{}
+			<-start
 			return runAudit(ictx, r, ss, log, n)
 		})
 	if err != nil {
 		t.Fatalf("auditAll: %v", err)
 	}
-	if ran.Load() != 8 {
-		t.Fatalf("drove %d audits, want 8: the fan-out did not exercise the shared state", ran.Load())
+	if got := ran.Load(); got != int64(len(issues)) {
+		t.Fatalf("drove %d audits, want %d: the fan-out did not exercise the shared state", got, len(issues))
 	}
 }
 
