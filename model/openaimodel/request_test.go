@@ -100,12 +100,10 @@ func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	if got, want := out.Content[0].OfOutputText.Text, "hello there"; got != want {
 		t.Errorf("assistant text = %q, want %q", got, want)
 	}
-	if got := out.Content[0].OfOutputText.Type; got != constant.OutputText("output_text") {
-		t.Errorf("assistant content type = %q, want output_text", got)
-	}
-
-	// Verify the wire format OpenAI actually receives: the assistant item must
-	// marshal with "output_text" and never "input_text".
+	// Verify the wire format OpenAI actually receives. Asserting the marshalled
+	// JSON rather than the structs is what makes these checks meaningful: Type
+	// elides its zero value to "output_text", ID is dropped when empty, and
+	// Status is `omitzero`, so none of the three is observable on the struct.
 	raw, err := json.Marshal(items[1])
 	if err != nil {
 		t.Fatalf("marshal assistant item: %v", err)
@@ -115,6 +113,76 @@ func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"input_text"`) {
 		t.Errorf("assistant item JSON must not contain input_text: %s", raw)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal assistant item: %v", err)
+	}
+	// OpenAI mints message IDs on output; a replayed turn has none to echo back
+	// and must omit the field rather than invent one, or the request is rejected.
+	if v, ok := wire["id"]; ok {
+		t.Errorf("assistant item must not carry an id, got %v: %s", v, raw)
+	}
+	if got := wire["status"]; got != "completed" {
+		t.Errorf("assistant item status = %v, want completed: %s", got, raw)
+	}
+	if got := wire["role"]; got != "assistant" {
+		t.Errorf("assistant item role = %v, want assistant: %s", got, raw)
+	}
+}
+
+// TestBuildOpenAIParams_ItemOrdering pins the order in which a model turn's
+// parts become input items. Text is buffered and flushed by convertContents
+// immediately before a function call or response is appended; dropping that
+// flush does not lose the text but does emit it after the call, silently
+// reordering the history. Assistant text became a third item kind with the
+// output_text fix, so the ordering needs a guard.
+func TestBuildOpenAIParams_ItemOrdering(t *testing.T) {
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "call_1"}}
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  []string
+	}{
+		{
+			name:  "text before call is flushed first",
+			parts: []*genai.Part{{Text: "Let me check."}, call},
+			want:  []string{"output_message", "function_call"},
+		},
+		{
+			name:  "text after call is flushed last",
+			parts: []*genai.Part{call, {Text: "Checking now."}},
+			want:  []string{"function_call", "output_message"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: string(genai.RoleModel), Parts: tc.parts},
+			}}
+			params, err := buildOpenAIParams("fallback", req)
+			if err != nil {
+				t.Fatalf("buildOpenAIParams() err = %v", err)
+			}
+			var got []string
+			for _, item := range params.Input.OfInputItemList {
+				switch {
+				case item.OfOutputMessage != nil:
+					got = append(got, "output_message")
+				case item.OfMessage != nil:
+					got = append(got, "message")
+				case item.OfFunctionCall != nil:
+					got = append(got, "function_call")
+				case item.OfFunctionCallOutput != nil:
+					got = append(got, "function_call_output")
+				default:
+					got = append(got, "unknown")
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("item order = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
