@@ -30,8 +30,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/session"
 )
 
 // These tests drive runReviewFor -- the real production path, agent loop
@@ -224,9 +222,9 @@ func newHarnessWith(t *testing.T, graphQL func(int) string, mdl model.LLM, scrip
 	// A fresh agent, runner and session service per review, exactly as sweep
 	// builds them. Sharing one runner across concurrent reviews races inside
 	// ADK, which is why production builds one per review too.
-	factory := func() (*runner.Runner, session.Service, error) {
-		return newReviewer(cfg, mdl, tools, "test", discardLogger())
-	}
+	// reviewerFor, not an equivalent closure: the wiring under test has to be
+	// the wiring sweep uses.
+	factory := reviewerFor(cfg, mdl, tools, "test", discardLogger())
 	if _, _, err := factory(); err != nil {
 		t.Fatalf("newReviewer: %v", err)
 	}

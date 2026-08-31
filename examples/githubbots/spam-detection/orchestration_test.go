@@ -645,9 +645,7 @@ func TestAgentLoopObservesAToolErrorWithoutReplacingIt(t *testing.T) {
 	// holds whether or not the callback ever runs.
 	var logged bytes.Buffer
 	capture := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	factory := func() (*runner.Runner, session.Service, error) {
-		return newReviewer(cfg, mdl, tools, "test", capture)
-	}
+	factory := reviewerFor(cfg, mdl, tools, "test", capture)
 	reviewIssue(context.Background(), cfg, 7, func(ictx context.Context) {
 		runReviewFor(ictx, factory, gh, cfg, discardLogger(), 7)
 	})
@@ -725,4 +723,155 @@ func nonceIn(t *testing.T, prompt string) string {
 		t.Fatalf("unterminated fence marker:\n%s", prompt)
 	}
 	return rest[:end]
+}
+
+// The reviewer factory must hand every concurrent review its OWN runner.
+//
+// ADK's runner.Run lazily initializes mutable state on the agent it is given
+// (a read at runner.go:210 against a write at :212 in v2.2.0), so a shared
+// runner races as soon as two reviews overlap — which the shipped
+// CONCURRENCY_LIMIT=3 does on any sweep with two candidates.
+//
+// Two things make this catch a regression where an earlier attempt did not.
+//
+// It calls reviewerFor, the function sweep uses, rather than assembling an
+// equivalent closure. While sweep built its factory inline and the tests built
+// their own, memoizing sweep's closure into one shared runner reintroduced the
+// race and FIVE fresh `go test -race` processes reported it zero times.
+//
+// And the barrier sits before Run, not inside the model. The racing access is
+// at the top of Run, so a model that blocks has already let the workers past it
+// one at a time; holding each worker once it HOLDS a runner and releasing them
+// together is what puts them on the write at once.
+//
+// Two distinct regressions, measured separately in fresh processes, because
+// `-count=N` is not N attempts at a once-per-process initialization:
+//
+//	reviewerFor memoized into a shared singleton   DATA RACE 10/10, test fails 10/10
+//	the factory call hoisted out of reviewAll's    DATA RACE  7-9/10, test fails 10/10
+//	  per-review path
+//
+// The hoist is caught every time despite the race detector missing some runs,
+// because it also stops the factory being called once per review, and
+// the holding count below asserts that outright. Do not drop that assertion in
+// favour of the race detector.
+//
+// 32 workers rather than a handful: the racing window is two instructions, so
+// detection scales with how many worker pairs collide. Measured at 4 workers
+// the memoize regression was still 10/10 on the machine this was written on,
+// but that is one machine, and the extra workers run a stub model with no I/O.
+func TestReviewAllGivesEachConcurrentReviewItsOwnRunner(t *testing.T) {
+	const workers = 32
+
+	writes := &writeRecorder{graphQ: func(n int) string {
+		return issueWith(n, fmt.Sprintf("user%d", n), fmt.Sprintf("spam text for %d", n), nil)
+	}}
+	cfg := testConfig()
+	cfg.IssueTimeout = 30 * time.Second
+	cfg.Concurrency = workers // every worker must be in flight for the barrier to fill
+	gh := testClient(t, cfg, writes.handler())
+
+	mdl := &countingModel{}
+	tools, err := gh.tools()
+	if err != nil {
+		t.Fatalf("tools: %v", err)
+	}
+	production := reviewerFor(cfg, mdl, tools, "test", discardLogger())
+
+	// Hold each worker once it holds a runner, and release them together.
+	barrier := make(chan struct{})
+	barrierTimeout := time.After(5 * time.Second)
+	var holding atomic.Int32
+	var released sync.Once
+	factory := func() (*runner.Runner, session.Service, error) {
+		r, ss, err := production()
+		if err != nil {
+			return nil, nil, err
+		}
+		if holding.Add(1) >= workers {
+			released.Do(func() { close(barrier) })
+		}
+		select {
+		case <-barrier:
+		case <-barrierTimeout:
+			// Reached when the factory is called fewer than `workers` times,
+			// which is what hoisting the call out of the per-review path looks
+			// like from here. Short, because a healthy run fills the barrier in
+			// milliseconds and this timeout is otherwise pure dead wait on a
+			// failure.
+			t.Error("the barrier never filled: the factory was not called once per review")
+		}
+		return r, ss, nil
+	}
+	t.Cleanup(func() { released.Do(func() { close(barrier) }) })
+
+	issues := make([]int, 0, workers)
+	for i := 1; i <= workers; i++ {
+		issues = append(issues, i)
+	}
+	reviewAll(context.Background(), factory, gh, cfg, discardLogger(), issues)
+
+	if got := int(holding.Load()); got != workers {
+		t.Errorf("%d review(s) reached the factory, want %d", got, workers)
+	}
+	if got := mdl.calls.Load(); got != workers {
+		t.Errorf("the model ran %d time(s), want %d: some review never entered Run", got, workers)
+	}
+	if gh.hadError() {
+		t.Error("a review failed, so this test may not have exercised what it claims")
+	}
+}
+
+// countingModel answers immediately and counts. The blocking belongs at the
+// barrier before Run, not here.
+type countingModel struct{ calls atomic.Int64 }
+
+func (m *countingModel) Name() string { return "counting-test-model" }
+
+func (m *countingModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls.Add(1)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(textTurn("No spam detected."), nil)
+	}
+}
+
+// The same invariant one level up. This drives sweep itself, so it reaches a
+// hoist introduced between reviewerFor and reviewAll — which the test above,
+// calling reviewAll directly with its own factory, cannot see.
+//
+// It is NOT a pin, and should not be read as one. sweep builds the factory
+// internally, which is the point, so there is nowhere to put a barrier and
+// detection rests entirely on the race detector catching two workers on the
+// same two instructions. Measured with sweep hoisting one shared reviewer:
+// DATA RACE in 7 of 10 fresh processes at 32 issues. Raising the count makes it
+// WORSE, not better — 4 of 10 at 96 — because each worker fetches its issue
+// before reaching Run, and more workers queueing through one httptest server
+// spreads their arrivals apart rather than colliding them. So the usual "add
+// workers until it is deterministic" move does not apply here; what makes the
+// test above deterministic is the barrier, and that is unavailable here.
+//
+// It earns its place as a probabilistic backstop on a variant nothing else
+// covers. The deterministic guarantee lives in the test above.
+func TestSweepGivesEachConcurrentReviewItsOwnRunner(t *testing.T) {
+	const issues = 32
+
+	var items []string
+	for i := 1; i <= issues; i++ {
+		items = append(items, fmt.Sprintf(`{"number":%d}`, i))
+	}
+	mdl := &countingModel{}
+	cfg, deps, _ := sweepHarness(t,
+		func(n int) string {
+			return issueWith(n, fmt.Sprintf("user%d", n), fmt.Sprintf("spam text for %d", n), nil)
+		},
+		mdl, `{"items":[`+strings.Join(items, ",")+`]}`)
+	cfg.IssueCount = issues
+	cfg.Concurrency = issues
+
+	if err := sweep(context.Background(), cfg, discardLogger(), deps); err != nil {
+		t.Fatalf("sweep() = %v, want nil", err)
+	}
+	if got := mdl.calls.Load(); got != issues {
+		t.Errorf("the model ran %d time(s), want %d", got, issues)
+	}
 }

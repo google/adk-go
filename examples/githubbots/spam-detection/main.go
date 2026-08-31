@@ -119,10 +119,7 @@ func sweep(ctx context.Context, cfg *Config, log *slog.Logger, deps sweepDeps) e
 		return fmt.Errorf("create model: %w", err)
 	}
 
-	instruction := renderPrompt(cfg)
-	newReviewer := func() (*runner.Runner, session.Service, error) {
-		return newReviewer(cfg, mdl, tools, instruction, log)
-	}
+	newReviewer := reviewerFor(cfg, mdl, tools, renderPrompt(cfg), log)
 	// Fail on the first build here rather than once per issue inside the
 	// goroutines: a misconfigured agent is a startup problem.
 	if _, _, err := newReviewer(); err != nil {
@@ -153,6 +150,23 @@ func sweep(ctx context.Context, cfg *Config, log *slog.Logger, deps sweepDeps) e
 // reviewerFactory builds the agent, runner and session service for ONE issue
 // review. Nothing it returns is shared with another review.
 type reviewerFactory func() (*runner.Runner, session.Service, error)
+
+// reviewerFor is the factory sweep hands to reviewAll: it closes over the model,
+// the tool set and the rendered instruction -- which ARE shared across reviews --
+// and builds everything else fresh on each call.
+//
+// It is a named function rather than a closure inside sweep so that a test can
+// drive the wiring production actually uses. While it was a closure, memoizing
+// it back into a single shared runner -- reintroducing the ADK race newReviewer
+// exists to avoid -- was invisible to the whole suite, because every test built
+// an equivalent closure of its own instead of calling this one. Measured: with
+// the closure memoized, five fresh `go test -race` processes reported zero data
+// races.
+func reviewerFor(cfg *Config, mdl model.LLM, tools []tool.Tool, instruction string, log *slog.Logger) reviewerFactory {
+	return func() (*runner.Runner, session.Service, error) {
+		return newReviewer(cfg, mdl, tools, instruction, log)
+	}
+}
 
 // newReviewer builds a fresh agent, runner and session service.
 //
