@@ -198,7 +198,7 @@ Nine files, all against the real functions rather than copies of them:
 | `workflow_test.go` | Binds the workflow to the config. Reads the real `.github/workflows/issue-triage-bot.yml`, replays its environment through the real `loadConfig`, and checks the budget arithmetic and the job timeout. A renamed variable on either side fails here. |
 | `tools_test.go` | The allowlist, session-scope and need-claim gates: rejections that make no HTTP call, exactly one writer under 8 concurrent goroutines, the pre-write re-read, and the one-shot claim. Also drives both tools through the real `functiontool` wrapper. |
 | `main_test.go` | The sweep loop, the nonce fence and its fail-closed path, the run budget, and authorization scoped to a session. |
-| `chokepoint_test.go` | Reads the package's own source and fails when any function issues a mutating request without passing through `shouldSkip` — the structural counterpart to the pinned tool inventory, so a third mutation cannot be added without the dry-run gate. |
+| `chokepoint_test.go` | Reads the package's own source and fails when any function issues a mutating request without passing through `shouldSkip` — the structural counterpart to the pinned tool inventory, so a third mutation cannot be added without the dry-run gate — including one routed through the GraphQL transport, hidden in a function literal, or gated by a `shouldSkip` whose result is discarded. |
 | `github_test.go` | The client against `httptest`: GraphQL pagination, cross-page dedupe, PR/NOT_FOUND handling, silent-drop detection, dry-run. |
 | `triage_test.go`, `config_test.go`, `dryrun_env_test.go`, `prompt_test.go` | Pure decision logic, configuration parsing and its strictness, and prompt rendering. |
 

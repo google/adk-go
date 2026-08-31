@@ -261,10 +261,16 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		// The run budget funds the work-set fetch as well as the issues, and a
 		// configuration that cannot fit its own worst case reports issues
 		// untriaged on a run that behaved exactly as designed.
-		{"sweep cannot fit its own worst case", func(c *Config) { c.IssueCount = 4 }, "exceeds SWEEP_TIMEOUT"},
-		// Bounded before the multiplication: the product is an int64 duration,
-		// and an absurd count would wrap back into the accepted range.
+		{"sweep cannot fit its own worst case", func(c *Config) { c.IssueCount = 4 }, "does not fit SWEEP_TIMEOUT"},
 		{"count beyond what a sweep can read", func(c *Config) { c.IssueCount = 61489147 }, "one sweep can read"},
+		// Compared by division, not by forming the product: this timeout times
+		// this count wraps int64 and would otherwise land inside the budget.
+		{"timeout large enough to wrap the product", func(c *Config) {
+			c.IssueCount, c.IssueTimeout, c.SweepTimeout = 30, 100000*time.Hour, 100000*time.Hour
+		}, "does not fit SWEEP_TIMEOUT"},
+		{"budget smaller than the work-set fetch", func(c *Config) {
+			c.IssueCount, c.IssueTimeout, c.SweepTimeout = 1, time.Second, 30*time.Second
+		}, "does not fit SWEEP_TIMEOUT"},
 		{"zero count", func(c *Config) { c.IssueCount = 0 }, "ISSUE_COUNT"},
 		{"negative freshness", func(c *Config) { c.FreshnessWindow = -time.Hour }, "FRESHNESS_WINDOW_DAYS"},
 		{"no usable labels", func(c *Config) { c.AllowedLabels = nil }, "ALLOWED_LABELS"},

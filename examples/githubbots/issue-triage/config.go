@@ -164,6 +164,14 @@ func (c *Config) validate() error {
 	if c.SweepTimeout < c.IssueTimeout {
 		return fmt.Errorf("SWEEP_TIMEOUT (%s) must be at least ISSUE_TIMEOUT (%s)", c.SweepTimeout, c.IssueTimeout)
 	}
+	if c.IssueCount < 1 {
+		return fmt.Errorf("ISSUE_COUNT must be at least 1, got %d", c.IssueCount)
+	}
+	// The sweep cannot read more than this many issues, so a larger count is
+	// always a misconfiguration.
+	if maxSweep := maxSearchPages * searchPageSize; c.IssueCount > maxSweep {
+		return fmt.Errorf("ISSUE_COUNT (%d) exceeds the %d issues one sweep can read", c.IssueCount, maxSweep)
+	}
 	// The run budget funds choosing the work set as well as triaging it. A
 	// configuration that cannot fit its own worst case exhausts the budget on
 	// an ordinary busy sweep and reports issues untriaged, which reads as a
@@ -176,19 +184,13 @@ func (c *Config) validate() error {
 	if c.SingleIssue > 0 {
 		issues = 1
 	}
-	if worst := time.Duration(issues)*c.IssueTimeout + fetchTimeout; worst > c.SweepTimeout {
-		return fmt.Errorf("%d issue(s) x ISSUE_TIMEOUT (%s) plus the %s work-set fetch is %s, which exceeds SWEEP_TIMEOUT (%s)",
-			issues, c.IssueTimeout, fetchTimeout, worst, c.SweepTimeout)
-	}
-	if c.IssueCount < 1 {
-		return fmt.Errorf("ISSUE_COUNT must be at least 1, got %d", c.IssueCount)
-	}
-	// Bounded before it is multiplied below: the product is a time.Duration, so
-	// an absurd count would wrap int64 and land back inside the accepted range,
-	// letting a configuration through that the budget check exists to reject.
-	// The sweep cannot see more than this many issues anyway.
-	if maxSweep := maxSearchPages * searchPageSize; c.IssueCount > maxSweep {
-		return fmt.Errorf("ISSUE_COUNT (%d) exceeds the %d issues one sweep can read", c.IssueCount, maxSweep)
+	// Compared by division rather than by forming the product: the product is a
+	// time.Duration, so a large count or a large timeout wraps int64 and lands
+	// back inside the accepted range, letting through exactly the configuration
+	// this check exists to reject.
+	if c.SweepTimeout <= fetchTimeout || c.IssueTimeout > (c.SweepTimeout-fetchTimeout)/time.Duration(issues) {
+		return fmt.Errorf("%d issue(s) at ISSUE_TIMEOUT (%s) each, plus the %s work-set fetch, does not fit SWEEP_TIMEOUT (%s)",
+			issues, c.IssueTimeout, fetchTimeout, c.SweepTimeout)
 	}
 	if c.FreshnessWindow < 0 {
 		return fmt.Errorf("FRESHNESS_WINDOW_DAYS must not be negative, got %s", c.FreshnessWindow)
