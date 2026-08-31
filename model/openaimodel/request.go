@@ -97,8 +97,11 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			}
 			// Assistant turns must be replayed as output messages whose content
 			// uses "output_text"; the OpenAI Responses API rejects "input_text"
-			// for the assistant role (EasyInputMessageParam can only emit
-			// input_text). Every other role stays an easy input message.
+			// for the assistant role, and an EasyInputMessageParam content list
+			// can only hold input_text. A plain-string EasyInputMessageParam is
+			// also accepted, but an output message keeps one entry per part
+			// rather than flattening them into a single string. Every other role
+			// stays an easy input message.
 			if curRole == genai.RoleModel {
 				msg, err := newOutputMessage(textParts)
 				if err != nil {
