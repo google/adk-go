@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -202,4 +203,70 @@ func forbiddenHandler(calls *int) http.Handler {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
 	})
+}
+
+// The claim's test and its consume must share ONE critical section. Splitting
+// them — read the observation and the claimed flag under the lock, evaluate the
+// predicate outside it, re-lock to record — is the check-then-act the design
+// exists to prevent, and it is a plausible refactor: it looks like shortening a
+// lock hold.
+//
+// TestClaimIsAtomicUnderConcurrency does not catch it: its workers race a
+// window two instructions wide, so catching the split needs two of them to read
+// "unclaimed" before either writes. Measured against that mutant it killed it in
+// 1 of 15 fresh processes. This test drops the timing dependency by making the
+// PREDICATE itself the barrier, and killed the same mutant in 10 of 10.
+//
+// If the predicate runs under the claim's lock, as it must, only one worker can
+// ever be inside it, the arrival count never reaches the total, that worker
+// waits out the timeout alone and wins, and the rest find the key claimed and
+// return without ever calling the predicate. If the predicate has been moved
+// outside the lock, every worker enters it together, the count is satisfied at
+// once, they all see an unclaimed key, and they all win — which is a duplicate
+// stale warning on a real issue.
+func TestClaimTestAndConsumeShareOneCriticalSection(t *testing.T) {
+	const workers = 8
+	c := newTestClient(t)
+	c.recordObservation(7, staleReady())
+
+	var (
+		inPredicate atomic.Int64
+		release     = make(chan struct{})
+		closeOnce   sync.Once
+	)
+	barrierPred := func(st IssueState) (string, bool) {
+		if inPredicate.Add(1) >= workers {
+			closeOnce.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(200 * time.Millisecond):
+		}
+		return stalePredicate(7)(st)
+	}
+
+	var (
+		wins  atomic.Int64
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+	)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, ok := c.claimAction(7, actionMarkStale, barrierPred); ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := wins.Load(); got != 1 {
+		t.Errorf("%d of %d workers claimed the same action, want exactly 1: the predicate and the consume are not in one critical section, so a duplicate stale comment reaches the issue", got, workers)
+	}
+	if n := inPredicate.Load(); n != 1 {
+		t.Errorf("the predicate ran %d times, want 1: a worker that lost the claim must never reach it", n)
+	}
 }
