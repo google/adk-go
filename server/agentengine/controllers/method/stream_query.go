@@ -68,7 +68,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		errText := json.Unmarshal(payload, &reqText)
 		if errText != nil {
 			// cannot unmarshall to models.StreamQueryRequest and models.StreamQueryTextRequest
-			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%v) and models.StreamQueryTextRequest (%v)", err, errText)
+			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%w) and models.StreamQueryTextRequest (%w)", err, errText)
 			log.Print(err.Error())
 			return err
 		}
@@ -200,7 +200,7 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 		AutoCreateSession: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner: %v", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
 	return r.Run(ctx, req.Input.UserID, req.Input.SessionID, message, agent.RunConfig{

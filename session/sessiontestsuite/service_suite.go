@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package sessiontestsuite provides a reusable, backend-agnostic test
+// suite for verifying session.Service implementations.
 package sessiontestsuite
 
 import (

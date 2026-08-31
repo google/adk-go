@@ -26,11 +26,13 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// Example is a single few-shot example, pairing an input with its expected output.
 type Example struct {
 	Input  *genai.Content   `json:"input"`
 	Output []*genai.Content `json:"output"`
 }
 
+// ExampleToolConfig configures an example tool with the few-shot examples to add.
 type ExampleToolConfig struct {
 	Examples []*Example
 }
@@ -40,6 +42,8 @@ type exampleTool struct {
 	examples []*Example
 }
 
+// New creates an example tool that adds the configured few-shot examples to the
+// LLM request.
 func New(config ExampleToolConfig) (*exampleTool, error) {
 	return &exampleTool{examples: config.Examples}, nil
 }

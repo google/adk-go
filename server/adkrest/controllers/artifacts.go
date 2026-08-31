@@ -29,6 +29,7 @@ type ArtifactsAPIController struct {
 	artifactService artifact.Service
 }
 
+// NewArtifactsAPIController creates an ArtifactsAPIController backed by the given artifact service.
 func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
 	return &ArtifactsAPIController{artifactService: artifactService}
 }

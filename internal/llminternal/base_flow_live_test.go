@@ -16,7 +16,10 @@ package llminternal
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -391,4 +394,155 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			assertNoRunLiveLeak(t, baseline)
 		})
 	}
+}
+
+// liveHistoryProcessor populates req.Contents with a turn the SDK cannot
+// marshal, so RunLive's SendHistory call fails on the client side.
+//
+// The failure has to be client-side: a broken socket would also fail the send,
+// but then there would be no live connection left to observe. json.Marshal
+// rejects NaN, so the send fails while the websocket stays healthy.
+func liveHistoryProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	req.Config = &genai.GenerateContentConfig{}
+	req.Contents = []*genai.Content{{
+		Role: "user",
+		Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				Name: "unmarshalable",
+				Args: map[string]any{"nan": math.NaN()},
+			},
+		}},
+	}}
+	return func(yield func(*session.Event, error) bool) {}
+}
+
+// TestRunLiveClosesConnectionOnSendHistoryFailure pins the cleanup discipline
+// on RunLive's one early-return path.
+//
+// Every other return in RunLive's own body releases the attempt through
+// cleanup (or cancelConn, before the connection exists). The SendHistory
+// failure path returns without either, so the websocket is never closed.
+// Cancelling the context would not help: genai dials with
+// websocket.DefaultDialer.Dial, which takes no context, and nothing in the SDK
+// watches one — only an explicit Close releases that socket. So the connection
+// survives for the lifetime of the process, not just the invocation.
+func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
+	// How long the fake server waits for the client's close before concluding
+	// the socket was abandoned. Only paid on failure.
+	const closeWait = 3 * time.Second
+
+	baseline, _ := runLiveStacks()
+
+	// clientClosed reports whether the client tore the connection down, as
+	// opposed to leaving the server parked until its read deadline expired.
+	clientClosed := make(chan bool, 1)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		_ = conn.SetReadDeadline(time.Now().Add(closeWait))
+		_, _, err := conn.ReadMessage()
+		var netErr net.Error
+		clientClosed <- !(errors.As(err, &netErr) && netErr.Timeout())
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveHistoryProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	_, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	// RunLive pushes the SendHistory error and returns. Stop iterating at that
+	// error: nothing closes the session, so ranging further would block.
+	var gotErr error
+	for _, e := range seq {
+		if e != nil {
+			gotErr = e
+			break
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected the SendHistory failure to surface through the iterator")
+	}
+	if !strings.Contains(gotErr.Error(), "history") {
+		t.Errorf("surfaced error = %v, want it to mention the history send", gotErr)
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1", got)
+	}
+
+	select {
+	case closed := <-clientClosed:
+		if !closed {
+			t.Error("RunLive returned without closing the live connection: the socket " +
+				"is leaked for the life of the process (missing cleanup on the SendHistory path)")
+		}
+	case <-time.After(closeWait + 2*time.Second):
+		t.Fatal("fake server never reported a connection outcome")
+	}
+
+	assertNoRunLiveLeak(t, baseline)
+}
+
+func TestRunLiveCloseStopsIdleSession(t *testing.T) {
+	baseline, _ := runLiveStacks()
+
+	// connGone fires when the fake server's read returns, i.e. once the client
+	// has torn the socket down. Buffered so the handler never blocks, whether
+	// the test consumed the signal or gave up and failed.
+	connGone := make(chan struct{}, 1)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		blockUntilClientCloses(conn) // an idle server: no unsolicited traffic
+		connGone <- struct{}{}
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	// The context is deliberately left alive across the assertions below:
+	// this test is about Close standing on its own, with no help from ctx.
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	// The setup-complete acknowledgement. Once it lands the connection is up
+	// and the flow is settling into the idle consumer select.
+	if _, _, ok := next(); !ok {
+		t.Fatal("iterator ended before the setup-complete event; the connection never came up")
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Fatalf("connection count = %d, want 1", got)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if _, _, ok := next(); ok {
+		t.Error("iterator produced an event after Close")
+	}
+
+	select {
+	case <-connGone:
+	case <-time.After(10 * time.Second):
+		_, stacks := runLiveStacks()
+		t.Fatalf("Close did not release the live connection: the websocket is still "+
+			"open and the flow is still running:\n%s", stacks)
+	}
+
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1 (Close must not trigger a reconnect)", got)
+	}
+	assertNoRunLiveLeak(t, baseline)
 }
