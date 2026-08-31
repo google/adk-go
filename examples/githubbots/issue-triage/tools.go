@@ -85,7 +85,7 @@ func errResult(format string, a ...any) actionResult {
 // (adk/v2 internal/context/invocation_context.go builds it with Context: ctx,
 // and runner.Runner.Run hands it the caller's context), and agent.Context
 // embeds that in turn, so a value set here is visible to every tool through
-// ctx.Value. TestToolsRefuseAnOutOfScopeIssueThroughTheRealToolWrapper pins the
+// ctx.Value. TestToolsEnforceTheSessionScopeThroughTheRealWrapper pins the
 // half of that chain this module owns.
 type auditedIssueKey struct{}
 
@@ -126,7 +126,9 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 	// Three steps, in this order for a reason.
 	//
 	// The peek is non-consuming, so a call that would be refused anyway does not
-	// spend a network read. The re-read then happens BEFORE the claim, because
+	// spend a network read. That only helps SEQUENTIALLY -- several calls issued
+	// in the same turn all peek before any of them claims, so each still reads.
+	// The re-read then happens BEFORE the claim, because
 	// the need was computed when the work set was fetched and a maintainer may
 	// have set the type since -- and because a failed read must cost nothing: if
 	// the claim were taken first, a flaky read would burn the issue's one write
@@ -139,6 +141,11 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 		return errResult("issue #%d already has a type; not overwriting", number), nil
 	}
 	fresh, err := c.confirmStillNeeded(ctx, number)
+	if errors.Is(err, ErrIssueNotFound) {
+		// The issue was deleted or converted between selection and now. Nothing
+		// is broken, so tell the model and leave the run green.
+		return errResult("issue #%d no longer exists; nothing to do", number), nil
+	}
 	if err != nil {
 		return c.toolFailed(err)
 	}
@@ -175,6 +182,9 @@ func (c *Client) doAddLabel(ctx context.Context, number int, label string) (acti
 		return errResult("issue #%d already has a categorization label; not adding another", number), nil
 	}
 	fresh, err := c.confirmStillNeeded(ctx, number)
+	if errors.Is(err, ErrIssueNotFound) {
+		return errResult("issue #%d no longer exists; nothing to do", number), nil
+	}
 	if err != nil {
 		return c.toolFailed(err)
 	}

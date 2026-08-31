@@ -56,6 +56,10 @@ const (
 	labelPageSize = 100
 	// searchPageSize bounds one page of search results.
 	searchPageSize = 50
+	// labelResponsePage is GitHub's default page size for the label list an add
+	// returns. The endpoint takes no page-size option, so a list this long may
+	// be truncated and cannot be read as complete.
+	labelResponsePage = 30
 )
 
 // maxSearchPages bounds GraphQL search pagination as a safety valve: at
@@ -167,16 +171,23 @@ func (c *Client) claimLabel(number int) (claimed, authorized bool) {
 	return true, true
 }
 
-// revoke drops an issue's authorization entirely. triageOne calls it when the
-// session for that issue ends, so an authorization cannot outlive the session
-// that justified it and sit in the map for the rest of the sweep. The
+// revoke closes every field of an issue's authorization. triageOne calls it
+// when that issue's session ends, so an authorization cannot outlive the
+// session that justified it and sit in the map for the rest of the sweep. The
 // per-session context scope already refuses a later cross-issue call, but
-// leaving stale entries would mean any future call site that forgot the scope
-// check could write to every issue the run had touched rather than to one.
+// leaving open needs behind would mean any future call site that forgot the
+// scope check could write to every issue the run had touched rather than one.
+//
+// It zeroes the entry rather than deleting it, so authorize's merge above still
+// sees a record. Deleting would let a second authorize for the same issue start
+// from nothing and restore both fields at full strength, which is exactly the
+// resurrection that merge exists to prevent.
 func (c *Client) revoke(number int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.authorized, number)
+	if _, ok := c.authorized[number]; ok {
+		c.authorized[number] = need{}
+	}
 }
 
 // recordToolError flags that a tool hit an infrastructure error this run.
@@ -403,7 +414,13 @@ func (c *Client) GetIssue(ctx context.Context, number int) (Issue, error) {
 	if resp.Data.Repository.Issue == nil {
 		return Issue{}, fmt.Errorf("issue #%d: %w", number, ErrIssueNotFound)
 	}
-	return resp.Data.Repository.Issue.toIssue(), nil
+	iss := resp.Data.Repository.Issue.toIssue()
+	// A response that decoded but carries no number is not an issue. Returning
+	// it would put 0 into the session scope and the authorization map.
+	if iss.Number == 0 {
+		return Issue{}, fmt.Errorf("issue #%d: response carried no issue number: %w", number, ErrIssueNotFound)
+	}
+	return iss, nil
 }
 
 // --- Mutations ---
@@ -456,6 +473,14 @@ func (c *Client) AddLabel(ctx context.Context, number int, label string) error {
 			applied = true
 			break
 		}
+	}
+	// Absent from a list that is at the page cap proves nothing: the add may
+	// have landed on a later page. Reporting a failure there would red the job
+	// on every successful add to a heavily labelled issue.
+	if !applied && len(labels) >= labelResponsePage {
+		c.log.Warn("could not confirm the label was applied; the response was a full page of labels",
+			"issue", number, "label", label, "labels_returned", len(labels))
+		return nil
 	}
 	if !applied {
 		return fmt.Errorf("add label %q to issue #%d (the token likely lacks push access): %w", label, number, errNotApplied)

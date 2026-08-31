@@ -58,7 +58,13 @@ func main() {
 func run(ctx context.Context, log *slog.Logger, args []string) error {
 	// Best-effort: load a local .env when present (for local runs). Ignored in
 	// CI, where configuration comes from the environment.
-	_ = godotenv.Load()
+	// Local convenience only. In Actions the configuration comes from the
+	// workflow, and a .env that reached a runner would silently override it --
+	// ALLOWED_LABELS in particular, which is the one authority-bearing setting
+	// the workflow does not pin.
+	if os.Getenv("GITHUB_ACTIONS") == "" {
+		_ = godotenv.Load()
+	}
 
 	cfg, err := loadConfig(args)
 	if err != nil {
@@ -327,6 +333,9 @@ func runAgent(ctx context.Context, r *runner.Runner, sessions session.Service, l
 	// range-over-func): each iteration yields one streamed event or an error.
 	// We keep the last text content as the agent's final summary.
 	for event, err := range r.Run(ctx, userID, created.Session.ID(), msg, agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
+		if event == nil && err == nil {
+			continue
+		}
 		if err != nil {
 			log.Error("agent run", "error", err)
 			runErr = errors.Join(runErr, err)

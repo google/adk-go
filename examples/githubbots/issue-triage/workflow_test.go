@@ -16,10 +16,30 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
+
+// readWorkflow returns the workflow source.
+//
+// Missing file, but the repository's workflow directory is there: fatal. That
+// is the case this test exists for -- the workflow was renamed or moved and
+// nothing else would notice. Directory absent entirely: the module has been
+// copied out of adk-go, where there is no workflow to check, so skip.
+func readWorkflow(t *testing.T) string {
+	t.Helper()
+	if _, err := os.Stat(filepath.Dir(workflowPath)); err != nil {
+		t.Skipf("%s is not present, so this module is not in its adk-go tree: %v", filepath.Dir(workflowPath), err)
+	}
+	raw, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (the workflow that runs this module must exist)", workflowPath, err)
+	}
+	return string(raw)
+}
 
 // workflowPath is the workflow that runs this module in CI. Nothing else binds
 // the environment variable names it sets to the ones loadConfig reads, so a
@@ -37,14 +57,9 @@ var literalEnv = regexp.MustCompile(`(?m)^\s{10}([A-Z][A-Z0-9_]*):\s*'?([^'$\n]+
 // This reads the real file and drives the real loadConfig with it, so a renamed
 // key stops taking effect and this test says so.
 func TestWorkflowEnvProducesTheIntendedConfig(t *testing.T) {
-	raw, err := os.ReadFile(workflowPath)
-	if err != nil {
-		// Deliberately fatal rather than skipped. A skip here would pass
-		// silently for exactly the reason the test exists: the file moved.
-		t.Fatalf("read %s: %v (the workflow that runs this module must exist)", workflowPath, err)
-	}
+	raw := readWorkflow(t)
 
-	matches := literalEnv.FindAllStringSubmatch(string(raw), -1)
+	matches := literalEnv.FindAllStringSubmatch(raw, -1)
 	if len(matches) == 0 {
 		t.Fatalf("found no literal env assignments in %s; the pattern or the workflow changed shape", workflowPath)
 	}
@@ -100,11 +115,8 @@ func TestWorkflowEnvProducesTheIntendedConfig(t *testing.T) {
 var timeoutMinutes = regexp.MustCompile(`(?m)^\s*timeout-minutes:\s*(\d+)\s*$`)
 
 func TestWorkflowJobTimeoutExceedsTheProcessBudget(t *testing.T) {
-	raw, err := os.ReadFile(workflowPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", workflowPath, err)
-	}
-	m := timeoutMinutes.FindStringSubmatch(string(raw))
+	raw := readWorkflow(t)
+	m := timeoutMinutes.FindStringSubmatch(raw)
 	if m == nil {
 		t.Fatal("the workflow job declares no timeout-minutes; an overrun would run to the runner's own limit")
 	}
@@ -113,9 +125,8 @@ func TestWorkflowJobTimeoutExceedsTheProcessBudget(t *testing.T) {
 		t.Fatalf("parse timeout-minutes %q: %v", m[1], err)
 	}
 
-	sweep := literalEnv.FindAllStringSubmatch(string(raw), -1)
 	var budget time.Duration
-	for _, e := range sweep {
+	for _, e := range literalEnv.FindAllStringSubmatch(raw, -1) {
 		if e[1] != "SWEEP_TIMEOUT" {
 			continue
 		}
@@ -129,5 +140,45 @@ func TestWorkflowJobTimeoutExceedsTheProcessBudget(t *testing.T) {
 	if budget >= job {
 		t.Errorf("SWEEP_TIMEOUT %s is not below timeout-minutes %s: the job would be killed before the process could report what it left",
 			budget, job)
+	}
+}
+
+// The keys whose values are runner expressions or shell-derived never reach the
+// regex above, so the test that replays the literal env cannot see them renamed
+// -- and they are the four whose absence stops the bot dead. Assert their names
+// are present, which is the whole binding available without running Actions.
+//
+// Killing mutation: rename GITHUB_TOKEN, GEMINI_API_KEY or DRY_RUN in the
+// workflow, or the `export OWNER REPO` the script derives from the repository.
+func TestWorkflowSuppliesEveryKeyTheConfigRequires(t *testing.T) {
+	raw := readWorkflow(t)
+	for _, want := range []string{
+		// Supplied by the runner as ${{ }} expressions.
+		"GITHUB_TOKEN:",
+		"GEMINI_API_KEY:",
+		// Derived in the script from github.repository.
+		"export OWNER REPO",
+		// Resolved in the script, because the input's declared default only
+		// applies when the key is absent from the dispatch payload.
+		"export DRY_RUN",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the workflow no longer contains %q; loadConfig would refuse to start, or the dry-run switch would not reach it", want)
+		}
+	}
+
+	// And the Go side must still read them under those names.
+	setRequired(t)
+	if _, err := loadConfig(nil); err != nil {
+		t.Fatalf("loadConfig() with the required variables set = %v", err)
+	}
+	for _, key := range []string{"GITHUB_TOKEN", "OWNER", "REPO"} {
+		t.Run("without "+key, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(key, "")
+			if _, err := loadConfig(nil); err == nil {
+				t.Errorf("loadConfig() without %s = nil error; the workflow supplying it would be pointless", key)
+			}
+		})
 	}
 }

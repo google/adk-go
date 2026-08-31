@@ -74,9 +74,14 @@ jobs:
           # Reaches the script only as an environment variable, never
           # interpolated into the script text, and validated below before use.
           ISSUE_INPUT: ${{ github.event.issue.number || inputs.issue }}
-          # Manual runs default to a dry run. The issue and schedule triggers
-          # are the bot doing its job, so they act for real.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          # Resolved in the script below, not here. A `${{ a && b || c }}`
+          # expression cannot express "default to true" safely: GitHub applies
+          # the input's declared default only when the key is ABSENT, so a REST
+          # dispatch carrying "dry_run": "" is present-but-falsy, falls through
+          # to the `|| false` arm, and mutates live issues for an operator whose
+          # payload asked for a rehearsal.
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
           # These three must satisfy ISSUE_COUNT x ISSUE_TIMEOUT <= SWEEP_TIMEOUT,
           # or an ordinary busy sweep exhausts its budget and the job goes red on
           # a run that behaved exactly as designed. 5 x 3m = 15m, inside 18m.
@@ -91,6 +96,25 @@ jobs:
           OWNER=${GH_REPOSITORY%%/*}
           REPO=${GH_REPOSITORY##*/}
           export OWNER REPO
+
+          # Manual runs are a rehearsal unless the operator says otherwise; the
+          # issue and schedule triggers are the bot doing its job. Anything that
+          # is neither "true" nor "false" -- including the empty string a REST
+          # dispatch can deliver -- is refused rather than guessed at.
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${DRY_RUN_INPUT}" in
+              true)  DRY_RUN=true  ;;
+              false) DRY_RUN=false ;;
+              "")    DRY_RUN=true  ;;
+              *)
+                echo "::error::dry_run must be true or false"
+                exit 1
+                ;;
+            esac
+          else
+            DRY_RUN=false
+          fi
+          export DRY_RUN
 
           # Digits only. A grep would match per LINE, so "12\nwhatever" would
           # pass it; this rejects any non-digit character, newlines included. The

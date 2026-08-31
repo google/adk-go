@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -80,8 +81,28 @@ func loadConfig(args []string) (*Config, error) {
 	env := &envReader{}
 	fs := flag.NewFlagSet("issue-triage", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", env.boolean("DRY_RUN", false), "Log intended actions without modifying any issues.")
-	singleIssue := fs.Int("issue", 0, "Triage only this issue number (0 = sweep untriaged issues).")
-	if err := fs.Parse(args); err != nil {
+	// Not fs.Int: that parses with strconv.ParseInt base 0, so "-issue 010"
+	// would be read as octal 8 and the bot would triage a different issue than
+	// the operator named. strconv.Atoi is base 10. A value below 1 is rejected
+	// rather than ignored, because only SingleIssue > 0 selects single-issue
+	// mode -- "-issue 0" would otherwise become a full backlog sweep.
+	var singleIssue int
+	fs.Func("issue", "Triage only this issue number (omit to sweep untriaged issues).", func(v string) error {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("issue number %q is not a base-10 integer: %w", v, err)
+		}
+		if n < 1 {
+			return fmt.Errorf("issue number must be at least 1, got %d", n)
+		}
+		singleIssue = n
+		return nil
+	})
+	parseErr := fs.Parse(args)
+	// Report the environment failures too rather than only the first problem:
+	// a bad flag and a DRY_RUN typo are independent, and hiding the second
+	// behind the first is how the second survives a fix for the first.
+	if err := errors.Join(parseErr, env.err()); err != nil {
 		return nil, err
 	}
 
@@ -100,9 +121,10 @@ func loadConfig(args []string) (*Config, error) {
 		IssueTimeout:    env.duration("ISSUE_TIMEOUT", 5*time.Minute),
 		SweepTimeout:    env.duration("SWEEP_TIMEOUT", 15*time.Minute),
 		DryRun:          *dryRun,
-		SingleIssue:     *singleIssue,
+		SingleIssue:     singleIssue,
 		UseVertexAI:     env.boolean("GOOGLE_GENAI_USE_VERTEXAI", false),
 	}
+	// The typed reads above happen after fs.Parse, so collect their failures too.
 	if err := env.err(); err != nil {
 		return nil, err
 	}
@@ -147,12 +169,6 @@ func (c *Config) validate() error {
 	}
 	if c.FreshnessWindow < 0 {
 		return fmt.Errorf("FRESHNESS_WINDOW_DAYS must not be negative, got %s", c.FreshnessWindow)
-	}
-	// A negative -issue is neither a valid issue number nor a request to sweep.
-	// Only SingleIssue > 0 selects single-issue mode, so letting a negative
-	// through would quietly turn "triage issue -5" into a full backlog sweep.
-	if c.SingleIssue < 0 {
-		return fmt.Errorf("-issue must not be negative, got %d", c.SingleIssue)
 	}
 	if len(c.AllowedLabels) == 0 {
 		return errors.New("ALLOWED_LABELS is set but contains no usable label")
@@ -242,6 +258,12 @@ func (e *envReader) duration(key string, def time.Duration) time.Duration {
 }
 
 // days reads a (possibly fractional) number of days and returns a Duration.
+//
+// ParseFloat accepts "NaN" and "Inf", and converting either to an int64 is
+// implementation-defined in Go: on amd64 NaN becomes a large negative value,
+// on a saturating target it becomes 0 -- which reads as "no freshness window"
+// and silently widens the sweep to the whole backlog. Both are rejected, as is
+// a day count too large to be a Duration.
 func (e *envReader) days(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
@@ -252,5 +274,13 @@ func (e *envReader) days(key string, def time.Duration) time.Duration {
 		e.fail(key, v, err)
 		return def
 	}
-	return time.Duration(days * float64(24*time.Hour))
+	hours := days * 24
+	if math.IsNaN(hours) || math.IsInf(hours, 0) || math.Abs(hours) > maxDurationHours {
+		e.fail(key, v, errors.New("not a finite number of days a duration can represent"))
+		return def
+	}
+	return time.Duration(hours * float64(time.Hour))
 }
+
+// maxDurationHours is how many hours fit in a time.Duration, with margin.
+const maxDurationHours = float64(math.MaxInt64/int64(time.Hour)) - 1

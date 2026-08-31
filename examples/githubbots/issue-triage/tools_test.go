@@ -661,3 +661,42 @@ func TestToolsEnforceTheSessionScopeThroughTheRealWrapper(t *testing.T) {
 		})
 	}
 }
+
+// An issue deleted, transferred or converted to a discussion between the sweep
+// selecting it and the tool acting on it is not an infrastructure failure. It
+// must be reported to the model as data and leave the run green -- otherwise
+// every such event reds a scheduled sweep.
+//
+// Killing mutation: remove the ErrIssueNotFound branch from doChangeType, so
+// the read error routes through toolFailed.
+func TestAVanishedIssueIsNotAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(*Client) (actionResult, error)
+	}{
+		{"doChangeType", func(c *Client) (actionResult, error) { return c.doChangeType(scoped(7), 7, "Bug") }},
+		{"doAddLabel", func(c *Client) (actionResult, error) { return c.doAddLabel(scoped(7), 7, "bug") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes int
+			c := writeClient(t, testConfig(),
+				`{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","message":"gone"}]}`,
+				func(http.ResponseWriter, *http.Request) { writes++ })
+			c.authorize(7, need{typ: true, label: true})
+
+			res, err := tc.act(c)
+			if err != nil {
+				t.Fatalf("%s returned a Go error for a vanished issue: %v", tc.name, err)
+			}
+			if res.Status != "error" || !strings.Contains(res.Message, "no longer exists") {
+				t.Errorf("%s = %+v, want a model-readable refusal naming the missing issue", tc.name, res)
+			}
+			if c.hadToolError() {
+				t.Error("a vanished issue was recorded as an infrastructure failure; the run would go red")
+			}
+			if writes != 0 {
+				t.Errorf("made %d mutating calls for an issue that does not exist", writes)
+			}
+		})
+	}
+}

@@ -66,6 +66,15 @@ func TestLoadConfigRejectsAMalformedEnvValue(t *testing.T) {
 		{"ISSUE_TIMEOUT", "5min"},
 		{"SWEEP_TIMEOUT", "15"},
 		{"GOOGLE_GENAI_USE_VERTEXAI", "yes"},
+		// ParseFloat accepts these, and converting either to an int64 is
+		// implementation-defined in Go: on a saturating target NaN becomes 0,
+		// which reads as "no freshness window" and silently widens the sweep to
+		// the whole backlog. Killing mutation: drop the finiteness check from
+		// envReader.days.
+		{"FRESHNESS_WINDOW_DAYS", "NaN"},
+		{"FRESHNESS_WINDOW_DAYS", "Inf"},
+		{"FRESHNESS_WINDOW_DAYS", "-Inf"},
+		{"FRESHNESS_WINDOW_DAYS", "1e300"},
 	} {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
 			setRequired(t)

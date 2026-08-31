@@ -84,7 +84,7 @@ real I/O failures return a Go `error`. `OnToolErrorCallbacks` returns
 
 ## Running locally
 
-Requires **Go 1.26+** (see `go.mod`). Copy `.env.example` to `.env` and fill it
+Requires the Go toolchain in `go.mod` (1.26.6) or newer. Copy `.env.example` to `.env` and fill it
 in (or export the variables), then:
 
 ```bash
@@ -133,7 +133,12 @@ The bot runs from this repository against this repository, driven by
 That workflow checks the repo out, installs the Go version from this module's
 `go.mod`, and runs `go run .` here. `OWNER`/`REPO` are derived from
 `github.repository`, and the built-in `GITHUB_TOKEN` — scoped by the job's
-`permissions:` — does the writing, so no PAT or GitHub App is needed.
+`permissions:` — does the writing, so no PAT or GitHub App is needed for that.
+
+**One secret is required**: `GEMINI_API_KEY`, as a repository secret. Without it
+`loadConfig` refuses to start and every run goes red — on each opened issue and
+four times a day. Add it before enabling the workflow, or switch the job to
+Vertex AI via `GOOGLE_GENAI_USE_VERTEXAI`.
 
 Three triggers:
 
@@ -183,13 +188,19 @@ and then once against a single issue for real.
 
 ## Tests
 
-Pure logic is table-driven (`triage_test.go`); the GitHub client is exercised
-with `httptest` (`github_test.go`, incl. GraphQL pagination and PR/NOT_FOUND
-handling); the tool layer's allowlist, session-scope and need-claim gates are
-verified to reject bad input without any HTTP call, and to admit exactly one
-writer under concurrency (`tools_test.go`); the sweep, the fence and the run
-budget are driven through the real functions via injected seams
-(`main_test.go`).
+Nine files, all against the real functions rather than copies of them:
+
+| file | what it covers |
+| --- | --- |
+| `runner_test.go` | Drives the **real `runner.Runner`** with a scripted model and a local GitHub: the happy path for both tools, the `-issue` path, a vanished issue, dry-run, a failing tool call, and the prompt-injection case where the model asks for an issue outside the session scope. |
+| `workflow_test.go` | Binds the workflow to the config. Reads the real `.github/workflows/issue-triage-bot.yml`, replays its environment through the real `loadConfig`, and checks the budget arithmetic and the job timeout. A renamed variable on either side fails here. |
+| `tools_test.go` | The allowlist, session-scope and need-claim gates: rejections that make no HTTP call, exactly one writer under 8 concurrent goroutines, the pre-write re-read, and the one-shot claim. Also drives both tools through the real `functiontool` wrapper. |
+| `main_test.go` | The sweep loop, the nonce fence and its fail-closed path, the run budget, and authorization scoped to a session. |
+| `github_test.go` | The client against `httptest`: GraphQL pagination, cross-page dedupe, PR/NOT_FOUND handling, silent-drop detection, dry-run. |
+| `triage_test.go`, `config_test.go`, `dryrun_env_test.go`, `prompt_test.go` | Pure decision logic, configuration parsing and its strictness, and prompt rendering. |
+
+Most non-trivial tests name, in a comment, the one-line mutation to production
+code that makes them fail.
 
 ```bash
 go test ./...

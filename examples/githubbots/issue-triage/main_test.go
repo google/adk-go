@@ -260,9 +260,6 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		{"sweep below issue", func(c *Config) { c.SweepTimeout = time.Minute }, "at least"},
 		{"zero count", func(c *Config) { c.IssueCount = 0 }, "ISSUE_COUNT"},
 		{"negative freshness", func(c *Config) { c.FreshnessWindow = -time.Hour }, "FRESHNESS_WINDOW_DAYS"},
-		// Only SingleIssue > 0 selects single-issue mode, so a negative value
-		// would otherwise turn "triage issue -5" into a full backlog sweep.
-		{"negative single issue", func(c *Config) { c.SingleIssue = -5 }, "-issue"},
 		{"no usable labels", func(c *Config) { c.AllowedLabels = nil }, "ALLOWED_LABELS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,8 +382,18 @@ func TestTriageOneRevokesTheAuthorizationWhenTheSessionEnds(t *testing.T) {
 	if !ran {
 		t.Fatal("runFn was never called")
 	}
-	if _, authorized := c.claimLabel(7); authorized {
-		t.Error("issue #7 is still authorized after its session ended")
+	// Revoke closes every field. It zeroes the entry rather than deleting it, so
+	// authorize's merge still has a record and a second session for the same
+	// issue cannot restore the fields at full strength.
+	if claimed, _ := c.claimLabel(7); claimed {
+		t.Error("the label need is still open after the session ended")
+	}
+	if claimed, _ := c.claimType(7); claimed {
+		t.Error("the type need is still open after the session ended")
+	}
+	c.authorize(7, need{typ: true, label: true})
+	if claimed, _ := c.claimType(7); claimed {
+		t.Error("re-authorizing after a revoke restored the type need; a second session could rewrite the field")
 	}
 }
 
