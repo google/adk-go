@@ -18,6 +18,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestServerHealth(t *testing.T) {
@@ -38,5 +41,49 @@ func TestServerHealth(t *testing.T) {
 	}
 	if got, want := recorder.Body.String(), "{\"status\":\"ok\"}\n"; got != want {
 		t.Errorf("GET /health body = %q, want %q", got, want)
+	}
+}
+
+// debugRoutes are every route owned by the debug API router, including the
+// event graph route, whose path does not contain "debug".
+var debugRoutes = []string{
+	"/debug/trace/evt1",
+	"/debug/trace/session/sess1",
+	"/apps/app1/users/user1/sessions/sess1/events/evt1/graph",
+}
+
+// muxNotFound is what gorilla/mux writes when no route matches. A registered
+// handler that happens to answer 404 writes its own body, so the body is what
+// distinguishes "not routed" from "routed and rejected".
+const muxNotFound = "404 page not found\n"
+
+func TestNewServerDebugAPIGate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		include    bool
+		wantRouted bool
+	}{
+		{name: "omitted by default", include: false, wantRouted: false},
+		{name: "included when opted in", include: true, wantRouted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := NewServer(ServerConfig{
+				SessionService: session.InMemoryService(),
+				AgentLoader:    agent.NewSingleLoader(nil),
+				DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: tc.include},
+			})
+			if err != nil {
+				t.Fatalf("NewServer() error = %v", err)
+			}
+			for _, route := range debugRoutes {
+				rr := httptest.NewRecorder()
+				srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, route, nil))
+				routed := rr.Body.String() != muxNotFound
+				if routed != tc.wantRouted {
+					t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
+						route, routed, tc.wantRouted, rr.Code, rr.Body.String())
+				}
+			}
+		})
 	}
 }

@@ -22,9 +22,14 @@
 // changing an Instruction, tool declaration, or agent shape, delete
 // the corresponding .httprr file and run:
 //
-//	GEMINI_API_KEY=... go test ./agent/llmagent/ -httprecord=TestDelegation_NN
+//	GEMINI_API_KEY=... go test ./agent/llmagent/ -run TestDelegation_NN \
+//	    -httprecord='TestDelegation_NN.*\.httprr$'
 //
-// To re-record everything: -httprecord=TestDelegation.
+// -httprecord is a regexp matched against the cassette's file path, not a
+// test-name filter, so keep it as narrow as the set of cassettes you mean to
+// replace. The go:generate directive below re-records every delegation
+// cassette and nothing else; `go generate ./agent/llmagent/...` also runs the
+// directive in llmagent_test.go, so it re-records the whole package.
 //
 // The tests generate *.events.yaml file to visualize delegation and overall
 // flow of execution.
@@ -63,7 +68,7 @@ import (
 
 const delegationModelName = "gemini-3.5-flash"
 
-//go:generate go test -httprecord=TestDelegation
+//go:generate go test -httprecord=^testdata[/\\]TestDelegation_.*\.httprr$
 
 // newDelegationModel returns a Gemini model whose HTTP transport is
 // the httprr record/replay wrapper, scoped to a trace file derived

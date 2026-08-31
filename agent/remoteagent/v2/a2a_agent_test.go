@@ -22,6 +22,9 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -222,12 +225,13 @@ func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msgParts ...*a2a.
 
 func TestRemoteAgent_ADK2ADK(t *testing.T) {
 	testCases := []struct {
-		name          string
-		remoteEvents  []*session.Event
-		wantResponses []model.LLMResponse
-		wantEscalate  bool
-		wantTransfer  string
-		noStreaming   bool
+		name                 string
+		remoteEvents         []*session.Event
+		wantResponses        []model.LLMResponse
+		wantEscalate         bool
+		wantTransfer         string
+		allowTransferToAgent bool
+		noStreaming          bool
 	}{
 		{
 			name: "text streaming",
@@ -315,7 +319,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("stop", genai.RoleModel)},
 				{TurnComplete: true},
 			},
-			wantTransfer: "a-2",
+			wantTransfer:         "a-2",
+			allowTransferToAgent: true,
 		},
 		{
 			name: "long-running function call",
@@ -398,7 +403,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 						Agent:          newADKEventReplay(t, "root", tc.remoteEvents),
 					},
 				})
-				remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
+				card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(startA2AServer(executor).URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+				remoteAgent := utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: "a2a", AllowTransferToAgent: tc.allowTransferToAgent}))
 
 				mode := agent.StreamingModeSSE
 				if tc.noStreaming {
@@ -1433,5 +1439,182 @@ func TestRemoteAgent_PartConverter(t *testing.T) {
 		if p.Text() != "KEEP" {
 			t.Errorf("got %s, want 'KEEP'", p.Text())
 		}
+	}
+}
+
+// newAgentCardServer serves a minimal agent card at the well-known path.
+func newAgentCardServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, _ *http.Request) {
+		if err := json.NewEncoder(w).Encode(&a2a.AgentCard{Name: "served-card"}); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestNewAgentCardProvider_AcceptsUppercaseScheme pins a fix that came with the
+// scheme classification: the old "http://" prefix test was case sensitive, so
+// an uppercase URL fell through to a file read and failed.
+func TestNewAgentCardProvider_AcceptsUppercaseScheme(t *testing.T) {
+	server := newAgentCardServer(t)
+	source := strings.Replace(server.URL, "http://", "HTTP://", 1)
+
+	card, err := NewAgentCardProvider(source)(t.Context())
+	if err != nil {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want nil", source, err)
+	}
+	if card.Name != "served-card" {
+		t.Errorf("card.Name = %q, want %q", card.Name, "served-card")
+	}
+}
+
+func TestNewAgentCardProvider_ReadsLocalFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "card.json")
+	if err := os.WriteFile(path, []byte(`{"name":"file-card"}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	card, err := NewAgentCardProvider(path)(t.Context())
+	if err != nil {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want nil", path, err)
+	}
+	if card.Name != "file-card" {
+		t.Errorf("card.Name = %q, want %q", card.Name, "file-card")
+	}
+}
+
+// TestNewAgentCardProvider_ReadsRelativePathContainingColon guards the
+// compatibility trap in classifying a source by its scheme: a colon is an
+// ordinary character in a POSIX filename, so a relative path can wear what
+// looks like one. Each source here is a readable file that loaded before this
+// provider classified anything, and an absolute path cannot stand in for them
+// because a leading slash puts the colon out of scheme position.
+func TestNewAgentCardProvider_ReadsRelativePathContainingColon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a colon cannot appear in a Windows filename")
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "cards:v2"), 0o700); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+	t.Chdir(dir)
+
+	for _, source := range []string{"cards:v2/agent.json", "weird:name.json", "card.json:stream", "http:card.json"} {
+		t.Run(source, func(t *testing.T) {
+			if err := os.WriteFile(source, []byte(`{"name":"file-card"}`), 0o600); err != nil {
+				t.Fatalf("os.WriteFile() error = %v", err)
+			}
+
+			card, err := NewAgentCardProvider(source)(t.Context())
+			if err != nil {
+				t.Fatalf("NewAgentCardProvider(%q) error = %v, want nil", source, err)
+			}
+			if card.Name != "file-card" {
+				t.Errorf("card.Name = %q, want %q", card.Name, "file-card")
+			}
+		})
+	}
+}
+
+// TestNewAgentCardProvider_RejectsNonHTTPScheme pins the classification: a
+// source carrying a scheme this provider cannot serve is turned away by name,
+// where the old code passed the whole string to os.ReadFile and reported it as
+// a missing path the caller never wrote.
+func TestNewAgentCardProvider_RejectsNonHTTPScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "card.json")
+	if err := os.WriteFile(path, []byte(`{"name":"file-card"}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	for _, source := range []string{"file://" + path, "ftp://example.test/card.json"} {
+		t.Run(source, func(t *testing.T) {
+			card, err := NewAgentCardProvider(source)(t.Context())
+			if !errors.Is(err, ErrUnsupportedCardSource) {
+				t.Errorf("NewAgentCardProvider(%q) error = %v, want %v", source, err, ErrUnsupportedCardSource)
+			}
+			if card != nil {
+				t.Errorf("NewAgentCardProvider(%q) card = %+v, want nil", source, card)
+			}
+		})
+	}
+}
+
+func TestClassifyCardSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		isFile  bool
+		wantErr bool
+	}{
+		{name: "http URL", source: "http://example.com", isFile: false},
+		{name: "https URL", source: "https://example.com/cards", isFile: false},
+		{name: "uppercase scheme", source: "HTTP://example.com", isFile: false},
+		{name: "absolute path", source: "/etc/passwd", isFile: true},
+		{name: "relative path", source: "cards/agent.json", isFile: true},
+		{name: "windows path", source: `C:\cards\agent.json`, isFile: true},
+		{name: "windows path with forward slashes", source: "C:/cards/agent.json", isFile: true},
+		{name: "file scheme rejected", source: "file:///etc/shadow", wantErr: true},
+		{name: "other scheme rejected", source: "ftp://example.com/card.json", wantErr: true},
+		// Nothing about the length of a scheme makes it a path, so a short one
+		// is rejected like any other rather than read off disk.
+		{name: "two character scheme rejected", source: "s3://bucket/card.json", wantErr: true},
+		{name: "one character scheme rejected", source: "c://cards/agent.json", wantErr: true},
+
+		// A colon is an ordinary character in a POSIX filename, so a source is
+		// a URL only once it also carries the two slashes. Every source here is
+		// a file os.ReadFile opens, and http(s) is no exception.
+		{name: "colon in first path segment", source: "cards:v2/agent.json", isFile: true},
+		{name: "colon in file name", source: "weird:name.json", isFile: true},
+		{name: "colon suffix on file name", source: "card.json:stream", isFile: true},
+		{name: "http scheme without slashes", source: "http:card.json", isFile: true},
+		{name: "bare https scheme", source: "https:", isFile: true},
+
+		// The scheme is the whole of what precedes the first "://", so a
+		// prefix holding a character no scheme may hold is not one.
+		{name: "colon before the slashes", source: "notes:/a://b", isFile: true},
+		{name: "slash before the slashes", source: "dir/sub://x", isFile: true},
+		{name: "tab inside scheme", source: "file\t://etc/hosts", isFile: true},
+		// Matching the last "://" instead of the first would read this one as
+		// an ftp source.
+		{name: "slashes again inside an http path", source: "https://example.com/ftp://x", isFile: false},
+
+		// url.Parse rejects every source below, so classifying on a parse of
+		// the whole source has to guess at all of them. Parsing only the scheme
+		// answers each one on the same rule as the cases above.
+		//
+		// An ordinary path is often not a valid URL, so a parse failure cannot
+		// mean "reject".
+		{name: "path with percent", source: "/tmp/100%.json", isFile: true},
+		{name: "path with control character", source: "\ncards/agent.json", isFile: true},
+		// Nor can it mean "read it as a file", or an unsupported scheme is
+		// waved through by the one trailing character that spoils the parse.
+		{name: "unparseable file scheme rejected", source: "file:///etc/shadow%", wantErr: true},
+		{name: "file scheme with control character rejected", source: "file:///etc/shadow\n", wantErr: true},
+		// A leading character that cannot start a scheme leaves no scheme to
+		// reject, so this is a path, and a missing one.
+		{name: "control character before scheme", source: "\nfile:///etc/shadow", isFile: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isFile, err := classifyCardSource(tc.source)
+			if tc.wantErr {
+				if !errors.Is(err, ErrUnsupportedCardSource) {
+					t.Fatalf("classifyCardSource(%q) error = %v, want %v", tc.source, err, ErrUnsupportedCardSource)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("classifyCardSource(%q) error = %v, want nil", tc.source, err)
+			}
+			if isFile != tc.isFile {
+				t.Errorf("classifyCardSource(%q) isFile = %v, want %v", tc.source, isFile, tc.isFile)
+			}
+		})
 	}
 }
