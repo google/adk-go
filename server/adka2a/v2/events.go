@@ -352,7 +352,7 @@ func toEventActions(meta map[string]any) session.EventActions {
 	}
 	var result session.EventActions
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
-	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
+	// TransferToAgent intentionally NOT restored from peer metadata.
 	return result
 }
 

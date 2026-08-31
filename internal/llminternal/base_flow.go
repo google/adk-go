@@ -83,6 +83,9 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
+		// Compaction must run before contentsRequestProcessor so a summary it
+		// appends is reflected in the history assembled for this very request.
+		CompactionRequestProcessor,
 		ContentsRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
@@ -100,8 +103,23 @@ var (
 	}
 )
 
+// maxConsecutiveThoughtOnlyTurns bounds how many thought-only ("thinking")
+// turns in a row the flow accepts before giving up, so the model is re-called
+// at most maxConsecutiveThoughtOnlyTurns-1 times waiting for an answer. A model
+// that keeps emitting thoughts without ever surfacing an answer would otherwise
+// spin forever, appending an event per turn and re-sending an ever-growing
+// history. Any turn that is not a final response resets the count.
+//
+// This is a safety net against a degenerate model, not a tuning knob: it is
+// deliberately not configurable, because a caller has no basis for choosing a
+// value. It is set high on purpose. A bound that is too low never requests an
+// answer the model was about to give, which is worse than a few wasted calls
+// before a degenerate model is cut off.
+const maxConsecutiveThoughtOnlyTurns = 10
+
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		thoughtOnlyTurns := 0
 		for {
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
@@ -115,10 +133,25 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			// A thought-only ("thinking") turn reports as final but has no
-			// answer; don't stop on it — call the model again.
-			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
+			if lastEvent == nil {
 				return
+			}
+			if lastEvent.IsFinalResponse() {
+				// A thought-only ("thinking") turn reports as final but has no
+				// answer; don't stop on it — call the model again. Give up once
+				// the model has produced only thoughts too many times in a row,
+				// leaving the last thinking event as the result.
+				if !isThoughtOnlyTurn(lastEvent) {
+					return
+				}
+				thoughtOnlyTurns++
+				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
+					return
+				}
+			} else {
+				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
 				// We may have reached max token limit during streaming mode.
@@ -872,6 +905,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
 			ModelName:    m.Name(),
 			InvocationID: ctx.InvocationID(),
+			Request:      req,
 		})
 		ctx = ctx.WithContext(spanCtx)
 		backend := googlellm.GetGoogleLLMVariant(m)
@@ -1216,6 +1250,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Author = ctx.Agent().Name()
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
+			// A tool handler holds this EventActions for the whole call, and
+			// everything on it lands on the persisted event. Compaction is the
+			// framework's to write: see session.EventActions.Compaction.
+			ev.Actions.Compaction = nil
 
 			traceTool := curTool
 			if traceTool == nil {
