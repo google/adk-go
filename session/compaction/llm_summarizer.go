@@ -44,8 +44,9 @@ const ConversationHistoryPlaceholder = "{conversation_history}"
 // in place of "europe-west4" -- and once generalized it cannot come back,
 // because the next pass sees only the previous summary and the retained tail.
 // Measured over ten conversations that each ran ten or more passes, the prompt
-// without instruction 3 lost every early detail in five of them; with it, none
-// of nine lost any. See the package doc, "What bounding costs".
+// without instruction 3 lost every early detail in five of them; with it, no
+// conversation out of nine lost everything, and 70 of 72 probes were recalled.
+// See the package doc, "What bounding costs".
 //
 // It asks only for what the user stated, which is narrower than the problem.
 // Identifiers that arrive in a tool response decay the same way, and for a
@@ -321,7 +322,29 @@ func (s *LLMSummarizer) formatEvents(events []*session.Event, cap int) string {
 					lines = append(lines, fmt.Sprintf("%s (thought): %s", escapeLines(ev.Author), escapeLines(s.truncateTo(p.Text, cap))))
 				}
 			case p.Text != "":
-				lines = append(lines, fmt.Sprintf("%s: %s", escapeLines(ev.Author), escapeLines(s.truncateTo(p.Text, cap))))
+				// A prior summary is exempt from the cap. Tail retention
+				// re-ingests it as an ordinary model turn, so without this it
+				// is trimmed by a limit meant for one tool call's output, and
+				// everything past the cut is gone for good: the next pass sees
+				// only what was rendered here. That is the exact ratchet the
+				// fact-retention instruction exists to prevent, applied to the
+				// summary that carries the facts.
+				//
+				// Reachable rather than theoretical. Summaries of about 4,000
+				// characters were measured against the 2,000 default, and
+				// recall survived only because the durable-facts section tends
+				// to sit near the top, so the trim took narrative. That is luck
+				// rather than design.
+				//
+				// The transcript as a whole is still bounded by
+				// MaxTranscriptChars, which is the right backstop for text the
+				// framework generated. The per-item cap is for content it did
+				// not author.
+				text := p.Text
+				if !isCompaction {
+					text = s.truncateTo(text, cap)
+				}
+				lines = append(lines, fmt.Sprintf("%s: %s", escapeLines(ev.Author), escapeLines(text)))
 			}
 			if p.FunctionCall != nil {
 				lines = append(lines, fmt.Sprintf("%s called tool: %s(%s)",

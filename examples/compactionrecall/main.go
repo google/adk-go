@@ -63,6 +63,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -257,6 +258,7 @@ func run() error {
 		}
 		var scores []string
 		totalHits, totalProbes, wipeouts, failed := 0, 0, 0, 0
+		totalBuried, totalLostBuried := 0, 0
 
 		for i := range *runs {
 			cfg := &compaction.Config{
@@ -277,6 +279,8 @@ func run() error {
 			scores = append(scores, fmt.Sprintf("%d/%d", res.hits, len(facts)))
 			totalHits += res.hits
 			totalProbes += len(facts)
+			totalBuried += res.buried
+			totalLostBuried += res.lostBuried
 			if res.hits == 0 {
 				wipeouts++
 			}
@@ -291,8 +295,14 @@ func run() error {
 		if failed > 0 {
 			note = fmt.Sprintf(", %d run(s) failed and are excluded", failed)
 		}
-		fmt.Printf("  %-8s TOTAL %d/%d probes, per-run %s, runs losing everything: %d/%d%s\n\n",
-			name, totalHits, totalProbes, strings.Join(scores, " "), wipeouts, len(scores), note)
+		// Buried facts are the ones that say anything: a fact still sitting in
+		// the raw tail was never summarized, so recalling it measures nothing
+		// about compaction. It is reported separately rather than folded in,
+		// because counting unburied facts adds free hits to both arms and
+		// narrows the gap between them.
+		fmt.Printf("  %-8s TOTAL %d/%d probes, of which buried %d/%d, per-run %s, runs losing everything: %d/%d%s\n\n",
+			name, totalHits, totalProbes, totalBuried-totalLostBuried, totalBuried,
+			strings.Join(scores, " "), wipeouts, len(scores), note)
 	}
 
 	fmt.Println("A run that lost everything is the failure that matters: the summary kept")
@@ -311,6 +321,11 @@ func runArm(ctx context.Context, name string, cfg *compaction.Config, modelName 
 		sum, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 			Model:          m,
 			PromptTemplate: priorPromptTemplate,
+			// Matches the bound the runner installs on the summarizer it
+			// creates when none is named. Naming one opts out of that default,
+			// so without this the arms differ in the timeout as well as the
+			// prompt, and the comparison stops being about the prompt alone.
+			Timeout: 60 * time.Second,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("summarizer: %w", err)

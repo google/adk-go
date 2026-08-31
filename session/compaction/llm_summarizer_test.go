@@ -1067,15 +1067,26 @@ func TestDefaultPromptRequiresFactsBeCarriedForwardVerbatim(t *testing.T) {
 		[]*session.Event{textEvent("u", "inv1", 1, "the region is europe-west4")},
 	)
 
-	for _, want := range []string{
-		"Durable facts",   // the values need somewhere to live
-		"verbatim",        // copied, not paraphrased
-		"carried forward", // across re-summarization, not just this pass
-		"generalize",      // the specific failure mode being forbidden
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("default prompt is missing %q, so a rolling summary may drop early values\nprompt:\n%s", want, prompt)
-		}
+	// Compared whole rather than by keyword. A keyword set is not a contract:
+	// a prompt reading `A section titled "Durable facts" is OPTIONAL. You need
+	// not copy values verbatim, and a durable fact may be generalized rather
+	// than carried forward` contains every keyword worth asserting while
+	// instructing the opposite of what this test is named for, and an earlier
+	// version of this test passed on exactly that. Pinning the text is the only
+	// version that fails when the meaning is inverted; a deliberate reword is
+	// then a one-line update with the change visible in review.
+	const wantInstruction = `3. Maintain a section titled "Durable facts" listing every concrete ` +
+		"detail the user has stated: identifiers, names, dates, numbers, chosen " +
+		"options and the reasons given for them. Copy each one verbatim. This " +
+		"history may already be a summary of a summary, so any durable fact " +
+		"present in the history MUST be carried forward unchanged, even if it is " +
+		"old and the recent turns are about something else. Never drop or " +
+		"generalize a durable fact to save space; drop narrative instead. "
+
+	if !strings.Contains(prompt, wantInstruction) {
+		t.Errorf("default prompt does not carry the fact-retention instruction verbatim,"+
+			" so a rolling summary may drop early values\nwant substring:\n%s\n\ngot prompt:\n%s",
+			wantInstruction, prompt)
 	}
 }
 
@@ -1093,10 +1104,56 @@ func TestCustomPromptTemplateIsUsedVerbatim(t *testing.T) {
 		[]*session.Event{textEvent("u", "inv1", 1, "the region is europe-west4")},
 	)
 
-	if !strings.HasPrefix(prompt, "summarize: ") {
-		t.Errorf("custom template was not used\nprompt:\n%s", prompt)
+	// The whole prompt, not a prefix. A prefix check catches the default
+	// replacing the caller's template but not the default being appended to it,
+	// and "used verbatim" has to mean the caller's text and nothing else.
+	want := "summarize: user: the region is europe-west4"
+	if prompt != want {
+		t.Errorf("custom template was not used verbatim\nwant: %q\ngot:  %q", want, prompt)
 	}
-	if strings.Contains(prompt, "Durable facts") {
-		t.Errorf("default template leaked into a custom one\nprompt:\n%s", prompt)
+}
+
+func TestPriorSummaryIsNotTruncatedByToolContentCap(t *testing.T) {
+	t.Parallel()
+
+	// Tail retention feeds the previous summary back as an ordinary model turn
+	// carrying the compaction record. Capping it with the per-tool-content
+	// limit deletes the tail of the rolling summary permanently, since the next
+	// pass sees only what was rendered here -- the same ratchet the
+	// fact-retention instruction exists to prevent, aimed at the summary that
+	// carries the facts. Measured summaries reach about twice this cap.
+	const cap = 100
+	summary := strings.Repeat("s", cap*3)
+
+	seed := modelTextEvent("seed", "inv1", 1, summary)
+	seed.Actions.Compaction = &session.EventCompaction{
+		StartTimestamp:   at(1),
+		EndTimestamp:     at(1),
+		CompactedContent: seed.LLMResponse.Content,
+	}
+
+	prompt := promptFor(t,
+		LLMSummarizerConfig{
+			Model:               &fakeModel{responses: []*model.LLMResponse{summaryResponse("done")}},
+			MaxToolContentChars: cap,
+		},
+		[]*session.Event{seed, textEvent("u", "inv2", 2, "next question")},
+	)
+
+	if !strings.Contains(prompt, summary) {
+		t.Errorf("prior summary did not survive intact into the prompt\nprompt:\n%s", prompt)
+	}
+
+	// The cap must still bite on content the framework did not author, or this
+	// would be a licence for any large text part to inflate the prompt.
+	toolPrompt := promptFor(t,
+		LLMSummarizerConfig{
+			Model:               &fakeModel{responses: []*model.LLMResponse{summaryResponse("done")}},
+			MaxToolContentChars: cap,
+		},
+		[]*session.Event{modelTextEvent("m", "inv1", 1, summary)},
+	)
+	if !strings.Contains(toolPrompt, "truncated") {
+		t.Errorf("an ordinary oversized text part was not truncated; the cap no longer applies\nprompt:\n%s", toolPrompt)
 	}
 }

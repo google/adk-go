@@ -51,9 +51,9 @@
 // carried forward verbatim. Measured with eight arbitrary facts stated early
 // and probed after the events holding them had been summarized away, a prompt
 // without that instruction lost every one of them in five conversations out of
-// ten; the default lost none in nine. A custom PromptTemplate that drops the
-// instruction reintroduces the loss, and asking only for a "concise" summary is
-// enough to do it.
+// ten; the default lost no conversation entirely across nine, recalling 70 of
+// 72 probes. A custom PromptTemplate that drops the instruction reintroduces
+// the loss, and asking only for a "concise" summary is enough to do it.
 //
 // Carrying values forward costs summarizer calls, because larger summaries
 // cross TokenThreshold sooner: about twice as many in the same measurement.
@@ -62,6 +62,13 @@
 // an Instruction referencing state with a {key} placeholder is re-templated on
 // every request, so a value held there reaches the model however many passes
 // have run.
+//
+// Larger summaries also press against MaxToolContentChars. A rolling summary is
+// re-ingested as an ordinary turn, so before it was exempted it was trimmed by
+// that cap and the trimmed part was unrecoverable. Summaries around twice the
+// 2,000-character default were measured, so a custom LLMSummarizer that
+// reintroduces a per-item cap over its own prior summary reintroduces the loss
+// with it.
 //
 // # Enabling both together
 //
