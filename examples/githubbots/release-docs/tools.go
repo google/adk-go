@@ -106,6 +106,8 @@ type recorder struct {
 	// whose output is entirely unrenderable is reported rather than silently
 	// producing an issue that says it found nothing.
 	discarded int
+	// capped counts findings the per-group cap dropped, for the same reason.
+	capped int
 }
 
 func newRecorder(cfg *Config) *recorder {
@@ -132,6 +134,20 @@ func (r *recorder) addDiscarded(n int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.discarded += n
+}
+
+// addCapped records findings the per-group cap dropped.
+func (r *recorder) addCapped(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capped += n
+}
+
+// cappedCount returns how many findings the per-group cap dropped.
+func (r *recorder) cappedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.capped
 }
 
 // discardedCount returns how many recorded findings sanitization emptied.
@@ -209,6 +225,7 @@ func (r *recorder) recordFindings(ctx context.Context, a recordArgs) actionResul
 		dropped = len(raw) - r.cfg.MaxFindingsPerGroup
 		raw = raw[:r.cfg.MaxFindingsPerGroup]
 	}
+	r.addCapped(dropped)
 	clean := make([]Finding, 0, len(raw))
 	emptied := 0
 	for _, f := range raw {

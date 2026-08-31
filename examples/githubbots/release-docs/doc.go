@@ -63,6 +63,13 @@
 // per file, and by commit count, and whatever those caps drop is stated in the
 // issue rather than silently omitted.
 //
+// Two of the counts the issue reports -- findings sanitization emptied, and
+// findings the per-group cap dropped -- are influenced by the model, so neither
+// is allowed to reach the decision of whether an issue is filed at all. A model
+// steered into recording one unrenderable finding would otherwise make the run
+// look incomplete, force the write, and file an issue whose marker suppresses
+// every later run for that release.
+//
 // The issue body is largely model-authored. Every model-authored field is
 // sanitized (value allow-lists on the kind and the documentation path, a rune
 // cap on the free text) and rendered inside a fenced block. Control characters

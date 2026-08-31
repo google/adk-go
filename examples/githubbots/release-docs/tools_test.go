@@ -185,17 +185,24 @@ func TestRecorderOrdersFindingsByGroup(t *testing.T) {
 // Mutation that must fail this test: split record into an RLock check followed
 // by a Lock write.
 func TestRecordFindingsContendsOnOneGroup(t *testing.T) {
-	const attempts = 50
+	// Detection is probabilistic: a check-then-act split is only observable when
+	// both goroutines are inside the window. The start gate removes the launch
+	// skew, which is the largest term, and the attempt count buys the rest. It
+	// is not a proof, and the comment on recorder.record is what a reader should
+	// rely on.
+	const attempts = 500
 	for range attempts {
 		r := newRecorder(testConfig())
 		ctx := scoped(testRelease, 0)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		start := make(chan struct{})
 		wins := 0
 		for i := range 2 {
 			wg.Add(1)
 			go func(which int) {
 				defer wg.Done()
+				<-start
 				res := r.recordFindings(ctx, recordArgs{
 					Release: testRelease, GroupIndex: 0,
 					Findings: []Finding{{Kind: "new-feature", Summary: string(rune('a' + which))}},
@@ -207,6 +214,7 @@ func TestRecordFindingsContendsOnOneGroup(t *testing.T) {
 				}
 			}(i)
 		}
+		close(start)
 		wg.Wait()
 		if wins != 1 {
 			t.Fatalf("%d of 2 concurrent calls for group 0 succeeded, want exactly 1", wins)
@@ -370,5 +378,34 @@ func TestRecordFindingsReportsDiscardedFindings(t *testing.T) {
 		r.findings(), analysis{Groups: 1, Discarded: r.discardedCount()})
 	if !strings.Contains(body, "2 recorded suggestions were discarded") {
 		t.Errorf("the issue does not disclose the discarded findings:\n%s", body)
+	}
+}
+
+// Findings the per-group cap drops must be counted, not merely mentioned in a
+// tool result the program throws away. It is the same undisclosed-partial
+// -coverage shape as the file and commit caps.
+//
+// Mutation that must fail this test: remove the addCapped call from recordFindings.
+func TestRecordFindingsReportsCappedFindings(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFindingsPerGroup = 2
+	r := newRecorder(cfg)
+	var many []Finding
+	for i := range 7 {
+		many = append(many, Finding{Kind: "new-feature", Summary: string(rune('a' + i))})
+	}
+	if res := r.recordFindings(scoped(testRelease, 0), recordArgs{
+		Release: testRelease, Findings: many,
+	}); res.Status != "success" {
+		t.Fatalf("status = %q: %s", res.Status, res.Message)
+	}
+	if got := r.cappedCount(); got != 5 {
+		t.Errorf("cappedCount = %d, want 5", got)
+	}
+	// The count reaches the issue.
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"},
+		r.findings(), analysis{Groups: 1, CappedFindings: r.cappedCount()})
+	if !strings.Contains(body, "5 suggestions beyond the per-group cap were dropped") {
+		t.Errorf("the issue does not disclose the capped suggestions:\n%s", body)
 	}
 }

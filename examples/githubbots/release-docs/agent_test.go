@@ -602,6 +602,16 @@ func TestToolErrorLoggingCannotCarryAWorkflowCommand(t *testing.T) {
 	if !strings.Contains(out, "arg_names") || !strings.Contains(out, "group_index") {
 		t.Errorf("the log dropped the argument names, leaving nothing to debug:\n%s", out)
 	}
+	// The two assertions above are also satisfied by slog's own quoting, which
+	// renders a real newline as the two characters \ and n. That would leave
+	// safeLogValue unpinned. Assert the FOLDED shape is what reached the handler:
+	// a space where the newline was, and no backslash-escape of one.
+	if !strings.Contains(out, marker+" ::add-mask::x") {
+		t.Errorf("the error text was not folded to one line by the bot's own code:\n%s", out)
+	}
+	if strings.Contains(out, `\n::add-mask::x`) {
+		t.Errorf("the newline reached the handler and was merely quoted by slog, not removed:\n%s", out)
+	}
 }
 
 func TestSafeLogValueFoldsToOneLine(t *testing.T) {

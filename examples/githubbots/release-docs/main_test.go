@@ -412,6 +412,48 @@ func TestRunWithDisclosesAGroupThatNeverReported(t *testing.T) {
 	}
 }
 
+// One group, which records real findings and THEN hits a model error. Gating on
+// `Attempted - Failed == 0` alone throws those findings away and reports that no
+// group was analyzed, when one plainly produced output.
+//
+// Mutation that must fail this test: drop `&& len(findings) == 0` from the
+// nothing-was-analyzed check in runWith.
+func TestRunWithKeepsFindingsFromAGroupThatFailedAfterRecording(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	// One group only, so Attempted-Failed is zero.
+	cfg.FilesPerGroup = 5
+	withStubModel(t, &stubModel{
+		errorOnTurn: func(turn int) bool { return turn == 1 },
+		reply: func(turn int) []*genai.Part {
+			if turn == 0 {
+				return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{
+					map[string]any{"kind": "new-feature", "summary": "a new exported API"},
+				})}
+			}
+			return nil
+		},
+	})
+
+	h := &filingHandler{}
+	gh := testClient(t, cfg, h)
+	// The model error is recorded, so the run still exits non-zero.
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err == nil {
+		t.Error("runWith returned nil despite a model error")
+	} else if strings.Contains(err.Error(), "not one of the") {
+		t.Errorf("runWith reported that no group produced anything, but one did: %v", err)
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1: the findings the group recorded were thrown away", h.creates)
+	}
+	if !strings.Contains(h.body, "a new exported API") {
+		t.Errorf("the filed issue lost the finding the failed group recorded:\n%s", h.body)
+	}
+	if !strings.Contains(h.body, "1 of 1 file groups failed to complete") {
+		t.Errorf("the issue does not disclose the failure:\n%s", h.body)
+	}
+}
+
 func TestFinishTurnsARecordedErrorIntoANonZeroExit(t *testing.T) {
 	gh := testClient(t, testConfig(), failIfCalled(t))
 	if err := finish(gh); err != nil {
@@ -513,5 +555,23 @@ func TestRunWithCountsAGroupThatFailedBeforeRecordingOnlyOnce(t *testing.T) {
 	}
 	if strings.Contains(h.body, "finished without reporting") {
 		t.Errorf("the failed group was counted twice, as failed AND as silent:\n%s", h.body)
+	}
+}
+
+// godotenv fills in any variable the environment does not already set, and the
+// workflow sets neither TARGET_OWNER nor TARGET_REPO — so a .env committed to
+// the tree would choose which repository the bot files into. It must not be read
+// under Actions.
+//
+// Mutation that must fail this test: remove the GITHUB_ACTIONS check from
+// loadDotEnv.
+func TestDotEnvIsSkippedUnderActions(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "true")
+	if loadDotEnv() {
+		t.Error("a repository .env would be read under GitHub Actions")
+	}
+	t.Setenv("GITHUB_ACTIONS", "")
+	if !loadDotEnv() {
+		t.Error("a local run no longer reads .env, so local configuration is broken")
 	}
 }

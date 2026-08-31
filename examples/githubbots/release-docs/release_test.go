@@ -490,3 +490,108 @@ func TestDiffTruncatedIgnoresFilesWithNoPatch(t *testing.T) {
 		t.Error("a truncated patch was not counted as truncation")
 	}
 }
+
+// complete() must not read any counter the MODEL controls. A model steered into
+// recording one all-control finding would otherwise make the run look
+// incomplete, force the bot's only write, and file an issue carrying the release
+// marker — which suppresses every future run for that tag pair. The model may
+// not decide that an issue is created.
+//
+// Mutation that must fail this test: add `&& a.Discarded == 0` (or
+// `&& a.CappedFindings == 0`) back to complete().
+func TestCompleteIgnoresModelControlledCounters(t *testing.T) {
+	if !(analysis{Groups: 1, Discarded: 5}).complete() {
+		t.Error("a discard count made the run look incomplete; a steered model could force a filing")
+	}
+	if !(analysis{Groups: 1, CappedFindings: 40}).complete() {
+		t.Error("a cap count made the run look incomplete; a steered model could force a filing")
+	}
+	// The counts a model cannot set still make it incomplete.
+	for name, a := range map[string]analysis{
+		"not attempted": {Groups: 2, NotAttempted: 1},
+		"failed":        {Groups: 2, Failed: 1},
+		"unreported":    {Groups: 2, Unreported: 1},
+		"budget":        {Groups: 1, BudgetExhausted: true},
+	} {
+		if a.complete() {
+			t.Errorf("%s: complete() = true, want false", name)
+		}
+	}
+}
+
+// A finding carrying only a code reference has content. Dropping it and then
+// counting that drop as "nothing survived sanitization" states something false
+// in the issue.
+//
+// Mutation that must fail this test: remove Reference from empty().
+func TestFindingWithOnlyAReferenceIsNotEmpty(t *testing.T) {
+	if (Finding{Reference: "pkg/foo/bar.go"}).empty() {
+		t.Error("a finding with a code reference was treated as having no content")
+	}
+	if !(Finding{Kind: "new-feature"}).empty() {
+		t.Error("a finding with only a kind should still be empty")
+	}
+}
+
+// Every format character, not a hand-picked six. A "finding" whose only content
+// is a zero-width space is not empty, so it forces the bot's only write and
+// renders an invisible suggestion — and it escapes the discard count added for
+// exactly that shape.
+//
+// Mutation that must fail this test: replace the unicode.Is(unicode.Cf, r) case
+// with the named list of six bidi marks.
+func TestStripControlsRemovesEveryFormatCharacter(t *testing.T) {
+	for _, r := range []rune{
+		'\u00ad',     // soft hyphen
+		'\u061c',     // Arabic letter mark
+		'\u200b',     // zero-width space
+		'\u200d',     // zero-width joiner
+		'\u2060',     // word joiner
+		'\u202e',     // right-to-left override
+		'\ufeff',     // zero-width no-break space
+		'\U000E0041', // tag latin capital A
+	} {
+		if got := stripControls(string(r)); got != "" {
+			t.Errorf("stripControls(%+q) = %+q, want it removed", r, got)
+		}
+		if f := sanitizeFinding(Finding{Kind: "new-feature", Summary: string(r)}); !f.empty() {
+			t.Errorf("a finding whose only content is %+q was not empty: it would force a filing", r)
+		}
+	}
+	// Ordinary text, including non-Latin scripts and emoji, survives.
+	for _, ok := range []string{"docs/guide.md", "café", "日本語", "→", "a\nb\tc"} {
+		if got := stripControls(ok); got != ok {
+			t.Errorf("stripControls(%q) = %q, want it unchanged", ok, got)
+		}
+	}
+}
+
+// A single replacer pass leaves "-->" behind on "<!-->", because replacing the
+// opening sequence exposes the closing one.
+//
+// Mutation that must fail this test: replace replaceToFixpoint's loop with one
+// modelTextReplacer.Replace call.
+func TestNeutralizeRunsTheReplacerToAFixpoint(t *testing.T) {
+	if one := modelTextReplacer.Replace("<!-->"); !strings.Contains(one, "-->") {
+		t.Fatal("test premise: a single pass must leave the closing sequence behind")
+	}
+	if got := neutralize("<!-->"); strings.Contains(got, "-->") || strings.Contains(got, "<!--") {
+		t.Errorf("neutralize(%q) = %q, want no HTML comment sequence left", "<!-->", got)
+	}
+}
+
+// The per-group cap is the same undisclosed-partial-coverage shape as the file
+// and commit caps: the issue renders ten suggestions and reads as complete.
+//
+// Mutation that must fail this test: drop the a.CappedFindings branch from
+// coverageNotes.
+func TestCoverageNotesDiscloseCappedFindings(t *testing.T) {
+	diff := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 1,
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}},
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1, CappedFindings: 4})
+	if !strings.Contains(body, "4 suggestions beyond the per-group cap were dropped") {
+		t.Errorf("the issue does not disclose the capped suggestions:\n%s", body)
+	}
+}

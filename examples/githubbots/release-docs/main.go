@@ -52,9 +52,7 @@ func main() {
 }
 
 func run(ctx context.Context, log *slog.Logger, args []string) error {
-	// Best-effort: load a local .env when present (for local runs). Ignored in
-	// CI, where configuration comes from the environment.
-	_ = godotenv.Load()
+	loadDotEnv()
 
 	cfg, err := loadConfig(args)
 	if err != nil {
@@ -123,15 +121,22 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	// reader at the wrong remediation.
 	a.Unreported = rec.unreportedExcept(a.Attempted, a.FailedIndexes)
 	a.Discarded = rec.discardedCount()
+	a.CappedFindings = rec.cappedCount()
 
 	findings := rec.findings()
 	log.Info("analysis finished", "findings", len(findings),
 		"groups", a.Groups, "not_attempted", a.NotAttempted, "failed", a.Failed, "unreported", a.Unreported)
-	// Nothing at all was analyzed, so there is nothing to report and nothing to
-	// preserve. Fail loudly WITHOUT filing: an issue here would mark the release
-	// done and suppress the re-run that could still do the job properly.
-	if analyzed := a.Attempted - a.Failed; analyzed == 0 {
-		return fmt.Errorf("not one of the %d file groups was analyzed (%d never attempted, %d failed); "+
+	// Nothing was produced AND no group came through cleanly, so there is
+	// nothing to report and nothing to preserve. Fail loudly WITHOUT filing: an
+	// issue here would mark the release done and suppress the re-run that could
+	// still do the job properly.
+	//
+	// The findings check is not redundant. A group can record its suggestions and
+	// then hit a model error, which makes it count as failed; a bare
+	// Attempted-Failed test would throw those real findings away and report that
+	// no group was analyzed, when one plainly was.
+	if analyzed := a.Attempted - a.Failed; analyzed == 0 && len(findings) == 0 {
+		return fmt.Errorf("not one of the %d file groups produced anything (%d never attempted, %d failed); "+
 			"no issue was filed, so a re-run is not suppressed", a.Groups, a.NotAttempted, a.Failed)
 	}
 
@@ -209,7 +214,7 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 				// quotes the offending VALUE back, so the error carries model
 				// output even when the arguments do not.
 				log.Error("tool call failed", "tool", t.Name(),
-					"arg_names", argNames(args), "error", safeLogValue(err.Error()))
+					"arg_names", safeLogValues(argNames(args)), "error", safeLogValue(err.Error()))
 				return nil, nil
 			},
 		},
@@ -225,9 +230,35 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 	return r, sessions, nil
 }
 
-// argNames returns a tool call's argument names, sorted. It exists so a failure
-// can be debugged without writing the model's own text to a log the CI runner
-// parses.
+// loadDotEnv loads a local .env when present, for local runs only.
+//
+// Under GitHub Actions it is skipped. The workflow does not set TARGET_OWNER,
+// TARGET_REPO or LLM_MODEL_NAME, and godotenv fills in anything unset, so a .env
+// committed to the tree would silently choose which repository the issue is
+// filed in. It reports whether it loaded, so a test can drive both branches.
+func loadDotEnv() bool {
+	if os.Getenv("GITHUB_ACTIONS") != "" {
+		return false
+	}
+	_ = godotenv.Load()
+	return true
+}
+
+// safeLogValues applies safeLogValue to each element.
+func safeLogValues(vals []string) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, safeLogValue(v))
+	}
+	return out
+}
+
+// argNames returns a tool call's argument names, sorted.
+//
+// The names are model-authored too -- a tool call is a JSON object whose keys
+// the model chooses, and a schema violation is exactly what brings us here -- so
+// the caller sanitizes them. Logging the names rather than the values is about
+// volume and secrecy, not about safety.
 func argNames(args map[string]any) []string {
 	names := make([]string, 0, len(args))
 	for k := range args {
@@ -381,13 +412,14 @@ func runGroup(ctx context.Context, r *runner.Runner, ss session.Service, gh *Git
 	ok := true
 	for event, err := range r.Run(ctx, userID, resp.Session.ID(), msg, agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
 		if err != nil {
-			l.Error("agent run", "error", err)
+			l.Error("agent run", "error", safeLogValue(err.Error()))
 			gh.recordError()
 			ok = false
 			continue
 		}
 		if event.ErrorCode != "" {
-			l.Error("model error", "code", event.ErrorCode, "message", event.ErrorMessage)
+			l.Error("model error", "code", safeLogValue(event.ErrorCode),
+				"message", safeLogValue(event.ErrorMessage))
 			gh.recordError()
 			ok = false
 		}

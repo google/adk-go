@@ -162,10 +162,15 @@ func sanitizeFinding(f Finding) Finding {
 	}
 }
 
-// empty reports whether a finding carries no usable content, so it can be
+// empty reports whether a finding carries no content at all, so it can be
 // dropped instead of rendering an empty block.
+//
+// Reference counts. It is thin on its own, but dropping a finding that still has
+// text in it and then counting that drop as "nothing survived sanitization"
+// states something false in the issue.
 func (f Finding) empty() bool {
-	return f.Summary == "" && f.ProposedChange == "" && f.Reasoning == "" && f.DocFile == ""
+	return f.Summary == "" && f.ProposedChange == "" && f.Reasoning == "" &&
+		f.DocFile == "" && f.Reference == ""
 }
 
 // modelTextReplacer neutralizes the sequences that let model-authored text
@@ -215,8 +220,16 @@ func replaceToFixpoint(s string) string {
 		}
 		s = next
 	}
-	return s
+	// Unreachable by the argument above, and it fails CLOSED anyway: returning
+	// the still-unmatched string would put a sequence the replacer could not
+	// settle straight into the issue body, which is the opposite of what this
+	// function is for.
+	return lastResortStripper.Replace(s)
 }
+
+// lastResortStripper removes the characters the replacer works on, for the case
+// its fixpoint is never reached.
+var lastResortStripper = strings.NewReplacer("`", "", "<", "", ">", "")
 
 // stripControls removes every rune that is not printable text, plus the
 // bidirectional formatting overrides.
@@ -238,10 +251,16 @@ func stripControls(s string) string {
 			// C0 and C1. unicode.IsControl covers only these two ranges, which is
 			// why every category below has to be named separately.
 			return -1
-		case r == '\u061c', r == '\u200e', r == '\u200f',
-			r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
-			// The implicit and explicit bidirectional marks. U+061C is the one
-			// most often missed: it is category Cf, not Cc, so IsControl says no.
+		case unicode.Is(unicode.Cf, r):
+			// Every format character, not a hand-picked list. This is the
+			// category that carries the bidirectional marks and overrides
+			// (U+061C, U+200E/F, U+202A-202E, U+2066-2069), the zero-width
+			// characters (U+200B-200D, U+2060-2064, U+FEFF), the soft hyphen, and
+			// the tag block U+E0000-E007F used to smuggle invisible ASCII. None
+			// is category Cc, so unicode.IsControl misses all of them, and naming
+			// six of them left the rest through -- a "finding" consisting of one
+			// zero-width space was not empty, so it forced the bot's only write
+			// and rendered an invisible suggestion.
 			return -1
 		case r == '\u2028', r == '\u2029':
 			// Line and paragraph separator. Category Zl/Zp, so again not a
@@ -639,6 +658,10 @@ type analysis struct {
 	// FailedIndexes names them, so an unreported group can be counted over
 	// exactly the attempted-and-not-failed set rather than by subtraction.
 	FailedIndexes []int
+	// CappedFindings is how many recorded findings the per-group cap dropped.
+	// Like Discarded it is model-influenced, so it informs the issue but never
+	// complete().
+	CappedFindings int
 	// Discarded is how many recorded findings sanitization emptied completely.
 	// Without it, a model whose every field is unrenderable looks identical to
 	// one that honestly had nothing to say.
@@ -673,9 +696,16 @@ func (d *ReleaseDiff) diffTruncated() bool {
 }
 
 // complete reports whether every group was analyzed and reported.
+// complete deliberately ignores Discarded and CappedFindings. Both are counts of
+// what the MODEL produced, and complete() decides whether an issue is filed at
+// all: a model steered into recording one all-control finding would otherwise
+// set Discarded to 1, make the run look incomplete, and force the bot's only
+// write -- an issue carrying the release marker, which then suppresses every
+// future run for that tag pair. The model must not be able to decide that an
+// issue is created. Both counts still appear in coverageNotes, which is read
+// when an issue is filed for some other reason.
 func (a analysis) complete() bool {
-	return a.NotAttempted == 0 && a.Failed == 0 && a.Unreported == 0 &&
-		a.Discarded == 0 && !a.BudgetExhausted
+	return a.NotAttempted == 0 && a.Failed == 0 && a.Unreported == 0 && !a.BudgetExhausted
 }
 
 // coverageNotes lists, in reader-facing prose, everything the analysis did not
@@ -723,6 +753,10 @@ func coverageNotes(diff *ReleaseDiff, a analysis) []string {
 	if a.Unreported > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d file groups finished without reporting a result, "+
 			"so their files may not be covered.", a.Unreported, a.Groups))
+	}
+	if a.CappedFindings > 0 {
+		notes = append(notes, fmt.Sprintf("%d suggestions beyond the per-group cap were dropped and are not "+
+			"listed below.", a.CappedFindings))
 	}
 	if a.Discarded > 0 {
 		notes = append(notes, fmt.Sprintf("%d recorded suggestions were discarded because nothing in them "+
