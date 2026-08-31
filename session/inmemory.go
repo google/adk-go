@@ -25,11 +25,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
-	"google.golang.org/adk/internal/sessionutils"
+	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/platform"
 )
 
 type stateMap map[string]any
@@ -50,7 +50,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 
 	sessionID := req.SessionID
 	if sessionID == "" {
-		sessionID = uuid.NewString()
+		sessionID = platform.NewUUID(ctx)
 	}
 
 	key := id{
@@ -74,7 +74,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	val := &session{
 		id:        key,
 		state:     state,
-		updatedAt: time.Now(),
+		updatedAt: platform.Now(ctx),
 	}
 
 	s.sessions.Set(encodedKey, val)
@@ -204,6 +204,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, the same way a
+	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
+	// event built as a struct literal by an agent or a tool never goes through
+	// it, and anything that identifies events by ID cannot tell two ID-less
+	// events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	sess, ok := curSession.(*session)
 	if !ok {
@@ -224,11 +232,12 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	eventCopy := &Event{
-		ID:           event.ID,
-		InvocationID: event.InvocationID,
-		Timestamp:    event.Timestamp,
-		Author:       event.Author,
-		Branch:       event.Branch,
+		ID:             event.ID,
+		InvocationID:   event.InvocationID,
+		Timestamp:      event.Timestamp,
+		Author:         event.Author,
+		Branch:         event.Branch,
+		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
@@ -236,9 +245,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
+			Compaction:                 event.Actions.Compaction.clone(),
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
+		Routes:             slices.Clone(event.Routes),
+		RequestedInput:     event.RequestedInput,
 		LLMResponse:        event.LLMResponse,
+		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
 	}
 
 	// update the in-memory session service
@@ -439,10 +453,16 @@ func trimTempDeltaState(event *Event) *Event {
 		}
 	}
 
-	// Replace the old map with the newly filtered one.
-	event.Actions.StateDelta = filteredStateDelta
+	// If no keys were filtered out, return the original event without copying.
+	if len(filteredStateDelta) == len(event.Actions.StateDelta) {
+		return event
+	}
 
-	return event
+	// Create a copy of the event to avoid mutating the original.
+	eventCopy := *event
+	eventCopy.Actions.StateDelta = filteredStateDelta
+
+	return &eventCopy
 }
 
 // updateSessionState updates the session state based on the event state delta.

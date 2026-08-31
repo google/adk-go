@@ -21,8 +21,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/session"
 )
 
 var (
@@ -166,6 +166,21 @@ func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 
 	event.Actions = toEventActions(a2aEvent.Meta())
 	return nil
+}
+
+// TransferToAgentFromMeta extracts the transfer_to_agent value a remote A2A
+// peer set on its response metadata, if present. This value drives the
+// local orchestrator's own control flow (which agent runs next), so
+// [ToSessionEvent] and [ToSessionEventWithParts] never restore it
+// automatically. A caller that has made its own trust decision about the
+// remote peer -- see [remoteagent.A2AConfig.AllowTransferToAgent] -- can use
+// this to restore it explicitly after conversion.
+func TransferToAgentFromMeta(meta map[string]any) (agentName string, ok bool) {
+	if meta == nil {
+		return "", false
+	}
+	agentName, ok = meta[metadataTransferToAgentKey].(string)
+	return agentName, ok
 }
 
 func addMeta(result map[string]any, key string, data any) error {

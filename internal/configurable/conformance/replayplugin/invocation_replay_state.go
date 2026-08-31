@@ -17,7 +17,7 @@ package replayplugin
 import (
 	"sync"
 
-	"google.golang.org/adk/internal/configurable/conformance/replayplugin/recording"
+	"google.golang.org/adk/v2/internal/configurable/conformance/replayplugin/recording"
 )
 
 // invocationReplayState tracks per-invocation replay state to isolate concurrent runs.

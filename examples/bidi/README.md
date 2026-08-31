@@ -92,7 +92,7 @@ The core setup in `main.go` involves:
   cameraTool, err := functiontool.New(functiontool.Config{
       Name:        "camera_toggle",
       Description: "Turns the camera on or off.",
-  }, func(ctx tool.Context, args EmptyArgs) (MessageResult, error) {
+  }, func(ctx agent.Context, args EmptyArgs) (MessageResult, error) {
       // ...
   })
   ```

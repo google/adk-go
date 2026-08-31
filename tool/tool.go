@@ -23,9 +23,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // ErrConfirmationRequired indicates that the tool requires confirmation.
@@ -44,13 +44,6 @@ type Tool interface {
 	// which typically returns a resource id first and finishes the operation later.
 	IsLongRunning() bool
 }
-
-// Context is an alias for agent.ToolContext.
-//
-// Deprecated: use agent.Context directly. This alias exists only to
-// minimize churn during the migration and will be removed in a future
-// release.
-type Context = agent.ToolContext
 
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
@@ -189,18 +182,32 @@ type confirmationTool struct {
 type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx agent.ToolContext, args any) (result map[string]any, err error)
+	Run(ctx agent.Context, args any) (result map[string]any, err error)
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
-func (t *confirmationTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if rp, ok := t.runnableTool.(interface {
+		ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
+	}); ok {
+		_, existedBefore := req.Tools[t.Name()]
+		if err := rp.ProcessRequest(ctx, req); err != nil {
+			return err
+		}
+		// If the inner tool packed itself into req.Tools during ProcessRequest,
+		// replace it with the confirmation wrapper so confirmationTool.Run is invoked.
+		if !existedBefore && req.Tools != nil && req.Tools[t.Name()] != nil {
+			req.Tools[t.Name()] = t
+			return nil
+		}
+	}
 	return toolutils.PackTool(req, t)
 }
 
-func (t *confirmationTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.

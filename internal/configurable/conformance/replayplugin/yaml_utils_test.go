@@ -137,6 +137,18 @@ systeminstruction:
     - text: You are a helpful assistant.
 `,
 		},
+		{
+			name: "normalizes system_instruction scalar string to structured object",
+			input: `
+system_instruction: "You are a helpful assistant."
+`,
+			expected: `
+systeminstruction:
+  role: user
+  parts:
+    - text: You are a helpful assistant.
+`,
+		},
 	}
 
 	for _, tc := range tests {

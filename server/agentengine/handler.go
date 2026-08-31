@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package agentengine brings functionality of serving commands for AgentEngine-deployed code
+// Package agentengine brings functionality of serving commands for AgentEngine-deployed code.
 package agentengine
 
 import (
@@ -28,10 +28,10 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/server/agentengine/controllers"
-	"google.golang.org/adk/server/agentengine/controllers/method"
-	"google.golang.org/adk/server/agentengine/internal/routers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/agentengine/controllers"
+	"google.golang.org/adk/v2/server/agentengine/controllers/method"
+	"google.golang.org/adk/v2/server/agentengine/internal/routers"
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
@@ -42,13 +42,13 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listNonStreamHandlers(config, agentEngineID))
 	if err != nil {
-		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %v", err)
+		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %w", err)
 	}
 
 	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listStreamHandlers(config, agentEngineID))
 	if err != nil {
-		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %v", err)
+		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %w", err)
 	}
 
 	setupRouter(router,
@@ -58,7 +58,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 
 	methods, err := ListClassMethods()
 	if err != nil {
-		return nil, fmt.Errorf("ListClassMethods() failed: %v", err)
+		return nil, fmt.Errorf("ListClassMethods() failed: %w", err)
 	}
 
 	log.Println("Supported methods:")
@@ -66,7 +66,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		sb := &strings.Builder{}
 		err = json.NewEncoder(sb).Encode(m)
 		if err != nil {
-			return nil, fmt.Errorf("json.NewEncoder failed: %v", err)
+			return nil, fmt.Errorf("json.NewEncoder failed: %w", err)
 		}
 		log.Println(sb.String())
 	}
@@ -93,6 +93,7 @@ func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []meth
 func listStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewStreamQueryHandler(config, agentEngineID, "async_stream_query", "async_stream"),
+		method.NewStreamingAgentRunWithEventsHandler(config, agentEngineID, "streaming_agent_run_with_events", "async_stream"),
 	}
 }
 

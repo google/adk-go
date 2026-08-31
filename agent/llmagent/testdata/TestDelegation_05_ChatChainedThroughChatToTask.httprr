@@ -1,0 +1,400 @@
+httprr trace v1
+1766 1773
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1533
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please edit this draft: 'me and him goes to the store yesterdy'."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For ANY editing request, immediately call\ntransfer_to_agent with agent_name=\"writer\". Do not attempt to edit\nthe draft yourself. Do not produce any final text — let writer\nrespond to the user.\n\nYou are an agent. Your internal name is \"root\". The description about you is \"Routes editing requests to the writer agent.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: writer\nAgent description: Polishes a draft by delegating to the editor sub-agent.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`writer`.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:07 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1854
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "transfer_to_agent",
+              "args": {
+                "agent_name": "writer"
+              },
+              "id": "oeiyn4lc"
+            },
+            "thoughtSignature": "ErkDCrYDAQw51sfrQxQjhX1pyAN917aypEp/N9wpW+HWwTwiUT/RalRTiZtLBSJB/OrJZAGTVmHC48WWA3tS1NW2dNGPvEua3PlIYYxUTT8hsNY+dsW2Kq4E5bXlHvlKQ3kHu5TPZMYxOFLUHOYeqtWyhuYCXFNUw+XNdF0pgFvFZLnsIywInTWUBtbqFPv9iOXqu9yV2HHRpFkt9MgAps1OldSvfiDEYXQ/DJOrLtQy9Uto/hyYexSmViEPMUMf6Tso9fP5ardacGbN+q6aKunjD5AibWtVhwCLl4BEo/FLNnPhJAI1eKV+E2oUkVnrPASL5K3qUc4DqdZ3Kw5iJcbi8PFW/rqGjXETi64cxQvyWRXaljUUvZPUiVOgvi0dFZu/s059eapxL4NWEv5U6xLDcCLQ19nSZp2G1YCsPDkU60mJS3in7LR1WUT0TiwlJT6UU7sigWE9qb01rjGXcjsNhMjNXYuUtfSF0krk2SoCs1WaLEdb5KnwzuEZ2OL3eYeIZL1XqJyb4NPtZHF7++2m279XvDN6D/GFfOPBUenMcpMf6W5xan7Zr1C+Ok+MdoOsjO0PRWU2Q4C6"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 315,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 428,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 315
+      }
+    ],
+    "thoughtsTokenCount": 93,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "7XoyasPlI_OikdUP1cTXkAk"
+}
+2630 2295
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2397
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please edit this draft: 'me and him goes to the store yesterdy'."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"writer\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For EACH draft you receive (a new draft on every\nuser turn), call the editor sub-agent ONCE with a request\ncontaining the draft text. After editor returns its structured\n`output`, reply with one short sentence presenting the edited\ntext. Always call editor for any new draft, even if you've edited\nsimilar drafts earlier in the conversation.\n\nYou are an agent. Your internal name is \"writer\". The description about you is \"Polishes a draft by delegating to the editor sub-agent.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes editing requests to the writer agent.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Edits a piece of text for clarity.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"editor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:09 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1904
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "editor",
+              "args": {
+                "request": "Please edit this draft for clarity and grammatical correctness: \"me and him goes to the store yesterdy\""
+              },
+              "id": "ybkehx4t"
+            },
+            "thoughtSignature": "EoAGCv0FAQw51sfNZA3VvJdiZxwJY4tclLf2QLwLi/bOiZ/+tmL5TuKjGL+kGn1XzYLT0CouyUtq0KqHN9RY74ZXR8NI/y2g8jtW5CaFlmyQDo51bh/uJpbq7M2UwSkMGAoaEPVPN4Pe4vY1yzatz2PudWoiIh3RsZyeHF+0VKGhEDJftm82O3aic/BEUCOOCVyqcUVP34y7zFeTFowKTPoGsN+dMRbFjCRNSg7IH1FXHxzbdkiTYeHgjkfJ9w1DBhEGBxQvn9GXd39yGWcWOnrjF3SsPHAkBWG74IBuaNiTArY6FdBx+5ftAcDZQ+0EJoiIPs5BoTIcrs/olYOW++qJ1UICvbbw5xtqTl2X8xi36csF5dMgsRo/+BZ7+nAiOfmydKwbnRe7Yk9Rzezn/L9fuPMJnpj1/CCNMv2MMqiN9Zi5Z+vDgDJw/5JO/j6e5rxWAt5f8sq1RQdnp1hodz3K4wHuArCaN1MKRbhkIVWABYVWxNvGS+oY7JlG7sWozcgU4wNlt262/GAqwPK4bqgzfY8mWDnuO3P/ay6tBvK5/NAFpv3zG8oSzL3jwstzyfnQKBtPYpmczGZvfAG8/X5Sy9+/IFsA8hKfwCAxzK6nCeuqwcGLFFByRaezft5+Pyq7hHj19aj5bZJaUSXjI9bXb3H1VwleT1ybOlwh/rEK30jUbSertp55jSSJS4Yc+7h6TbnRQPcPxrMGSPXPEcpOOGjSUIX2H1kcpleXycGuBsT09O7qYxJnb8PptUTH/vtfR5TQKP/5HSSak9TM25dGXjCcLS2n33D4ruc6J2E2WTRNheZrZAZlcZ4EZQ4nZhf9GK5s8HvZJHxJe/34m3fHxpINvKn5UpSq5fcEW9co7cSYgoaQMXsP8ZEOFPnle2xCnRSeJJsqHvBTYi4QRG1U4poHEjLtWx8Z1UeMJyKWtPWf+RtKEpvt2yXqKSGVBxRAogRyAgeQUPEefRjxOFwOhdYYw6fCpGLHY04SdZGtA13C08/y7qyDRFn4HsYtNHop"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 494,
+    "candidatesTokenCount": 34,
+    "totalTokenCount": 691,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 494
+      }
+    ],
+    "thoughtsTokenCount": 163,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "73oyavXMG_iVkdUP06yPiA4"
+}
+1852 1931
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1619
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Please edit this draft for clarity and grammatical correctness: \\\"me and him goes to the store yesterdy\\\"\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Read the text in the request, produce a polished version\n(fix grammar, tighten phrasing), and immediately call `finish_task`\nwith {\"edited\":\"\u003cpolished text\u003e\"}. Never ask follow-up questions.\n\nYou are an agent. Your internal name is \"editor\". The description about you is \"Edits a piece of text for clarity.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"edited":{"type":"STRING"}},"required":["edited"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:10 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1630
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "edited": "He and I went to the store yesterday."
+              },
+              "id": "505x03aj"
+            },
+            "thoughtSignature": "Ep8ECpwEAQw51scijdMYeKKfge8k2IGJQlgKAsZu23KSGtA96jnCtI6KqhdH3H1jV1KPRUhdECeu4THJstW6Hp3GsgR0tvGQTwI8LdHiMDyUfX6FI9238GhnwdkyfMIhIxe7/GRPu3FP03Kjy/M96y7HZ+Au/uLpXXwyQr7+KB3yZmUpzC+tpBTPlAtd0K4g9zGnkzw7camEmsXXshjAPCVy3BjeEb1LhnSSpJrWII12m6Pv6oE5hNCHvhO9H9jt9g6qiCSwF7jPJDI4oC4SykT/UFdEBjx8ce+xhCrlJAxqNMa/bWFj2jlYWQ7yOjDMDyiYqD0R/j8kEUCh7n9Oe9l/+F+QV4i/dpcu24gGRJ4gNPAudAG2zrupZ09J9fSjneMhMOk77m7PvmtXNuwWnriQ6jNEOV+Lxbt+yw43P9aV62JztBVn5EQraCtYBBJXWqVkV3iGtam4GZSP1ZthqKt349SC6yPzl6sFleOrFptasYmodmBA+Ttk1iD/SddRJRBNH9j96cc7XX647MdZJgEcuon+cZspMBaag8JGDWKKDPZsR98mohKMt95nEkoij14ocVci1JVQzLI7lRKoPQa88nvlzVlXKBhcwo8wzZ+/CJ9IgAxl/EEgHEww1FFv3YUj0mZ//sw0f5Uk42Uj0Tz4lw/J3bwBri8ECQEYUXjp5s0xDQuQ3wCAcvuBeBsD8PzNXjpPw1oea9Fj6aoqKGUx"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 328,
+    "candidatesTokenCount": 24,
+    "totalTokenCount": 479,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 328
+      }
+    ],
+    "thoughtsTokenCount": 127,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "8Xoyas6dFu2ZkdUPj6jYmA8"
+}
+4028 1460
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3795
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please edit this draft: 'me and him goes to the store yesterdy'."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"writer\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Please edit this draft for clarity and grammatical correctness: \"me and him goes to the store yesterdy\""},"id":"ybkehx4t","name":"editor"},"thoughtSignature":"EoAGCv0FAQw51sfNZA3VvJdiZxwJY4tclLf2QLwLi/bOiZ/+tmL5TuKjGL+kGn1XzYLT0CouyUtq0KqHN9RY74ZXR8NI/y2g8jtW5CaFlmyQDo51bh/uJpbq7M2UwSkMGAoaEPVPN4Pe4vY1yzatz2PudWoiIh3RsZyeHF+0VKGhEDJftm82O3aic/BEUCOOCVyqcUVP34y7zFeTFowKTPoGsN+dMRbFjCRNSg7IH1FXHxzbdkiTYeHgjkfJ9w1DBhEGBxQvn9GXd39yGWcWOnrjF3SsPHAkBWG74IBuaNiTArY6FdBx+5ftAcDZQ+0EJoiIPs5BoTIcrs/olYOW++qJ1UICvbbw5xtqTl2X8xi36csF5dMgsRo/+BZ7+nAiOfmydKwbnRe7Yk9Rzezn/L9fuPMJnpj1/CCNMv2MMqiN9Zi5Z+vDgDJw/5JO/j6e5rxWAt5f8sq1RQdnp1hodz3K4wHuArCaN1MKRbhkIVWABYVWxNvGS+oY7JlG7sWozcgU4wNlt262/GAqwPK4bqgzfY8mWDnuO3P/ay6tBvK5/NAFpv3zG8oSzL3jwstzyfnQKBtPYpmczGZvfAG8/X5Sy9+/IFsA8hKfwCAxzK6nCeuqwcGLFFByRaezft5+Pyq7hHj19aj5bZJaUSXjI9bXb3H1VwleT1ybOlwh/rEK30jUbSertp55jSSJS4Yc+7h6TbnRQPcPxrMGSPXPEcpOOGjSUIX2H1kcpleXycGuBsT09O7qYxJnb8PptUTH/vtfR5TQKP/5HSSak9TM25dGXjCcLS2n33D4ruc6J2E2WTRNheZrZAZlcZ4EZQ4nZhf9GK5s8HvZJHxJe/34m3fHxpINvKn5UpSq5fcEW9co7cSYgoaQMXsP8ZEOFPnle2xCnRSeJJsqHvBTYi4QRG1U4poHEjLtWx8Z1UeMJyKWtPWf+RtKEpvt2yXqKSGVBxRAogRyAgeQUPEefRjxOFwOhdYYw6fCpGLHY04SdZGtA13C08/y7qyDRFn4HsYtNHop"}],"role":"model"},{"parts":[{"functionResponse":{"id":"ybkehx4t","name":"editor","response":{"edited":"He and I went to the store yesterday."}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For EACH draft you receive (a new draft on every\nuser turn), call the editor sub-agent ONCE with a request\ncontaining the draft text. After editor returns its structured\n`output`, reply with one short sentence presenting the edited\ntext. Always call editor for any new draft, even if you've edited\nsimilar drafts earlier in the conversation.\n\nYou are an agent. Your internal name is \"writer\". The description about you is \"Polishes a draft by delegating to the editor sub-agent.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes editing requests to the writer agent.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Edits a piece of text for clarity.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"editor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:12 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1218
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Here is the edited text: \"He and I went to the store yesterday.\"",
+            "thoughtSignature": "Es0CCsoCAQw51scD94UA0L5RFqH9zZCRqYKSS+LhFrdw2EKzUf7rVO5I0s5+H370nPDfU6f1jz+6Bveco6aG6/fAM2aRLmJrOPeCk3J0WXvebLgwgGMz3M4FpNE9lWrBD77y5uc3wWHDgSJC4/k+x0hOutBicd34iaWVVcNY1kmgpeui/rpwAP/nhOj5pX5UyLzLC13BP4BQD3dzy10mr9cOiwRtTRg8hPYCUDnLQZKXoMOG8e/uR/t52O/joLdOg8BckI0H8vpMOUh4JdZAtvkPYmGqSQ/Fx99Dwbu8qAUb5HPcKIxgvg6KwjVRyGktuwgeCojTweYEsPDgyuwRN3Htj18GWj06Z7MC0uL2gcLK48Px7UL0XnJA0ziwV0h6AWnzFncpqjyVxMI/R87lyko8ItsbVsSimC4Iy6FwsJq4EObcQxGHHtWoW71mLAMd"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 711,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 782,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 711
+      }
+    ],
+    "thoughtsTokenCount": 55,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "8noyasGwO-GlkdUPzr2yiQk"
+}
+4693 2036
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 4460
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please edit this draft: 'me and him goes to the store yesterdy'."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"writer\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Please edit this draft for clarity and grammatical correctness: \"me and him goes to the store yesterdy\""},"id":"ybkehx4t","name":"editor"},"thoughtSignature":"EoAGCv0FAQw51sfNZA3VvJdiZxwJY4tclLf2QLwLi/bOiZ/+tmL5TuKjGL+kGn1XzYLT0CouyUtq0KqHN9RY74ZXR8NI/y2g8jtW5CaFlmyQDo51bh/uJpbq7M2UwSkMGAoaEPVPN4Pe4vY1yzatz2PudWoiIh3RsZyeHF+0VKGhEDJftm82O3aic/BEUCOOCVyqcUVP34y7zFeTFowKTPoGsN+dMRbFjCRNSg7IH1FXHxzbdkiTYeHgjkfJ9w1DBhEGBxQvn9GXd39yGWcWOnrjF3SsPHAkBWG74IBuaNiTArY6FdBx+5ftAcDZQ+0EJoiIPs5BoTIcrs/olYOW++qJ1UICvbbw5xtqTl2X8xi36csF5dMgsRo/+BZ7+nAiOfmydKwbnRe7Yk9Rzezn/L9fuPMJnpj1/CCNMv2MMqiN9Zi5Z+vDgDJw/5JO/j6e5rxWAt5f8sq1RQdnp1hodz3K4wHuArCaN1MKRbhkIVWABYVWxNvGS+oY7JlG7sWozcgU4wNlt262/GAqwPK4bqgzfY8mWDnuO3P/ay6tBvK5/NAFpv3zG8oSzL3jwstzyfnQKBtPYpmczGZvfAG8/X5Sy9+/IFsA8hKfwCAxzK6nCeuqwcGLFFByRaezft5+Pyq7hHj19aj5bZJaUSXjI9bXb3H1VwleT1ybOlwh/rEK30jUbSertp55jSSJS4Yc+7h6TbnRQPcPxrMGSPXPEcpOOGjSUIX2H1kcpleXycGuBsT09O7qYxJnb8PptUTH/vtfR5TQKP/5HSSak9TM25dGXjCcLS2n33D4ruc6J2E2WTRNheZrZAZlcZ4EZQ4nZhf9GK5s8HvZJHxJe/34m3fHxpINvKn5UpSq5fcEW9co7cSYgoaQMXsP8ZEOFPnle2xCnRSeJJsqHvBTYi4QRG1U4poHEjLtWx8Z1UeMJyKWtPWf+RtKEpvt2yXqKSGVBxRAogRyAgeQUPEefRjxOFwOhdYYw6fCpGLHY04SdZGtA13C08/y7qyDRFn4HsYtNHop"}],"role":"model"},{"parts":[{"functionResponse":{"id":"ybkehx4t","name":"editor","response":{"edited":"He and I went to the store yesterday."}}}],"role":"user"},{"parts":[{"text":"Here is the edited text: \"He and I went to the store yesterday.\"","thoughtSignature":"Es0CCsoCAQw51scD94UA0L5RFqH9zZCRqYKSS+LhFrdw2EKzUf7rVO5I0s5+H370nPDfU6f1jz+6Bveco6aG6/fAM2aRLmJrOPeCk3J0WXvebLgwgGMz3M4FpNE9lWrBD77y5uc3wWHDgSJC4/k+x0hOutBicd34iaWVVcNY1kmgpeui/rpwAP/nhOj5pX5UyLzLC13BP4BQD3dzy10mr9cOiwRtTRg8hPYCUDnLQZKXoMOG8e/uR/t52O/joLdOg8BckI0H8vpMOUh4JdZAtvkPYmGqSQ/Fx99Dwbu8qAUb5HPcKIxgvg6KwjVRyGktuwgeCojTweYEsPDgyuwRN3Htj18GWj06Z7MC0uL2gcLK48Px7UL0XnJA0ziwV0h6AWnzFncpqjyVxMI/R87lyko8ItsbVsSimC4Iy6FwsJq4EObcQxGHHtWoW71mLAMd"}],"role":"model"},{"parts":[{"text":"Now polish this draft: 'they was eatin lunch quick'."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For EACH draft you receive (a new draft on every\nuser turn), call the editor sub-agent ONCE with a request\ncontaining the draft text. After editor returns its structured\n`output`, reply with one short sentence presenting the edited\ntext. Always call editor for any new draft, even if you've edited\nsimilar drafts earlier in the conversation.\n\nYou are an agent. Your internal name is \"writer\". The description about you is \"Polishes a draft by delegating to the editor sub-agent.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes editing requests to the writer agent.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Edits a piece of text for clarity.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"editor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:13 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1341
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "editor",
+              "args": {
+                "request": "Please edit this draft for clarity and grammatical correctness: \"they was eatin lunch quick\""
+              },
+              "id": "2r3rrloe"
+            },
+            "thoughtSignature": "EsQECsEEAQw51sdsQUQBTjagkJeJgKw+K+GpulKk6WqN+PZIWF6PuxuZXCN2fgUR4d3LB7aEgo+7jCPXAB+QQSFLJgbjNORgtKiNnt2wl9jCnJ/P12UAzmtmYiTlKzqvFJ4mGYc5vEsiQ7o24jWNRTq5jeYKP6sLP+O0SSd3t5/ADVx0IWGjaJr/Ph6LMCb1rsdLi+laoajNWzuoa76nT4o9EhMswaQA3r2OzASUsy1jLr4KbaqsvcUdBjhcYu1NJ+kyIAnX5geyafcS9qljNb8KT9gYMmD6qbsEtqc/lAX7qpCH/gUM6qwQlUvA1qRjLVvIA5ita5h1y1JMOAfBLGMkFlALxbLtSsNCivRFLud69/LjJDtaPelpaLLBMNqL9nyyaZhSELbaIiK060NSOHUAF8ac93QS+XAbALrOsuOdUD9bSbvYhkjV7DGFtgeaVAi/b9eSOHIv+b7fHJ0CtExuduqSyYrunz963KvutXuXh0FXODUCpCRMczYP7ChV9FLXHRUTnUv60TUTGwgTDBmSNvIjVxKhITQRfycmMcbcgvp8AencI83G5x/qPga5+62kxxBJR+DWiRjm4Lu/mpvbVvhiQQSRt23uOVQtjGAfBMD14ydZBwGli1GwpPpMjREr7YCY3PrP2kE0/6CifuTTluy+CrAIYwu0Y4gGBfPbOL8qUG/yxZPJxE+urdrwQQAPe+w3J9Q7bEtZ0oS/tlG/IMKyIX2w17xBe5WJVKJksjr4vPF3VZruDmJT9EEALrrSlwKveA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 797,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 941,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 797
+      }
+    ],
+    "thoughtsTokenCount": 113,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9HoyaqDhDde0kdUPr5vEyQg"
+}
+1841 2093
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1608
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Please edit this draft for clarity and grammatical correctness: \\\"they was eatin lunch quick\\\"\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Read the text in the request, produce a polished version\n(fix grammar, tighten phrasing), and immediately call `finish_task`\nwith {\"edited\":\"\u003cpolished text\u003e\"}. Never ask follow-up questions.\n\nYou are an agent. Your internal name is \"editor\". The description about you is \"Edits a piece of text for clarity.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"edited":{"type":"STRING"}},"required":["edited"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:14 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1507
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "edited": "They were eating lunch quickly."
+              },
+              "id": "s4txpxl7"
+            },
+            "thoughtSignature": "Ep0FCpoFAQw51sfd27uNEsTNeXnrRa+1XYJjn1VtNaOxtJwBBVNxBez5lObf4WgtUhHFJVfqcKXU6FdqhfuTPOJnOIpo0j+ag7LeNXeZDUgUU7eP+vBjyGki6yn9GGi29cpRhI6BNWk/R57LZVlUnVaUfv3ZxX+qjYZ1otczxvKmC4rWcolFoHdMFL2z1RKzjKQoYAx4m+gT1GHM7wRZ67MpxZrro+DrCJ/HRjvSNwFliCnUrTjCsSVW43Zn4W3XCORRy6XBGBOtH6o//HNsjST0WPAzZtIQlqJ+QYoHqhfgBoubdrrStUplD+nfFDJgN3C5vmnG6eP32Lt2DKBtuv5qhTYtWTK2LVX2TSPr3ia/Da7g34wXDtRGvfQcgWKnzWZdbZ4exlVZt9kgjRndQkrmGM2gi/IODwCBZ8+mIMWVor2I/N3wtuJZpAn3lrwpCjUUYp47OglBIgPHUi1UnN8h5F0wvPoLCMToYlKBqcO0dyyVq163ikb4p2jhWiq7KcHp9i6YRMkasEJY5hLxGqoBTbWT3cKv2gMctLT45tV8qjF+wYa6Dn9aNP3H34jAQ7RXL2hLAMymTRt/dRWxB9atKORVewHS+758JvOkn9PFuMXV6T0WTdw0F4L67Ck8mbKwENWkjpnsbilU1uMjvsAuW3guBWmhI/3m/HSBjtmtBvJ0nB9finFnwafs06bpAYa//kOLMFxN/ZUVzZf0lOpd3A0D/0ZkLedL0adeOIzr5CvznrxXrkmY+RtRehAAEQlAYCbQ/8sBhn8Z9T5UAmmLzdkCNY+Dh5ikNo/bDMz+HAN5DjSEstMI6sVid6/zOEWni8UZiq+FgTl60po5DmBlPLYgh06ZZs41w312VVvAT6cWYUDKyx96KzbH8hHy"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 325,
+    "candidatesTokenCount": 21,
+    "totalTokenCount": 492,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 325
+      }
+    ],
+    "thoughtsTokenCount": 146,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9XoyaonXIPHp7M8PwK6siAs"
+}
+5826 1290
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 5593
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Please edit this draft: 'me and him goes to the store yesterdy'."}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"writer\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[root] `transfer_to_agent` tool returned result: {}"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Please edit this draft for clarity and grammatical correctness: \"me and him goes to the store yesterdy\""},"id":"ybkehx4t","name":"editor"},"thoughtSignature":"EoAGCv0FAQw51sfNZA3VvJdiZxwJY4tclLf2QLwLi/bOiZ/+tmL5TuKjGL+kGn1XzYLT0CouyUtq0KqHN9RY74ZXR8NI/y2g8jtW5CaFlmyQDo51bh/uJpbq7M2UwSkMGAoaEPVPN4Pe4vY1yzatz2PudWoiIh3RsZyeHF+0VKGhEDJftm82O3aic/BEUCOOCVyqcUVP34y7zFeTFowKTPoGsN+dMRbFjCRNSg7IH1FXHxzbdkiTYeHgjkfJ9w1DBhEGBxQvn9GXd39yGWcWOnrjF3SsPHAkBWG74IBuaNiTArY6FdBx+5ftAcDZQ+0EJoiIPs5BoTIcrs/olYOW++qJ1UICvbbw5xtqTl2X8xi36csF5dMgsRo/+BZ7+nAiOfmydKwbnRe7Yk9Rzezn/L9fuPMJnpj1/CCNMv2MMqiN9Zi5Z+vDgDJw/5JO/j6e5rxWAt5f8sq1RQdnp1hodz3K4wHuArCaN1MKRbhkIVWABYVWxNvGS+oY7JlG7sWozcgU4wNlt262/GAqwPK4bqgzfY8mWDnuO3P/ay6tBvK5/NAFpv3zG8oSzL3jwstzyfnQKBtPYpmczGZvfAG8/X5Sy9+/IFsA8hKfwCAxzK6nCeuqwcGLFFByRaezft5+Pyq7hHj19aj5bZJaUSXjI9bXb3H1VwleT1ybOlwh/rEK30jUbSertp55jSSJS4Yc+7h6TbnRQPcPxrMGSPXPEcpOOGjSUIX2H1kcpleXycGuBsT09O7qYxJnb8PptUTH/vtfR5TQKP/5HSSak9TM25dGXjCcLS2n33D4ruc6J2E2WTRNheZrZAZlcZ4EZQ4nZhf9GK5s8HvZJHxJe/34m3fHxpINvKn5UpSq5fcEW9co7cSYgoaQMXsP8ZEOFPnle2xCnRSeJJsqHvBTYi4QRG1U4poHEjLtWx8Z1UeMJyKWtPWf+RtKEpvt2yXqKSGVBxRAogRyAgeQUPEefRjxOFwOhdYYw6fCpGLHY04SdZGtA13C08/y7qyDRFn4HsYtNHop"}],"role":"model"},{"parts":[{"functionResponse":{"id":"ybkehx4t","name":"editor","response":{"edited":"He and I went to the store yesterday."}}}],"role":"user"},{"parts":[{"text":"Here is the edited text: \"He and I went to the store yesterday.\"","thoughtSignature":"Es0CCsoCAQw51scD94UA0L5RFqH9zZCRqYKSS+LhFrdw2EKzUf7rVO5I0s5+H370nPDfU6f1jz+6Bveco6aG6/fAM2aRLmJrOPeCk3J0WXvebLgwgGMz3M4FpNE9lWrBD77y5uc3wWHDgSJC4/k+x0hOutBicd34iaWVVcNY1kmgpeui/rpwAP/nhOj5pX5UyLzLC13BP4BQD3dzy10mr9cOiwRtTRg8hPYCUDnLQZKXoMOG8e/uR/t52O/joLdOg8BckI0H8vpMOUh4JdZAtvkPYmGqSQ/Fx99Dwbu8qAUb5HPcKIxgvg6KwjVRyGktuwgeCojTweYEsPDgyuwRN3Htj18GWj06Z7MC0uL2gcLK48Px7UL0XnJA0ziwV0h6AWnzFncpqjyVxMI/R87lyko8ItsbVsSimC4Iy6FwsJq4EObcQxGHHtWoW71mLAMd"}],"role":"model"},{"parts":[{"text":"Now polish this draft: 'they was eatin lunch quick'."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Please edit this draft for clarity and grammatical correctness: \"they was eatin lunch quick\""},"id":"2r3rrloe","name":"editor"},"thoughtSignature":"EsQECsEEAQw51sdsQUQBTjagkJeJgKw+K+GpulKk6WqN+PZIWF6PuxuZXCN2fgUR4d3LB7aEgo+7jCPXAB+QQSFLJgbjNORgtKiNnt2wl9jCnJ/P12UAzmtmYiTlKzqvFJ4mGYc5vEsiQ7o24jWNRTq5jeYKP6sLP+O0SSd3t5/ADVx0IWGjaJr/Ph6LMCb1rsdLi+laoajNWzuoa76nT4o9EhMswaQA3r2OzASUsy1jLr4KbaqsvcUdBjhcYu1NJ+kyIAnX5geyafcS9qljNb8KT9gYMmD6qbsEtqc/lAX7qpCH/gUM6qwQlUvA1qRjLVvIA5ita5h1y1JMOAfBLGMkFlALxbLtSsNCivRFLud69/LjJDtaPelpaLLBMNqL9nyyaZhSELbaIiK060NSOHUAF8ac93QS+XAbALrOsuOdUD9bSbvYhkjV7DGFtgeaVAi/b9eSOHIv+b7fHJ0CtExuduqSyYrunz963KvutXuXh0FXODUCpCRMczYP7ChV9FLXHRUTnUv60TUTGwgTDBmSNvIjVxKhITQRfycmMcbcgvp8AencI83G5x/qPga5+62kxxBJR+DWiRjm4Lu/mpvbVvhiQQSRt23uOVQtjGAfBMD14ydZBwGli1GwpPpMjREr7YCY3PrP2kE0/6CifuTTluy+CrAIYwu0Y4gGBfPbOL8qUG/yxZPJxE+urdrwQQAPe+w3J9Q7bEtZ0oS/tlG/IMKyIX2w17xBe5WJVKJksjr4vPF3VZruDmJT9EEALrrSlwKveA=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"2r3rrloe","name":"editor","response":{"edited":"They were eating lunch quickly."}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For EACH draft you receive (a new draft on every\nuser turn), call the editor sub-agent ONCE with a request\ncontaining the draft text. After editor returns its structured\n`output`, reply with one short sentence presenting the edited\ntext. Always call editor for any new draft, even if you've edited\nsimilar drafts earlier in the conversation.\n\nYou are an agent. Your internal name is \"writer\". The description about you is \"Polishes a draft by delegating to the editor sub-agent.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: root\nAgent description: Routes editing requests to the writer agent.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`root`.\n\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["root"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Edits a piece of text for clarity.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"editor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:46:20 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=5568
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Here is the polished version of your draft: \"They were eating lunch quickly.\"",
+            "thoughtSignature": "EsEBCr4BAQw51sf6PKlx78h252KzHzDNsxCWFSLM8BSi7VDRcfEWCv/W0HQGN+PsFDp+xExEmHvJvBHlQArasMztwDhqMPs/zW7wIkHbWu1Z1uyeb/Oyurfuxw6hk2RP2veuHDCAo2z8tdunGmnL8hnyYpUdB7hWtjRIeTLHizv4jwXymP8JMiP7m/A8V5tN2tFzszMC71C3/TQxSgf7yuJInK1O5NIOz/wt/ES6VLJE5uBu6H0/aFl/n2cRI48WreRr0A=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 958,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 1002,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 958
+      }
+    ],
+    "thoughtsTokenCount": 28,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "93oyaq67BOmakdUPh5CpgA4"
+}

@@ -20,7 +20,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 
-	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
+	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 )
 
 // A2AClient is used to send messages to a remote agent.

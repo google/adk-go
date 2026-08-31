@@ -24,10 +24,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/adkrest/controllers/triggers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 )
 
 type pubsubConfig struct {

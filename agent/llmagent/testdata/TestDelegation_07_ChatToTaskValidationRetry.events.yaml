@@ -1,0 +1,91 @@
+- author: user
+  role: user
+  parts:
+    - text: What is 21 plus 21?
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: solver
+        id: jr6iqvyp
+        args:
+            request: What is 21 plus 21?
+  node_info:
+    path: coordinator
+- author: solver
+  isolation_scope: jr6iqvyp
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: dmyvsg54
+        args:
+            wrong_field: 42
+  node_info:
+    path: coordinator/solver@jr6iqvyp
+- author: solver
+  isolation_scope: jr6iqvyp
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: dmyvsg54
+        response:
+            error: |-
+                Invoking `finish_task()` failed due to validation errors:
+                output arg: '"wrong_field"' does not exist in schema properties
+                You could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters with correct types.
+  node_info:
+    path: coordinator/solver@jr6iqvyp
+- author: solver
+  isolation_scope: jr6iqvyp
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: uf0amaey
+        args:
+            answer: 42
+  node_info:
+    path: coordinator/solver@jr6iqvyp
+- author: solver
+  isolation_scope: jr6iqvyp
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: uf0amaey
+        response:
+            result: Task completed.
+  output:
+    answer: 42
+  node_info:
+    path: coordinator/solver@jr6iqvyp
+    output_for:
+        - coordinator/solver@jr6iqvyp
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: solver
+        id: jr6iqvyp
+        response:
+            answer: 42
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: 21 plus 21 is 42.
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: What was the answer to the previous question?
+- author: coordinator
+  role: model
+  parts:
+    - text: The answer to the previous question was 42.
+  node_info:
+    path: coordinator

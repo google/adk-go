@@ -8,16 +8,25 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - google.golang.org/adk
+        - google.golang.org/adk/v2
     gofumpt:
       extra-rules: true
-      module-path: google.golang.org/adk
+      module-path: google.golang.org/adk/v2
 
 linters:
   enable:
     - goheader
-  
+    - revive
+
   settings:
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+
     
     goheader:
       values:
@@ -62,3 +71,10 @@ linters:
           - goheader
           - errcheck
           - staticcheck
+      # Don't enforce doc comments on internal (non-importable) packages or on
+      # examples (demonstration code, not an importable API surface), while
+      # keeping any other revive rules active there.
+      - path: '(^|/)(internal|examples)/'
+        linters:
+          - revive
+        text: '^(exported|package-comments):'

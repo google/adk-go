@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package vertexai provides a session.Service backed by the Vertex AI
+// Agent Engine runtime.
 package vertexai
 
 import (
@@ -21,7 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/option"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // VertexAiSessionService
@@ -29,6 +31,7 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
+// VertexAIServiceConfig configures a Vertex AI-backed session service.
 type VertexAIServiceConfig struct {
 	// ProjectID with VertexAI API enabled.
 	ProjectID string
@@ -55,9 +58,6 @@ func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig, opts ...o
 func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
-	}
-	if req.SessionID != "" {
-		return nil, fmt.Errorf("user-provided Session id is not supported for VertexAISessionService: %q", req.SessionID)
 	}
 	sess, err := s.client.createSession(ctx, req)
 	if err != nil {

@@ -26,15 +26,15 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/geminitool"
 )
 
 func main() {
@@ -56,7 +56,7 @@ func main() {
 	cameraTool, err := functiontool.New(functiontool.Config{
 		Name:        "camera_toggle",
 		Description: "Turns the camera on or off.",
-	}, func(ctx agent.ToolContext, args EmptyArgs) (MessageResult, error) {
+	}, func(ctx agent.Context, args EmptyArgs) (MessageResult, error) {
 		fmt.Println("Camera tool was called!")
 		return MessageResult{Message: "Camera tool called successfully!"}, nil
 	})

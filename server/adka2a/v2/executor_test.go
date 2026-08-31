@@ -29,12 +29,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 )
 
 // No testQueue needed anymore.
@@ -126,7 +126,12 @@ func TestExecutor_Execute(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
-				a2a.NewSubmittedTask(task, hiMsg),
+				func() *a2a.Task {
+					// The executor marks every task it emits with the ADK A2A extension key.
+					submitted := a2a.NewSubmittedTask(task, hiMsg)
+					submitted.Metadata = map[string]any{ADKExtensionURI: true}
+					return submitted
+				}(),
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),

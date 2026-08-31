@@ -24,11 +24,11 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockLiveSession struct {
@@ -49,7 +49,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 		Count int `json:"count"`
 	}
 
-	handler := func(ctx agent.ToolContext, args Args) iter.Seq2[string, error] {
+	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; i < args.Count; i++ {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
@@ -187,7 +187,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	var cancelCount int
 	var cancelMu sync.Mutex
 
-	handler := func(ctx agent.ToolContext, args Args) iter.Seq2[string, error] {
+	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; ; i++ {
 				time.Sleep(time.Millisecond)

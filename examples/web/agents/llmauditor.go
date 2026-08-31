@@ -20,10 +20,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/model"
 )
 
 const EndMark = "---END-OF-EDIT---"
@@ -153,7 +153,7 @@ The sun is sphere-shaped and very hot.
 Here are the question-answer pair and the reviewer-provided findings:
 `
 
-func afterCritic(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func afterCritic(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponse.Content.Parts == nil || llmResponse.GroundingMetadata == nil {
 		return llmResponse, nil
 	}
@@ -204,7 +204,7 @@ func afterCritic(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmR
 	return llmResponse, nil
 }
 
-func afterReviser(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func afterReviser(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse.Content == nil || llmResponse.Content.Parts == nil {
 		return llmResponse, nil
 	}

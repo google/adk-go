@@ -13,7 +13,6 @@
 // limitations under the License.
 
 // Package agentengine handles command line parameters and execution logic for agentengine deployment.
-
 package agentengine
 
 import (
@@ -35,9 +34,9 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	"google.golang.org/adk/cmd/adkgo/internal/deploy"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/agentengine"
+	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/agentengine"
 )
 
 type gCloudFlags struct {
@@ -279,9 +278,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "NUM_WORKERS", Value: "1"},
 								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
 								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
 							},
 						},
 						ClassMethods: methods,

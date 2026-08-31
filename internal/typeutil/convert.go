@@ -31,14 +31,20 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	if resolvedSchema != nil {
-		// See https://github.com/google/jsonschema-go/issues/23: in order to
-		// validate, we must validate against a map[string]any. Struct validation
-		// does not work as it cannot account for `omitempty` or custom marshalling.
-		var m map[string]any
-		if err := json.Unmarshal(rawArgs, &m); err != nil {
+		// Validate the JSON-decoded form rather than the Go value:
+		// struct validation can't account for `omitempty` or custom
+		// marshalling (see
+		// https://github.com/google/jsonschema-go/issues/23).
+		var decoded any
+		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
 			return zero, err
 		}
-		if err := resolvedSchema.Validate(m); err != nil {
+		// An absent input (e.g. a tool invoked with no arguments)
+		// should satisfy an object schema.
+		if decoded == nil && schemaExpectsObject(resolvedSchema) {
+			decoded = map[string]any{}
+		}
+		if err := resolvedSchema.Validate(decoded); err != nil {
 			return zero, err
 		}
 	}
@@ -47,4 +53,46 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	return typed, nil
+}
+
+// ValidateWithJSONSchema validates a Go value against a resolved schema by
+// first converting it to its JSON-decoded form to avoid struct validation issues.
+func ValidateWithJSONSchema(v any, resolvedSchema *jsonschema.Resolved) error {
+	if resolvedSchema == nil {
+		return nil
+	}
+	rawArgs, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	var decoded any
+	if err := json.Unmarshal(rawArgs, &decoded); err != nil {
+		return err
+	}
+	if decoded == nil && schemaExpectsObject(resolvedSchema) {
+		decoded = map[string]any{}
+	}
+	return resolvedSchema.Validate(decoded)
+}
+
+// schemaExpectsObject reports whether the resolved schema's root type
+// is (or includes) "object". Used to decide whether a JSON `null`
+// input should be treated as an empty object for validation.
+func schemaExpectsObject(resolved *jsonschema.Resolved) bool {
+	if resolved == nil {
+		return false
+	}
+	root := resolved.Schema()
+	if root == nil {
+		return false
+	}
+	if root.Type == "object" {
+		return true
+	}
+	for _, t := range root.Types {
+		if t == "object" {
+			return true
+		}
+	}
+	return false
 }

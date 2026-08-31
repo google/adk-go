@@ -21,19 +21,19 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 )
 
 func TestLogRequest(t *testing.T) {
 	type wantEvent struct {
 		name  string
 		body  any // can be map[string]any or string (for elided)
-		attrs []log.KeyValue
+		attrs []attribute.KeyValue
 	}
 	tests := []struct {
 		name                  string
@@ -154,8 +154,8 @@ func TestLogRequest(t *testing.T) {
 					body: map[string]any{
 						"content": nil,
 					},
-					attrs: []log.KeyValue{
-						log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini),
+					attrs: []attribute.KeyValue{
+						semconv.GenAISystemGCPGemini,
 					},
 				},
 			},
@@ -174,8 +174,8 @@ func TestLogRequest(t *testing.T) {
 					body: map[string]any{
 						"content": nil,
 					},
-					attrs: []log.KeyValue{
-						log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI),
+					attrs: []attribute.KeyValue{
+						semconv.GenAISystemGCPVertexAI,
 					},
 				},
 			},
@@ -289,6 +289,7 @@ func TestLogRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogRequest(ctx, tc.req, tc.backend)
 
@@ -312,12 +313,12 @@ func TestLogRequest(t *testing.T) {
 					t.Errorf("record[%d] body mismatch (-want +got):\n%s", i, diff)
 				}
 
-				var gotAttrs []log.KeyValue
-				gotRecord.WalkAttributes(func(kv log.KeyValue) bool {
+				var gotAttrs []attribute.KeyValue
+				gotRecord.WalkAttributes(func(kv attribute.KeyValue) bool {
 					gotAttrs = append(gotAttrs, kv)
 					return true
 				})
-				if diff := cmp.Diff(want.attrs, gotAttrs); diff != "" {
+				if diff := cmp.Diff(toGoKeyValues(want.attrs), toGoKeyValues(gotAttrs)); diff != "" {
 					t.Errorf("record[%d] attributes mismatch (-want +got):\n%s", i, diff)
 				}
 			}
@@ -333,7 +334,7 @@ func TestLogResponse(t *testing.T) {
 		captureMessageContent bool
 		wantName              string
 		wantBody              map[string]any
-		wantAttrs             []log.KeyValue
+		wantAttrs             []attribute.KeyValue
 	}{
 		{
 			name:                  "Response",
@@ -385,8 +386,8 @@ func TestLogResponse(t *testing.T) {
 					},
 				},
 			},
-			wantAttrs: []log.KeyValue{
-				log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini),
+			wantAttrs: []attribute.KeyValue{
+				semconv.GenAISystemGCPGemini,
 			},
 		},
 		{
@@ -415,8 +416,8 @@ func TestLogResponse(t *testing.T) {
 					},
 				},
 			},
-			wantAttrs: []log.KeyValue{
-				log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI),
+			wantAttrs: []attribute.KeyValue{
+				semconv.GenAISystemGCPVertexAI,
 			},
 		},
 		{
@@ -503,6 +504,7 @@ func TestLogResponse(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogResponse(t.Context(), tc.resp, tc.backend)
 
@@ -524,12 +526,12 @@ func TestLogResponse(t *testing.T) {
 				t.Errorf("Body mismatch (-want +got):\n%s", diff)
 			}
 
-			var gotAttrs []log.KeyValue
-			record.WalkAttributes(func(kv log.KeyValue) bool {
+			var gotAttrs []attribute.KeyValue
+			record.WalkAttributes(func(kv attribute.KeyValue) bool {
 				gotAttrs = append(gotAttrs, kv)
 				return true
 			})
-			if diff := cmp.Diff(tc.wantAttrs, gotAttrs); diff != "" {
+			if diff := cmp.Diff(toGoKeyValues(tc.wantAttrs), toGoKeyValues(gotAttrs)); diff != "" {
 				t.Errorf("attributes mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -537,7 +539,7 @@ func TestLogResponse(t *testing.T) {
 }
 
 func TestSpanIDPropagation(t *testing.T) {
-	ctx, span := otel.Tracer("test").Start(context.Background(), "test")
+	ctx, span := otel.Tracer("test").Start(t.Context(), "test")
 	defer span.End()
 
 	exporter := setup(t, false)
@@ -576,7 +578,7 @@ func TestSpanIDPropagation(t *testing.T) {
 	}
 }
 
-func setup(t *testing.T, elided bool) *inMemoryExporter {
+func setup(t *testing.T, capture bool) *inMemoryExporter {
 	exporter := &inMemoryExporter{}
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)),
@@ -587,11 +589,12 @@ func setup(t *testing.T, elided bool) *inMemoryExporter {
 		otelLogger = originalLogger
 	})
 
-	original := getGenAICaptureMessageContent()
-	SetGenAICaptureMessageContent(elided)
-	t.Cleanup(func() {
-		SetGenAICaptureMessageContent(original)
-	})
+	if capture {
+		t.Setenv(captureMessageContentEnvVar, "true")
+	} else {
+		t.Setenv(captureMessageContentEnvVar, "")
+	}
+
 	return exporter
 }
 
@@ -607,33 +610,54 @@ func (e *inMemoryExporter) Export(ctx context.Context, records []sdklog.Record) 
 func (e *inMemoryExporter) Shutdown(ctx context.Context) error   { return nil }
 func (e *inMemoryExporter) ForceFlush(ctx context.Context) error { return nil }
 
-// toGoValue converts a log.Value to a Go value for easier testing.
-// log.Value is not comparable by design, so we need to transform it to another form.
-func toGoValue(v log.Value) any {
-	switch v.Kind() {
-	case log.KindBool:
+// toGoValue converts an attribute.Value to a Go value for easier testing.
+// attribute.Value is not comparable by design, so we need to transform it to another form.
+func toGoValue(v attribute.Value) any {
+	switch v.Type() {
+	case attribute.BOOL:
 		return v.AsBool()
-	case log.KindFloat64:
+	case attribute.BOOLSLICE:
+		return v.AsBoolSlice()
+	case attribute.FLOAT64:
 		return v.AsFloat64()
-	case log.KindInt64:
+	case attribute.FLOAT64SLICE:
+		return v.AsFloat64Slice()
+	case attribute.INT64:
 		return v.AsInt64()
-	case log.KindString:
+	case attribute.INT64SLICE:
+		return v.AsInt64Slice()
+	case attribute.STRING:
 		return v.AsString()
-	case log.KindBytes:
-		return v.AsBytes()
-	case log.KindSlice:
+	case attribute.STRINGSLICE:
+		return v.AsStringSlice()
+	case attribute.BYTESLICE:
+		return v.AsByteSlice()
+	case attribute.SLICE:
 		var s []any
 		for _, v := range v.AsSlice() {
 			s = append(s, toGoValue(v))
 		}
 		return s
-	case log.KindMap:
+	case attribute.MAP:
 		m := make(map[string]any)
 		for _, kv := range v.AsMap() {
-			m[kv.Key] = toGoValue(kv.Value)
+			m[string(kv.Key)] = toGoValue(kv.Value)
 		}
 		return m
 	default:
 		return nil
 	}
+}
+
+type goKeyValue struct {
+	Key   string
+	Value any
+}
+
+func toGoKeyValues(kvs []attribute.KeyValue) []goKeyValue {
+	values := make([]goKeyValue, 0, len(kvs))
+	for _, kv := range kvs {
+		values = append(values, goKeyValue{Key: string(kv.Key), Value: toGoValue(kv.Value)})
+	}
+	return values
 }

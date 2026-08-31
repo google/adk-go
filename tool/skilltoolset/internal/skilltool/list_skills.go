@@ -18,10 +18,10 @@ import (
 	"html"
 	"strings"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
 // ListSkillsArgs represents the input for ListSkills tool.
@@ -39,13 +39,13 @@ func ListSkills(source skill.Source) (tool.Tool, error) {
 			Name:        "list_skills",
 			Description: "Lists all available skills with their names and descriptions.",
 		},
-		func(ctx agent.ToolContext, args ListSkillsArgs) (*ListSkillsResult, error) {
+		func(ctx agent.Context, args ListSkillsArgs) (*ListSkillsResult, error) {
 			return listSkills(ctx, args, source)
 		},
 	)
 }
 
-func listSkills(ctx agent.ToolContext, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
+func listSkills(ctx agent.Context, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
 	skills, err := source.ListFrontmatters(ctx)
 	if err != nil {
 		return nil, err

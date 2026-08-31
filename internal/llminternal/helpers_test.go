@@ -15,7 +15,7 @@
 package llminternal
 
 import (
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/v2/agent"
 )
 
 // mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
