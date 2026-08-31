@@ -177,8 +177,22 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		eventQuery = eventQuery.Where("timestamp >= ?", req.After)
 	}
 
-	// Order by timestamp DESC to get the most recent events when limiting
-	eventQuery = eventQuery.Order("timestamp DESC")
+	// Order by timestamp DESC to get the most recent events when limiting, with
+	// id as a tiebreak so the order is total.
+	//
+	// Without the tiebreak, events sharing a timestamp come back in whatever
+	// order the engine happens to yield and the reversal below then flips them:
+	// SQLite's sort is stable, so a tie is returned in reverse insertion order.
+	// Timestamps are truncated to microseconds on write, so ties are ordinary
+	// rather than exotic. Compaction reads this order to choose what a summary
+	// stands for, and a pair that swaps between two reads means a record can
+	// cover an event nothing summarized, which is that event gone from every
+	// later prompt.
+	//
+	// The id is arbitrary as an ordering, but it is stable, and stable is what
+	// callers need. adk-python orders the same way, by timestamp then id, so
+	// this also removes a divergence rather than creating one.
+	eventQuery = eventQuery.Order("timestamp DESC, id DESC")
 
 	if req.NumRecentEvents > 0 {
 		eventQuery = eventQuery.Limit(req.NumRecentEvents)
@@ -332,6 +346,13 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	// ignore partial events
 	if event.Partial {
 		return nil
+	}
+	// Give the event an identity if it arrived without one, matching the
+	// in-memory service. An event built as a struct literal by an agent or a
+	// tool never passes through session.NewEvent, and anything that identifies
+	// events by ID cannot tell two ID-less events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
 	}
 
 	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
