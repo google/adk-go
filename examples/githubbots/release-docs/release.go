@@ -17,7 +17,9 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // markerPrefix identifies an issue this bot filed. The full marker names the
@@ -111,20 +113,27 @@ type ReleaseDiff struct {
 	TotalFiles   int
 
 	// Commits are the commit subjects kept; OmittedCommits is how many were
-	// dropped.
+	// dropped, counted against the comparison's true commit total rather than
+	// against the number of commits actually fetched.
 	Commits        []Commit
 	OmittedCommits int
+
+	// PageBoundHit records that the comparison had more pages than the bot
+	// fetches, so TotalFiles is a floor rather than the real number of changed
+	// files. Without it "Files changed: 300" would read as complete on a release
+	// that changed nine hundred.
+	PageBoundHit bool
 }
 
 // Finding is one documentation suggestion. Every field is model-authored and
 // therefore untrusted; sanitizeFinding is what makes one safe to render.
 type Finding struct {
-	Kind           string `json:"kind"`
-	DocFile        string `json:"doc_file"`
-	Summary        string `json:"summary"`
-	ProposedChange string `json:"proposed_change"`
-	Reasoning      string `json:"reasoning"`
-	Reference      string `json:"reference"`
+	Kind           string `json:"kind,omitempty"`
+	DocFile        string `json:"doc_file,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+	ProposedChange string `json:"proposed_change,omitempty"`
+	Reasoning      string `json:"reasoning,omitempty"`
+	Reference      string `json:"reference,omitempty"`
 }
 
 // sanitizeFinding applies the value allow-lists and neutralizes the free-text
@@ -193,6 +202,9 @@ func truncateRunes(s string, n int) string {
 // truncateBytes shortens s to at most n bytes without splitting a rune, so a
 // byte-capped patch stays valid UTF-8. It reports whether it trimmed.
 func truncateBytes(s string, n int) (string, bool) {
+	if n < 0 {
+		n = 0
+	}
 	if len(s) <= n {
 		return s, false
 	}
@@ -207,6 +219,139 @@ func truncateBytes(s string, n int) (string, bool) {
 // utf8Start reports whether b can begin a UTF-8 encoded rune (i.e. it is not a
 // continuation byte).
 func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
+
+// Release is one published release, reduced to what tag selection needs.
+type Release struct {
+	Tag string
+	// Prerelease marks a release GitHub flagged as a prerelease. A prerelease is
+	// never chosen as a base: diffing a final release against its own release
+	// candidate would cover only the rc-to-final delta and silently drop the
+	// feature set the release actually shipped.
+	Prerelease bool
+	// Published is when the release was published. It is the second half of base
+	// selection: on a repository with a maintenance branch, a release from the
+	// older line can carry a lower version AND a later publication date, and it
+	// was not a plausible base for anything published before it.
+	Published time.Time
+}
+
+// versionPattern splits a tag into its numeric core and an optional suffix.
+// "v1.2.3" and "1.2" parse; "v1.2.3-rc.1" parses with a suffix; a tag with no
+// numeric core does not parse and takes no part in tag selection.
+var versionPattern = regexp.MustCompile(`^v?([0-9]+(?:\.[0-9]+)*)([-+].*)?$`)
+
+// parseVersion returns a tag's numeric components, and whether it parsed.
+//
+// Selection compares versions rather than trusting the order the releases API
+// returns. That order is by created_at -- the date of the COMMIT a tag points
+// at, not the date the release was published -- so on a repository with a
+// maintenance branch the list interleaves release lines. On google/adk-go the
+// live list runs v2.3.0, v1.6.0, v2.2.0, ..., so "the entry after the head tag"
+// gives v1.6.0 as the base for v2.3.0: a diff spanning a major version.
+func parseVersion(tag string) ([]int, bool) {
+	m := versionPattern.FindStringSubmatch(tag)
+	if m == nil {
+		return nil, false
+	}
+	parts := strings.Split(m[1], ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+// compareVersions orders two numeric versions. A shorter version compares as if
+// padded with zeros, so v1.2 == v1.2.0.
+func compareVersions(a, b []int) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// latestTag returns the greatest non-prerelease version among the releases.
+// It is what an empty END_TAG resolves to.
+func latestTag(releases []Release) (string, bool) {
+	best, bestVer := "", []int(nil)
+	for _, r := range releases {
+		if r.Prerelease {
+			continue
+		}
+		v, ok := parseVersion(r.Tag)
+		if !ok {
+			continue
+		}
+		if best == "" || compareVersions(v, bestVer) > 0 {
+			best, bestVer = r.Tag, v
+		}
+	}
+	return best, best != ""
+}
+
+// previousTag returns the greatest non-prerelease release strictly older than
+// head, by version rather than by the order the API returned.
+//
+// head does not have to appear in releases: only its version is needed, so a
+// head tag published after the listing was taken, or beyond the page bound,
+// still resolves.
+func previousTag(releases []Release, head string) (string, error) {
+	headVer, ok := parseVersion(head)
+	if !ok {
+		return "", fmt.Errorf("cannot derive a base for %q: it is not a numeric version tag; pass -start-tag explicitly", head)
+	}
+	// A release published after the head is not a candidate, whatever its
+	// version. Live example: on google/adk-go, v1.6.0 carries a lower version
+	// than v2.0.0 but shipped six weeks later, so it was never the release
+	// v2.0.0 followed. When the head is not in the listing -- a release
+	// published after the listing was taken -- there is no cutoff to apply and
+	// every candidate is in scope, which is correct for a release that has just
+	// shipped.
+	var cutoff time.Time
+	for _, r := range releases {
+		if r.Tag == head {
+			cutoff = r.Published
+			break
+		}
+	}
+	best, bestVer := "", []int(nil)
+	for _, r := range releases {
+		if r.Prerelease || r.Tag == head {
+			continue
+		}
+		if !cutoff.IsZero() && !r.Published.IsZero() && r.Published.After(cutoff) {
+			continue
+		}
+		v, ok := parseVersion(r.Tag)
+		if !ok || compareVersions(v, headVer) >= 0 {
+			continue
+		}
+		if best == "" || compareVersions(v, bestVer) > 0 {
+			best, bestVer = r.Tag, v
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no release older than %q among the %d listed (the listing is bounded; pass -start-tag to compare against an older release): %w",
+			head, len(releases), ErrNoPreviousRelease)
+	}
+	return best, nil
+}
 
 // releaseKey identifies a tag pair. It is the key for the per-release claim and
 // the payload of the issue marker, so the two can never disagree.
@@ -270,7 +415,10 @@ func groupFiles(files []ChangedFile, per int) [][]ChangedFile {
 	var groups [][]ChangedFile
 	for i := 0; i < len(files); i += per {
 		end := min(i+per, len(files))
-		groups = append(groups, files[i:end])
+		// Three-index slice: a full-capacity subslice would let an append into
+		// one group overwrite the next group's first file. No caller appends
+		// today, and the aliasing is invisible at the call site if one starts.
+		groups = append(groups, files[i:end:end])
 	}
 	return groups
 }
@@ -329,7 +477,7 @@ func renderGroupPrompt(diff *ReleaseDiff, group []ChangedFile, groupIndex, total
 // sanitizeFinding has neutralized it.
 //
 // The body is truncated to GitHub's limit rather than being rejected by the API.
-func buildIssueBody(diff *ReleaseDiff, findings []Finding, budgetExhausted bool) string {
+func buildIssueBody(diff *ReleaseDiff, findings []Finding, a analysis) string {
 	var b strings.Builder
 	b.WriteString(bodyMarker(diff.BaseTag, diff.HeadTag) + "\n\n")
 	fmt.Fprintf(&b, "Automated analysis of the code changes between `%s` and `%s`, "+
@@ -339,7 +487,7 @@ func buildIssueBody(diff *ReleaseDiff, findings []Finding, budgetExhausted bool)
 	}
 	fmt.Fprintf(&b, "Files changed: %d. Analyzed: %d.\n\n", diff.TotalFiles, len(diff.Files))
 
-	if notes := coverageNotes(diff, budgetExhausted); len(notes) > 0 {
+	if notes := coverageNotes(diff, a); len(notes) > 0 {
 		b.WriteString("**The analysis is partial.**\n\n")
 		for _, n := range notes {
 			b.WriteString("- " + n + "\n")
@@ -370,8 +518,15 @@ func buildIssueBody(diff *ReleaseDiff, findings []Finding, budgetExhausted bool)
 	b.WriteString("---\nFiled automatically. Review each suggestion before acting on it: " +
 		"the analysis reads the diff only and does not read the documentation.\n")
 
-	body, cut := truncateBytes(b.String(), maxIssueBodyBytes-len(bodyTruncationNotice))
+	body, cut := truncateBytes(b.String(), maxIssueBodyBytes-len(bodyTruncationNotice)-len(fenceClose))
 	if cut {
+		// The cut lands at an arbitrary byte offset, which for a body of several
+		// findings is usually inside a fenced block. Close it first, or the
+		// notice below renders as preformatted text inside a fence that never
+		// ends.
+		if strings.Count(body, "```")%2 == 1 {
+			body += fenceClose
+		}
 		body += bodyTruncationNotice
 	}
 	return body
@@ -379,6 +534,9 @@ func buildIssueBody(diff *ReleaseDiff, findings []Finding, budgetExhausted bool)
 
 // bodyTruncationNotice is appended when the rendered body exceeded GitHub's
 // limit, so a reader is never shown a silently cut issue.
+// fenceClose terminates a fenced block left open by truncation.
+const fenceClose = "\n```\n"
+
 const bodyTruncationNotice = "\n\n_[This issue body hit GitHub's size limit and was truncated.]_\n"
 
 // writeField renders one labeled field inside the fenced block, skipping empties.
@@ -389,31 +547,78 @@ func writeField(b *strings.Builder, label, value string) {
 	fmt.Fprintf(b, "%s: %s\n", label, value)
 }
 
+// analysis records what the run actually managed to analyze, so the issue can
+// say which parts of the release it does not cover. Every field here becomes a
+// line in the issue: a group that failed, was never reached, or completed
+// without reporting is disclosed rather than silently missing.
+type analysis struct {
+	// Groups is how many file groups the release was split into.
+	Groups int
+	// NotAttempted is how many the run budget never reached.
+	NotAttempted int
+	// Failed is how many errored (a nonce draw, a session, or the model call).
+	Failed int
+	// Unreported is how many completed without recording anything at all --
+	// distinct from recording an empty list, which is a real "nothing to
+	// suggest" answer. A model steered into silence lands here.
+	Unreported int
+	// BudgetExhausted records that the run budget expired at any point.
+	BudgetExhausted bool
+}
+
+// complete reports whether every group was analyzed and reported.
+func (a analysis) complete() bool {
+	return a.NotAttempted == 0 && a.Failed == 0 && a.Unreported == 0 && !a.BudgetExhausted
+}
+
 // coverageNotes lists, in reader-facing prose, everything the analysis did not
 // see. It is what makes the truncation honest rather than silent.
-func coverageNotes(diff *ReleaseDiff, budgetExhausted bool) []string {
+func coverageNotes(diff *ReleaseDiff, a analysis) []string {
 	var notes []string
+	if diff.PageBoundHit {
+		notes = append(notes, "The comparison was larger than this bot fetches, so the file and commit "+
+			"totals below are lower bounds rather than the real counts.")
+	}
 	if diff.OmittedFiles > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d changed files were not analyzed (file cap).",
 			diff.OmittedFiles, diff.TotalFiles))
 	}
-	// Count only: a file path is contributor-authored, and these notes are
+	// Counts only: a file path is contributor-authored, and these notes are
 	// rendered outside any fence.
-	cut := 0
+	cut, patchless := 0, 0
 	for _, f := range diff.Files {
 		if f.PatchTruncated {
 			cut++
+		}
+		if f.Patch == "" {
+			patchless++
 		}
 	}
 	if cut > 0 {
 		notes = append(notes, fmt.Sprintf("%d file diffs were truncated to the per-file byte cap, "+
 			"so only part of each was analyzed.", cut))
 	}
+	if patchless > 0 {
+		notes = append(notes, fmt.Sprintf("%d changed files had no diff text available (binary, or larger than "+
+			"GitHub returns), so they were named to the analysis but their contents were not read.", patchless))
+	}
 	if diff.OmittedCommits > 0 {
 		notes = append(notes, fmt.Sprintf("%d commit subjects were not included (commit cap).", diff.OmittedCommits))
 	}
-	if budgetExhausted {
-		notes = append(notes, "The run budget was exhausted before every file group was analyzed.")
+	if a.NotAttempted > 0 {
+		notes = append(notes, fmt.Sprintf("%d of %d file groups were never analyzed: the run budget was exhausted.",
+			a.NotAttempted, a.Groups))
+	}
+	if a.Failed > 0 {
+		notes = append(notes, fmt.Sprintf("%d of %d file groups failed to complete, so their files are not covered.",
+			a.Failed, a.Groups))
+	}
+	if a.Unreported > 0 {
+		notes = append(notes, fmt.Sprintf("%d of %d file groups finished without reporting a result, "+
+			"so their files may not be covered.", a.Unreported, a.Groups))
+	}
+	if a.BudgetExhausted && a.NotAttempted == 0 && a.Failed == 0 {
+		notes = append(notes, "The run budget was exhausted, so the last group may not have been fully analyzed.")
 	}
 	return notes
 }

@@ -108,14 +108,23 @@ const (
 // and validates required fields. args is injectable so tests can exercise flag
 // parsing.
 func loadConfig(args []string) (*Config, error) {
+	// DRY_RUN is read before flag parsing so an unparseable value is rejected
+	// rather than defaulting. It is the one control whose whole job is to
+	// suppress the write, so it must fail CLOSED: silently reading DRY_RUN=yes
+	// as "false" performs exactly the mutation the operator asked to prevent.
+	envDryRun, err := envBoolStrict("DRY_RUN", false)
+	if err != nil {
+		return nil, err
+	}
+
 	fs := flag.NewFlagSet("releasedocsbot", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false),
+	dryRun := fs.Bool("dry-run", envDryRun,
 		"render the issue that would be filed without creating it")
 	startTag := fs.String("start-tag", os.Getenv("START_TAG"),
 		"older release tag (base); empty = the release before -end-tag")
 	endTag := fs.String("end-tag", os.Getenv("END_TAG"),
 		"newer release tag (head); empty = the most recent release")
-	if err := fs.Parse(args); err != nil {
+	if err = fs.Parse(args); err != nil {
 		return nil, err
 	}
 
@@ -262,6 +271,21 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// envBoolStrict reads a boolean environment variable and reports a value it
+// cannot parse as an error instead of falling back to the default. Use it for
+// anything whose default is the unsafe direction.
+func envBoolStrict(key string, def bool) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a boolean (use true or false)", key, v)
+	}
+	return b, nil
 }
 
 func envBool(key string, def bool) bool {

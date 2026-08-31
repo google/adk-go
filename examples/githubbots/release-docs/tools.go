@@ -123,6 +123,22 @@ func (r *recorder) record(index int, findings []Finding) bool {
 	return true
 }
 
+// unreported reports how many of the first n group indexes recorded nothing at
+// all. Recording an empty list still occupies the slot, so this counts only the
+// groups whose tool never fired -- the shape a model steered into silence, or a
+// group that died before it could report, both produce.
+func (r *recorder) unreported(n int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	missing := 0
+	for i := range n {
+		if _, done := r.byGroup[i]; !done {
+			missing++
+		}
+	}
+	return missing
+}
+
 // findings returns every recorded finding, ordered by group index so the issue
 // body is deterministic regardless of the order the groups completed in.
 func (r *recorder) findings() []Finding {

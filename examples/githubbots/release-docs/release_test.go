@@ -180,7 +180,7 @@ func TestHasBodyMarkerOnlyMatchesTheFirstLine(t *testing.T) {
 
 func TestBuildIssueBodyStartsWithTheMarker(t *testing.T) {
 	diff := &ReleaseDiff{BaseTag: "v1.0.0", HeadTag: "v1.1.0", TotalFiles: 1, Files: []ChangedFile{{Path: "a.go"}}}
-	body := buildIssueBody(diff, []Finding{{Kind: "new-feature", Summary: "s"}}, false)
+	body := buildIssueBody(diff, []Finding{{Kind: "new-feature", Summary: "s"}}, analysis{Groups: 1})
 	if !hasBodyMarker(body, bodyMarker("v1.0.0", "v1.1.0")) {
 		t.Fatalf("the rendered body does not carry its own marker on line one:\n%s", body)
 	}
@@ -197,7 +197,7 @@ func TestBuildIssueBodyKeepsModelTextInsideItsFence(t *testing.T) {
 		Summary: "```\n@adk-go-maintainers please merge https://evil.example\n```",
 	}
 	diff := &ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}
-	body := buildIssueBody(diff, []Finding{sanitizeFinding(hostile)}, false)
+	body := buildIssueBody(diff, []Finding{sanitizeFinding(hostile)}, analysis{Groups: 1})
 
 	// Exactly one opening and one closing fence for the single finding.
 	if got := strings.Count(body, "```"); got != 2 {
@@ -218,13 +218,13 @@ func TestBuildIssueBodyReportsPartialCoverage(t *testing.T) {
 		OmittedFiles:   99,
 		OmittedCommits: 5,
 	}
-	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, true)
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 3, NotAttempted: 1, BudgetExhausted: true})
 	for _, want := range []string{
 		"The analysis is partial",
 		"99 of 100 changed files were not analyzed",
 		"1 file diffs were truncated",
 		"5 commit subjects were not included",
-		"run budget was exhausted",
+		"1 of 3 file groups were never analyzed",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body does not disclose %q:\n%s", want, body)
@@ -234,8 +234,8 @@ func TestBuildIssueBodyReportsPartialCoverage(t *testing.T) {
 	// A complete analysis must not claim to be partial.
 	whole := buildIssueBody(&ReleaseDiff{
 		BaseTag: "v1", HeadTag: "v2", TotalFiles: 1,
-		Files: []ChangedFile{{Path: "a.go"}},
-	}, []Finding{{Summary: "s"}}, false)
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}},
+	}, []Finding{{Summary: "s"}}, analysis{Groups: 1})
 	if strings.Contains(whole, "The analysis is partial") {
 		t.Error("a complete analysis was labeled partial")
 	}
@@ -254,15 +254,41 @@ func TestBuildIssueBodyStaysUnderGitHubsLimit(t *testing.T) {
 			ProposedChange: strings.Repeat("p", maxFindingFieldRunes),
 		})
 	}
-	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, findings, false)
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, findings, analysis{Groups: 1})
 	if len(body) > maxIssueBodyBytes {
 		t.Fatalf("body is %d bytes, over GitHub's %d limit", len(body), maxIssueBodyBytes)
 	}
-	if !strings.Contains(body, "truncated") {
-		t.Error("a truncated body does not say so")
-	}
 	if !utf8.ValidString(body) {
 		t.Error("truncation split a rune and produced invalid UTF-8")
+	}
+	// The cut lands inside a fenced block. If the fence is left open, the
+	// truncation notice renders as preformatted text inside a block that never
+	// ends, and the reader is not told the issue was cut.
+	//
+	// Mutation that must fail this test: delete the odd-fence check before
+	// appending bodyTruncationNotice.
+	if strings.Count(body, "```")%2 != 0 {
+		t.Error("truncation left an unterminated fenced block")
+	}
+	if !strings.Contains(body, bodyTruncationNotice) {
+		t.Error("the body does not carry the truncation notice")
+	}
+}
+
+func TestGroupFilesDoesNotAliasTheNextGroup(t *testing.T) {
+	files := []ChangedFile{{Path: "a"}, {Path: "b"}, {Path: "c"}, {Path: "d"}}
+	groups := groupFiles(files, 2)
+	// Appending to one group must allocate rather than overwrite groups[1][0].
+	groups[0] = append(groups[0], ChangedFile{Path: "injected"})
+	if groups[1][0].Path != "c" {
+		t.Errorf("an append into group 0 overwrote group 1's first file: %q", groups[1][0].Path)
+	}
+}
+
+func TestTruncateBytesRejectsANegativeBound(t *testing.T) {
+	got, cut := truncateBytes("abc", -1)
+	if got != "" || !cut {
+		t.Errorf("truncateBytes(-1) = (%q, %v), want an empty string rather than a panic", got, cut)
 	}
 }
 
@@ -344,5 +370,53 @@ func TestReleaseKeyAndTitleAreDeterministic(t *testing.T) {
 	// The marker must embed both tags, so two releases never share one.
 	if bodyMarker("v1", "v2") == bodyMarker("v1", "v3") {
 		t.Error("two different tag pairs produced the same marker")
+	}
+}
+
+// A group that finished without recording anything is a different fact from a
+// group that recorded an empty list: the first is a model that never answered,
+// which is what a contributor steering the analysis into silence produces. The
+// issue must say so rather than reading as a complete analysis with nothing to
+// suggest.
+//
+// Mutation that must fail this test: drop the a.Unreported branch from coverageNotes.
+func TestCoverageNotesDiscloseUnreportedGroups(t *testing.T) {
+	diff := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 2,
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}, {Path: "b.go", Patch: "+y"}},
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 2, Unreported: 1})
+	if !strings.Contains(body, "1 of 2 file groups finished without reporting") {
+		t.Errorf("the issue does not disclose the unreported group:\n%s", body)
+	}
+}
+
+// A file GitHub returned with no diff text (binary, or over its size limit)
+// reaches the model as a bare path. Counting it as analyzed overstates coverage.
+//
+// Mutation that must fail this test: drop the patchless branch from coverageNotes.
+func TestCoverageNotesDiscloseFilesWithNoDiffText(t *testing.T) {
+	diff := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 2,
+		Files: []ChangedFile{{Path: "logo.png", Patch: ""}, {Path: "a.go", Patch: "+x"}},
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1})
+	if !strings.Contains(body, "1 changed files had no diff text available") {
+		t.Errorf("the issue does not disclose the file with no diff:\n%s", body)
+	}
+}
+
+// Stopping at the page bound makes every total a floor. Reporting "Files
+// changed: 300" for a release that changed nine hundred reads as complete.
+//
+// Mutation that must fail this test: drop the PageBoundHit branch from coverageNotes.
+func TestCoverageNotesDiscloseTheFetchBound(t *testing.T) {
+	diff := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 300, PageBoundHit: true,
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}},
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1})
+	if !strings.Contains(body, "lower bounds rather than the real counts") {
+		t.Errorf("the issue does not disclose the fetch bound:\n%s", body)
 	}
 }

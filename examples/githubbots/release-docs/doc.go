@@ -44,9 +44,13 @@
 //     which is what catches a re-run moments after a successful run, and a
 //     search-index query by the deterministic title, which covers issues older
 //     than the scan's bound. A hit from either means the release is done.
+//   - Both probes run again immediately before the write, because the check
+//     above happened before the analysis loop and is minutes stale by then.
 //   - Within a run, an atomic claim keyed by the tag pair is taken in the same
 //     critical section that reads the previous outcome, so two callers cannot
 //     both pass on one observation.
+//   - The workflow serializes every run of itself, so two cannot analyze one
+//     release side by side.
 //   - Each model session is scoped to one (release, file group) pair, and the
 //     recording tool refuses any call naming a different one.
 //
@@ -62,7 +66,15 @@
 // The issue body is largely model-authored. Every model-authored field is
 // sanitized (value allow-lists on the kind and the documentation path, a rune
 // cap on the free text) and rendered inside a fenced block, with the sequences
-// that could close that fence or open an HTML comment neutralized first.
+// that could close that fence or open an HTML comment neutralized first. The
+// dry-run render additionally defuses any line the GitHub Actions runner would
+// read as a workflow command, because that is a different parser.
+//
+// The bot also reports what it did NOT analyze. A file group that failed, that
+// the run budget never reached, or that finished without the model calling the
+// tool at all is counted and named in the issue, so a partial analysis cannot
+// be mistaken for a complete one -- and a model steered into silence shows up
+// as an unreported group rather than as "no suggestions".
 //
 // # Filing into another repository
 //

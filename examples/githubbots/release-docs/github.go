@@ -171,42 +171,44 @@ func (c *GitHubClient) fileAttemptFailed(key string) bool {
 // --- Release resolution -----------------------------------------------------
 
 // ResolveTags determines the tag pair to diff. An explicitly configured tag is
-// used as given; an empty EndTag resolves to the most recent published release
-// and an empty StartTag to the release published immediately before it.
+// used as given; an empty EndTag resolves to the greatest published release
+// version and an empty StartTag to the greatest release older than it.
 //
-// Draft releases are skipped: they are not published and diffing against one
-// would compare code nobody has shipped.
+// Selection is by version, not by the order the releases API returns -- see
+// parseVersion for why that order cannot be trusted.
 func (c *GitHubClient) ResolveTags(ctx context.Context) (base, head string, err error) {
 	if c.cfg.StartTag != "" && c.cfg.EndTag != "" {
 		return c.cfg.StartTag, c.cfg.EndTag, nil
 	}
-	tags, err := c.publishedTags(ctx)
+	releases, err := c.publishedReleases(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	head = c.cfg.EndTag
 	if head == "" {
-		if len(tags) == 0 {
-			return "", "", errors.New("no published releases found")
+		var ok bool
+		if head, ok = latestTag(releases); !ok {
+			return "", "", errors.New("no published release with a numeric version tag was found")
 		}
-		head = tags[0]
 	}
 	base = c.cfg.StartTag
 	if base == "" {
-		base, err = previousTag(tags, head)
-		if err != nil {
+		if base, err = previousTag(releases, head); err != nil {
 			return "", "", err
 		}
 	}
 	return base, head, nil
 }
 
-// publishedTags lists non-draft release tags, most recently created first, and
-// drops any tag that fails the allow-list so a malformed tag from the API can
-// never reach a URL path.
-func (c *GitHubClient) publishedTags(ctx context.Context) ([]string, error) {
+// publishedReleases lists non-draft releases, dropping any whose tag fails the
+// allow-list so a malformed tag from the API can never reach a URL path.
+//
+// The listing is bounded by releasePages. That bound is safe for tag selection
+// because selection is by version: a head tag missing from the listing still
+// resolves, and a base older than the bound is reported as such by previousTag.
+func (c *GitHubClient) publishedReleases(ctx context.Context) ([]Release, error) {
 	opts := &github.ListOptions{PerPage: listPageSize}
-	var tags []string
+	var out []Release
 	for page := 0; page < releasePages; page++ {
 		releases, resp, err := c.rest.Repositories.ListReleases(ctx, c.cfg.Owner, c.cfg.Repo, opts)
 		if err != nil {
@@ -221,28 +223,14 @@ func (c *GitHubClient) publishedTags(ctx context.Context) ([]string, error) {
 				c.log.Warn("skipping release with an unusable tag name", "tag", tag)
 				continue
 			}
-			tags = append(tags, tag)
+			out = append(out, Release{Tag: tag, Prerelease: r.GetPrerelease(), Published: r.GetPublishedAt().Time})
 		}
 		if resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
 	}
-	return tags, nil
-}
-
-// previousTag returns the tag listed immediately after head, i.e. the release
-// published before it. tags must be ordered most-recent-first.
-func previousTag(tags []string, head string) (string, error) {
-	for i, t := range tags {
-		if t == head {
-			if i+1 >= len(tags) {
-				return "", fmt.Errorf("%q is the earliest listed release: %w", head, ErrNoPreviousRelease)
-			}
-			return tags[i+1], nil
-		}
-	}
-	return "", fmt.Errorf("release %q not found among the listed releases", head)
+	return out, nil
 }
 
 // --- Diff -------------------------------------------------------------------
@@ -262,6 +250,7 @@ func (c *GitHubClient) Compare(ctx context.Context, base, head string) (*Release
 	// it a repeated files array would have the same file analyzed once per page.
 	seenFile := make(map[string]bool)
 	seenCommit := make(map[string]bool)
+	totalCommits := 0
 	opts := &github.ListOptions{PerPage: listPageSize}
 	for page := 0; page < comparePages; page++ {
 		cmp, resp, err := c.rest.Repositories.CompareCommits(ctx, c.cfg.Owner, c.cfg.Repo, base, head, opts)
@@ -270,6 +259,9 @@ func (c *GitHubClient) Compare(ctx context.Context, base, head string) (*Release
 		}
 		if page == 0 {
 			diff.CompareURL = cmp.GetHTMLURL()
+			// The comparison reports its own commit total, which is the real
+			// number even when pagination or the caps stop us short of it.
+			totalCommits = cmp.GetTotalCommits()
 		}
 		for _, f := range cmp.Files {
 			path := f.GetFilename()
@@ -299,14 +291,25 @@ func (c *GitHubClient) Compare(ctx context.Context, base, head string) (*Release
 		if resp.NextPage == 0 {
 			break
 		}
+		if page == comparePages-1 {
+			// About to stop with pages left. Record it: without this the totals
+			// below are silently a floor, and the issue would report "Files
+			// changed: 300" for a release that changed nine hundred.
+			diff.PageBoundHit = true
+		}
 		opts.Page = resp.NextPage
 	}
 
 	diff.TotalFiles = len(files)
 	diff.Files, diff.OmittedFiles = boundFiles(files, c.cfg.MaxFiles, c.cfg.MaxPatchBytes)
 	if len(diff.Commits) > c.cfg.MaxCommits {
-		diff.OmittedCommits = len(diff.Commits) - c.cfg.MaxCommits
 		diff.Commits = diff.Commits[:c.cfg.MaxCommits]
+	}
+	// Counted against the comparison's own total, not against the commits we
+	// happened to fetch, so a release whose commits exceed the page bound does
+	// not under-report how many subjects the analysis never saw.
+	if totalCommits > len(diff.Commits) {
+		diff.OmittedCommits = totalCommits - len(diff.Commits)
 	}
 	return diff, nil
 }
@@ -434,11 +437,16 @@ func (c *GitHubClient) trustedCreator(u *github.User) bool {
 // FileReleaseIssue creates the release's documentation issue in the target
 // repository. It is the bot's only mutation.
 //
-// The claim is taken before the write so a second call for the same release is
-// a no-op rather than a second issue. A failed write is reported as such rather
-// than as "already filed", so the run does not record an issue that was never
+// Three things stand between it and a duplicate, because one alone is not
+// enough. The claim is taken first, so a second call in this process is a no-op.
+// The duplicate probes are then re-run inside the claim, immediately before the
+// write: the caller's earlier check ran before the analysis loop and is minutes
+// stale by now, and an in-process claim cannot see a concurrent workflow run at
+// all. The workflow's concurrency group serializes those runs, and this re-probe
+// is what holds if it does not. A failed write is reported as such rather than
+// as "already filed", so the run does not record an issue that was never
 // created.
-func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, title, body string) (int, error) {
+func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, headTag, title, body string) (int, error) {
 	if !c.claimRelease(key) {
 		if c.fileAttemptFailed(key) {
 			return 0, fmt.Errorf("filing the issue for %s already failed this run", key)
@@ -448,10 +456,22 @@ func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, title, body st
 	}
 	if c.shouldSkip("create issue %q in %s/%s", title, c.cfg.TargetOwner, c.cfg.TargetRepo) {
 		c.log.Info("[dry-run] rendering the issue body it would have filed", "release", key, "bytes", len(body))
-		if _, err := fmt.Fprintln(c.out, body); err != nil {
+		if _, err := fmt.Fprintln(c.out, escapeWorkflowCommands(body)); err != nil {
 			c.log.Warn("could not render the dry-run issue body", "error", err)
 		}
 		return 0, nil
+	}
+	// Re-probe AFTER the dry-run gate: a dry run writes nothing, so it owes no
+	// proof of novelty and must not fail on an API call it does not need.
+	base, _, _ := strings.Cut(key, "...")
+	if n, found, err := c.FindExistingIssue(ctx, headTag, bodyMarker(base, headTag)); err != nil {
+		c.recordFileFailure(key)
+		c.recordError()
+		return 0, fmt.Errorf("re-check for an existing issue before filing: %w", err)
+	} else if found {
+		c.log.Info("another run filed this release's issue while this one was analyzing; not filing again",
+			"release", key, "issue", n)
+		return n, nil
 	}
 	iss, _, err := c.rest.Issues.Create(ctx, c.cfg.TargetOwner, c.cfg.TargetRepo, &github.IssueRequest{
 		Title: github.String(title),
@@ -465,6 +485,25 @@ func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, title, body st
 	c.log.Info("filed release documentation issue",
 		"issue", iss.GetNumber(), "repo", c.cfg.TargetOwner+"/"+c.cfg.TargetRepo)
 	return iss.GetNumber(), nil
+}
+
+// escapeWorkflowCommands defuses any line of the rendered body that the GitHub
+// Actions runner would read as a workflow command.
+//
+// The dry-run render writes a partly model-authored body to stdout, and the
+// runner parses stdout for lines beginning (after optional whitespace) with
+// "::" -- ::add-mask::, ::error::, ::stop-commands:: and the rest. Neutralizing
+// Markdown is not enough here, because that is a different parser. Only such a
+// line is touched, and it is marked rather than silently altered, so the render
+// stays faithful to what would be filed.
+func escapeWorkflowCommands(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimLeft(l, " \t"), "::") {
+			lines[i] = "[escaped workflow command] " + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // shouldSkip logs an intended mutation and reports whether it should be skipped

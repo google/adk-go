@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,8 +24,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v66/github"
 )
@@ -35,6 +40,7 @@ func testConfig() *Config {
 		TargetOwner: "google", TargetRepo: "adk-go",
 		MaxFiles: 10, MaxPatchBytes: 1000, MaxCommits: 10,
 		FilesPerGroup: 2, MaxFindingsPerGroup: 5,
+		RunBudget: time.Minute, GroupTimeout: time.Minute,
 	}
 }
 
@@ -85,39 +91,190 @@ func issueJSON(number int, login, userType, body string) string {
 
 // --- Tag resolution ---------------------------------------------------------
 
-func TestPreviousTag(t *testing.T) {
-	tags := []string{"v1.3.0", "v1.2.0", "v1.1.0"}
-	got, err := previousTag(tags, "v1.3.0")
-	if err != nil || got != "v1.2.0" {
-		t.Errorf("previousTag(head=v1.3.0) = (%q, %v), want (v1.2.0, nil)", got, err)
+// The live google/adk-go release listing, in the order ListReleases returns it.
+// Maintenance-line releases interleave with the main line because GitHub orders
+// by created_at -- the date of the COMMIT a tag points at, not the date the
+// release was published. Any selection that trusts this order is wrong on this
+// repository, today, on the bot's default path.
+func liveAdkGoReleases() []Release {
+	var out []Release
+	// Tag with its real publication date, in the real list order.
+	for _, r := range [][2]string{
+		{"v2.3.0", "2026-08-31T14:44:57Z"},
+		{"v1.6.0", "2026-08-12T06:36:40Z"},
+		{"v2.2.0", "2026-08-10T07:30:43Z"},
+		{"v2.1.0", "2026-07-23T16:16:30Z"},
+		{"v1.5.1", "2026-07-22T13:53:57Z"},
+		{"v2.0.0", "2026-06-30T14:24:36Z"},
+		{"v1.5.0", "2026-07-01T09:40:04Z"},
+		{"v1.4.0", "2026-05-29T13:45:25Z"},
+		{"v1.3.0", "2026-05-19T12:49:31Z"},
+		{"v1.2.0", "2026-04-23T19:13:09Z"},
+		{"v1.1.0", "2026-04-10T15:08:03Z"},
+		{"v1.0.0", "2026-03-23T09:38:41Z"},
+	} {
+		published, err := time.Parse(time.RFC3339, r[1])
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, Release{Tag: r[0], Published: published})
 	}
-	if _, err := previousTag(tags, "v1.1.0"); !errors.Is(err, ErrNoPreviousRelease) {
-		t.Errorf("previousTag on the earliest release = %v, want ErrNoPreviousRelease", err)
-	}
-	if _, err := previousTag(tags, "v9.9.9"); err == nil {
-		t.Error("previousTag for an unlisted head returned no error")
+	return out
+}
+
+// Mutation that must fail this test: make previousTag return the entry after
+// head in list order (`for i, r := range releases { if r.Tag == head { return
+// releases[i+1].Tag, nil } }`).
+func TestPreviousTagUsesVersionOrderNotListOrder(t *testing.T) {
+	rels := liveAdkGoReleases()
+	for _, tc := range []struct{ head, want string }{
+		// List order would give v1.6.0 here: a base from the other major line.
+		{"v2.3.0", "v2.2.0"},
+		// List order would give v2.2.0 here: a base NEWER than the head, on the
+		// other major line, producing a backwards compare.
+		{"v1.6.0", "v1.5.1"},
+		// Version order ALONE would give v1.6.0 here, which shipped six weeks
+		// AFTER v2.0.0 and so was never the release v2.0.0 followed. The
+		// publication cutoff is what excludes it. v1.5.0 published 2026-07-01,
+		// after v2.0.0's 2026-06-30, so the answer is v1.4.0.
+		{"v2.0.0", "v1.4.0"},
+		{"v1.1.0", "v1.0.0"},
+		// A head published after the listing was taken still resolves.
+		{"v2.4.0", "v2.3.0"},
+	} {
+		got, err := previousTag(rels, tc.head)
+		if err != nil {
+			t.Errorf("previousTag(head=%s): %v", tc.head, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("previousTag(head=%s) = %s, want %s", tc.head, got, tc.want)
+		}
 	}
 }
 
-// A draft release is unpublished code, and a tag outside the allow-list would be
-// interpolated into the compare path. Both must be dropped before a tag is used.
+// A prerelease must never become a base: diffing a final release against its own
+// release candidate covers only the rc-to-final delta and drops the feature set
+// the release shipped.
 //
-// Mutation that must fail this test: delete the `if r.GetDraft() { continue }` guard.
-func TestPublishedTagsSkipsDraftsAndUnusableTags(t *testing.T) {
+// Mutation that must fail this test: delete the `r.Prerelease` term from
+// previousTag's skip condition.
+func TestPreviousTagSkipsPrereleases(t *testing.T) {
+	// v1.3.5-rc.1 carries a version strictly BETWEEN v1.3.0 and the head, so it
+	// is the answer version comparison alone would give. Only the prerelease
+	// flag excludes it. (An rc of the head itself, v1.4.0-rc.1, would be
+	// excluded by the version comparison anyway and so proves nothing.)
+	rels := []Release{
+		{Tag: "v1.4.0"},
+		{Tag: "v1.4.0-rc.1", Prerelease: true},
+		{Tag: "v1.3.5-rc.1", Prerelease: true},
+		{Tag: "v1.3.0"},
+	}
+	got, err := previousTag(rels, "v1.4.0")
+	if err != nil {
+		t.Fatalf("previousTag: %v", err)
+	}
+	if got != "v1.3.0" {
+		t.Errorf("previousTag(v1.4.0) = %s, want v1.3.0 (v1.3.5-rc.1 is a prerelease)", got)
+	}
+}
+
+func TestPreviousTagErrors(t *testing.T) {
+	rels := []Release{{Tag: "v1.0.0"}}
+	if _, err := previousTag(rels, "v1.0.0"); !errors.Is(err, ErrNoPreviousRelease) {
+		t.Errorf("previousTag on the earliest release = %v, want ErrNoPreviousRelease", err)
+	}
+	// The message must tell the operator the listing is bounded and name the way out.
+	_, err := previousTag(rels, "v1.0.0")
+	for _, want := range []string{"bounded", "-start-tag"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if _, err := previousTag(rels, "nightly"); err == nil {
+		t.Error("previousTag accepted a non-version head tag")
+	}
+}
+
+func TestLatestTagPicksTheGreatestVersion(t *testing.T) {
+	// v1.6.0 is FIRST in list order but is not the latest release.
+	rels := append(liveAdkGoReleases(), Release{Tag: "v9.9.9-rc.1", Prerelease: true})
+	got, ok := latestTag(rels)
+	if !ok || got != "v2.3.0" {
+		t.Errorf("latestTag = (%q, %v), want (v2.3.0, true)", got, ok)
+	}
+	if _, ok := latestTag([]Release{{Tag: "nightly"}}); ok {
+		t.Error("latestTag accepted a non-version tag")
+	}
+}
+
+func TestParseAndCompareVersions(t *testing.T) {
+	for _, tc := range []struct {
+		tag  string
+		want []int
+		ok   bool
+	}{
+		{"v1.2.3", []int{1, 2, 3}, true},
+		{"1.2", []int{1, 2}, true},
+		{"v2.0.0-rc.1", []int{2, 0, 0}, true},
+		{"v1.0.0+build.5", []int{1, 0, 0}, true},
+		{"nightly", nil, false},
+		{"v", nil, false},
+	} {
+		got, ok := parseVersion(tc.tag)
+		if ok != tc.ok || (ok && !slices.Equal(got, tc.want)) {
+			t.Errorf("parseVersion(%q) = (%v, %v), want (%v, %v)", tc.tag, got, ok, tc.want, tc.ok)
+		}
+	}
+	// A shorter version compares as if zero-padded.
+	if compareVersions([]int{1, 2}, []int{1, 2, 0}) != 0 {
+		t.Error("v1.2 and v1.2.0 should compare equal")
+	}
+	if compareVersions([]int{1, 10, 0}, []int{1, 9, 0}) <= 0 {
+		t.Error("versions must compare numerically, not lexically (1.10 > 1.9)")
+	}
+}
+
+// A draft release is unpublished code, and a tag outside the allow-list would
+// be interpolated into the compare API path. Both must be dropped. The
+// prerelease flag and the publication time must survive, because base selection
+// reads both: without the flag an rc becomes a base, and without the time a
+// maintenance release that shipped later becomes the base for an older major.
+//
+// Mutations that must fail this test: delete the `if r.GetDraft()` guard;
+// delete the `validTag` guard; hardcode `Prerelease: false`; hardcode
+// `Published: time.Time{}`.
+func TestPublishedReleasesMapsTheAPIFields(t *testing.T) {
 	const body = `[
-		{"tag_name":"v1.3.0","draft":false},
-		{"tag_name":"v1.2.9","draft":true},
-		{"tag_name":"../evil","draft":false},
-		{"tag_name":"v1.2.0","draft":false}
+		{"tag_name":"v1.3.0","draft":false,"prerelease":false,"published_at":"2026-05-19T12:49:31Z"},
+		{"tag_name":"v1.2.9","draft":true,"published_at":"2026-05-01T00:00:00Z"},
+		{"tag_name":"../evil","draft":false,"published_at":"2026-05-01T00:00:00Z"},
+		{"tag_name":"v1.2.0","draft":false,"published_at":"2026-04-23T19:13:09Z"},
+		{"tag_name":"v1.1.0-rc.1","draft":false,"prerelease":true,"published_at":"2026-04-01T00:00:00Z"}
 	]`
 	c := respondWith(t, testConfig(), body)
-	tags, err := c.publishedTags(context.Background())
+	rels, err := c.publishedReleases(context.Background())
 	if err != nil {
-		t.Fatalf("publishedTags: %v", err)
+		t.Fatalf("publishedReleases: %v", err)
 	}
-	want := []string{"v1.3.0", "v1.2.0"}
+	var tags []string
+	for _, r := range rels {
+		tags = append(tags, r.Tag)
+	}
+	want := []string{"v1.3.0", "v1.2.0", "v1.1.0-rc.1"}
 	if strings.Join(tags, ",") != strings.Join(want, ",") {
-		t.Errorf("publishedTags = %v, want %v", tags, want)
+		t.Fatalf("publishedReleases = %v, want %v (the draft and the unusable tag are dropped)", tags, want)
+	}
+	if rels[0].Prerelease {
+		t.Error("a full release was marked as a prerelease")
+	}
+	if !rels[2].Prerelease {
+		t.Error("the prerelease flag was dropped, so an rc tag could become a base")
+	}
+	wantPublished := time.Date(2026, 5, 19, 12, 49, 31, 0, time.UTC)
+	if !rels[0].Published.Equal(wantPublished) {
+		t.Errorf("Published = %v, want %v; without it base selection loses its publication cutoff",
+			rels[0].Published, wantPublished)
 	}
 }
 
@@ -132,14 +289,26 @@ func TestResolveTagsWithBothTagsMakesNoAPICall(t *testing.T) {
 }
 
 func TestResolveTagsDerivesTheRange(t *testing.T) {
-	const body = `[{"tag_name":"v1.3.0"},{"tag_name":"v1.2.0"}]`
+	// List order is deliberately NOT version order, matching the live repo, and
+	// v1.4.0 is a maintenance release published AFTER the head — so it is
+	// excluded by version, and v1.3.0 by the publication cutoff. The answer is
+	// v1.2.0 only if both signals are wired through from the API.
+	const body = `[
+		{"tag_name":"v1.3.0","published_at":"2026-08-20T00:00:00Z"},
+		{"tag_name":"v1.6.0","published_at":"2026-08-12T00:00:00Z"},
+		{"tag_name":"v1.2.0","published_at":"2026-04-23T00:00:00Z"}
+	]`
 	c := respondWith(t, testConfig(), body)
 	base, head, err := c.ResolveTags(context.Background())
 	if err != nil {
 		t.Fatalf("ResolveTags: %v", err)
 	}
-	if base != "v1.2.0" || head != "v1.3.0" {
-		t.Errorf("ResolveTags = (%q, %q), want (v1.2.0, v1.3.0)", base, head)
+	if head != "v1.6.0" {
+		t.Errorf("ResolveTags head = %q, want v1.6.0 (the greatest version, not the first listed)", head)
+	}
+	if base != "v1.2.0" {
+		t.Errorf("ResolveTags base = %q, want v1.2.0: v1.3.0 has a lower version but was published "+
+			"after the head, so it was never the release v1.6.0 followed", base)
 	}
 }
 
@@ -160,7 +329,7 @@ func TestCompareBoundsTheDiff(t *testing.T) {
 	cfg.MaxFiles = 2
 	cfg.MaxPatchBytes = 5
 	cfg.MaxCommits = 1
-	body := `{"html_url":"https://github.com/google/adk-go/compare/v1...v2","files":[
+	body := `{"html_url":"https://github.com/google/adk-go/compare/v1...v2","total_commits":2,"files":[
 		{"filename":"a.go","status":"modified","additions":2,"deletions":1,"patch":"0123456789"},
 		{"filename":"b.go","status":"added","patch":"ok"},
 		{"filename":"c.go","status":"added","patch":"dropped"}
@@ -182,6 +351,11 @@ func TestCompareBoundsTheDiff(t *testing.T) {
 	if len(diff.Commits) != 1 || diff.OmittedCommits != 1 {
 		t.Errorf("commits kept=%d omitted=%d, want 1/1", len(diff.Commits), diff.OmittedCommits)
 	}
+	// The omitted count comes from the comparison's own total_commits, so a
+	// release whose commits exceed the page bound does not under-report.
+	//
+	// Mutation that must fail this test: compute OmittedCommits from
+	// len(diff.Commits) before the cap instead of from total_commits.
 	// Only the subject line reaches the prompt, and the SHA is abbreviated.
 	if diff.Commits[0].Subject != "feat: one" || diff.Commits[0].SHA != "abcdef12" {
 		t.Errorf("commit = %+v, want subject-only and a short SHA", diff.Commits[0])
@@ -395,14 +569,20 @@ func TestFileReleaseIssueCreatesOnlyOnce(t *testing.T) {
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			posts++
+			_, _ = io.WriteString(w, `{"number":11}`)
+			return
 		}
-		_, _ = io.WriteString(w, `{"number":11}`)
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `[]`)
 	}))
-	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "title", "body")
+	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "body")
 	if err != nil || n != 11 {
 		t.Fatalf("first FileReleaseIssue = (%d, %v), want (11, nil)", n, err)
 	}
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "title", "body"); err != nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "body"); err != nil {
 		t.Fatalf("second FileReleaseIssue returned an error: %v", err)
 	}
 	if posts != 1 {
@@ -418,7 +598,7 @@ func TestFileReleaseIssueDryRunRendersWithoutWriting(t *testing.T) {
 	c := testClient(t, cfg, failIfCalled(t))
 	var rendered strings.Builder
 	c.out = &rendered
-	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "title", "THE BODY")
+	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "THE BODY")
 	if err != nil || n != 0 {
 		t.Fatalf("dry-run FileReleaseIssue = (%d, %v), want (0, nil)", n, err)
 	}
@@ -433,17 +613,27 @@ func TestFileReleaseIssueDryRunRendersWithoutWriting(t *testing.T) {
 // The failure is PRODUCED by a failing write, not installed by calling
 // recordFileFailure directly, so the recording half is pinned too.
 func TestSecondFileAfterFailureReportsTheFailure(t *testing.T) {
-	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The duplicate re-check succeeds; only the create fails, so the failure
+		// under test is the write and not the probe.
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"message":"boom"}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `[]`)
 	}))
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "t", "b"); err == nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", "b"); err == nil {
 		t.Fatal("the first FileReleaseIssue must surface the write failure")
 	}
 	if !c.hadError() {
 		t.Error("a failed write must be recorded so the run exits non-zero")
 	}
-	_, err := c.FileReleaseIssue(context.Background(), "v1...v2", "t", "b")
+	_, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", "b")
 	if err == nil || !strings.Contains(err.Error(), "already failed") {
 		t.Errorf("second FileReleaseIssue = %v, want an error naming the earlier failure", err)
 	}
@@ -470,11 +660,198 @@ func TestNewGitHubClientInitializesTheClaimMap(t *testing.T) {
 	}
 }
 
-func TestCommitSubjectTakesTheFirstLineOnly(t *testing.T) {
+// The rune cap is the only bound on a commit subject, and up to MaxCommits of
+// them go into the prompt, so a contributor writing one enormous subject line is
+// bounded by this and nothing else.
+//
+// The previous assertion was `> 300` on a 300-rune input, which is false by
+// construction: it passed with the cap deleted.
+//
+// Mutation that must fail this test: change commitSubject's truncateRunes bound
+// from 200 to 100000.
+func TestCommitSubjectTakesTheFirstLineOnlyAndBoundsIt(t *testing.T) {
 	if got := commitSubject("feat: thing\r\n\r\nlong body\nmore"); got != "feat: thing" {
 		t.Errorf("commitSubject = %q, want the subject line only", got)
 	}
-	if got := commitSubject(strings.Repeat("x", 300)); len([]rune(got)) > 300 {
-		t.Errorf("commitSubject did not bound a 300-rune subject: %d runes", len([]rune(got)))
+	const cap = 200
+	got := commitSubject(strings.Repeat("x", 5000))
+	if n := len([]rune(got)); n != cap+len([]rune(" …[truncated]")) {
+		t.Errorf("commitSubject returned %d runes, want the %d-rune cap plus the marker", n, cap)
+	}
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Errorf("a truncated subject does not say so: %q", got)
+	}
+	// A subject under the cap is returned whole.
+	if got := commitSubject(strings.Repeat("y", cap)); len([]rune(got)) != cap {
+		t.Errorf("a subject exactly at the cap was altered: %d runes", len([]rune(got)))
+	}
+}
+
+// filingHandler serves every endpoint runWith touches and captures the create
+// request, so an end-to-end test can assert what GitHub would actually receive.
+type filingHandler struct {
+	mu sync.Mutex
+	// writes counts every non-GET request, so a mutation added anywhere shows up.
+	writes      int
+	creates     int
+	title       string
+	body        string
+	searchQuery string
+}
+
+func (h *filingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if r.Method != http.MethodGet {
+		h.writes++
+	}
+	switch {
+	case strings.Contains(r.URL.Path, "/compare/"):
+		_, _ = io.WriteString(w, `{"html_url":"https://example.invalid/compare","total_commits":1,`+
+			`"files":[{"filename":"agent/agent.go","status":"modified","patch":"+// New exported API."}],`+
+			`"commits":[{"sha":"abcdef1234","commit":{"message":"feat: a new exported API"}}]}`)
+	case strings.HasPrefix(r.URL.Path, "/search/"):
+		h.searchQuery = r.URL.Query().Get("q")
+		_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+	case strings.HasSuffix(r.URL.Path, "/issues") && r.Method == http.MethodPost:
+		h.creates++
+		var req struct{ Title, Body string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		h.title, h.body = req.Title, req.Body
+		_, _ = io.WriteString(w, `{"number":1}`)
+	default:
+		_, _ = io.WriteString(w, `[]`)
+	}
+}
+
+// firstLine returns s up to its first newline, for a readable failure message.
+func firstLine(s string) string {
+	l, _, _ := strings.Cut(s, "\n")
+	return l
+}
+
+// Two runs that both passed the duplicate check must not both create. The claim
+// is the only thing standing between them, and until now it was driven only
+// sequentially: the -race gate was vacuous for GitHubClient because no test in
+// the package ever touched one from a second goroutine.
+//
+// Mutation that must fail this test: make claimRelease always return true.
+func TestFileReleaseIssueIsClaimedUnderConcurrency(t *testing.T) {
+	var posts int32
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			atomic.AddInt32(&posts, 1)
+		}
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"number":1}`)
+			return
+		}
+		_, _ = io.WriteString(w, `[]`)
+	}))
+
+	const n = 20
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b"); err != nil {
+				t.Errorf("FileReleaseIssue: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&posts); got != 1 {
+		t.Errorf("%d concurrent callers produced %d create calls, want 1", n, got)
+	}
+}
+
+// The caller's duplicate check runs before the analysis loop and is minutes
+// stale by the time the write happens. A concurrent run that filed in that
+// window must be seen.
+//
+// Mutation that must fail this test: delete the FindExistingIssue re-check from
+// FileReleaseIssue.
+func TestFileReleaseIssueRechecksImmediatelyBeforeWriting(t *testing.T) {
+	marker := bodyMarker("v1.0.0", "v1.1.0")
+	posts := 0
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts++
+			_, _ = io.WriteString(w, `{"number":2}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		// Another run filed it while this one was analyzing.
+		_, _ = io.WriteString(w, "["+issueJSON(99, "adk-bot", "Bot", marker+"\n\nfiled by the other run")+"]")
+	}))
+
+	n, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b")
+	if err != nil {
+		t.Fatalf("FileReleaseIssue: %v", err)
+	}
+	if posts != 0 {
+		t.Errorf("made %d create calls after finding an existing issue, want 0", posts)
+	}
+	if n != 99 {
+		t.Errorf("returned issue %d, want the existing 99", n)
+	}
+}
+
+// A re-check that could not run proves nothing, so the write must not proceed.
+func TestFileReleaseIssueAbortsWhenTheRecheckFails(t *testing.T) {
+	posts := 0
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts++
+			_, _ = io.WriteString(w, `{"number":2}`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	}))
+	if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b"); err == nil {
+		t.Fatal("FileReleaseIssue proceeded despite an unusable re-check")
+	}
+	if posts != 0 {
+		t.Errorf("made %d create calls, want 0", posts)
+	}
+	if !c.hadError() {
+		t.Error("the failure was not recorded, so the run would exit 0")
+	}
+}
+
+// The dry-run render writes a partly model-authored body to stdout, which the
+// GitHub Actions runner parses for workflow commands. A line beginning "::"
+// must not reach it intact.
+//
+// Mutation that must fail this test: drop the escapeWorkflowCommands call.
+func TestDryRunRenderDefusesWorkflowCommands(t *testing.T) {
+	cfg := testConfig()
+	cfg.DryRun = true
+	c := testClient(t, cfg, failIfCalled(t))
+	var rendered strings.Builder
+	c.out = &rendered
+
+	body := "line one\n::add-mask::secret\n  ::error::fake\nstd::vector stays\n"
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", body); err != nil {
+		t.Fatalf("FileReleaseIssue: %v", err)
+	}
+	for _, line := range strings.Split(rendered.String(), "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "::") {
+			t.Errorf("a workflow command reached the runner intact: %q", line)
+		}
+	}
+	// Only the command lines are touched: a mid-line "::" is left alone.
+	if !strings.Contains(rendered.String(), "std::vector stays") {
+		t.Error("escaping mangled a mid-line :: that the runner would never parse")
 	}
 }

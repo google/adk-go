@@ -33,13 +33,22 @@ on:
 permissions:
   contents: read
 
-# Two runs for the same release must not analyze it at the same time: the
-# duplicate check reads the issue list, and two runs could both observe it empty.
-# This queues rather than cancels, so a retry still completes. It is a second
-# line of defense -- the bot's own duplicate probes and per-release claim are the
-# first, and they are what holds across separate workflow runs.
+# Serialize every run of this workflow, so two of them can never analyze the
+# same release concurrently and both observe the issue list empty.
+#
+# The group is deliberately a constant rather than the release tag. The tag pair
+# a run files for is resolved inside the program -- an empty end_tag means "the
+# newest release" -- so a key built from the trigger's inputs does NOT identify
+# the release: a release run would key on `v1.2.0` while a manual dispatch that
+# resolves to the same release keys on `refs/heads/main`, and GitHub would run
+# them side by side. Two runs of different releases queueing behind each other
+# costs minutes and is worth it.
+#
+# This queues rather than cancels, so a retry still completes. It is one of two
+# defenses: the bot also re-runs its duplicate probes inside the claim,
+# immediately before the write, which is what holds if the queue does not.
 concurrency:
-  group: release-docs-bot-${{ github.event.release.tag_name || inputs.end_tag || github.ref }}
+  group: release-docs-bot
   cancel-in-progress: false
 
 jobs:

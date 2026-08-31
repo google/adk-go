@@ -16,7 +16,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -42,38 +41,22 @@ func TestNewNonce(t *testing.T) {
 	}
 }
 
-// A fence draw failure must abort rather than fall back to a predictable marker:
-// a guessable nonce lets a contributor pre-write the closing marker in a code
-// comment and escape the fence.
-func TestNonceFailureIsSurfacedRatherThanSubstituted(t *testing.T) {
-	orig := newNonce
-	newNonce = func() (string, error) { return "", errors.New("no entropy") }
-	t.Cleanup(func() { newNonce = orig })
-
-	if _, err := newNonce(); err == nil {
-		t.Fatal("test setup: the forced failure did not take")
-	}
-	// An empty nonce would produce "[UNTRUSTED:]", which anybody can write. The
-	// production path must never reach renderGroupPrompt with one.
-	got := renderGroupPrompt(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"},
-		[]ChangedFile{{Path: "a.go", Patch: "p"}}, 0, 1, "")
-	if !strings.Contains(got, "[UNTRUSTED:]") {
-		t.Fatal("test premise is wrong: an empty nonce no longer yields a guessable fence")
-	}
-}
-
 // stubRun records which group indexes the orchestrator actually drove.
 type stubRun struct {
 	mu      sync.Mutex
 	indexes []int
 	delay   time.Duration
+	// failFrom makes every group at or after this index report failure, so the
+	// accounting of a failed group can be driven rather than installed.
+	failFrom int
 }
 
-func (s *stubRun) fn(_ context.Context, index int) {
+func (s *stubRun) fn(_ context.Context, index int) bool {
 	s.mu.Lock()
 	s.indexes = append(s.indexes, index)
 	s.mu.Unlock()
 	time.Sleep(s.delay)
+	return index < s.failFrom
 }
 
 func TestAnalyzeAllDrivesEveryGroupInOrder(t *testing.T) {
@@ -82,12 +65,36 @@ func TestAnalyzeAllDrivesEveryGroupInOrder(t *testing.T) {
 	cfg.GroupTimeout = time.Minute
 	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}, {{Path: "c"}}}
 
-	s := &stubRun{}
-	if exhausted := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn); exhausted {
-		t.Error("analyzeAll reported the budget exhausted on a one-minute budget")
+	s := &stubRun{failFrom: 99}
+	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
+	if !a.complete() {
+		t.Errorf("a clean run reported %+v, want complete", a)
 	}
 	if len(s.indexes) != 3 || s.indexes[0] != 0 || s.indexes[1] != 1 || s.indexes[2] != 2 {
 		t.Errorf("groups driven = %v, want [0 1 2]", s.indexes)
+	}
+}
+
+// A group that fails for any reason must be counted, so the issue can say its
+// files are not covered instead of silently omitting them.
+//
+// Mutation that must fail this test: drop the `a.Failed++` in analyzeAll.
+func TestAnalyzeAllCountsFailedGroups(t *testing.T) {
+	cfg := testConfig()
+	cfg.RunBudget, cfg.GroupTimeout = time.Minute, time.Minute
+	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}, {{Path: "c"}}}
+
+	s := &stubRun{failFrom: 1} // groups 1 and 2 fail
+	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
+	if a.Failed != 2 {
+		t.Errorf("Failed = %d, want 2", a.Failed)
+	}
+	if a.complete() {
+		t.Error("a run with two failed groups reported complete coverage")
+	}
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, []Finding{{Summary: "s"}}, a)
+	if !strings.Contains(body, "2 of 3 file groups failed to complete") {
+		t.Errorf("the issue does not disclose the failed groups:\n%s", body)
 	}
 }
 
@@ -102,18 +109,51 @@ func TestAnalyzeAllStopsAndReportsWhenTheBudgetRunsOut(t *testing.T) {
 	cfg.GroupTimeout = time.Minute
 	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}, {{Path: "c"}}, {{Path: "d"}}}
 
-	s := &stubRun{delay: 25 * time.Millisecond}
-	exhausted := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
-	if !exhausted {
+	s := &stubRun{delay: 25 * time.Millisecond, failFrom: 99}
+	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
+	if !a.BudgetExhausted {
 		t.Fatal("analyzeAll did not report the exhausted budget")
+	}
+	if a.NotAttempted == 0 {
+		t.Error("the groups the budget never reached were not counted")
 	}
 	if len(s.indexes) >= len(groups) {
 		t.Errorf("drove %d of %d groups; the budget did not stop the loop", len(s.indexes), len(groups))
 	}
 	// The issue must say so, otherwise a partial analysis reads as a complete one.
-	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, []Finding{{Summary: "s"}}, exhausted)
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, []Finding{{Summary: "s"}}, a)
+	if !strings.Contains(body, "file groups were never analyzed") {
+		t.Errorf("the issue body does not disclose the exhausted budget:\n%s", body)
+	}
+}
+
+// The budget can also expire while the LAST group is in flight. A loop that only
+// checks at the top of each iteration reports full coverage of a release it did
+// not finish reading.
+//
+// Mutation that must fail this test: delete the post-loop
+// `a.BudgetExhausted = budgetCtx.Err() != nil`.
+func TestAnalyzeAllReportsABudgetThatExpiredDuringTheLastGroup(t *testing.T) {
+	cfg := testConfig()
+	cfg.RunBudget = 40 * time.Millisecond
+	cfg.GroupTimeout = time.Minute
+	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}}
+
+	// Both groups are attempted; the budget expires inside the second.
+	s := &stubRun{delay: 30 * time.Millisecond, failFrom: 99}
+	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
+	if len(s.indexes) != 2 {
+		t.Fatalf("drove %d groups, want both attempted for this case", len(s.indexes))
+	}
+	if a.NotAttempted != 0 {
+		t.Fatalf("NotAttempted = %d, want 0 for this case", a.NotAttempted)
+	}
+	if !a.BudgetExhausted {
+		t.Fatal("a budget that expired during the last group was reported as not exhausted")
+	}
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"}, []Finding{{Summary: "s"}}, a)
 	if !strings.Contains(body, "run budget was exhausted") {
-		t.Error("the issue body does not disclose the exhausted budget")
+		t.Errorf("the issue does not disclose the cut-off last group:\n%s", body)
 	}
 }
 
@@ -247,8 +287,8 @@ func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	}))
 
 	err := runWith(context.Background(), discardLogger(), cfg, gh)
-	if err == nil || !strings.Contains(err.Error(), "run budget") {
-		t.Fatalf("runWith = %v, want an error naming the exhausted budget", err)
+	if err == nil || !strings.Contains(err.Error(), "no findings were recorded") {
+		t.Fatalf("runWith = %v, want an error saying nothing was recorded", err)
 	}
 	if creates != 0 {
 		t.Errorf("created %d issue(s) with no findings, want 0", creates)

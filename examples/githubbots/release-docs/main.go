@@ -110,18 +110,30 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 		return err
 	}
 
-	budgetExhausted := analyzeAll(ctx, cfg, log, groups, key, func(gctx context.Context, index int) {
-		runGroup(gctx, r, sessions, gh, log, diff, groups[index], index, len(groups), key)
+	a := analyzeAll(ctx, cfg, log, groups, key, func(gctx context.Context, index int) bool {
+		return runGroup(gctx, r, sessions, gh, log, diff, groups[index], index, len(groups), key)
 	})
+	// A group that finished without recording anything is distinguishable from
+	// one that recorded an empty list, because the recorder keys on the group
+	// index. That distinction is the only thing separating "the model analyzed
+	// this group and had nothing to say" from "the model was steered into
+	// silence, or never called the tool at all", and the issue says which.
+	a.Unreported = rec.unreported(len(groups)) - a.NotAttempted - a.Failed
+	if a.Unreported < 0 {
+		a.Unreported = 0
+	}
 
 	findings := rec.findings()
-	log.Info("analysis finished", "findings", len(findings), "budget_exhausted", budgetExhausted)
+	log.Info("analysis finished", "findings", len(findings),
+		"groups", a.Groups, "not_attempted", a.NotAttempted, "failed", a.Failed, "unreported", a.Unreported)
 	if len(findings) == 0 {
-		if budgetExhausted {
+		if !a.complete() {
 			// Nothing was produced and nothing will be filed, so the release is
 			// still unanalyzed. Fail loudly: a retry (or a larger RUN_BUDGET) is
 			// the fix, and a re-run is not suppressed because no issue exists.
-			return fmt.Errorf("the run budget of %s was exhausted before any findings were recorded", cfg.RunBudget)
+			return fmt.Errorf("no findings were recorded and the analysis was incomplete "+
+				"(%d groups: %d never attempted, %d failed, %d unreported)",
+				a.Groups, a.NotAttempted, a.Failed, a.Unreported)
 		}
 		// Filing an empty issue every release is noise in the tracker. Say so and
 		// leave the release un-filed; a later run may still file one.
@@ -138,8 +150,8 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	// budget, so a run that ran out of time still reports what it found.
 	createCtx, cancel := context.WithTimeout(ctx, createIssueTimeout)
 	defer cancel()
-	body := buildIssueBody(diff, findings, budgetExhausted)
-	if _, err := gh.FileReleaseIssue(createCtx, key, issueTitle(head), body); err != nil {
+	body := buildIssueBody(diff, findings, a)
+	if _, err := gh.FileReleaseIssue(createCtx, key, head, issueTitle(head), body); err != nil {
 		return err
 	}
 	return finish(gh)
@@ -197,7 +209,12 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 // newModel builds the Gemini model. If a Gemini API key is configured it is used
 // directly; otherwise the genai SDK auto-detects its backend (e.g. Vertex AI via
 // ADC) from the environment.
-func newModel(ctx context.Context, cfg *Config) (model.LLM, error) {
+//
+// It is a variable so a test can substitute a stub model and drive the real
+// agent, runner and tool plumbing. Without that seam nothing exercises whether
+// ADK carries the session scope through to the tool at all, and the entire
+// authority model rests on it doing so.
+var newModel = func(ctx context.Context, cfg *Config) (model.LLM, error) {
 	clientConfig := &genai.ClientConfig{}
 	if cfg.GeminiAPIKey != "" {
 		clientConfig.APIKey = cfg.GeminiAPIKey
@@ -206,29 +223,41 @@ func newModel(ctx context.Context, cfg *Config) (model.LLM, error) {
 }
 
 // analyzeAll walks the file groups in order under a single run budget and
-// reports whether the budget ran out before every group was analyzed.
+// reports what it managed to analyze.
 //
 // Groups run sequentially rather than concurrently: they share one release, and
 // the value of finishing the early groups within the budget is higher than the
-// wall-clock saving. Exhausting the budget stops the loop and is reported in the
-// issue, so an overrun says what it missed instead of the job being killed.
+// wall-clock saving. Whatever the loop misses -- groups the budget never
+// reached, groups that errored -- is counted here and disclosed in the issue,
+// so an overrun says what it missed instead of the job being killed or, worse,
+// filing an issue that reads as complete.
 func analyzeAll(ctx context.Context, cfg *Config, log *slog.Logger,
-	groups [][]ChangedFile, key string, runFn func(context.Context, int),
-) bool {
+	groups [][]ChangedFile, key string, runFn func(context.Context, int) bool,
+) analysis {
 	budgetCtx, cancel := context.WithTimeout(ctx, cfg.RunBudget)
 	defer cancel()
+	a := analysis{Groups: len(groups)}
 	for i := range groups {
 		if err := budgetCtx.Err(); err != nil {
+			a.NotAttempted = len(groups) - i
 			log.Warn("run budget exhausted; the remaining file groups were not analyzed",
 				"analyzed", i, "total", len(groups), "budget", cfg.RunBudget)
-			return true
+			break
 		}
 		start := time.Now()
-		analyzeGroup(budgetCtx, cfg, key, i, runFn)
+		ok := analyzeGroup(budgetCtx, cfg, key, i, runFn)
+		if !ok {
+			a.Failed++
+		}
 		log.Info("analyzed file group", "group", i+1, "of", len(groups),
-			"files", len(groups[i]), "duration", time.Since(start).Round(time.Millisecond))
+			"files", len(groups[i]), "ok", ok, "duration", time.Since(start).Round(time.Millisecond))
 	}
-	return false
+	// Checked AFTER the loop as well as before each group: a budget that expires
+	// while the last group is in flight cancels that group's model call, and a
+	// loop that only looks at the top of each iteration would report full
+	// coverage of a release it did not finish reading.
+	a.BudgetExhausted = budgetCtx.Err() != nil
+	return a
 }
 
 // analyzeGroup scopes a session to one (release, file group) and hands it to
@@ -239,18 +268,20 @@ func analyzeAll(ctx context.Context, cfg *Config, log *slog.Logger,
 // two lines inside a test would assert nothing about this function, and deleting
 // the withAuditedGroup line -- the whole cross-group defense -- would leave such
 // a suite green.
-func analyzeGroup(ctx context.Context, cfg *Config, key string, index int, runFn func(context.Context, int)) {
+func analyzeGroup(ctx context.Context, cfg *Config, key string, index int, runFn func(context.Context, int) bool) bool {
 	gctx, cancel := context.WithTimeout(ctx, cfg.GroupTimeout)
 	defer cancel()
 	gctx = withAuditedGroup(gctx, key, index)
-	runFn(gctx, index)
+	return runFn(gctx, index)
 }
 
-// runGroup runs one agent turn over one file group. Run-level errors are logged
-// and recorded so the program can exit non-zero.
+// runGroup runs one agent turn over one file group and reports whether it
+// completed. Run-level errors are logged and recorded so the program can exit
+// non-zero, and the false return makes the group show up as uncovered in the
+// issue rather than silently missing from it.
 func runGroup(ctx context.Context, r *runner.Runner, ss session.Service, gh *GitHubClient, log *slog.Logger,
 	diff *ReleaseDiff, group []ChangedFile, index, total int, key string,
-) {
+) bool {
 	l := log.With("group", index)
 
 	// A per-run unguessable nonce fences each untrusted blob. It fails loud on a
@@ -261,14 +292,14 @@ func runGroup(ctx context.Context, r *runner.Runner, ss session.Service, gh *Git
 	if err != nil {
 		l.Error("generate nonce", "error", err)
 		gh.recordError()
-		return
+		return false
 	}
 
 	resp, err := ss.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID})
 	if err != nil {
 		l.Error("create session", "error", err)
 		gh.recordError()
-		return
+		return false
 	}
 
 	// The release key and group index reach the tool through the model: this
@@ -295,17 +326,21 @@ func runGroup(ctx context.Context, r *runner.Runner, ss session.Service, gh *Git
 	// r.Run returns an iter.Seq2[*session.Event, error] (a Go 1.23
 	// range-over-func): each iteration yields one streamed event or an error.
 	// StreamingModeNone is used because this is a headless batch run with no UI.
+	ok := true
 	for event, err := range r.Run(ctx, userID, resp.Session.ID(), msg, agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
 		if err != nil {
 			l.Error("agent run", "error", err)
 			gh.recordError()
+			ok = false
 			continue
 		}
 		if event.ErrorCode != "" {
 			l.Error("model error", "code", event.ErrorCode, "message", event.ErrorMessage)
 			gh.recordError()
+			ok = false
 		}
 	}
+	return ok
 }
 
 // newNonce returns a short unguessable token used to fence untrusted content in

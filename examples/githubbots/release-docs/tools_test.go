@@ -228,7 +228,7 @@ func TestAnalyzeGroupScopesTheSession(t *testing.T) {
 	ran := false
 	gotIndex := -1
 
-	analyzeGroup(context.Background(), cfg, testRelease, 3, func(gctx context.Context, index int) {
+	got := analyzeGroup(context.Background(), cfg, testRelease, 3, func(gctx context.Context, index int) bool {
 		ran = true
 		gotIndex = index
 		if msg, ok := authorizeGroup(gctx, testRelease, 3); !ok {
@@ -246,8 +246,12 @@ func TestAnalyzeGroupScopesTheSession(t *testing.T) {
 		} else if time.Until(dl) > cfg.GroupTimeout {
 			problems = append(problems, "the deadline does not derive from GroupTimeout")
 		}
+		return true
 	})
 
+	if !got {
+		t.Error("analyzeGroup did not return runFn's result, so a failed group would count as clean")
+	}
 	if !ran {
 		t.Fatal("analyzeGroup never called runFn: the bot would analyze nothing")
 	}

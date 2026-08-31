@@ -59,3 +59,30 @@ func TestLoadConfigTagsFromEnv(t *testing.T) {
 		t.Errorf("tags from the environment = %q...%q, want v1.0.0...v1.1.0", cfg.StartTag, cfg.EndTag)
 	}
 }
+
+// DRY_RUN is the one control whose entire job is to suppress the write, so it
+// must fail CLOSED. envBool returns the default on a value it cannot parse, and
+// the default is "perform the mutation" -- so `DRY_RUN=yes` would silently file
+// a real issue for an operator who asked for a preview.
+//
+// Mutation that must fail this test: use envBool("DRY_RUN", false) instead of
+// envBoolStrict.
+func TestLoadConfigRejectsAnUnparseableDryRun(t *testing.T) {
+	for _, v := range []string{"yes", "on", "1 ", "maybe"} {
+		t.Run("DRY_RUN="+v, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("DRY_RUN", v)
+			if _, err := loadConfig(nil); err == nil {
+				t.Fatalf("loadConfig accepted DRY_RUN=%q; the run would have written for real", v)
+			}
+		})
+	}
+	// The values the workflow actually sends still work.
+	for _, v := range []string{"true", "false", "1", "0", "TRUE"} {
+		setRequired(t)
+		t.Setenv("DRY_RUN", v)
+		if _, err := loadConfig(nil); err != nil {
+			t.Errorf("loadConfig rejected DRY_RUN=%q: %v", v, err)
+		}
+	}
+}
