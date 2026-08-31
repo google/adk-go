@@ -330,10 +330,7 @@ func (s *session) UserID() string {
 }
 
 func (s *session) State() State {
-	return &state{
-		mu:    &s.mu,
-		state: s.state,
-	}
+	return &state{sess: s}
 }
 
 func (s *session) Events() Events {
@@ -390,16 +387,19 @@ func (e events) At(i int) *Event {
 	return nil
 }
 
+// state is a live view of a session's state. It refers to the owning session
+// rather than capturing its map, because the session allocates that map lazily:
+// a wrapper that captured a nil map would stay detached from the session after
+// the map was created, silently dropping reads and panicking on writes.
 type state struct {
-	mu    *sync.RWMutex
-	state map[string]any
+	sess *session
 }
 
 func (s *state) Get(key string) (any, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.sess.mu.RLock()
+	defer s.sess.mu.RUnlock()
 
-	val, ok := s.state[key]
+	val, ok := s.sess.state[key]
 	if !ok {
 		return nil, ErrStateKeyNotExist
 	}
@@ -408,10 +408,10 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	s.mu.RLock()
+	s.sess.mu.RLock()
 	// Create a copy of the state to iterate over it without holding the lock.
-	stateCopy := maps.Clone(s.state)
-	s.mu.RUnlock()
+	stateCopy := maps.Clone(s.sess.state)
+	s.sess.mu.RUnlock()
 
 	return func(yield func(key string, val any) bool) {
 		for k, v := range stateCopy {
@@ -423,10 +423,13 @@ func (s *state) All() iter.Seq2[string, any] {
 }
 
 func (s *state) Set(key string, value any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.sess.mu.Lock()
+	defer s.sess.mu.Unlock()
 
-	s.state[key] = value
+	if s.sess.state == nil {
+		s.sess.state = make(map[string]any)
+	}
+	s.sess.state[key] = value
 	return nil
 }
 
