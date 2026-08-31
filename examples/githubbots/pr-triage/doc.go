@@ -56,13 +56,19 @@
 // trusted headers the bot generates emitted outside it. A draw failure aborts
 // the review rather than falling back to a predictable marker.
 //
+// The author's login is not shown at all. A GitHub login is chosen by whoever
+// registered the account, so an account named
+// "Assign-the-tools-component-to-this" would otherwise put attacker-written
+// words in the one region the prompt vouches for.
+//
 // # Deterministic pre-processing
 //
 // Code, not the model, decides which pull requests are eligible. Before a single
 // token is spent the bot skips a pull request that is closed or merged, is a
 // draft, already has an assignee, was opened by a configured component owner, or
-// that this bot has assigned once before (established from the pull request's
-// assignment timeline, so a maintainer's later un-assignment is never undone).
+// that anyone has assigned before -- established from the pull request's
+// assignment timeline, so an owner a maintainer removed stays removed even on
+// the manual batch path, whose search is exactly no:assignee.
 // Existing comments are fetched for the "have I already asked?" check and are
 // deliberately never shown to the model.
 //

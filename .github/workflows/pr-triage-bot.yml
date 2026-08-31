@@ -63,10 +63,13 @@ on:
         default: false
         type: boolean
 
-# Never let two runs triage the same pull request at once (a reopen right after
-# an open, say). A manually dispatched batch gets its own group.
+# Never let two runs triage the same pull request at once. Keying on the number
+# alone was not enough: a workflow_dispatch has no github.event.pull_request, so
+# a dispatch for #42 fell through to a group of its own and could run beside the
+# event-driven run for #42, with an independent in-process claim table. Every
+# batch dispatch shares one group for the same reason.
 concurrency:
-  group: pr-triage-${{ github.event.pull_request.number || github.run_id }}
+  group: pr-triage-${{ github.event.pull_request.number || inputs.pr_number || 'batch' }}
   cancel-in-progress: false
 
 permissions:
@@ -131,6 +134,11 @@ jobs:
           REPO: ${{ github.event.repository.name }}
           # The complete set of logins this bot may ever assign.
           OWNER_MAP: ${{ vars.PR_TRIAGE_OWNER_MAP }}
+          # The identity the bot posts under. GET /user is a user-to-server
+          # endpoint and answers 403 for the installation token above, so the
+          # bot cannot discover this for itself; without it, it cannot recognize
+          # its own past comment and would ask the same author again.
+          BOT_LOGIN: 'github-actions[bot]'
           # Empty on a batch dispatch, which is how the bot selects batch mode.
           PULL_REQUEST_NUMBER: ${{ steps.target.outputs.pr_number }}
           PR_COUNT: ${{ steps.target.outputs.pr_count }}

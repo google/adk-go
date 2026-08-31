@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -38,24 +39,40 @@ type recordingHandler struct {
 	assignable bool
 	// status, when non-zero, is returned for every mutation.
 	status int
+	// prBody is what the GraphQL re-check before an assignment sees. The default
+	// is a pull request that still needs an owner.
+	prBody string
 }
 
+// unassignedPRBody is a pull request that still wants an owner, which is what
+// the pre-write re-check must see for an assignment to go ahead.
+const unassignedPRBody = `{"data":{"repository":{"pullRequest":{
+	"number":7,"state":"OPEN","author":{"login":"carol","__typename":"User"},
+	"assignees":{"totalCount":0},"files":{"totalCount":0,"nodes":[]},
+	"comments":{"totalCount":0,"nodes":[]},"timelineItems":{"totalCount":0}}}}}`
+
 func newRecordingHandler() *recordingHandler {
-	return &recordingHandler{assignable: true}
+	return &recordingHandler{assignable: true, prBody: unassignedPRBody}
 }
 
 func (h *recordingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.requests = append(h.requests, r.Method+" "+r.URL.Path)
-	if r.Method == http.MethodPost {
+	if r.Method == http.MethodPost && !strings.HasSuffix(r.URL.Path, "/graphql") {
 		var body map[string]any
 		if raw, err := io.ReadAll(r.Body); err == nil {
 			_ = json.Unmarshal(raw, &body)
 		}
 		h.bodies = append(h.bodies, body)
 	}
-	assignable, status := h.assignable, h.status
+	assignable, status, prBody := h.assignable, h.status, h.prBody
 	h.mu.Unlock()
+
+	// The re-check the assign path makes immediately before writing.
+	if strings.HasSuffix(r.URL.Path, "/graphql") {
+		_, _ = io.WriteString(w, prBody)
+		return
+	}
 
 	// GET /repos/{o}/{r}/assignees/{login}: 204 assignable, 404 not.
 	if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/assignees/") {
@@ -84,12 +101,12 @@ func (h *recordingHandler) calls() []string {
 	return append([]string(nil), h.requests...)
 }
 
-// writes returns only the mutating calls. The assignability probe is a read and
-// must not be counted as a write.
+// writes returns only the mutating calls. The assignability probe is a GET and
+// the pre-write re-check is a GraphQL POST; neither is a mutation.
 func (h *recordingHandler) writes() []string {
 	var out []string
 	for _, c := range h.calls() {
-		if strings.HasPrefix(c, "POST ") {
+		if strings.HasPrefix(c, "POST ") && !strings.HasSuffix(c, "/graphql") {
 			out = append(out, c)
 		}
 	}
@@ -235,6 +252,81 @@ func TestAssignOwnerRefusesAnIneligiblePullRequest(t *testing.T) {
 
 // One assignment per pull request, ever. A model that calls the tool twice must
 // not reach the API a second time.
+// The pre-write re-check must abort the assignment when the pull request changed
+// while this run was thinking — the window a batch run and an event run share,
+// where AddAssignees would otherwise APPEND a second owner.
+//
+// Each case trips exactly ONE branch. An earlier version set both an assignee
+// and a timeline event, so deleting either branch left the test green.
+func TestAssignOwnerAbortsWhenSomeoneWasAssignedMeanwhile(t *testing.T) {
+	prBody := func(assignees, timeline int, state string) string {
+		return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{
+			"number":7,"state":%q,"author":{"login":"carol","__typename":"User"},
+			"assignees":{"totalCount":%d},"files":{"totalCount":0,"nodes":[]},
+			"comments":{"totalCount":0,"nodes":[]},"timelineItems":{"totalCount":%d}}}}}`,
+			state, assignees, timeline)
+	}
+	for _, tc := range []struct {
+		name, body, wantReason string
+	}{
+		{"someone was assigned", prBody(1, 0, "OPEN"), "someone has been assigned"},
+		{"an assignment happened and was undone", prBody(0, 1, "OPEN"), "has been assigned"},
+		{"it was closed", prBody(0, 0, "CLOSED"), "no longer open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecordingHandler()
+			h.prBody = tc.body
+			c := eligibleClient(t, testConfig(), h)
+
+			res, err := c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core")
+			if err != nil {
+				t.Fatalf("assignOwner() error = %v", err)
+			}
+			if res.Status != "skipped" {
+				t.Errorf("status = %q (%s), want skipped", res.Status, res.Message)
+			}
+			if !strings.Contains(res.Message, tc.wantReason) {
+				t.Errorf("message = %q, want it to mention %q", res.Message, tc.wantReason)
+			}
+			if writes := h.writes(); len(writes) != 0 {
+				t.Errorf("wrote to a pull request that no longer wanted an owner: %v", writes)
+			}
+			if c.hadError() {
+				t.Error("a concurrent change was recorded as an infrastructure error")
+			}
+		})
+	}
+
+	// And the control: an unchanged pull request still gets its owner, so the
+	// re-check cannot pass by refusing everything.
+	h := newRecordingHandler()
+	c := eligibleClient(t, testConfig(), h)
+	if res, _ := c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core"); res.Status != "success" {
+		t.Fatalf("an unchanged pull request was refused: %+v", res)
+	}
+	if len(h.writes()) != 1 {
+		t.Errorf("writes = %v, want one assignment", h.writes())
+	}
+}
+
+// A failed re-check is an infrastructure error, not a silent skip: it must not
+// look like "the pull request no longer needs an owner".
+func TestAssignOwnerFailsLoudWhenTheRecheckFails(t *testing.T) {
+	h := newRecordingHandler()
+	h.prBody = `{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"RATE_LIMITED","message":"slow down"}]}`
+	c := eligibleClient(t, testConfig(), h)
+
+	if _, err := c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core"); err == nil {
+		t.Fatal("assignOwner() returned no error when the re-check failed")
+	}
+	if !c.hadError() {
+		t.Error("the failed re-check was not recorded, so the run would exit 0")
+	}
+	if writes := h.writes(); len(writes) != 0 {
+		t.Errorf("wrote despite an unverifiable precondition: %v", writes)
+	}
+}
+
 func TestAssignOwnerSecondCallIsRefused(t *testing.T) {
 	h := newRecordingHandler()
 	c := eligibleClient(t, testConfig(), h)
@@ -522,6 +614,10 @@ func TestRequestMoreContextRESTErrorIsGoErrorAndRecorded(t *testing.T) {
 func TestToolsAreIsolatedAcrossConcurrentSessions(t *testing.T) {
 	var posts int32
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			_, _ = io.WriteString(w, unassignedPRBody)
+			return
+		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/assignees/") {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -563,6 +659,95 @@ func TestToolsAreIsolatedAcrossConcurrentSessions(t *testing.T) {
 	// One assign and one comment per pull request, and nothing else.
 	if got := atomic.LoadInt32(&posts); got != 2*n {
 		t.Errorf("made %d writes, want %d (one assign + one comment per pull request)", got, 2*n)
+	}
+}
+
+// The previous test gives every goroutine its own pull request, so no two ever
+// contend for the SAME claim key — the exact contention the atomic claim exists
+// for. Here they all race for one, and exactly one may win.
+func TestOneClaimSurvivesConcurrentContention(t *testing.T) {
+	var posts int32
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			_, _ = io.WriteString(w, unassignedPRBody)
+			return
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/assignees/") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		atomic.AddInt32(&posts, 1)
+		_, _ = io.WriteString(w, `{"id":1}`)
+	}))
+	c.markEligible(7)
+
+	const n = 30
+	var wg sync.WaitGroup
+	var granted int32
+	start := make(chan struct{})
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together, so they genuinely contend
+			if res, _ := c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core"); res.Status == "success" {
+				atomic.AddInt32(&granted, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&granted); got != 1 {
+		t.Errorf("%d of %d concurrent callers were granted the single assignment claim, want 1", got, n)
+	}
+	if got := atomic.LoadInt32(&posts); got != 1 {
+		t.Errorf("made %d assignee writes, want 1", got)
+	}
+}
+
+// recordError and hadError are mutex-guarded, but nothing drove them from more
+// than one goroutine, so -race could not have observed those locks at all. This
+// makes the failure path itself concurrent.
+func TestErrorRecordingIsConcurrencySafe(t *testing.T) {
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			_, _ = io.WriteString(w, unassignedPRBody)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	}))
+
+	const n = 20
+	for i := 1; i <= n; i++ {
+		c.markEligible(i)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 1; i <= n; i++ {
+		wg.Add(1)
+		go func(pr int) {
+			defer wg.Done()
+			ctx := withAuditedPR(context.Background(), pr)
+			<-start // release together, so the writes genuinely overlap
+			// Each of these drives a real failing write, so recordError is called
+			// from all n goroutines while hadError reads it. The loop makes the
+			// calls dense: one round trip apiece leaves them too scattered in
+			// time for the race detector to see the unsynchronized write.
+			for range 50 {
+				_, _ = c.assignOwner(ctx, pr, "core")
+				_ = c.hadError()
+				_, _ = c.requestMoreContext(ctx, pr, []string{"problem"})
+				_ = c.hadError()
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if !c.hadError() {
+		t.Error("n failing writes recorded no error; the run would exit 0")
 	}
 }
 

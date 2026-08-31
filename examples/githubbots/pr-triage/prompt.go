@@ -59,7 +59,7 @@ is your only action.`
 // a future config path cannot reintroduce a brace.
 func renderPrompt(cfg *Config) string {
 	section := contextSectionDisabled
-	if cfg.RequestContext {
+	if cfg.contextRequestsEnabled() {
 		section = strings.ReplaceAll(contextSectionEnabled, "%ITEMS%", bulletList(contextItemKeys()))
 	}
 	r := strings.NewReplacer(

@@ -51,6 +51,18 @@ type Config struct {
 	// at parse time; lookups lowercase the model's choice to match.
 	OwnerMap map[string]string
 
+	// BotLogin is the login this bot posts under. It exists because the identity
+	// lookup the obvious way -- REST GET /user -- is a user-to-server endpoint,
+	// and the workflow authenticates with an installation token, for which it
+	// returns 403. The bot needs its own login to recognize its own past
+	// comment, so the workflow states it explicitly and the API lookup is only
+	// the fallback for a personal access token.
+	BotLogin string
+
+	// UseVertexAI reports whether the genai SDK should read its configuration
+	// from the environment (Vertex AI via ADC) instead of using an API key.
+	UseVertexAI bool
+
 	// RequestContext enables the second tool, which posts one comment asking the
 	// author for missing context. When false the tool is not registered at all
 	// and the prompt says so, so the bot's only power is assignment.
@@ -100,8 +112,11 @@ const (
 	maxPRCount     = 100
 	maxConcurrency = 10
 	// maxFilesLimit bounds the changed-file list even if MAX_FILES is raised, so
-	// the attacker-controlled part of the prompt stays bounded.
-	maxFilesLimit = 200
+	// the attacker-controlled part of the prompt stays bounded. It is 100 because
+	// that is a hard limit of GitHub's GraphQL schema, not a taste choice: "values
+	// of first and last must be within 1-100", and a larger value fails schema
+	// validation, so every fetch in the run would error.
+	maxFilesLimit = 100
 )
 
 // componentPattern constrains a component name from the owner map. The charset
@@ -112,9 +127,30 @@ const (
 var componentPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9 ._-]{0,39}$`)
 
 // loginPattern is GitHub's own rule for a user login: alphanumeric with single
-// internal hyphens, at most 39 characters. Validating it here means the set of
-// strings this bot can ever POST as an assignee is fixed at startup.
+// internal hyphens. Validating it here means the set of strings this bot can
+// ever POST as an assignee is fixed at startup.
+//
+// The length bound is checked separately, in validLogin: each repetition of the
+// group consumes one OR two characters, so the pattern by itself admits 77 --
+// long enough that an over-long login would pass startup validation, spend a
+// pull request's single assignment attempt, and then be rejected by GitHub.
 var loginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$`)
+
+// maxLoginRunes is GitHub's limit on a user login.
+const maxLoginRunes = 39
+
+// botSuffixPattern matches the "[bot]" a GitHub App login carries. BOT_LOGIN may
+// have it; an assignable owner may not.
+var botSuffixPattern = regexp.MustCompile(`\[bot\]$`)
+
+// validLogin reports whether s is a syntactically valid GitHub login. allowBot
+// permits the "[bot]" suffix a GitHub App identity carries.
+func validLogin(s string, allowBot bool) bool {
+	if allowBot {
+		s = botSuffixPattern.ReplaceAllString(s, "")
+	}
+	return len([]rune(s)) <= maxLoginRunes && loginPattern.MatchString(s)
+}
 
 // loadConfig parses configuration from flags (args) and environment variables
 // and validates required fields. args is injectable so tests can exercise flag
@@ -128,8 +164,9 @@ func loadConfig(args []string) (*Config, error) {
 		return nil, err
 	}
 
+	var ee envErrs
 	fs := flag.NewFlagSet("githubprtriagebot", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false),
+	dryRun := fs.Bool("dry-run", envBool(&ee, "DRY_RUN", false),
 		"log intended actions without assigning or commenting")
 	singlePR := fs.Int("pr", envPR,
 		"triage only this pull request number and skip the search step (0 = batch)")
@@ -152,14 +189,19 @@ func loadConfig(args []string) (*Config, error) {
 		GeminiAPIKey:   firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
 		Model:          envString("LLM_MODEL_NAME", "gemini-flash-latest"),
 		OwnerMap:       ownerMap,
-		RequestContext: envBool("REQUEST_CONTEXT", true),
+		BotLogin:       strings.TrimSpace(os.Getenv("BOT_LOGIN")),
+		UseVertexAI:    envBool(&ee, "GOOGLE_GENAI_USE_VERTEXAI", false),
+		RequestContext: envBool(&ee, "REQUEST_CONTEXT", true),
 		SinglePR:       *singlePR,
-		PRCount:        envInt("PR_COUNT", 10),
-		MaxFiles:       envInt("MAX_FILES", 50),
-		Concurrency:    envInt("CONCURRENCY_LIMIT", 3),
-		PRTimeout:      envDuration("PR_TIMEOUT", defaultPRTimeout),
-		RunBudget:      envDuration("RUN_BUDGET", defaultRunBudget),
+		PRCount:        envInt(&ee, "PR_COUNT", 10),
+		MaxFiles:       envInt(&ee, "MAX_FILES", 50),
+		Concurrency:    envInt(&ee, "CONCURRENCY_LIMIT", 3),
+		PRTimeout:      envDuration(&ee, "PR_TIMEOUT", defaultPRTimeout),
+		RunBudget:      envDuration(&ee, "RUN_BUDGET", defaultRunBudget),
 		DryRun:         *dryRun,
+	}
+	if err := ee.err(); err != nil {
+		return nil, err
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -176,7 +218,7 @@ func (c *Config) validate() error {
 	// A Gemini API key is the simplest path, but Vertex AI via ADC is also
 	// supported; in that case the genai SDK reads its configuration from the
 	// environment (GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT, ...).
-	if c.GeminiAPIKey == "" && !envBool("GOOGLE_GENAI_USE_VERTEXAI", false) {
+	if c.GeminiAPIKey == "" && !c.UseVertexAI {
 		missing = append(missing, "GEMINI_API_KEY (or set GOOGLE_GENAI_USE_VERTEXAI=true for Vertex AI)")
 	}
 	if c.Owner == "" {
@@ -196,6 +238,9 @@ func (c *Config) validate() error {
 	if c.SinglePR < 0 {
 		return fmt.Errorf("pull request number must not be negative, got %d", c.SinglePR)
 	}
+	if c.BotLogin != "" && !validLogin(c.BotLogin, true) {
+		return fmt.Errorf("BOT_LOGIN %q is not a valid GitHub login", c.BotLogin)
+	}
 
 	c.PRCount = clamp(c.PRCount, 1, maxPRCount)
 	c.Concurrency = clamp(c.Concurrency, 1, maxConcurrency)
@@ -207,6 +252,20 @@ func (c *Config) validate() error {
 		c.RunBudget = defaultRunBudget
 	}
 	return nil
+}
+
+// contextRequestsEnabled reports whether the bot may ask an author for more
+// context on this run.
+//
+// It is off in batch mode even when REQUEST_CONTEXT is set. Batch mode is a
+// manual sweep over a backlog: asking the author of a months-old pull request
+// for a better description is noise, and more importantly a batch run and a
+// per-pull-request run are in different concurrency groups, so allowing both to
+// comment is the one remaining way two comments could land on one pull request.
+// Assignment is safe to overlap -- it is idempotent server-side and separately
+// guarded by the assignee and timeline checks.
+func (c *Config) contextRequestsEnabled() bool {
+	return c.RequestContext && c.SinglePR != 0
 }
 
 // components returns the configured component names in a stable order, for the
@@ -229,8 +288,11 @@ func parsePRNumber(s string) (int, error) {
 		return 0, nil
 	}
 	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("PULL_REQUEST_NUMBER must be a non-negative integer, got %q", s)
+	// Zero is rejected rather than accepted: it is not a pull request number, and
+	// letting it through would make a maintainer who typed 0 into the dispatch
+	// input get a batch run over the backlog instead.
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("PULL_REQUEST_NUMBER must be a positive integer, got %q", s)
 	}
 	return n, nil
 }
@@ -259,7 +321,7 @@ func parseOwnerMap(s string) (map[string]string, error) {
 		if !componentPattern.MatchString(name) {
 			return nil, fmt.Errorf("OWNER_MAP component %q is not a valid component name", name)
 		}
-		if !loginPattern.MatchString(login) {
+		if !validLogin(login, false) {
 			return nil, fmt.Errorf("OWNER_MAP owner %q for component %q is not a valid GitHub login", login, name)
 		}
 		if prev, dup := out[name]; dup {
@@ -271,6 +333,25 @@ func parseOwnerMap(s string) (map[string]string, error) {
 }
 
 // Environment helpers.
+//
+// A malformed value is an error, never a silent fall back to the default. The
+// default is not a safe guess: DRY_RUN=yes would mean a LIVE run, and
+// MAX_FILES=1OO would quietly change how much of the pull request the model
+// sees. envErrs collects them so one run reports every one of them.
+
+// envErrs accumulates malformed environment values.
+type envErrs struct{ msgs []string }
+
+func (e *envErrs) bad(key, val, want string) {
+	e.msgs = append(e.msgs, fmt.Sprintf("%s=%q is not %s", key, val, want))
+}
+
+func (e *envErrs) err() error {
+	if len(e.msgs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid configuration: %s", strings.Join(e.msgs, "; "))
+}
 
 func envString(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -288,31 +369,43 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+func envInt(e *envErrs, key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		e.bad(key, v, "an integer")
+		return def
+	}
+	return n
 }
 
-func envBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+func envBool(e *envErrs, key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		e.bad(key, v, "a boolean (true/false/1/0)")
+		return def
+	}
+	return b
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+func envDuration(e *envErrs, key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		e.bad(key, v, "a duration (for example 90s or 10m)")
+		return def
+	}
+	return d
 }
 
 func clamp(v, lo, hi int) int {

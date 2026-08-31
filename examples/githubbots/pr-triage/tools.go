@@ -132,7 +132,25 @@ func (c *GitHubClient) assignOwner(ctx context.Context, number int, component st
 		return claimRejection(res, number, actionAssign), nil
 	}
 
-	assignable, err := c.IsAssignable(ctx, owner)
+	// Re-read the preconditions from GitHub immediately before writing. The claim
+	// is per process, and a manual batch run and an event-driven run for the same
+	// pull request are in different workflow concurrency groups: both can fetch
+	// before either writes, and AddAssignees APPENDS, so without this the pull
+	// request ends up with two owners. This does not make the write atomic — it
+	// narrows the window from a whole model turn to one round trip.
+	if stale, err := c.assignmentStillWanted(ctx, number); err != nil {
+		c.recordFailure(number, actionAssign)
+		c.recordError()
+		return actionResult{}, err
+	} else if stale != "" {
+		c.log.Info("assignment no longer wanted", "pr", number, "reason", stale)
+		return actionResult{
+			Status:  "skipped",
+			Message: fmt.Sprintf("pull request #%d no longer needs an owner: %s", number, stale),
+		}, nil
+	}
+
+	assignable, err := c.IsAssignable(ctx, key, owner)
 	if err != nil {
 		c.recordFailure(number, actionAssign)
 		c.recordError()
@@ -151,7 +169,7 @@ func (c *GitHubClient) assignOwner(ctx context.Context, number int, component st
 		}, nil
 	}
 
-	if err := c.AssignOwner(ctx, number, owner); err != nil {
+	if err := c.AssignOwner(ctx, number, key, owner); err != nil {
 		c.recordFailure(number, actionAssign)
 		c.recordError()
 		return actionResult{}, err
@@ -233,7 +251,7 @@ func (c *GitHubClient) tools() ([]tool.Tool, error) {
 	}
 	tools := []tool.Tool{assign}
 
-	if !c.cfg.RequestContext {
+	if !c.cfg.contextRequestsEnabled() {
 		return tools, nil
 	}
 	request, err := functiontool.New(functiontool.Config{

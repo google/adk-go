@@ -17,12 +17,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v66/github"
 )
@@ -33,9 +36,17 @@ func testConfig() *Config {
 		Repo:           "adk-go",
 		OwnerMap:       map[string]string{"core": "alice", "tools": "bob"},
 		RequestContext: true,
-		PRCount:        10,
-		MaxFiles:       50,
-		Concurrency:    1,
+		// Single-pull-request mode, as the pull_request_target path runs. The
+		// context-request tool exists only here; batch mode is assignment-only.
+		SinglePR:    7,
+		PRCount:     10,
+		MaxFiles:    50,
+		Concurrency: 1,
+		// A zero PRTimeout would make scopeSession hand every test an
+		// already-expired context, which reads as "the model chose not to act".
+		// validate() clamps it in production; the test config must set it.
+		PRTimeout: time.Minute,
+		RunBudget: time.Minute,
 	}
 }
 
@@ -71,10 +82,10 @@ func respondWith(t *testing.T, cfg *Config, body string) *GitHubClient {
 const fullPRBody = `{"data":{"repository":{"pullRequest":{
 	"number":7,"title":"Add a thing","body":"Because.","state":"OPEN","isDraft":false,
 	"author":{"login":"carol","__typename":"User"},
-	"assignees":{"nodes":[{"login":"dave"}]},
-	"files":{"nodes":[{"path":"agent/agent.go"},{"path":"agent/agent_test.go"}]},
-	"comments":{"nodes":[{"author":{"login":"github-actions","__typename":"Bot"},"body":"beep"}]},
-	"timelineItems":{"nodes":[{"actor":{"login":"maintainer","__typename":"User"}}]}
+	"assignees":{"totalCount":1},
+	"files":{"totalCount":9,"nodes":[{"path":"agent/agent.go"},{"path":"agent/agent_test.go"}]},
+	"comments":{"totalCount":4,"nodes":[{"author":{"login":"github-actions","__typename":"Bot"},"body":"beep"}]},
+	"timelineItems":{"totalCount":3}
 }}}}`
 
 func TestFetchPullRequestDecodesEveryField(t *testing.T) {
@@ -92,14 +103,25 @@ func TestFetchPullRequestDecodesEveryField(t *testing.T) {
 	if pr.Author != "carol" {
 		t.Errorf("author = %q, want carol", pr.Author)
 	}
-	if len(pr.Assignees) != 1 || pr.Assignees[0] != "dave" {
-		t.Errorf("assignees = %v, want [dave]", pr.Assignees)
+	if pr.AssigneeCount != 1 {
+		t.Errorf("assigneeCount = %d, want 1", pr.AssigneeCount)
 	}
 	if len(pr.Files) != 2 || pr.Files[0] != "agent/agent.go" {
 		t.Errorf("files = %v", pr.Files)
 	}
-	if len(pr.AssignedBy) != 1 || pr.AssignedBy[0] != "maintainer" {
-		t.Errorf("assignedBy = %v, want [maintainer]", pr.AssignedBy)
+	// The node list is capped by the query, so the real count has to come from
+	// totalCount or the prompt would call a truncated list complete.
+	if pr.TotalFiles != 9 {
+		t.Errorf("totalFiles = %d, want 9 (the count GitHub reported, not len(Files))", pr.TotalFiles)
+	}
+	// The fixture reports FOUR comments while returning one node, so a decoder
+	// that used len(nodes) as the total would read the same as the real thing —
+	// and the bot would then believe it can see a thread it cannot.
+	if pr.TotalComments != 4 {
+		t.Errorf("totalComments = %d, want the 4 GitHub reported, not the 1 node returned", pr.TotalComments)
+	}
+	if pr.PriorAssignments != 3 {
+		t.Errorf("priorAssignments = %d, want 3", pr.PriorAssignments)
 	}
 	// GraphQL returns a bare bot login; the REST-resolved identity carries the
 	// suffix, so without canonicalizing here the bot cannot recognize its own
@@ -109,41 +131,52 @@ func TestFetchPullRequestDecodesEveryField(t *testing.T) {
 	}
 }
 
-// A bot actor on the assignment timeline must be canonicalized too, or the bot
-// running as github-actions[bot] would never recognize its own past assignment
-// and would re-assign a pull request a maintainer had un-assigned.
-func TestFetchPullRequestCanonicalizesTimelineBotActor(t *testing.T) {
-	const body = `{"data":{"repository":{"pullRequest":{
+// A comment from a bot account must be canonicalized to the REST "[bot]" form,
+// or a bot running as github-actions[bot] cannot recognize its own comment and
+// asks the same author again on every reopen.
+func TestFetchPullRequestCanonicalizesCommentBotAuthor(t *testing.T) {
+	body := fmt.Sprintf(`{"data":{"repository":{"pullRequest":{
 		"number":7,"state":"OPEN","author":{"login":"carol","__typename":"User"},
-		"timelineItems":{"nodes":[{"actor":{"login":"github-actions","__typename":"Bot"}}]}
-	}}}}`
+		"comments":{"totalCount":1,"nodes":[
+			{"author":{"login":"github-actions","__typename":"Bot"},"body":%q}]}
+	}}}}`, botCommentSignature+" please add more detail")
 	c := respondWith(t, testConfig(), body)
 	pr, err := c.FetchPullRequest(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("FetchPullRequest() error = %v", err)
 	}
-	if len(pr.AssignedBy) != 1 || pr.AssignedBy[0] != "github-actions[bot]" {
-		t.Fatalf("assignedBy = %v, want [github-actions[bot]]", pr.AssignedBy)
+	if len(pr.Comments) != 1 || pr.Comments[0].Author != "github-actions[bot]" {
+		t.Fatalf("comment author = %q, want the canonical github-actions[bot]", pr.Comments[0].Author)
 	}
-	if reason := skipReason(pr, "github-actions[bot]", testOwnerMap()); !strings.Contains(reason, "already assigned by this bot") {
-		t.Errorf("skipReason = %q, want the bot to recognize its own prior assignment", reason)
+	if !contextRequestSpent(pr, "github-actions[bot]") {
+		t.Error("the bot did not recognize its own comment through the canonical form")
 	}
 }
 
-// A timeline node with no actor (a deleted account) must not become an empty
-// login that then matches an unresolved identity.
-func TestFetchPullRequestDropsNullTimelineActors(t *testing.T) {
-	const body = `{"data":{"repository":{"pullRequest":{
-		"number":7,"state":"OPEN","author":{"login":"carol","__typename":"User"},
-		"timelineItems":{"nodes":[{"actor":null},{}]}
-	}}}}`
-	c := respondWith(t, testConfig(), body)
-	pr, err := c.FetchPullRequest(context.Background(), 7)
+// The GraphQL schema rejects a first/last outside 1-100, so a file limit above
+// the cap would fail every fetch in the run. The clamp is what keeps the
+// configured value inside the schema.
+func TestFileLimitStaysInsideTheGraphQLNodeCap(t *testing.T) {
+	if maxFilesLimit > 100 {
+		t.Fatalf("maxFilesLimit = %d; GraphQL rejects first/last above 100", maxFilesLimit)
+	}
+	setRequired(t)
+	t.Setenv("MAX_FILES", "5000")
+	cfg, err := loadConfig(nil)
 	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	var sent string
+	c := testClient(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sent = string(raw)
+		_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"number":7,"state":"OPEN"}}}}`)
+	}))
+	if _, err := c.FetchPullRequest(context.Background(), 7); err != nil {
 		t.Fatalf("FetchPullRequest() error = %v", err)
 	}
-	if len(pr.AssignedBy) != 0 {
-		t.Errorf("assignedBy = %v, want empty", pr.AssignedBy)
+	if !strings.Contains(sent, `"fileLimit":100`) {
+		t.Errorf("the query asked for a file limit outside the 1-100 cap: %s", sent)
 	}
 }
 
@@ -208,6 +241,15 @@ func TestFetchPullRequestSendsTheConfiguredLimits(t *testing.T) {
 	if !strings.Contains(got, `"number":7`) {
 		t.Errorf("request body does not carry the pull request number: %s", got)
 	}
+	// The bot always comments EARLY, so it must read the FIRST page. Asking for
+	// the last would hide its own comment behind a long thread and let a reopen
+	// produce a second one.
+	if !strings.Contains(got, "comments(first: $commentLimit)") {
+		t.Errorf("the query does not read the first comments; the bot would miss its own:\n%s", got)
+	}
+	if strings.Contains(got, "comments(last:") {
+		t.Errorf("the query reads the LAST comments:\n%s", got)
+	}
 }
 
 func TestListUnassignedPullRequests(t *testing.T) {
@@ -268,7 +310,7 @@ func TestIsAssignable(t *testing.T) {
 		c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(tc.status)
 		}))
-		got, err := c.IsAssignable(context.Background(), "alice")
+		got, err := c.IsAssignable(context.Background(), "core", "alice")
 		if err != nil {
 			t.Fatalf("IsAssignable() on HTTP %d error = %v", tc.status, err)
 		}
@@ -280,7 +322,7 @@ func TestIsAssignable(t *testing.T) {
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	if got, err := c.IsAssignable(context.Background(), "alice"); err == nil || got {
+	if got, err := c.IsAssignable(context.Background(), "core", "alice"); err == nil || got {
 		t.Errorf("IsAssignable() on HTTP 500 = %v, %v; want false and an error", got, err)
 	}
 }
@@ -325,7 +367,7 @@ func TestDryRunSuppressesEveryMutation(t *testing.T) {
 		calls++
 		_, _ = io.WriteString(w, `{}`)
 	}))
-	if err := c.AssignOwner(context.Background(), 7, "alice"); err != nil {
+	if err := c.AssignOwner(context.Background(), 7, "core", "alice"); err != nil {
 		t.Fatalf("AssignOwner() dry-run error = %v", err)
 	}
 	if err := c.PostComment(context.Background(), 7, "hello"); err != nil {
@@ -333,5 +375,160 @@ func TestDryRunSuppressesEveryMutation(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("dry-run made %d HTTP calls, want 0", calls)
+	}
+}
+
+// The workflow's built-in token is a GitHub App installation token, and REST
+// GET /user is a user-to-server endpoint that answers 403 for one. Without a
+// configured identity the bot cannot recognize its own past comment, so the
+// configured value must win and no lookup must be attempted.
+func TestNewGitHubClientUsesTheConfiguredIdentity(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := testConfig()
+	cfg.BotLogin = "github-actions[bot]"
+	c, err := NewGitHubClient(context.Background(), cfg, discardLogger())
+	if err != nil {
+		t.Fatalf("NewGitHubClient() error = %v", err)
+	}
+	if c.selfLogin != "github-actions[bot]" {
+		t.Errorf("selfLogin = %q, want the configured github-actions[bot]", c.selfLogin)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Errorf("made %d identity lookups, want 0 when BOT_LOGIN is configured", got)
+	}
+}
+
+// With no configured identity the API lookup is the fallback, and a 403 from an
+// installation token must leave the bot degraded but SAFE, not silently
+// commenting twice.
+func TestNewGitHubClientDegradesSafelyWhenTheIdentityIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+	}))
+	t.Cleanup(srv.Close)
+	base, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.BotLogin = ""
+	c := &GitHubClient{
+		rest: github.NewClient(nil), cfg: cfg, log: discardLogger(),
+		eligible: make(map[int]bool), claims: make(map[claimKey]outcome),
+	}
+	c.rest.BaseURL = base
+	// Drive the real resolution path rather than asserting on a hand-set field.
+	if u, _, err := c.rest.Users.Get(context.Background(), ""); err == nil {
+		t.Fatalf("test setup: the forced 403 did not take, got %v", u)
+	}
+
+	// The degraded state must make the bot ask LESS, not twice: with no identity
+	// a comment carrying the signature counts whoever wrote it.
+	pr := eligiblePR()
+	pr.Comments = []Comment{{Author: "someone-else", Body: botCommentSignature + " asked"}}
+	pr.TotalComments = 1
+	if !contextRequestSpent(pr, c.selfLogin) {
+		t.Error("with an unresolved identity the bot would ask again; it must fail safe instead")
+	}
+}
+
+// A tool's Go error is serialized back to the model (main.go's
+// OnToolErrorCallbacks returns nil, nil -- observe only), so an error text that
+// named the login would hand a fully attacker-controlled model a real assignee
+// on any transient failure of the assignability probe. That defeats the point of
+// the model choosing a component rather than a person.
+func TestOwnerLoginNeverAppearsInAnErrorTheModelSees(t *testing.T) {
+	const secretLogin = "zzzsecretowner"
+	cfg := testConfig()
+	cfg.OwnerMap = map[string]string{"core": secretLogin}
+
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "the assignability probe fails",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/graphql") {
+					_, _ = io.WriteString(w, unassignedPRBody)
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"message":"boom"}`)
+			},
+		},
+		{
+			name: "the assignee write fails",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/graphql"):
+					_, _ = io.WriteString(w, unassignedPRBody)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/assignees/"):
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"message":"boom"}`)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, cfg, tc.handler)
+			c.markEligible(7)
+			res, err := c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core")
+			if err == nil {
+				t.Fatalf("expected a Go error, got result %+v", res)
+			}
+			if strings.Contains(err.Error(), secretLogin) {
+				t.Errorf("the error the model sees names the owner login:\n%v", err)
+			}
+			// The component IS safe to name: the model already chose it.
+			if !strings.Contains(err.Error(), "core") {
+				t.Errorf("the error should say which component failed, got %v", err)
+			}
+		})
+	}
+}
+
+// The re-check runs before every assignment, so it must not drag the file list
+// and a hundred comment bodies along to compare three counters. This is a
+// sample others will copy.
+func TestTheAssignmentRecheckAsksOnlyForWhatItNeeds(t *testing.T) {
+	var queries []string
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		queries = append(queries, string(raw))
+		_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{
+			"state":"OPEN","assignees":{"totalCount":0},"timelineItems":{"totalCount":0}}}}}`)
+	}))
+
+	reason, err := c.assignmentStillWanted(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("assignmentStillWanted() error = %v", err)
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want the assignment to proceed", reason)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("made %d queries, want 1", len(queries))
+	}
+	for _, unwanted := range []string{"files(", "comments(", "body", "title"} {
+		if strings.Contains(queries[0], unwanted) {
+			t.Errorf("the re-check query fetches %q, which it does not use:\n%s", unwanted, queries[0])
+		}
+	}
+	for _, wanted := range []string{"state", "assignees", "timelineItems"} {
+		if !strings.Contains(queries[0], wanted) {
+			t.Errorf("the re-check query is missing %q:\n%s", wanted, queries[0])
+		}
 	}
 }

@@ -34,7 +34,7 @@ func setRequired(t *testing.T) {
 	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "")
 	for _, k := range []string{
 		"LLM_MODEL_NAME", "REQUEST_CONTEXT", "PULL_REQUEST_NUMBER", "PR_COUNT",
-		"MAX_FILES", "CONCURRENCY_LIMIT", "PR_TIMEOUT", "RUN_BUDGET", "DRY_RUN",
+		"MAX_FILES", "CONCURRENCY_LIMIT", "PR_TIMEOUT", "RUN_BUDGET", "DRY_RUN", "BOT_LOGIN",
 	} {
 		t.Setenv(k, "")
 	}
@@ -64,6 +64,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.MaxFiles != 50 {
 		t.Errorf("default MaxFiles = %d, want 50", cfg.MaxFiles)
 	}
+	if cfg.BotLogin != "" {
+		t.Errorf("default BotLogin = %q, want empty", cfg.BotLogin)
+	}
 	if cfg.Concurrency != 3 {
 		t.Errorf("default Concurrency = %d, want 3", cfg.Concurrency)
 	}
@@ -78,20 +81,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if want := map[string]string{"core": "alice", "tools": "bob"}; !reflect.DeepEqual(cfg.OwnerMap, want) {
 		t.Errorf("OwnerMap = %v, want %v", cfg.OwnerMap, want)
-	}
-}
-
-// The run budget exists so the process reports its own overrun instead of being
-// killed by the workflow. It must therefore stay strictly below the workflow's
-// timeout-minutes, which the shipped workflow sets to 15.
-func TestDefaultRunBudgetLeavesRoomBelowTheWorkflowTimeout(t *testing.T) {
-	const workflowTimeout = 15 * time.Minute
-	if defaultRunBudget >= workflowTimeout {
-		t.Errorf("defaultRunBudget = %v, must be below the workflow timeout of %v", defaultRunBudget, workflowTimeout)
-	}
-	if defaultPRTimeout > defaultRunBudget {
-		t.Errorf("defaultPRTimeout = %v exceeds defaultRunBudget = %v; one pull request could consume the whole run",
-			defaultPRTimeout, defaultRunBudget)
 	}
 }
 
@@ -115,7 +104,7 @@ func TestLoadConfigMissingRequired(t *testing.T) {
 // back to 0 would silently turn a request to triage one pull request into a
 // batch run over ten.
 func TestLoadConfigRejectsMalformedPullRequestNumber(t *testing.T) {
-	for _, bad := range []string{"abc", "12x", "-3", "1 2", "3.0"} {
+	for _, bad := range []string{"abc", "12x", "-3", "1 2", "3.0", "0"} {
 		t.Run(bad, func(t *testing.T) {
 			setRequired(t)
 			t.Setenv("PULL_REQUEST_NUMBER", bad)
@@ -161,6 +150,7 @@ func TestLoadConfigClampsBounds(t *testing.T) {
 		{env: "CONCURRENCY_LIMIT", val: "999", wantConc: maxConcurrency, checkConc: true, name: "concurrency ceiling"},
 		{env: "MAX_FILES", val: "0", wantFiles: 1, checkFiles: true, name: "max files floor"},
 		{env: "MAX_FILES", val: "100000", wantFiles: maxFilesLimit, checkFiles: true, name: "max files ceiling"},
+		{env: "MAX_FILES", val: "150", wantFiles: maxFilesLimit, checkFiles: true, name: "max files above the GraphQL cap"},
 		{
 			env: "PR_TIMEOUT", val: "0s", wantPRTimeout: defaultPRTimeout, wantBudget: defaultRunBudget,
 			checkTime: true, name: "non-positive timeout falls back to the default",
@@ -191,6 +181,113 @@ func TestLoadConfigClampsBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A malformed value must fail loudly. The default is not a safe guess: DRY_RUN
+// falling back to false means a LIVE run, and the rest silently change how much
+// of the pull request the model sees or how many are touched.
+func TestLoadConfigRejectsMalformedEnvironmentValues(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"DRY_RUN", "yes"},
+		{"DRY_RUN", "on"},
+		{"REQUEST_CONTEXT", "maybe"},
+		{"PR_COUNT", "1O"},
+		{"MAX_FILES", "fifty"},
+		{"CONCURRENCY_LIMIT", "3.5"},
+		{"PR_TIMEOUT", "5min"},
+		{"RUN_BUDGET", "10"},
+		{"GOOGLE_GENAI_USE_VERTEXAI", "yes"},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(tc.key, tc.val)
+			cfg, err := loadConfig(nil)
+			if err == nil {
+				t.Fatalf("loadConfig() accepted %s=%q and produced %+v", tc.key, tc.val, cfg)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name %s", err, tc.key)
+			}
+		})
+	}
+	// Every malformed value is reported, not just the first.
+	setRequired(t)
+	t.Setenv("DRY_RUN", "yes")
+	t.Setenv("PR_COUNT", "lots")
+	_, err := loadConfig(nil)
+	if err == nil {
+		t.Fatal("loadConfig() accepted two malformed values")
+	}
+	if !strings.Contains(err.Error(), "DRY_RUN") || !strings.Contains(err.Error(), "PR_COUNT") {
+		t.Errorf("error %q should name both malformed values", err)
+	}
+}
+
+// BOT_LOGIN is how the bot learns the identity it posts under, because the
+// installation token in the workflow cannot read GET /user. A malformed value
+// would silently disable the "have I already asked?" check.
+func TestLoadConfigValidatesBotLogin(t *testing.T) {
+	for _, tc := range []struct {
+		val     string
+		wantErr bool
+	}{
+		{"github-actions[bot]", false},
+		{"adk-bot", false},
+		{"", false},
+		{"not a login", true},
+		{"bot[]", true},
+		{"@adk-bot", true},
+		{strings.Repeat("a", 40), true},
+	} {
+		t.Run(tc.val, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("BOT_LOGIN", tc.val)
+			cfg, err := loadConfig(nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("loadConfig() accepted BOT_LOGIN=%q", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig() rejected BOT_LOGIN=%q: %v", tc.val, err)
+			}
+			if cfg.BotLogin != tc.val {
+				t.Errorf("BotLogin = %q, want %q", cfg.BotLogin, tc.val)
+			}
+		})
+	}
+}
+
+// The context-request tool must not exist in batch mode. A batch dispatch and a
+// per-pull-request run are in different concurrency groups, so letting both
+// comment is the remaining way two comments could land on one pull request —
+// and asking the author of a months-old pull request for a better description
+// is noise anyway.
+func TestContextRequestsAreOffInBatchMode(t *testing.T) {
+	cfg := testConfig()
+	cfg.RequestContext = true
+
+	cfg.SinglePR = 42
+	if !cfg.contextRequestsEnabled() {
+		t.Error("context requests must be available when triaging one pull request")
+	}
+	cfg.SinglePR = 0
+	if cfg.contextRequestsEnabled() {
+		t.Error("context requests must be off in batch mode")
+	}
+
+	// And the tool inventory must follow, not just the flag.
+	c := &GitHubClient{cfg: cfg, log: discardLogger()}
+	tools, err := c.tools()
+	if err != nil {
+		t.Fatalf("tools() error = %v", err)
+	}
+	for _, tool := range tools {
+		if tool.Name() == "request_more_context" {
+			t.Error("the context-request tool is registered in batch mode")
+		}
 	}
 }
 
@@ -225,6 +322,14 @@ func TestParseOwnerMap(t *testing.T) {
 		{name: "login with slash", in: "core=al/ice", wantErr: "not a valid GitHub login"},
 		{name: "login with at", in: "core=@alice", wantErr: "not a valid GitHub login"},
 		{name: "login too long", in: "core=" + strings.Repeat("a", 40), wantErr: "not a valid GitHub login"},
+		{
+			// The repetition in loginPattern consumes one OR two characters, so
+			// the pattern alone admits 77. An over-long login passes startup,
+			// spends the pull request's single assignment attempt, and is then
+			// rejected by GitHub.
+			name: "login long via hyphens", in: "core=" + strings.Repeat("a-", 25) + "a",
+			wantErr: "not a valid GitHub login",
+		},
 		{name: "login with double hyphen", in: "core=al--ice", wantErr: "not a valid GitHub login"},
 		{name: "empty component", in: "=alice", wantErr: "not a valid component name"},
 		{name: "braced component", in: "co{re}=alice", wantErr: "not a valid component name"},

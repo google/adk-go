@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -27,6 +28,12 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 )
 
 func discardLogger() *slog.Logger {
@@ -107,14 +114,14 @@ func TestTriageOneGatesIneligiblePullRequests(t *testing.T) {
 		{
 			name: "already assigned",
 			node: `{"number":7,"state":"OPEN","author":{"login":"carol","__typename":"User"},
-				"assignees":{"nodes":[{"login":"dave"}]}}`,
+				"assignees":{"totalCount":1}}`,
 			wantSkip: "already has an assignee",
 		},
 		{
-			name: "this bot assigned it before",
+			name: "assigned before and since un-assigned",
 			node: `{"number":7,"state":"OPEN","author":{"login":"carol","__typename":"User"},
-				"timelineItems":{"nodes":[{"actor":{"login":"adk-bot","__typename":"User"}}]}}`,
-			wantSkip: "already assigned by this bot",
+				"assignees":{"totalCount":0},"timelineItems":{"totalCount":1}}`,
+			wantSkip: "assigned before",
 		},
 		{
 			name:     "authored by a component owner",
@@ -268,7 +275,7 @@ func TestTriageOneSpendsTheCommentClaimWhenItAlreadyAsked(t *testing.T) {
 	}
 	node := fmt.Sprintf(`{"number":7,"title":"t","body":"b","state":"OPEN",
 		"author":{"login":"carol","__typename":"User"},
-		"comments":{"nodes":[{"author":{"login":"adk-bot","__typename":"User"},"body":%q}]}}`, body)
+		"comments":{"totalCount":1,"nodes":[{"author":{"login":"adk-bot","__typename":"User"},"body":%q}]}}`, body)
 	c := graphQLPR(t, cfg, node)
 	var rec agentRecorder
 
@@ -291,7 +298,7 @@ func TestTriageOneIgnoresAForgedBotComment(t *testing.T) {
 	cfg := testConfig()
 	node := fmt.Sprintf(`{"number":7,"title":"t","body":"b","state":"OPEN",
 		"author":{"login":"carol","__typename":"User"},
-		"comments":{"nodes":[{"author":{"login":"mallory","__typename":"User"},"body":%q}]}}`,
+		"comments":{"totalCount":1,"nodes":[{"author":{"login":"mallory","__typename":"User"},"body":%q}]}}`,
 		botCommentSignature+" already asked")
 	c := graphQLPR(t, cfg, node)
 	var rec agentRecorder
@@ -311,7 +318,7 @@ func TestTriageOneNeverShowsCommentsToTheModel(t *testing.T) {
 	cfg := testConfig()
 	const node = `{"number":7,"title":"t","body":"b","state":"OPEN",
 		"author":{"login":"carol","__typename":"User"},
-		"comments":{"nodes":[{"author":{"login":"mallory","__typename":"User"},"body":"COMMENT-MARKER"}]}}`
+		"comments":{"totalCount":1,"nodes":[{"author":{"login":"mallory","__typename":"User"},"body":"COMMENT-MARKER"}]}}`
 	c := graphQLPR(t, cfg, node)
 	var rec agentRecorder
 	if got := triageOne(context.Background(), c, cfg, discardLogger(), 7, rec.run); got != "" {
@@ -390,6 +397,43 @@ func TestTriageAllScopesEveryPullRequestAndSurvivesFailures(t *testing.T) {
 	}
 }
 
+// Production runs triageOne on several goroutines against one shared client
+// (main.go's triageAll closure), and nothing exercised that: every triageOne
+// test was single-threaded, so -race never saw the real orchestration path.
+func TestTriageOneIsConcurrencySafe(t *testing.T) {
+	cfg := testConfig()
+	cfg.Concurrency = 4
+	cfg.SinglePR = 0
+	c := graphQLPR(t, cfg, `{"number":7,"title":"t","body":"b","state":"OPEN",
+		"author":{"login":"carol","__typename":"User"},
+		"assignees":{"totalCount":0},"files":{"totalCount":1,"nodes":[{"path":"a.go"}]},
+		"comments":{"totalCount":0,"nodes":[]},"timelineItems":{"totalCount":0}}`)
+
+	prs := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	var mu sync.Mutex
+	nonces := map[string]bool{}
+	triageAll(context.Background(), cfg, discardLogger(), prs, func(ictx context.Context, n int) {
+		triageOne(ictx, c, cfg, discardLogger(), n, func(_ context.Context, _ int, prompt string) string {
+			mu.Lock()
+			nonces[fenceNonce(t, prompt)] = true
+			mu.Unlock()
+			return "done"
+		})
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(nonces) != len(prs) {
+		t.Errorf("saw %d distinct fence nonces across %d concurrent pull requests; they must not be shared",
+			len(nonces), len(prs))
+	}
+	for _, n := range prs {
+		if !c.isEligible(n) {
+			t.Errorf("pull request %d was not authorized; the concurrent path lost a write", n)
+		}
+	}
+}
+
 func TestTriageAllRespectsTheConcurrencyLimit(t *testing.T) {
 	cfg := testConfig()
 	cfg.Concurrency = 2
@@ -431,6 +475,7 @@ func TestCandidatePRsSingleSkipsTheSearch(t *testing.T) {
 
 func TestCandidatePRsBatchSearches(t *testing.T) {
 	cfg := testConfig()
+	cfg.SinglePR = 0 // batch mode
 	c := respondWith(t, cfg, `{"items":[{"number":11,"pull_request":{"url":"u"}}]}`)
 	got, err := candidatePRs(context.Background(), c, cfg)
 	if err != nil {
@@ -533,5 +578,220 @@ func TestNothingIsAuthorizedBeforeTriage(t *testing.T) {
 		if c.isEligible(n) {
 			t.Errorf("pull request %d was authorized before any triage ran", n)
 		}
+	}
+}
+
+// The run budget must stop the dispatch, not just fail each remaining pull
+// request: past the deadline every fetch returns "context deadline exceeded",
+// so continuing buries the real cause under one recorded failure per queued
+// item.
+func TestTriageAllStopsDispatchingWhenTheBudgetIsGone(t *testing.T) {
+	cfg := testConfig()
+	cfg.Concurrency = 1
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	var started int32
+	triageAll(ctx, cfg, discardLogger(), []int{1, 2, 3, 4, 5}, func(context.Context, int) {
+		atomic.AddInt32(&started, 1)
+	})
+	if got := atomic.LoadInt32(&started); got != 0 {
+		t.Errorf("dispatched %d pull requests after the budget expired, want 0", got)
+	}
+}
+
+// A panic in the agent, transport or model stack must not unwind out of the
+// worker and kill the process: the surviving pull requests would never be
+// triaged and runOutcome would never run.
+func TestTriageAllSurvivesAPanickingWorker(t *testing.T) {
+	cfg := testConfig()
+	cfg.Concurrency = 1
+
+	var seen []int
+	var mu sync.Mutex
+	triageAll(context.Background(), cfg, discardLogger(), []int{1, 2, 3}, func(_ context.Context, n int) {
+		mu.Lock()
+		seen = append(seen, n)
+		mu.Unlock()
+		if n == 2 {
+			panic("the model client exploded")
+		}
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 3 {
+		t.Errorf("triaged %v, want all three: a panic on one must not abort the batch", seen)
+	}
+}
+
+// The event loop must not depend on the ADK iterator choosing to stop after a
+// cancelled context. If it kept yielding, the worker would spin until the job's
+// own timeout killed it — the outcome the run budget exists to prevent.
+func TestRunAgentStopsOnAnExpiredDeadline(t *testing.T) {
+	cfg := testConfig()
+	rec := newRecordingHandler()
+	gh := graphQLThen(t, cfg, eligiblePRBody, rec)
+
+	llm := &scriptedLLM{}
+	tools, err := gh.tools()
+	if err != nil {
+		t.Fatalf("tools(): %v", err)
+	}
+	triager, err := llmagent.New(llmagent.Config{
+		Name: "pr_triager", Model: llm, Instruction: renderPrompt(cfg), Tools: tools,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(): %v", err)
+	}
+	ss := session.InMemoryService()
+	r, err := runner.New(runner.Config{AppName: appName, Agent: triager, SessionService: ss})
+	if err != nil {
+		t.Fatalf("runner.New(): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(withAuditedPR(context.Background(), 7), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	done := make(chan string, 1)
+	go func() { done <- runAgent(ctx, r, ss, gh, discardLogger(), "triage pull request #7") }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runAgent did not return on an expired deadline; the worker would spin until the job timeout")
+	}
+	if writes := rec.writes(); len(writes) != 0 {
+		t.Errorf("an expired run still wrote to GitHub: %v", writes)
+	}
+}
+
+// The prompt names which lines the model may trust. It must not name the
+// author: the login is attacker-chosen and is deliberately not emitted, so
+// promising it both misleads the model and invites the line back.
+func TestBuildPromptDoesNotPromiseTheAuthor(t *testing.T) {
+	got := buildPrompt(9, assemblePRContext(eligiblePR(), 10, "abcd1234"), "abcd1234")
+	if strings.Contains(got, "the author,") {
+		t.Errorf("the prompt promises a trusted author line:\n%s", got)
+	}
+	if strings.Contains(got, "@carol") {
+		t.Errorf("the author login reached the prompt:\n%s", got)
+	}
+	// It must still vouch for what IS emitted, or the model has no trusted anchor.
+	if !strings.Contains(got, "the pull request number") {
+		t.Errorf("the prompt no longer names its trusted context:\n%s", got)
+	}
+}
+
+// The loop must not depend on the iterator choosing to stop. A sequence that
+// keeps yielding an error is exactly what a runner reporting a cancelled context
+// would look like, and without the deadline check the worker spins until the
+// job's own timeout kills it — the outcome the run budget exists to prevent.
+func TestConsumeEventsStopsOnAnExpiredDeadline(t *testing.T) {
+	c := testClient(t, testConfig(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	var yielded int
+	endless := func(yield func(*session.Event, error) bool) {
+		for {
+			yielded++
+			if yielded > 1_000_000 {
+				// The loop never terminated. Stop rather than hang the suite.
+				return
+			}
+			if !yield(nil, errors.New("context deadline exceeded")) {
+				return
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	done := make(chan struct{})
+	go func() { consumeEvents(ctx, c, discardLogger(), endless); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("consumeEvents did not return on an endless error sequence")
+	}
+	if yielded > 2 {
+		t.Errorf("the loop consumed %d events past the deadline, want it to break at once", yielded)
+	}
+}
+
+// The control: with a live context the loop still drains the sequence and
+// returns the model's last text, so the deadline check cannot pass by refusing
+// everything.
+func TestConsumeEventsReturnsTheFinalText(t *testing.T) {
+	c := testClient(t, testConfig(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	seq := func(yield func(*session.Event, error) bool) {
+		for _, text := range []string{"first", "second"} {
+			ev := &session.Event{}
+			ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}
+	if got := consumeEvents(context.Background(), c, discardLogger(), seq); got != "second" {
+		t.Errorf("consumeEvents() = %q, want the last text", got)
+	}
+	if c.hadError() {
+		t.Error("a clean run recorded an error")
+	}
+}
+
+// A model error is data to the agent, so the ONLY thing that turns it into a
+// non-zero exit is recordError here. Nothing tested that: the fetch-failure test
+// covers a different branch entirely, so deleting either recordError call left
+// the suite green while a run in which every turn failed reported success.
+func TestConsumeEventsRecordsModelErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seq  iter.Seq2[*session.Event, error]
+	}{
+		{
+			name: "the runner yields an error",
+			seq: func(yield func(*session.Event, error) bool) {
+				yield(nil, errors.New("the model refused"))
+			},
+		},
+		{
+			name: "the event carries an error code",
+			seq: func(yield func(*session.Event, error) bool) {
+				ev := &session.Event{}
+				ev.ErrorCode, ev.ErrorMessage = "SAFETY", "blocked"
+				yield(ev, nil)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, testConfig(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			if c.hadError() {
+				t.Fatal("hadError() should start false")
+			}
+			consumeEvents(context.Background(), c, discardLogger(), tc.seq)
+			if !c.hadError() {
+				t.Error("the failure was not recorded, so the run would exit 0")
+			}
+			// And it must fail the run for real, through the production path.
+			if err := runOutcome(context.Background(), c, time.Minute); err == nil {
+				t.Error("runOutcome() returned nil after a failed agent run")
+			}
+		})
+	}
+
+	// The control: a clean run must not be recorded as an error, or the check
+	// above would pass by failing everything.
+	c := testClient(t, testConfig(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	consumeEvents(context.Background(), c, discardLogger(), func(yield func(*session.Event, error) bool) {
+		ev := &session.Event{}
+		ev.Content = genai.NewContentFromText("all good", genai.RoleModel)
+		yield(ev, nil)
+	})
+	if c.hadError() {
+		t.Error("a clean run was recorded as an error")
 	}
 }

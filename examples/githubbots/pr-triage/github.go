@@ -32,14 +32,14 @@ const (
 	resolveIdentityTimeout = 10 * time.Second
 	// searchPageSize bounds one page of REST search results.
 	searchPageSize = 100
-	// commentLimit bounds the comments fetched per pull request. They are used
-	// only for the "have I already asked for context?" check.
+	// commentLimit bounds the comments fetched per pull request, used only for
+	// the "have I already asked for context?" check. It is the schema maximum
+	// (GraphQL rejects a first/last outside 1-100), and the query asks for the
+	// FIRST comments rather than the last: the bot only ever comments on a fresh
+	// pull request, so its own comment is among the earliest. The query also
+	// returns totalCount, so a thread longer than this window is recognized as
+	// "cannot tell" rather than silently read as "never asked".
 	commentLimit = 100
-	// timelineLimit bounds the assignment events fetched per pull request. They
-	// establish whether the bot has already had its one assignment turn.
-	timelineLimit = 100
-	// assigneeLimit bounds the assignees fetched. GitHub allows at most 10.
-	assigneeLimit = 10
 )
 
 // botSuffix is what the REST API appends to a GitHub App's login. GraphQL
@@ -134,18 +134,31 @@ func NewGitHubClient(ctx context.Context, cfg *Config, log *slog.Logger) (*GitHu
 		claims:   make(map[claimKey]outcome),
 	}
 
-	// Resolve identity once, under a short timeout so a hanging API call cannot
-	// stall startup indefinitely.
+	// The bot needs its own login to recognize its own past context-request
+	// comment. Configuration wins over the API: the workflow runs with an
+	// installation token, and REST GET /user is a user-to-server endpoint that
+	// answers 403 for one, so the API path exists only for a personal access
+	// token.
+	if cfg.BotLogin != "" {
+		c.selfLogin = cfg.BotLogin
+		log.Info("bot identity from configuration", "login", c.selfLogin)
+		return c, nil
+	}
+	// Resolve under a short timeout so a hanging API call cannot stall startup.
 	idCtx, cancel := context.WithTimeout(ctx, resolveIdentityTimeout)
 	defer cancel()
 	if u, _, err := rest.Users.Get(idCtx, ""); err == nil {
 		c.selfLogin = u.GetLogin()
 		log.Info("resolved bot identity", "login", c.selfLogin)
 	} else {
-		// Without an identity the bot cannot tell its own past assignment from a
-		// maintainer's, so skipReason refuses any pull request that has ever been
-		// assigned. That is the fail-safe direction: it triages less, never more.
-		log.Warn("could not resolve bot identity; pull requests with any prior assignment will be skipped", "error", err)
+		// Degraded, but degraded SAFELY: with no identity, contextRequestSpent
+		// counts a comment carrying the signature whoever wrote it, so the bot
+		// asks less rather than asking twice. Say which control is degraded --
+		// a run that quietly lost one looks exactly like a healthy run.
+		log.Warn("could not resolve the bot identity; set BOT_LOGIN. "+
+			"Falling back to matching the context-request comment by its text alone, "+
+			"so anyone who copies that text can suppress the request",
+			"error", err)
 	}
 	return c, nil
 }
@@ -304,22 +317,23 @@ type rawPullRequest struct {
 	IsDraft   bool     `json:"isDraft"`
 	Author    *ghActor `json:"author"`
 	Assignees struct {
-		Nodes []struct {
-			Login string `json:"login"`
-		} `json:"nodes"`
+		TotalCount int `json:"totalCount"`
 	} `json:"assignees"`
 	Files struct {
-		Nodes []struct {
+		TotalCount int `json:"totalCount"`
+		Nodes      []struct {
 			Path string `json:"path"`
 		} `json:"nodes"`
 	} `json:"files"`
 	Comments struct {
-		Nodes []ghComment `json:"nodes"`
+		TotalCount int         `json:"totalCount"`
+		Nodes      []ghComment `json:"nodes"`
 	} `json:"comments"`
+	// TimelineItems is filtered to ASSIGNED_EVENT, so its totalCount is the
+	// number of times anyone has been assigned. Only the count is fetched: who
+	// did it does not matter, because ANY prior assignment stops this bot.
 	TimelineItems struct {
-		Nodes []struct {
-			Actor *ghActor `json:"actor"`
-		} `json:"nodes"`
+		TotalCount int `json:"totalCount"`
 	} `json:"timelineItems"`
 }
 
@@ -338,10 +352,6 @@ func login(a *ghActor) string {
 }
 
 func (r *rawPullRequest) toPullRequest() PullRequest {
-	assignees := make([]string, 0, len(r.Assignees.Nodes))
-	for _, a := range r.Assignees.Nodes {
-		assignees = append(assignees, a.Login)
-	}
 	files := make([]string, 0, len(r.Files.Nodes))
 	for _, f := range r.Files.Nodes {
 		files = append(files, f.Path)
@@ -350,23 +360,19 @@ func (r *rawPullRequest) toPullRequest() PullRequest {
 	for _, c := range r.Comments.Nodes {
 		comments = append(comments, Comment{Author: login(c.Author), Body: c.Body})
 	}
-	assignedBy := make([]string, 0, len(r.TimelineItems.Nodes))
-	for _, t := range r.TimelineItems.Nodes {
-		if actor := login(t.Actor); actor != "" {
-			assignedBy = append(assignedBy, actor)
-		}
-	}
 	return PullRequest{
-		Number:     r.Number,
-		Title:      r.Title,
-		Body:       r.Body,
-		State:      r.State,
-		IsDraft:    r.IsDraft,
-		Author:     login(r.Author),
-		Assignees:  assignees,
-		Files:      files,
-		Comments:   comments,
-		AssignedBy: assignedBy,
+		Number:           r.Number,
+		Title:            r.Title,
+		Body:             r.Body,
+		State:            r.State,
+		IsDraft:          r.IsDraft,
+		Author:           login(r.Author),
+		AssigneeCount:    r.Assignees.TotalCount,
+		Files:            files,
+		TotalFiles:       r.Files.TotalCount,
+		Comments:         comments,
+		TotalComments:    r.Comments.TotalCount,
+		PriorAssignments: r.TimelineItems.TotalCount,
 	}
 }
 
@@ -375,7 +381,7 @@ func (r *rawPullRequest) toPullRequest() PullRequest {
 // paths carry the routing signal at a fraction of the tokens and a fraction of
 // the attacker-controlled text.
 const pullRequestQuery = `
-query($owner: String!, $name: String!, $number: Int!, $fileLimit: Int!, $commentLimit: Int!, $timelineLimit: Int!, $assigneeLimit: Int!) {
+query($owner: String!, $name: String!, $number: Int!, $fileLimit: Int!, $commentLimit: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       number
@@ -384,15 +390,32 @@ query($owner: String!, $name: String!, $number: Int!, $fileLimit: Int!, $comment
       state
       isDraft
       author { login __typename }
-      assignees(first: $assigneeLimit) { nodes { login } }
-      files(first: $fileLimit) { nodes { path } }
-      comments(last: $commentLimit) { nodes { author { login __typename } body } }
-      timelineItems(last: $timelineLimit, itemTypes: [ASSIGNED_EVENT]) {
-        nodes { ... on AssignedEvent { actor { login __typename } } }
-      }
+      assignees(first: 1) { totalCount }
+      files(first: $fileLimit) { totalCount nodes { path } }
+      comments(first: $commentLimit) { totalCount nodes { author { login __typename } body } }
+      timelineItems(last: 1, itemTypes: [ASSIGNED_EVENT]) { totalCount }
     }
   }
 }`
+
+// graphQLError is one entry of a GraphQL response's errors array.
+type graphQLError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// graphQL issues a query through the authenticated go-github client and decodes
+// the response into out.
+func (c *GitHubClient) graphQL(ctx context.Context, query string, variables map[string]any, out any) error {
+	req, err := c.rest.NewRequest("POST", "graphql", map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return fmt.Errorf("build graphql request: %w", err)
+	}
+	if _, err := c.rest.Do(ctx, req, out); err != nil {
+		return fmt.Errorf("graphql request: %w", err)
+	}
+	return nil
+}
 
 type pullRequestResponse struct {
 	Data struct {
@@ -403,35 +426,22 @@ type pullRequestResponse struct {
 			PullRequest *rawPullRequest `json:"pullRequest"`
 		} `json:"repository"`
 	} `json:"data"`
-	Errors []struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"errors"`
+	Errors []graphQLError `json:"errors"`
 }
 
 // FetchPullRequest retrieves a pull request in a single GraphQL query, issued
 // through the authenticated go-github client. It returns ErrPullRequestNotFound
 // when the number does not exist or refers to an issue.
 func (c *GitHubClient) FetchPullRequest(ctx context.Context, number int) (PullRequest, error) {
-	body := map[string]any{
-		"query": pullRequestQuery,
-		"variables": map[string]any{
-			"owner":         c.cfg.Owner,
-			"name":          c.cfg.Repo,
-			"number":        number,
-			"fileLimit":     c.cfg.MaxFiles,
-			"commentLimit":  commentLimit,
-			"timelineLimit": timelineLimit,
-			"assigneeLimit": assigneeLimit,
-		},
-	}
-	req, err := c.rest.NewRequest("POST", "graphql", body)
-	if err != nil {
-		return PullRequest{}, fmt.Errorf("build graphql request: %w", err)
-	}
 	var out pullRequestResponse
-	if _, err := c.rest.Do(ctx, req, &out); err != nil {
-		return PullRequest{}, fmt.Errorf("graphql request: %w", err)
+	if err := c.graphQL(ctx, pullRequestQuery, map[string]any{
+		"owner":        c.cfg.Owner,
+		"name":         c.cfg.Repo,
+		"number":       number,
+		"fileLimit":    c.cfg.MaxFiles,
+		"commentLimit": commentLimit,
+	}, &out); err != nil {
+		return PullRequest{}, err
 	}
 	// A null repository means OWNER/REPO could not be resolved at all (misconfig
 	// or missing access). That is an infrastructure error, NOT "not found":
@@ -471,22 +481,108 @@ func (c *GitHubClient) FetchPullRequest(ctx context.Context, number int) (PullRe
 // GitHub only accepts assignees with write or triage access and silently drops
 // the rest from an assignee POST, so this is checked first and a negative answer
 // is reported as a skip rather than a silent no-op.
-func (c *GitHubClient) IsAssignable(ctx context.Context, login string) (bool, error) {
+// The underlying error is deliberately NOT wrapped. A tool's Go error is
+// serialized back to the model (see OnToolErrorCallbacks in main.go), and this
+// endpoint puts the login in its PATH -- go-github's error text is
+// "GET .../assignees/<login>: 500", so wrapping it would hand a fully
+// attacker-controlled model a real assignee on any transient failure of the
+// probe. That defeats the whole point of the model choosing a component rather
+// than a person. The detail goes to the operator's log instead, and the returned
+// error names only the component, which the model already knows.
+func (c *GitHubClient) IsAssignable(ctx context.Context, component, login string) (bool, error) {
 	ok, _, err := c.rest.Issues.IsAssignee(ctx, c.cfg.Owner, c.cfg.Repo, login)
 	if err != nil {
-		return false, fmt.Errorf("check assignability of %q: %w", login, err)
+		c.log.Error("assignability check failed", "component", component, "owner", login, "error", err)
+		return false, fmt.Errorf("could not check whether the owner of component %q can be assigned", component)
 	}
 	return ok, nil
 }
 
+// assignmentStillWanted re-reads the pull request and reports why it no longer
+// needs an owner, or "" when the assignment should proceed.
+//
+// It exists because the one-shot claim is per process. The workflow keeps two
+// event-driven runs for one pull request in the same concurrency group, but a
+// manual batch run is necessarily in a different one, so two processes can hold
+// the same pull request at once. Both pass their own precondition gate minutes
+// earlier, both reach the write, and AddAssignees APPENDS -- so the pull request
+// ends up with two owners. This does not make the write atomic; it narrows the
+// window from a whole model turn to one round trip.
+func (c *GitHubClient) assignmentStillWanted(ctx context.Context, number int) (string, error) {
+	var out assignmentStateResponse
+	if err := c.graphQL(ctx, assignmentStateQuery, map[string]any{
+		"owner": c.cfg.Owner, "name": c.cfg.Repo, "number": number,
+	}, &out); err != nil {
+		return "", fmt.Errorf("re-check pull request #%d before assigning: %w", number, err)
+	}
+	if len(out.Errors) > 0 {
+		for _, e := range out.Errors {
+			if e.Type == "NOT_FOUND" {
+				return "it is no longer a visible pull request", nil
+			}
+		}
+		return "", fmt.Errorf("re-check pull request #%d before assigning: %s", number, out.Errors[0].Message)
+	}
+	pr := out.Data.Repository.PullRequest
+	if out.Data.Repository == nil || pr == nil {
+		return "it is no longer a visible pull request", nil
+	}
+	if pr.Assignees.TotalCount > 0 {
+		return "someone has been assigned since this run started", nil
+	}
+	if pr.TimelineItems.TotalCount > 0 {
+		return "it has been assigned since this run started", nil
+	}
+	if !strings.EqualFold(pr.State, "OPEN") {
+		return "it is no longer open", nil
+	}
+	return "", nil
+}
+
+// assignmentStateQuery reads only the three scalars the re-check needs. It is
+// deliberately not the full pull request query: this runs on every assignment,
+// and pulling the file list and a hundred comment bodies to compare three
+// counters is a pattern nobody copying this sample should learn.
+const assignmentStateQuery = `
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state
+      assignees(first: 1) { totalCount }
+      timelineItems(last: 1, itemTypes: [ASSIGNED_EVENT]) { totalCount }
+    }
+  }
+}`
+
+type assignmentStateResponse struct {
+	Data struct {
+		Repository *struct {
+			PullRequest *struct {
+				State     string `json:"state"`
+				Assignees struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"assignees"`
+				TimelineItems struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"timelineItems"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
 // AssignOwner assigns one login to a pull request. Pull requests are issues as
 // far as the assignee endpoint is concerned. It is a no-op under dry-run.
-func (c *GitHubClient) AssignOwner(ctx context.Context, number int, login string) error {
-	if c.shouldSkip(number, "assign @%s", login) {
+func (c *GitHubClient) AssignOwner(ctx context.Context, number int, component, login string) error {
+	if c.shouldSkip(number, "assign the owner of component %q", component) {
 		return nil
 	}
 	if _, _, err := c.rest.Issues.AddAssignees(ctx, c.cfg.Owner, c.cfg.Repo, number, []string{login}); err != nil {
-		return err
+		// Safe to wrap here: this endpoint carries the login in the request BODY,
+		// and go-github's error text is built from the method and URL. A test
+		// pins that, because the distinction is one refactor away from being
+		// wrong -- as it already was for IsAssignable, whose login is in the path.
+		return fmt.Errorf("assign the owner of component %q: %w", component, err)
 	}
 	c.log.Info("assigned owner", "pr", number, "owner", login)
 	return nil
