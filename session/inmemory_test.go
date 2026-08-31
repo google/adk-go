@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -232,5 +234,56 @@ func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestInMemoryService_AppendEvent_CopiesCompaction pins that a stored
+// compaction cannot be edited through the pointer the caller passed in.
+//
+// Of every field on EventActions this is the one that must be copied: it names
+// the range of history each future prompt drops, so a producer that kept its
+// pointer could move the boundary after the append and silently change what
+// the agent sees. The other three fields were already cloned.
+func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(time.Minute)
+	mine := &session.EventCompaction{
+		StartTimestamp:   start,
+		EndTimestamp:     end,
+		CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "summary"}}},
+	}
+	event := &session.Event{ID: "c1", Author: "user"}
+	event.Actions.Compaction = mine
+	if err := service.AppendEvent(ctx, sess, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// Rewrite the record through the pointer we still hold. A stored event must
+	// not follow.
+	mine.EndTimestamp = end.Add(100 * time.Hour)
+	mine.CompactedContent.Parts[0].Text = "rewritten after the append"
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stored := got.Session.Events().At(0).Actions.Compaction
+	if stored == nil {
+		t.Fatal("compaction was not persisted")
+	}
+	if !stored.EndTimestamp.Equal(end) {
+		t.Errorf("stored EndTimestamp = %v, want %v: the caller moved the covered range after the append", stored.EndTimestamp, end)
+	}
+	if txt := stored.CompactedContent.Parts[0].Text; txt != "summary" {
+		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
 	}
 }

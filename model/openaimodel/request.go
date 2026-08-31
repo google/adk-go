@@ -95,12 +95,20 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if len(textParts) == 0 {
 				return nil
 			}
-			msg, err := newMessage(curRole, textParts)
+			msgRole, err := normalizeRole(curRole)
 			if err != nil {
 				return err
 			}
-			if msg != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+			// The Responses API rejects "input_text" for the assistant role, so
+			// a replayed assistant turn goes out as an output message instead.
+			if msgRole == responses.EasyInputMessageRoleAssistant {
+				if msg := newOutputMessage(textParts); msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
+				}
+			} else {
+				if msg := newMessage(msgRole, textParts); msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+				}
 			}
 			textParts = textParts[:0]
 			return nil
@@ -151,13 +159,10 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 	return items, nil
 }
 
-func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessageParam, error) {
+// newMessage builds an easy input message for an already-normalized role.
+func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
 	if len(texts) == 0 {
-		return nil, nil
-	}
-	msgRole, err := normalizeRole(role)
-	if err != nil {
-		return nil, err
+		return nil
 	}
 	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
 	for _, txt := range texts {
@@ -173,7 +178,7 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		})
 	}
 	if len(contentList) == 0 {
-		return nil, nil
+		return nil
 	}
 	return &responses.EasyInputMessageParam{
 		Role: msgRole,
@@ -181,7 +186,35 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		Content: responses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
-	}, nil
+	}
+}
+
+// newOutputMessage builds an assistant output message whose content uses the
+// "output_text" type, as required when replaying a prior assistant turn to the
+// OpenAI Responses API.
+func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
+	if len(texts) == 0 {
+		return nil
+	}
+	contentList := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
+	for _, txt := range texts {
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		contentList = append(contentList, responses.ResponseOutputMessageContentUnionParam{
+			OfOutputText: &responses.ResponseOutputTextParam{
+				Text: txt,
+				Type: constant.OutputText("output_text"),
+			},
+		})
+	}
+	if len(contentList) == 0 {
+		return nil
+	}
+	return &responses.ResponseOutputMessageParam{
+		Content: contentList,
+		Status:  responses.ResponseOutputMessageStatusCompleted,
+	}
 }
 
 func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {

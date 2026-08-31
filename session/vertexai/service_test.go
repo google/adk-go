@@ -16,6 +16,7 @@ package vertexai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,6 +131,19 @@ func emptyService(t *testing.T, name string, offline bool) (session.Service, map
 		var rawTeardown func()
 		rawOpts, rawTeardown, err = setupReplay(t, replayFile)
 		if err != nil {
+			// A shared-suite case that this backend has no recording for yet.
+			// Skipping loudly beats failing the build, but the case is
+			// genuinely not covered here until someone regenerates, and a
+			// skipped case reports PASS while asserting nothing.
+			//
+			// The three compaction cases were skipping for exactly that reason
+			// and are recorded now. Recording them answered two open questions
+			// about this backend: a compaction record does survive the round
+			// trip, and a hole still names its event afterwards, so the
+			// microsecond normalisation holds here.
+			if errors.Is(err, os.ErrNotExist) {
+				t.Skipf("no replay recording at testdata/%s. Regenerate with: UPDATE_REPLAYS=true go test ./session/vertexai/...", replayFile)
+			}
 			t.Fatalf("Failed to setup replay: %v", err)
 		}
 		opts = rawOpts
