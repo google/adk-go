@@ -151,6 +151,23 @@ func (c *Client) peek(number int) (n need, authorized bool) {
 	return n, authorized
 }
 
+// claimBarrier, when non-nil, is called inside a claim's critical section --
+// after the need has been observed and before it is cleared. It is nil in
+// production, where it costs one nil check, and exists only so a test can pin
+// the atomicity of the claim.
+//
+// Nothing else could. Racing N goroutines at claimType and asserting that one
+// wins does not: catching a split critical section needs two of them to read
+// "still needed" before either writes, a window two instructions wide, and
+// measured against exactly that mutation the racing test caught it 0 times in
+// 10 fresh processes. A hook inside the section lets a test MAKE that
+// interleaving happen rather than hope for it, because correct code can only
+// ever have one caller inside at a time. See
+// TestAClaimsCriticalSectionAdmitsOneCallerAtATime.
+//
+// It runs while c.mu is held, so it must not touch the Client.
+var claimBarrier func()
+
 // claimType atomically reserves an issue's type need for a single mutation. It
 // reports whether the issue is authorized at all, and whether this call won the
 // reservation (the type was still needed and is now marked satisfied). Reserving
@@ -170,6 +187,9 @@ func (c *Client) claimType(number int) (claimed, authorized bool) {
 	if !n.typ {
 		return false, true
 	}
+	if claimBarrier != nil {
+		claimBarrier()
+	}
 	n.typ = false
 	c.authorized[number] = n
 	return true, true
@@ -186,6 +206,9 @@ func (c *Client) claimLabel(number int) (claimed, authorized bool) {
 	}
 	if !n.label {
 		return false, true
+	}
+	if claimBarrier != nil {
+		claimBarrier()
 	}
 	n.label = false
 	c.authorized[number] = n

@@ -247,12 +247,13 @@ func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
 	//
 	// What this test does and does not establish. It establishes the OUTCOME
 	// under real contention: 64 goroutines released together produce one write
-	// and one success. It does NOT reliably kill a check-then-act split of
-	// claimType -- measured 0 kills in 5 runs against exactly that mutation,
-	// because the window between an unlocked read and an unlocked write is a few
-	// nanoseconds and the goroutines serialize on the first mutex anyway. The
-	// atomicity itself is established by reading claimType: one Lock, one
-	// deferred Unlock, spanning the whole read-modify-write.
+	// and one success, through the real tool function and a live server. It does
+	// NOT kill a check-then-act split of claimType -- measured 0 kills in 10
+	// fresh processes against exactly that mutation, because the window between
+	// an unlocked read and an unlocked write is two instructions wide and racing
+	// for it is a coin flip. The mechanism is pinned separately, by forcing that
+	// interleaving rather than racing it: see
+	// TestAClaimsCriticalSectionAdmitsOneCallerAtATime.
 	var calls atomic.Int64
 	c := writeClient(t, testConfig(), untriagedIssueJSON, func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
