@@ -1,0 +1,102 @@
+# Runs the issue-triage agent in examples/githubbots/issue-triage.
+#
+# The agent reads an issue's title and body -- text any stranger can write --
+# and sets the issue type and one categorization label. The authority limits
+# live in the Go code (per-session issue scoping, an atomic need-claim, and a
+# value allow-list on both fields), not in the prompt. This workflow's job is to
+# hand the process the narrowest possible token and a bounded amount of time.
+name: Issue Triage Bot
+
+on:
+  issues:
+    types: [opened]
+  schedule:
+    # Backstop. The concurrency group below is constant, so GitHub keeps at most
+    # one run queued and a burst of newly opened issues can drop some of them.
+    # This sweep collects whatever the event runs missed.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number to triage. Leave blank to sweep the backlog.'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 'Log the intended actions without modifying any issue.'
+        type: boolean
+        required: false
+        default: true
+
+# The agent sets an issue type and adds a label; contents:read is what checkout
+# needs and nothing else is granted.
+permissions:
+  contents: read
+  issues: write
+
+# Constant on purpose, NOT keyed on the issue number. Keying it on the number
+# would put a scheduled sweep in a different group from an event run for an
+# issue that sweep is already processing, and the bot's no-double-action guard
+# (the need-claim) lives in process memory: two concurrent processes each read
+# an unset field and both write it.
+concurrency:
+  group: issue-triage-bot
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    # A fork inherits the schedule, and its token cannot write here anyway.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    # Must stay above SWEEP_TIMEOUT below, with room for the cold `go run`
+    # compile that precedes it. Hitting this limit kills the process without a
+    # word; the process-side budget is what makes an overrun report instead.
+    timeout-minutes: 25
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/githubbots/issue-triage/go.mod
+          cache-dependency-path: examples/githubbots/issue-triage/go.sum
+
+      - name: Triage issues
+        working-directory: examples/githubbots/issue-triage
+        env:
+          # The default job token, scoped by the permissions block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_REPOSITORY: ${{ github.repository }}
+          # Reaches the script only as an environment variable, never
+          # interpolated into the script text, and validated below before use.
+          ISSUE_INPUT: ${{ github.event.issue.number || inputs.issue }}
+          # Manual runs default to a dry run. The issue and schedule triggers
+          # are the bot doing its job, so they act for real.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          # A sweep processes at most this many issues, newest first.
+          ISSUE_COUNT: '5'
+          ISSUE_TIMEOUT: 5m
+          # The process-side budget: below timeout-minutes above, so the sweep
+          # stops and names what it left rather than being killed mid-run.
+          SWEEP_TIMEOUT: 15m
+        run: |
+          set -euo pipefail
+
+          OWNER=${GH_REPOSITORY%%/*}
+          REPO=${GH_REPOSITORY##*/}
+          export OWNER REPO
+
+          args=()
+          if [ -n "${ISSUE_INPUT}" ]; then
+            if ! printf '%s' "${ISSUE_INPUT}" | grep -Eq '^[0-9]+$'; then
+              echo "::error::issue input must be a number, got: ${ISSUE_INPUT}"
+              exit 1
+            fi
+            args+=(-issue "${ISSUE_INPUT}")
+          fi
+
+          go run . ${args[@]+"${args[@]}"}
