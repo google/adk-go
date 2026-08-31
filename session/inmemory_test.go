@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -232,5 +233,118 @@ func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestInMemoryService_AppendEvent_StripsTempKeysFromCanonicalRecord covers
+// what the test above does not: Create() and AppendEvent() hand callers a
+// session.Session distinct from the service's own canonical record, so
+// re-reading temp: stripping through that same handle (as above) cannot
+// catch a bug in how the canonical record is built. A fresh Get() call is
+// required to observe what any other caller (e.g. a later turn, a different
+// goroutine) actually sees.
+func TestInMemoryService_AppendEvent_StripsTempKeysFromCanonicalRecord(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:k1": "v1",
+				"sk":      "v2",
+			},
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	var storedEvent *session.Event
+	for ev := range getResp.Session.Events().All() {
+		storedEvent = ev
+	}
+	if storedEvent == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if _, exists := storedEvent.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("temp:k1 leaked into the canonical record returned by Get(): %v", storedEvent.Actions.StateDelta)
+	}
+	if storedEvent.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestInMemoryService_AppendEvent_MultipleEventsAllStripped guards against a
+// narrower fix that only handles the first appended event: each event in a
+// multi-turn session must independently have its temp: keys stripped from
+// the canonical record.
+func TestInMemoryService_AppendEvent_MultipleEventsAllStripped(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	for i, tempVal := range []string{"first", "second", "third"} {
+		event := &session.Event{
+			ID:        fmt.Sprintf("event%d", i),
+			Timestamp: time.Now(),
+			Actions: session.EventActions{
+				StateDelta: map[string]any{
+					"temp:turn": tempVal,
+					"turn":      i,
+				},
+			},
+		}
+		if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%d) failed: %v", i, err)
+		}
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	i := 0
+	for ev := range getResp.Session.Events().All() {
+		if _, exists := ev.Actions.StateDelta["temp:turn"]; exists {
+			t.Errorf("event %d: temp:turn leaked into the canonical record: %v", i, ev.Actions.StateDelta)
+		}
+		if ev.Actions.StateDelta["turn"] != i {
+			t.Errorf("event %d: expected non-temp key turn=%d, got: %v", i, i, ev.Actions.StateDelta)
+		}
+		i++
+	}
+	if i != 3 {
+		t.Fatalf("expected 3 stored events, got %d", i)
 	}
 }
