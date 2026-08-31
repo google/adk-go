@@ -102,7 +102,11 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			// also accepted, but an output message keeps one entry per part
 			// rather than flattening them into a single string. Every other role
 			// stays an easy input message.
-			if curRole == genai.RoleModel {
+			msgRole, err := normalizeRole(curRole)
+			if err != nil {
+				return err
+			}
+			if msgRole == responses.EasyInputMessageRoleAssistant {
 				msg, err := newOutputMessage(textParts)
 				if err != nil {
 					return err
@@ -111,11 +115,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
 				}
 			} else {
-				msg, err := newMessage(curRole, textParts)
-				if err != nil {
-					return err
-				}
-				if msg != nil {
+				if msg := newMessage(msgRole, textParts); msg != nil {
 					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
 				}
 			}
@@ -168,13 +168,11 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 	return items, nil
 }
 
-func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessageParam, error) {
+// newMessage builds an easy input message for an already-normalized role.
+// Returns nil when every text part is blank, so no empty message is emitted.
+func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
 	if len(texts) == 0 {
-		return nil, nil
-	}
-	msgRole, err := normalizeRole(role)
-	if err != nil {
-		return nil, err
+		return nil
 	}
 	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
 	for _, txt := range texts {
@@ -190,7 +188,7 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		})
 	}
 	if len(contentList) == 0 {
-		return nil, nil
+		return nil
 	}
 	return &responses.EasyInputMessageParam{
 		Role: msgRole,
@@ -198,7 +196,7 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		Content: responses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
-	}, nil
+	}
 }
 
 // newOutputMessage builds an assistant output message whose content uses the
