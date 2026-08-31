@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package loggingplugin provides a plugin that logs key invocation events
+// (user messages, agent and model activity, tool calls, and errors) to the
+// console for terminal-based debugging.
 package loggingplugin
 
 import (

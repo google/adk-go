@@ -18,6 +18,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Every job here only reads the repository: it checks out, builds, tests and
+# lints. Declaring that once at the top keeps each job from inheriting the
+# broader default token.
+permissions:
+  contents: read
+
 jobs:
   discover:
     runs-on: ubuntu-latest
@@ -80,6 +86,12 @@ jobs:
         working-directory: ${{ matrix.module }}
         install-mode: goinstall
         version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1
+        # golangci-lint's analysis cache stores the facts analyzers derive about
+        # dependencies, and its key does not track the toolchain. Restoring one
+        # written by an older Go leaves staticcheck without the runtime.Goexit
+        # inside testing.(*common).FailNow, so it stops treating t.Fatal as
+        # terminating and reports SA5011 nil dereferences throughout the tests.
+        skip-cache: true
 
   guardrail:
     runs-on: ubuntu-latest

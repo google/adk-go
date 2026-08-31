@@ -77,7 +77,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to read image file: %v", err)
 	}
-	genai.NewPartFromBytes(imageBytes, "image/png")
 
 	_, err = artifactService.Save(ctx, &artifact.SaveRequest{
 		AppName:   appName,

@@ -14,7 +14,8 @@
 
 package agent
 
-// TODO(kdroste): comment the interface
+// DynamicSubScheduler schedules and runs child nodes dynamically, resolving
+// their outputs for ancestor agents.
 type DynamicSubScheduler interface {
 	RunNode(any, any, any) (any, error)
 	ParentPath() string
