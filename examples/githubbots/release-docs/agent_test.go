@@ -19,11 +19,14 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"google.golang.org/genai"
 
@@ -156,16 +159,23 @@ func findingRequiredFields(d *genai.FunctionDeclaration) (fields []string, ok bo
 	if err != nil {
 		return nil, false
 	}
+	// Pointers throughout: json.Unmarshal does not error on a missing key, so a
+	// value type here would report "read the schema" for a document that has no
+	// findings node at all -- a $ref-shaped schema, say -- and the caller would
+	// then certify a property it never observed.
 	var schema struct {
-		Properties struct {
-			Findings struct {
-				Items struct {
+		Properties *struct {
+			Findings *struct {
+				Items *struct {
 					Required []string `json:"required"`
 				} `json:"items"`
 			} `json:"findings"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil, false
+	}
+	if schema.Properties == nil || schema.Properties.Findings == nil || schema.Properties.Findings.Items == nil {
 		return nil, false
 	}
 	return schema.Properties.Findings.Items.Required, true
@@ -418,7 +428,10 @@ func TestRunGroupAbortsWhenTheNonceCannotBeDrawn(t *testing.T) {
 	if !gh.hadError() {
 		t.Error("the failure was not recorded, so the run would exit 0")
 	}
-	if turns := m.turns; turns != 0 {
+	m.mu.Lock()
+	turns := m.turns
+	m.mu.Unlock()
+	if turns != 0 {
 		t.Errorf("the model was called %d times, want 0", turns)
 	}
 	if len(rec.findings()) != 0 {
@@ -458,6 +471,12 @@ func TestRunWithFilesAnIssueTheDuplicateProbesCanFind(t *testing.T) {
 
 	if h.creates != 1 {
 		t.Fatalf("created %d issues, want 1", h.creates)
+	}
+	// Exactly one non-GET request in the whole run: the create. A second
+	// mutation added anywhere, even one that is itself dry-run gated, shows up
+	// here.
+	if h.writes != 1 {
+		t.Errorf("the run made %d write requests, want exactly 1 (the create)", h.writes)
 	}
 	// The title the create sends must be the one the search probe looks for.
 	if want := issueTitle("v1.1.0"); h.title != want {
@@ -510,5 +529,100 @@ func TestRunWithUnderDryRunMakesNoWriteRequest(t *testing.T) {
 	}
 	if !strings.Contains(rendered.String(), "a new exported API") {
 		t.Error("dry run did not render the issue it would have filed")
+	}
+}
+
+// The tool-error callback is the one place model output reaches a log.
+//
+// The GitHub Actions runner scans a step's stderr for workflow commands exactly
+// as it scans stdout, so this is the single path where model text could reach a
+// command parser with neither neutralize nor escapeWorkflowCommands in the way.
+// The invariant is not "the model's words never appear" — a schema error that
+// does not say which value was wrong is useless — it is that they cannot be
+// PARSED: the argument values are replaced by their names, and the error text is
+// folded to a single line with every control character removed.
+//
+// The error is produced by a real schema violation rather than installed: the
+// stub sends group_index as a string, and ADK quotes the offending value back.
+//
+// Mutation that must fail this test: log `"args", args` instead of
+// `"arg_names", argNames(args)`, or drop the safeLogValue call.
+func TestToolErrorLoggingCannotCarryAWorkflowCommand(t *testing.T) {
+	const marker = "MODEL_TEXT_MARKER"
+	cfg := testConfig()
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn > 0 {
+			return nil
+		}
+		return []*genai.Part{{FunctionCall: &genai.FunctionCall{
+			Name: "record_documentation_findings",
+			Args: map[string]any{
+				"release": "v1.0.0...v1.1.0",
+				// Wrong type, so ADK rejects it before the tool body runs and its
+				// error message quotes this value back.
+				"group_index": marker + "\n::add-mask::x\r::error::y",
+				"findings":    []any{},
+			},
+		}}}
+	}})
+
+	var logged strings.Builder
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	gh := testClient(t, cfg, failIfCalled(t))
+	r, sessions, err := newAgentRunner(context.Background(), cfg, newRecorder(cfg), log)
+	if err != nil {
+		t.Fatalf("newAgentRunner: %v", err)
+	}
+	diff := testDiff()
+	analyzeGroup(context.Background(), cfg, "v1.0.0...v1.1.0", 0, func(gctx context.Context, i int) bool {
+		return runGroup(gctx, r, sessions, gh, log, diff, diff.Files, i, 1, "v1.0.0...v1.1.0")
+	})
+
+	out := logged.String()
+	if !strings.Contains(out, "tool call failed") {
+		t.Fatalf("the tool-error callback never fired, so this test asserts nothing:\n%s", out)
+	}
+	// The marker proves the error text really did carry the model's value, so
+	// the assertions below are about a live path and not a sanitized-away one.
+	if !strings.Contains(out, marker) {
+		t.Fatalf("the error did not quote the model's value, so this test proves nothing:\n%s", out)
+	}
+	// No line of the log may start with "::", by the runner's own reading rules.
+	for _, line := range regexp.MustCompile(`\r\n|\r|\n`).Split(out, -1) {
+		if strings.HasPrefix(strings.TrimLeftFunc(line, unicode.IsSpace), "::") {
+			t.Errorf("a log line would be read as a workflow command: %q", line)
+		}
+	}
+	// And the record is one physical line, so nothing can be appended to a new one.
+	if n := strings.Count(strings.TrimSuffix(out, "\n"), "\n"); n != 0 {
+		t.Errorf("the tool-error record spans %d extra lines:\n%s", n, out)
+	}
+	// The argument NAMES survive, so a failure is still debuggable, and the
+	// VALUES do not appear under their own keys.
+	if !strings.Contains(out, "arg_names") || !strings.Contains(out, "group_index") {
+		t.Errorf("the log dropped the argument names, leaving nothing to debug:\n%s", out)
+	}
+}
+
+func TestSafeLogValueFoldsToOneLine(t *testing.T) {
+	got := safeLogValue("a\nb\tc\rd\u0000e")
+	if strings.ContainsAny(got, "\n\r\t\x00") {
+		t.Errorf("safeLogValue = %+q, want a single line with no controls", got)
+	}
+	if !strings.Contains(got, "a") || !strings.Contains(got, "e") {
+		t.Errorf("safeLogValue dropped content: %q", got)
+	}
+	if n := len([]rune(safeLogValue(strings.Repeat("x", 5000)))); n > maxLoggedValueRunes+len([]rune(" …[truncated]")) {
+		t.Errorf("safeLogValue returned %d runes, want it bounded to %d", n, maxLoggedValueRunes)
+	}
+}
+
+func TestArgNamesAreSortedAndValueFree(t *testing.T) {
+	got := argNames(map[string]any{"zeta": "secret", "alpha": 1, "mid": nil})
+	if !slices.Equal(got, []string{"alpha", "mid", "zeta"}) {
+		t.Errorf("argNames = %v, want them sorted", got)
+	}
+	if slices.Contains(got, "secret") {
+		t.Error("argNames returned a value")
 	}
 }

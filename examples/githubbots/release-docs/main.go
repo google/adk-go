@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -120,6 +122,7 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	// the subtraction hides a genuinely silent group behind it and points the
 	// reader at the wrong remediation.
 	a.Unreported = rec.unreportedExcept(a.Attempted, a.FailedIndexes)
+	a.Discarded = rec.discardedCount()
 
 	findings := rec.findings()
 	log.Info("analysis finished", "findings", len(findings),
@@ -195,8 +198,18 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 		// (nil, nil) here means "observe only": log the failure but don't replace
 		// the result, so the model still sees the error and can react.
 		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			// The argument NAMES are logged, never their values. The values are
+			// raw model output, and the GitHub Actions runner scans a step's
+			// stderr for workflow commands exactly as it scans stdout -- so
+			// logging them would be the one path where model text reaches a
+			// command parser with neither neutralize nor escapeWorkflowCommands
+			// in the way.
 			func(_ agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
-				log.Error("tool call failed", "tool", t.Name(), "args", args, "error", err)
+				// The error text is sanitized too: a schema-validation failure
+				// quotes the offending VALUE back, so the error carries model
+				// output even when the arguments do not.
+				log.Error("tool call failed", "tool", t.Name(),
+					"arg_names", argNames(args), "error", safeLogValue(err.Error()))
 				return nil, nil
 			},
 		},
@@ -211,6 +224,37 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 	}
 	return r, sessions, nil
 }
+
+// argNames returns a tool call's argument names, sorted. It exists so a failure
+// can be debugged without writing the model's own text to a log the CI runner
+// parses.
+func argNames(args map[string]any) []string {
+	names := make([]string, 0, len(args))
+	for k := range args {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// safeLogValue makes a model-influenced string safe to write to a log the CI
+// runner parses.
+//
+// It cannot remove the model's words -- a schema error that does not say which
+// value was wrong is useless -- so it removes their ability to be PARSED as
+// anything: every control character goes, and the newlines and tabs that
+// stripControls deliberately keeps for the issue body are folded to spaces here,
+// because a log record must be one physical line. A value that cannot start a
+// line cannot start a workflow command.
+func safeLogValue(s string) string {
+	return truncateRunes(logWhitespace.Replace(stripControls(s)), maxLoggedValueRunes)
+}
+
+// logWhitespace folds the two characters stripControls keeps.
+var logWhitespace = strings.NewReplacer("\n", " ", "\t", " ")
+
+// maxLoggedValueRunes bounds one logged, model-influenced value.
+const maxLoggedValueRunes = 500
 
 // newModel builds the Gemini model. If a Gemini API key is configured it is used
 // directly; otherwise the genai SDK auto-detects its backend (e.g. Vertex AI via

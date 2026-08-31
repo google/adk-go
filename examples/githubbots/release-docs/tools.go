@@ -102,6 +102,10 @@ type recorder struct {
 	// byGroup is keyed by group index so a duplicate call for a group can be
 	// rejected rather than appending the same findings twice.
 	byGroup map[int][]Finding
+	// discarded counts findings sanitization emptied completely, so a model
+	// whose output is entirely unrenderable is reported rather than silently
+	// producing an issue that says it found nothing.
+	discarded int
 }
 
 func newRecorder(cfg *Config) *recorder {
@@ -121,6 +125,20 @@ func (r *recorder) record(index int, findings []Finding) bool {
 	}
 	r.byGroup[index] = findings
 	return true
+}
+
+// addDiscarded records findings that sanitization emptied completely.
+func (r *recorder) addDiscarded(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.discarded += n
+}
+
+// discardedCount returns how many recorded findings sanitization emptied.
+func (r *recorder) discardedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.discarded
 }
 
 // unreported reports how many of the first n group indexes recorded nothing at
@@ -192,17 +210,24 @@ func (r *recorder) recordFindings(ctx context.Context, a recordArgs) actionResul
 		raw = raw[:r.cfg.MaxFindingsPerGroup]
 	}
 	clean := make([]Finding, 0, len(raw))
+	emptied := 0
 	for _, f := range raw {
 		if s := sanitizeFinding(f); !s.empty() {
 			clean = append(clean, s)
+		} else {
+			emptied++
 		}
 	}
 	if !r.record(a.GroupIndex, clean) {
 		return errResult("group %d has already recorded its findings", a.GroupIndex)
 	}
+	r.addDiscarded(emptied)
 	msg := fmt.Sprintf("recorded %d findings for group %d", len(clean), a.GroupIndex)
 	if dropped > 0 {
 		msg += fmt.Sprintf(" (%d beyond the per-group cap were dropped)", dropped)
+	}
+	if emptied > 0 {
+		msg += fmt.Sprintf(" (%d were discarded: nothing in them survived sanitization)", emptied)
 	}
 	return actionResult{Status: "success", Message: msg}
 }

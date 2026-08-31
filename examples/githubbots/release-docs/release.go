@@ -188,7 +188,34 @@ var modelTextReplacer = strings.NewReplacer(
 // control and formatting characters that let text mean one thing to a reader
 // and another to a parser.
 func neutralize(s string) string {
-	return truncateRunes(stripControls(modelTextReplacer.Replace(strings.TrimSpace(s))), maxFindingFieldRunes)
+	// Strip FIRST, then replace. The other order is exploitable: a zero-width
+	// character between two backticks and a third hides the fence from the
+	// replacer, which passes the text through, and the strip then deletes the
+	// separator and reassembles "```" in the output. The rest of the model's
+	// text renders as Markdown from there, and an @mention in it notifies a
+	// real person -- which is the whole reason the fence exists.
+	//
+	// The replacer then runs to a fixpoint, because a replacement can in
+	// principle expose a new match ("<!-->" becomes "(!-->"). It terminates:
+	// every replacement strictly reduces the count of backticks, "<" or ">",
+	// and no replacement text contains any of them.
+	return truncateRunes(replaceToFixpoint(stripControls(strings.TrimSpace(s))), maxFindingFieldRunes)
+}
+
+// maxReplacePasses bounds the fixpoint loop. The argument above says it cannot
+// be reached; the bound is here so a future replacement rule that breaks that
+// argument cannot hang the program.
+const maxReplacePasses = 8
+
+func replaceToFixpoint(s string) string {
+	for range maxReplacePasses {
+		next := modelTextReplacer.Replace(s)
+		if next == s {
+			return s
+		}
+		s = next
+	}
+	return s
 }
 
 // stripControls removes every rune that is not printable text, plus the
@@ -207,8 +234,19 @@ func stripControls(s string) string {
 		switch {
 		case r == '\n' || r == '\t':
 			return r
-		case unicode.IsControl(r), r == '\u200e', r == '\u200f',
+		case unicode.IsControl(r):
+			// C0 and C1. unicode.IsControl covers only these two ranges, which is
+			// why every category below has to be named separately.
+			return -1
+		case r == '\u061c', r == '\u200e', r == '\u200f',
 			r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+			// The implicit and explicit bidirectional marks. U+061C is the one
+			// most often missed: it is category Cf, not Cc, so IsControl says no.
+			return -1
+		case r == '\u2028', r == '\u2029':
+			// Line and paragraph separator. Category Zl/Zp, so again not a
+			// control, but both force a line break under the `white-space: pre`
+			// a fenced block renders with.
 			return -1
 		}
 		return r
@@ -601,6 +639,10 @@ type analysis struct {
 	// FailedIndexes names them, so an unreported group can be counted over
 	// exactly the attempted-and-not-failed set rather than by subtraction.
 	FailedIndexes []int
+	// Discarded is how many recorded findings sanitization emptied completely.
+	// Without it, a model whose every field is unrenderable looks identical to
+	// one that honestly had nothing to say.
+	Discarded int
 	// Unreported is how many completed without recording anything at all --
 	// distinct from recording an empty list, which is a real "nothing to
 	// suggest" answer. A model steered into silence lands here.
@@ -618,7 +660,12 @@ func (d *ReleaseDiff) diffTruncated() bool {
 		return true
 	}
 	for _, f := range d.Files {
-		if f.PatchTruncated || f.Patch == "" {
+		// A file with no patch text is disclosed by coverageNotes but is NOT a
+		// reason to file. GitHub omits the patch for a binary file and for a pure
+		// rename, so treating it as truncation would let one .png in a release
+		// force the bot's only write on every otherwise-clean release, under a
+		// note about caps that cannot be raised.
+		if f.PatchTruncated {
 			return true
 		}
 	}
@@ -627,7 +674,8 @@ func (d *ReleaseDiff) diffTruncated() bool {
 
 // complete reports whether every group was analyzed and reported.
 func (a analysis) complete() bool {
-	return a.NotAttempted == 0 && a.Failed == 0 && a.Unreported == 0 && !a.BudgetExhausted
+	return a.NotAttempted == 0 && a.Failed == 0 && a.Unreported == 0 &&
+		a.Discarded == 0 && !a.BudgetExhausted
 }
 
 // coverageNotes lists, in reader-facing prose, everything the analysis did not
@@ -635,8 +683,8 @@ func (a analysis) complete() bool {
 func coverageNotes(diff *ReleaseDiff, a analysis) []string {
 	var notes []string
 	if diff.PageBoundHit {
-		notes = append(notes, "The comparison was larger than this bot fetches, so the file and commit "+
-			"totals below are lower bounds rather than the real counts.")
+		notes = append(notes, fmt.Sprintf("The comparison reached the %d-file limit GitHub returns, or the "+
+			"bot's own page bound, so the totals below are at least this large rather than exact.", compareFileCap))
 	}
 	if diff.OmittedFiles > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d changed files were not analyzed (file cap).",
@@ -675,6 +723,10 @@ func coverageNotes(diff *ReleaseDiff, a analysis) []string {
 	if a.Unreported > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d file groups finished without reporting a result, "+
 			"so their files may not be covered.", a.Unreported, a.Groups))
+	}
+	if a.Discarded > 0 {
+		notes = append(notes, fmt.Sprintf("%d recorded suggestions were discarded because nothing in them "+
+			"survived sanitization.", a.Discarded))
 	}
 	if a.BudgetExhausted && a.NotAttempted == 0 && a.Failed == 0 {
 		notes = append(notes, "The run budget was exhausted, so the last group may not have been fully analyzed.")

@@ -416,7 +416,77 @@ func TestCoverageNotesDiscloseTheFetchBound(t *testing.T) {
 		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}},
 	}
 	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1})
-	if !strings.Contains(body, "lower bounds rather than the real counts") {
+	if !strings.Contains(body, "at least this large rather than exact") {
 		t.Errorf("the issue does not disclose the fetch bound:\n%s", body)
+	}
+}
+
+// A zero-width character between two backticks and a third hides the fence from
+// the replacer, and the control-stripping pass then deletes the separator and
+// reassembles "```" in the output. Everything after it renders as Markdown, and
+// an @mention in that region notifies a real person — the whole reason the
+// fence exists. Neutralization must therefore strip before it replaces.
+//
+// Mutation that must fail this test: swap the order back to
+// stripControls(modelTextReplacer.Replace(...)).
+func TestNeutralizeCannotReassembleAFenceFromStrippedRunes(t *testing.T) {
+	for _, sep := range []string{"\u200e", "\u200f", "\u202e", "\u061c", "\u0000", "\u2028", "\r"} {
+		hostile := Finding{Kind: "new-feature", Summary: "x\n``" + sep + "`\n@adk-go-maintainers ping"}
+		body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"},
+			[]Finding{sanitizeFinding(hostile)}, analysis{Groups: 1})
+		if n := strings.Count(body, "```"); n != 2 {
+			t.Errorf("separator %q: body has %d fence markers, want 2 (model text closed the fence):\n%s",
+				sep, n, body)
+			continue
+		}
+		tail := body[strings.LastIndex(body, "```")+3:]
+		if strings.Contains(tail, "@") {
+			t.Errorf("separator %q: a mention escaped the fence: %q", sep, tail)
+		}
+	}
+	// The same trick against the HTML-comment guard.
+	got := neutralize("<!\u0000-- hidden --" + "\u200e" + ">")
+	if strings.Contains(got, "<!--") || strings.Contains(got, "-->") {
+		t.Errorf("neutralize reassembled an HTML comment: %q", got)
+	}
+}
+
+// A finding whose every field is emptied by sanitization must be disclosed, not
+// silently dropped: otherwise a model producing entirely unrenderable output is
+// indistinguishable from one that honestly found nothing.
+//
+// Mutation that must fail this test: drop the a.Discarded branch from coverageNotes.
+func TestCoverageNotesDiscloseDiscardedFindings(t *testing.T) {
+	diff := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 1,
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x"}},
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1, Discarded: 3})
+	if !strings.Contains(body, "3 recorded suggestions were discarded") {
+		t.Errorf("the issue does not disclose the discarded findings:\n%s", body)
+	}
+}
+
+// A binary file or a pure rename comes back from GitHub with no patch text. That
+// is worth a note but must not force the bot's only write: otherwise one .png in
+// an otherwise-clean release makes it file an issue saying "the analysis is
+// partial" under a cap that cannot be raised.
+//
+// Mutation that must fail this test: add `|| f.Patch == ""` back to diffTruncated.
+func TestDiffTruncatedIgnoresFilesWithNoPatch(t *testing.T) {
+	binary := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 2,
+		Files: []ChangedFile{{Path: "logo.png", Patch: ""}, {Path: "a.go", Patch: "+x"}},
+	}
+	if binary.diffTruncated() {
+		t.Error("a binary file made the whole diff count as truncated, forcing a filing")
+	}
+	// A patch the byte cap actually cut IS truncation.
+	cut := &ReleaseDiff{
+		BaseTag: "v1", HeadTag: "v2", TotalFiles: 1,
+		Files: []ChangedFile{{Path: "a.go", Patch: "+x", PatchTruncated: true}},
+	}
+	if !cut.diffTruncated() {
+		t.Error("a truncated patch was not counted as truncation")
 	}
 }

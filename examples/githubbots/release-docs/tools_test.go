@@ -177,6 +177,46 @@ func TestRecorderOrdersFindingsByGroup(t *testing.T) {
 
 // Concurrent sessions share one recorder. Each may write only its own group, and
 // -race must find no data race on the shared map.
+// Two goroutines racing for the SAME group index, which is what the
+// claim-and-write critical section exists for. Every other concurrent test gives
+// each goroutine a distinct index, so a check-then-act split in recorder.record
+// would survive them deterministically.
+//
+// Mutation that must fail this test: split record into an RLock check followed
+// by a Lock write.
+func TestRecordFindingsContendsOnOneGroup(t *testing.T) {
+	const attempts = 50
+	for range attempts {
+		r := newRecorder(testConfig())
+		ctx := scoped(testRelease, 0)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		wins := 0
+		for i := range 2 {
+			wg.Add(1)
+			go func(which int) {
+				defer wg.Done()
+				res := r.recordFindings(ctx, recordArgs{
+					Release: testRelease, GroupIndex: 0,
+					Findings: []Finding{{Kind: "new-feature", Summary: string(rune('a' + which))}},
+				})
+				if res.Status == "success" {
+					mu.Lock()
+					wins++
+					mu.Unlock()
+				}
+			}(i)
+		}
+		wg.Wait()
+		if wins != 1 {
+			t.Fatalf("%d of 2 concurrent calls for group 0 succeeded, want exactly 1", wins)
+		}
+		if got := len(r.findings()); got != 1 {
+			t.Fatalf("group 0 holds %d findings after two concurrent calls, want 1", got)
+		}
+	}
+}
+
 func TestRecordFindingsConcurrentIsolation(t *testing.T) {
 	r := newRecorder(testConfig())
 	const n = 20
@@ -294,5 +334,41 @@ func TestUnreportedExceptIgnoresFailedGroupsThatDidRecord(t *testing.T) {
 	// A failed group that ALSO recorded nothing is not double-counted.
 	if got := r.unreportedExcept(3, []int{1}); got != 0 {
 		t.Errorf("unreportedExcept(3, [1]) = %d, want 0: group 1 is already counted as failed", got)
+	}
+}
+
+// A finding whose every field is emptied by sanitization is dropped, and the
+// drop must be counted. Otherwise a model whose entire output is unrenderable
+// produces a run indistinguishable from one that honestly found nothing.
+//
+// Mutation that must fail this test: remove the addDiscarded call from
+// recordFindings.
+func TestRecordFindingsReportsDiscardedFindings(t *testing.T) {
+	r := newRecorder(testConfig())
+	res := r.recordFindings(scoped(testRelease, 0), recordArgs{
+		Release: testRelease, GroupIndex: 0,
+		Findings: []Finding{
+			{Kind: "new-feature", Summary: "\u0000\u202e", DocFile: "../etc/passwd"},
+			{Kind: "new-feature", Summary: "\x00\x01\u202e"},
+			{Kind: "new-feature", Summary: "a real suggestion"},
+		},
+	})
+	if res.Status != "success" {
+		t.Fatalf("status = %q: %s", res.Status, res.Message)
+	}
+	if got := r.discardedCount(); got != 2 {
+		t.Errorf("discardedCount = %d, want 2", got)
+	}
+	if got := len(r.findings()); got != 1 {
+		t.Errorf("kept %d findings, want 1", got)
+	}
+	if !strings.Contains(res.Message, "discarded") {
+		t.Errorf("the result does not tell the model its findings were discarded: %q", res.Message)
+	}
+	// The count reaches the issue.
+	body := buildIssueBody(&ReleaseDiff{BaseTag: "v1", HeadTag: "v2"},
+		r.findings(), analysis{Groups: 1, Discarded: r.discardedCount()})
+	if !strings.Contains(body, "2 recorded suggestions were discarded") {
+		t.Errorf("the issue does not disclose the discarded findings:\n%s", body)
 	}
 }

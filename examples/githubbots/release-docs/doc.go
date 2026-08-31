@@ -65,8 +65,11 @@
 //
 // The issue body is largely model-authored. Every model-authored field is
 // sanitized (value allow-lists on the kind and the documentation path, a rune
-// cap on the free text) and rendered inside a fenced block, with the sequences
-// that could close that fence or open an HTML comment neutralized first. The
+// cap on the free text) and rendered inside a fenced block. Control characters
+// and bidirectional marks are stripped BEFORE the Markdown sequences are
+// neutralized, because the other order is exploitable: a zero-width character
+// between two backticks and a third hides the fence from the replacer, and the
+// strip then deletes the separator and reassembles it. The
 // dry-run render additionally defuses any line the GitHub Actions runner would
 // read as a workflow command, because that is a different parser.
 //

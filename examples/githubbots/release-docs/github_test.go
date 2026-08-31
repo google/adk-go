@@ -24,14 +24,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode"
 
 	"github.com/google/go-github/v66/github"
 )
@@ -857,43 +855,53 @@ func TestFileReleaseIssueAbortsWhenTheRecheckFails(t *testing.T) {
 // Mutation that must fail this test: revert escapeWorkflowCommands to
 // strings.Split(body, "\n") with strings.TrimLeft(l, " \t").
 func TestDryRunRenderDefusesWorkflowCommands(t *testing.T) {
-	// Every separator the runner ends a line on, and a sample of the whitespace
-	// its parser trims, each carrying a command.
-	body := "line one\n" +
-		"::add-mask::secret\n" +
-		"  ::error::spaces\n" +
-		"\t::error::tab\n" +
-		"\u00a0::error::nbsp\n" +
-		"carriage\r::error::after-cr\n" +
-		"crlf\r\n::error::after-crlf\n" +
-		"std::vector stays\n"
-
-	cfg := testConfig()
-	cfg.DryRun = true
-	c := testClient(t, cfg, failIfCalled(t))
-	var rendered strings.Builder
-	c.out = &rendered
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "t", body); err != nil {
-		t.Fatalf("FileReleaseIssue: %v", err)
-	}
-
-	// Independent oracle: re-split the render the way the RUNNER does, on any of
-	// \r\n, \r or \n, and trim the full Unicode whitespace class.
-	out := rendered.String()
-	for _, line := range regexp.MustCompile(`\r\n|\r|\n`).Split(out, -1) {
-		if strings.HasPrefix(strings.TrimLeftFunc(line, unicode.IsSpace), "::") {
-			t.Errorf("a workflow command reached the runner intact: %q", line)
-		}
-	}
-	// Every command line must actually have been marked, so the test cannot pass
-	// by the body having been dropped instead of escaped.
-	if got := strings.Count(out, escapedCommandPrefix); got != 6 {
-		t.Errorf("marked %d command lines, want 6; the render lost content instead of escaping it", got)
-	}
-	// Only command lines are touched: a mid-line "::" the runner would never
-	// parse is left alone.
-	if !strings.Contains(out, "std::vector stays") {
-		t.Error("escaping mangled a mid-line :: that the runner would never parse")
+	// A hand-written table, one row per property of the runner's command
+	// grammar, with the expectation written out rather than computed. The
+	// previous version re-split the render with the same regexp the production
+	// code compiles and re-used its TrimLeftFunc, which is frozen at today's
+	// predicate: it kills a revert but cannot notice the predicate still being
+	// incomplete, which is exactly the defect it was written for.
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantEscaped bool
+	}{
+		{"plain line", "hello\n", false},
+		{"mid-line double colon", "std::vector stays\n", false},
+		{"command at line start", "::add-mask::secret\n", true},
+		{"after a newline", "text\n::error::x\n", true},
+		{"after a bare carriage return", "text\r::error::x\n", true},
+		{"after a CRLF", "text\r\n::error::x\n", true},
+		{"leading spaces", "  ::error::x\n", true},
+		{"leading tab", "\t::error::x\n", true},
+		{"leading no-break space", "\u00a0::error::x\n", true},
+		{"leading ideographic space", "\u3000::error::x\n", true},
+		{"stop-commands", "::stop-commands::tok\n", true},
+		{"the resuming half", "::tok::\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.DryRun = true
+			c := testClient(t, cfg, failIfCalled(t))
+			var rendered strings.Builder
+			c.out = &rendered
+			if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "t", tc.body); err != nil {
+				t.Fatalf("FileReleaseIssue: %v", err)
+			}
+			got := strings.Contains(rendered.String(), escapedCommandPrefix)
+			if got != tc.wantEscaped {
+				t.Errorf("escaped=%v, want %v; render was %q", got, tc.wantEscaped, rendered.String())
+			}
+			// Whatever the verdict, every piece of the text must still be
+			// present: the render is a preview and must not lose content.
+			for _, want := range strings.FieldsFunc(tc.body, func(r rune) bool {
+				return r == '\n' || r == '\r'
+			}) {
+				if want = strings.TrimSpace(want); want != "" && !strings.Contains(rendered.String(), want) {
+					t.Errorf("the render lost %q instead of escaping it: %q", want, rendered.String())
+				}
+			}
+		})
 	}
 }
 
@@ -903,6 +911,20 @@ func TestDryRunRenderDefusesWorkflowCommands(t *testing.T) {
 //
 // Mutation that must fail this test: drop the stripControls call from neutralize.
 func TestNeutralizeStripsControlCharacters(t *testing.T) {
+	// One row per category, because unicode.IsControl covers only Cc: the
+	// bidirectional marks are Cf, and the line and paragraph separators are
+	// Zl/Zp, so each has to be named in the implementation and each is checked
+	// here. U+061C is the one most often missed.
+	for _, bad := range []string{
+		"\r", "\x00", "\x1b", // C0 controls
+		"\u0085",                                         // C1 next-line
+		"\u061c", "\u200e", "\u200f", "\u202e", "\u2066", // bidi marks and overrides
+		"\u2028", "\u2029", // line and paragraph separators
+	} {
+		if got := neutralize("before" + bad + "after"); strings.Contains(got, bad) {
+			t.Errorf("neutralize kept %+q: %+q", bad, got)
+		}
+	}
 	got := neutralize("ok\r::add-mask::x\x1b[31mred\u202eevil\x00")
 	for _, bad := range []string{"\r", "\x1b", "\u202e", "\x00"} {
 		if strings.Contains(got, bad) {
@@ -983,7 +1005,7 @@ func TestCompareFlagsTheFileCap(t *testing.T) {
 		t.Error("a comparison at the file cap was not flagged, so the issue would report its count as complete")
 	}
 	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1})
-	if !strings.Contains(body, "lower bounds rather than the real counts") {
+	if !strings.Contains(body, "at least this large rather than exact") {
 		t.Error("the issue does not disclose that the totals are a floor")
 	}
 

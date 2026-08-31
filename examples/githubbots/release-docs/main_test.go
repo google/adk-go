@@ -137,7 +137,10 @@ func TestAnalyzeAllStopsAndReportsWhenTheBudgetRunsOut(t *testing.T) {
 // `a.BudgetExhausted = budgetCtx.Err() != nil`.
 func TestAnalyzeAllReportsABudgetThatExpiredDuringTheLastGroup(t *testing.T) {
 	cfg := testConfig()
-	cfg.RunBudget = 100 * time.Millisecond
+	// Generous on purpose: correctness needs only that the loop reaches group 1
+	// before the budget fires, and group 1 then blocks until it does. The cost
+	// is this test taking the budget's length.
+	cfg.RunBudget = 300 * time.Millisecond
 	cfg.GroupTimeout = time.Minute
 	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}}
 
@@ -155,9 +158,8 @@ func TestAnalyzeAllReportsABudgetThatExpiredDuringTheLastGroup(t *testing.T) {
 			}
 			return true
 		})
-	s := &stubRun{indexes: indexes}
-	if len(s.indexes) != 2 {
-		t.Fatalf("drove %d groups, want both attempted for this case", len(s.indexes))
+	if len(indexes) != 2 {
+		t.Fatalf("drove %d groups, want both attempted for this case", len(indexes))
 	}
 	if a.NotAttempted != 0 {
 		t.Fatalf("NotAttempted = %d, want 0 for this case", a.NotAttempted)
@@ -281,9 +283,15 @@ func TestRunWithAbortsWhenTheDuplicateCheckFails(t *testing.T) {
 func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	cfg := testConfig()
 	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
-	cfg.GeminiAPIKey = "test-key"
-	cfg.Model = "gemini-flash-latest"
 	cfg.RunBudget = time.Nanosecond
+	// Install a stub even though the budget expires before any group runs:
+	// without it newAgentRunner calls the real constructor, and on a machine
+	// with Vertex credentials in the environment the run fails at "create
+	// model" and this test's assertion breaks for a reason it is not about.
+	withStubModel(t, &stubModel{reply: func(int) []*genai.Part {
+		t.Error("the model was invoked despite an exhausted budget")
+		return nil
+	}})
 
 	creates := 0
 	gh := testClient(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
