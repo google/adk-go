@@ -111,9 +111,15 @@ jobs:
           END_TAG="${INPUT_END_TAG:-${RELEASE_TAG}}"
           export OWNER REPO START_TAG END_TAG
 
+          # Mirrors validTag in release.go, including its ".." rejection: ".."
+          # is the compare endpoint's own separator as well as the traversal
+          # token, and a character class alone does not exclude it.
           check_tag() {
             local name="$1" value="$2"
-            if [[ -n "${value}" && ! "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]; then
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            if [[ ! "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ || "${value}" == *".."* ]]; then
               echo "Refusing to run: ${name} is not a valid release tag" >&2
               exit 1
             fi

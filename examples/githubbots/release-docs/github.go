@@ -368,14 +368,14 @@ func commitSubject(message string) string {
 // An error from either probe is returned rather than swallowed: the caller must
 // not file an issue it could not prove is new.
 func (c *GitHubClient) FindExistingIssue(ctx context.Context, headTag, marker string) (int, bool, error) {
-	if n, found, err := c.findByList(ctx, marker); err != nil || found {
+	if n, found, err := c.findByList(ctx, headTag, marker); err != nil || found {
 		return n, found, err
 	}
 	return c.findBySearch(ctx, headTag, marker)
 }
 
 // findByList scans the target repository's most recent issues for the marker.
-func (c *GitHubClient) findByList(ctx context.Context, marker string) (int, bool, error) {
+func (c *GitHubClient) findByList(ctx context.Context, headTag, marker string) (int, bool, error) {
 	opts := &github.IssueListByRepoOptions{
 		State:       "all",
 		Sort:        "created",
@@ -388,7 +388,7 @@ func (c *GitHubClient) findByList(ctx context.Context, marker string) (int, bool
 			return 0, false, fmt.Errorf("list issues for duplicate check: %w", err)
 		}
 		for _, iss := range issues {
-			if c.isOwnMarkedIssue(iss, marker) {
+			if c.isOwnMarkedIssue(iss, headTag, marker) {
 				return iss.GetNumber(), true, nil
 			}
 		}
@@ -412,7 +412,7 @@ func (c *GitHubClient) findBySearch(ctx context.Context, headTag, marker string)
 		return 0, false, fmt.Errorf("search issues for duplicate check: %w", err)
 	}
 	for _, iss := range result.Issues {
-		if c.isOwnMarkedIssue(iss, marker) {
+		if c.isOwnMarkedIssue(iss, headTag, marker) {
 			return iss.GetNumber(), true, nil
 		}
 	}
@@ -426,11 +426,18 @@ func (c *GitHubClient) findBySearch(ctx context.Context, headTag, marker string)
 // issue whose first line is the marker and suppress the bot's issue for that
 // release. Pull requests are excluded because a PR body is contributor-authored
 // and would give the same suppression for free.
-func (c *GitHubClient) isOwnMarkedIssue(iss *github.Issue, marker string) bool {
+func (c *GitHubClient) isOwnMarkedIssue(iss *github.Issue, headTag, marker string) bool {
 	if iss == nil || iss.IsPullRequest() {
 		return false
 	}
-	return c.trustedCreator(iss.GetUser()) && hasBodyMarker(iss.GetBody(), marker)
+	// Title as well as marker. With the built-in Actions token the identity
+	// lookup fails, so trustedCreator can only check "written by some GitHub
+	// App", and the marker is a pure function of two public tag names. Requiring
+	// the exact title too means a suppressing issue must reproduce both, which
+	// no workflow does by accident.
+	return c.trustedCreator(iss.GetUser()) &&
+		iss.GetTitle() == issueTitle(headTag) &&
+		hasBodyMarker(iss.GetBody(), marker)
 }
 
 // trustedCreator reports whether an issue's author may be treated as this bot.

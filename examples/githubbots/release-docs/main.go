@@ -126,33 +126,38 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	findings := rec.findings()
 	log.Info("analysis finished", "findings", len(findings),
 		"groups", a.Groups, "not_attempted", a.NotAttempted, "failed", a.Failed, "unreported", a.Unreported)
-	// Nothing was produced AND no group came through cleanly, so there is
-	// nothing to report and nothing to preserve. Fail loudly WITHOUT filing: an
-	// issue here would mark the release done and suppress the re-run that could
-	// still do the job properly.
+	// ONE condition decides whether the bot writes: did the analysis produce a
+	// suggestion? Nothing else, and in particular nothing counted from what the
+	// model did.
 	//
-	// The findings check is not redundant. A group can record its suggestions and
-	// then hit a model error, which makes it count as failed; a bare
-	// Attempted-Failed test would throw those real findings away and report that
-	// no group was analyzed, when one plainly was.
-	if analyzed := a.Attempted - a.Failed; analyzed == 0 && len(findings) == 0 {
-		return fmt.Errorf("not one of the %d file groups produced anything (%d never attempted, %d failed); "+
-			"no issue was filed, so a re-run is not suppressed", a.Groups, a.NotAttempted, a.Failed)
-	}
-
-	// With nothing to suggest AND full coverage there is nothing worth a tracker
-	// entry, so the release is left un-filed and a later run may still file one.
-	// Partial coverage is different: an issue saying "this release was too large
-	// to read, here is what was skipped" is the only way a maintainer learns the
-	// caps need raising, and it is exactly the case that would otherwise look
-	// identical to a clean run.
-	if len(findings) == 0 && a.complete() && !diff.diffTruncated() {
-		log.Info("no documentation updates suggested; not filing an issue", "release", key)
-		return finish(gh)
-	}
+	// Three rounds of review put three different counters into this decision and
+	// each was a way for a steered model to force the write. The damage is not
+	// the issue itself, it is the marker the issue carries: once filed, every
+	// later run for that tag pair is a no-op, so an attacker who can make the bot
+	// file an empty issue has permanently suppressed re-analysis of the release
+	// they poisoned. An empty issue is worth nothing to a maintainer and
+	// everything to that attacker.
+	//
+	// So a run with no findings NEVER files. If it also missed nothing, that is
+	// simply a release with no documentation impact. If it missed something, it
+	// fails loudly instead: the operator sees it in CI, and because no issue was
+	// filed, a re-run with a larger budget or higher caps is not suppressed.
+	//
+	// The residual, which no code can remove: the finding list is model-authored,
+	// so a model steered into recording one plausible-looking suggestion does
+	// cause an issue to be filed. That issue is read by a human, which is the
+	// point of filing suggestions rather than acting on them.
 	if len(findings) == 0 {
-		log.Warn("no documentation updates were suggested, but the analysis was incomplete; "+
-			"filing an issue that says what it missed", "release", key)
+		if a.complete() && !diff.diffTruncated() {
+			log.Info("no documentation updates suggested; not filing an issue", "release", key)
+			return finish(gh)
+		}
+		return fmt.Errorf("no suggestions were recorded and the analysis was incomplete "+
+			"(%d groups: %d never attempted, %d failed, %d finished without reporting; "+
+			"%d suggestions discarded, %d dropped to the per-group cap; diff truncated: %v); "+
+			"no issue was filed, so a re-run is not suppressed",
+			a.Groups, a.NotAttempted, a.Failed, a.Unreported, a.Discarded, a.CappedFindings,
+			diff.diffTruncated())
 	}
 
 	// A budget-exhausted run that DID record findings is not an error: it files
@@ -236,12 +241,11 @@ func newAgentRunner(ctx context.Context, cfg *Config, rec *recorder, log *slog.L
 // TARGET_REPO or LLM_MODEL_NAME, and godotenv fills in anything unset, so a .env
 // committed to the tree would silently choose which repository the issue is
 // filed in. It reports whether it loaded, so a test can drive both branches.
-func loadDotEnv() bool {
+func loadDotEnv(paths ...string) {
 	if os.Getenv("GITHUB_ACTIONS") != "" {
-		return false
+		return
 	}
-	_ = godotenv.Load()
-	return true
+	_ = godotenv.Load(paths...)
 }
 
 // safeLogValues applies safeLogValue to each element.

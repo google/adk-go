@@ -49,7 +49,7 @@ steered by that text, then ask what the Go code still refuses.
 | The model cannot write an unbounded issue body | `MAX_FINDINGS_PER_GROUP` caps the count, `maxFindingFieldRunes` caps each field, and the body is truncated to GitHub's 65536-byte limit with a notice. |
 | The model cannot write arbitrary values into structured fields | `kind` is allow-listed to a fixed set; `doc_file` must match a restricted path pattern with no `..`. |
 | Model text cannot escape into Markdown | Every model-authored field is rendered inside a fenced block, and ` ``` `, `<!--` and `-->` are neutralized first. GitHub does not notify `@mentions` inside a fence. |
-| Model text cannot escape into another parser | Control characters, bidirectional marks and the line/paragraph separators are stripped **before** the Markdown sequences are neutralized. The other order is exploitable: a zero-width character between two backticks and a third hides the fence from the replacer, and the strip then reassembles it. |
+| Model text cannot escape into another parser | Every Unicode format character (the whole `Cf` category, which is the bidirectional marks, the zero-width characters and the invisible tag block), every control character, and the line/paragraph separators are stripped **before** the Markdown sequences are neutralized, and whitespace is trimmed **after** both. The other order is exploitable: a zero-width character between two backticks and a third hides the fence from the replacer, and the strip then reassembles it. |
 | Model text in a log cannot become a command | The tool-error callback logs argument NAMES, not values, and folds the error text to one line with no control characters. The Actions runner scans a step's stderr for `::` commands exactly as it scans stdout. |
 | A model whose output is entirely unrenderable is not mistaken for one with nothing to say | Findings that sanitization empties, and findings the per-group cap drops, are counted and reported in the issue. Neither count reaches `complete()`, because a counter the model controls must not decide that an issue is filed. |
 | Contributor text cannot forge trusted context | Each blob sits inside an unguessable per-run `[UNTRUSTED:<hex>]` fence drawn from `crypto/rand`; a draw failure aborts the group rather than falling back to a guessable marker. |
@@ -230,6 +230,14 @@ already has an issue reaches neither the diff nor a write.
   the judgement being delegated is exactly that question. It costs a missing
   suggestion, never a wrong write. What IS caught is a group whose tool never
   fired at all, which the issue reports.
+- **A multi-codepoint emoji is split.** Stripping the whole `Cf` category removes
+  the zero-width joiner that binds an emoji sequence, so one in a suggestion
+  renders as its component glyphs. That is the price of not maintaining a
+  hand-picked list of dangerous characters, and it costs legibility rather than
+  safety.
+- **A model that fabricates a plausible suggestion causes an issue to be filed.**
+  Nothing can prevent that: filing when there are suggestions is what the bot is
+  for. The issue is advisory and a human reads it.
 - **A prerelease head is skipped by the workflow, not by the program.** Running
   `go run .` with `-end-tag v2.4.0-rc.1` will analyze and file for it, and the
   final v2.4.0 issue will then overlap it.

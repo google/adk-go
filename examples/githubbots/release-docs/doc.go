@@ -27,15 +27,20 @@
 // tool mutates nothing: it appends sanitized entries to an in-memory collector.
 // Creating the issue is done by Go after the analysis loop, with the target
 // repository, the title and the duplicate-detection marker all computed from
-// configuration and API metadata. A fully steered model therefore cannot file
-// an issue, cannot choose where one is filed, and cannot decide that one is
-// filed at all. Its influence is bounded to the prose inside a fenced block in
-// a body the program wrote.
+// configuration and API metadata. A fully steered model cannot file an issue,
+// cannot choose where one is filed, and cannot suppress one by making the run
+// look broken -- exactly one condition decides that the bot writes, and it is
+// "did the analysis produce a suggestion?", read from nothing the model counts.
+//
+// What remains, and cannot be removed: the suggestions themselves are
+// model-authored, so a model steered into recording one plausible-looking
+// suggestion does cause an issue to be filed. Its content is bounded to prose
+// inside a fenced block of a body the program wrote, and a human reads it --
+// which is why the bot files suggestions rather than acting on them.
 //
 // # One issue per release
 //
-// There is no per-issue session to scope here, so the bound is per release. It
-// has three parts:
+// There is no per-issue session to scope here, so the bound is per release:
 //
 //   - Before any model token is spent, the bot looks for an issue it already
 //     filed for the same tag pair, identified by an exact marker on the first
@@ -63,12 +68,11 @@
 // per file, and by commit count, and whatever those caps drop is stated in the
 // issue rather than silently omitted.
 //
-// Two of the counts the issue reports -- findings sanitization emptied, and
-// findings the per-group cap dropped -- are influenced by the model, so neither
-// is allowed to reach the decision of whether an issue is filed at all. A model
-// steered into recording one unrenderable finding would otherwise make the run
-// look incomplete, force the write, and file an issue whose marker suppresses
-// every later run for that release.
+// The counts the issue reports are influenced by the model, so none of them
+// reaches the decision of whether an issue is filed at all. Three separate
+// review rounds each put a different counter into that decision, and each was a
+// way for a model steered by text in the diff to force the bot's only write --
+// whose marker then suppresses every later run for that release.
 //
 // The issue body is largely model-authored. Every model-authored field is
 // sanitized (value allow-lists on the kind and the documentation path, a rune
@@ -82,8 +86,8 @@
 //
 // The bot also reports what it did NOT analyze. A file group that failed, that
 // the run budget never reached, or that finished without the model calling the
-// tool at all is counted and named in the issue, so a partial analysis cannot
-// be mistaken for a complete one.
+// tool at all is counted in the issue, so a partial analysis cannot be mistaken
+// for a complete one. The counts are totals, not a list of which groups.
 //
 // What that does NOT catch, and cannot: a model that calls the tool and reports
 // an empty list is indistinguishable in Go from one that genuinely found

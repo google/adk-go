@@ -18,6 +18,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -309,8 +311,8 @@ func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	}))
 
 	err := runWith(context.Background(), discardLogger(), cfg, gh)
-	if err == nil || !strings.Contains(err.Error(), "not one of the") {
-		t.Fatalf("runWith = %v, want an error saying no group was analyzed", err)
+	if err == nil || !strings.Contains(err.Error(), "1 never attempted") {
+		t.Fatalf("runWith = %v, want an error naming the group the budget never reached", err)
 	}
 	// Filing here would mark the release done and suppress the re-run that could
 	// still analyze it properly.
@@ -319,13 +321,14 @@ func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	}
 }
 
-// A release too large for the caps produces no findings and full per-group
-// coverage, which used to look identical to a clean run. The only place a
-// maintainer can learn the caps need raising is an issue that says so.
+// A release too large for the caps, with nothing to suggest, must fail loudly
+// and file NOTHING. Filing would plant the release marker and suppress the
+// re-run that a larger cap could complete, and an issue with no suggestions is
+// worth nothing to a maintainer.
 //
-// Mutation that must fail this test: drop `|| diff.diffTruncated()` from the
+// Mutation that must fail this test: drop `&& !diff.diffTruncated()` from the
 // don't-file condition in runWith.
-func TestRunWithFilesWhenTheDiffWasTruncatedEvenWithNoFindings(t *testing.T) {
+func TestRunWithFailsLoudlyWhenTruncatedWithNoFindings(t *testing.T) {
 	cfg := testConfig()
 	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
 	cfg.MaxFiles = 1
@@ -342,17 +345,47 @@ func TestRunWithFilesWhenTheDiffWasTruncatedEvenWithNoFindings(t *testing.T) {
 		{"filename":"b.go","status":"modified","patch":"+y"},
 		{"filename":"c.go","status":"modified","patch":"+z"}`}
 	gh := testClient(t, cfg, h)
-	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
-		t.Fatalf("runWith: %v", err)
+	err := runWith(context.Background(), discardLogger(), cfg, gh)
+	if err == nil || !strings.Contains(err.Error(), "analysis was incomplete") {
+		t.Fatalf("runWith = %v, want an error naming the incomplete analysis", err)
 	}
-	if h.creates != 1 {
-		t.Fatalf("created %d issues, want 1: a release the caps truncated must be reported", h.creates)
+	if !strings.Contains(err.Error(), "diff truncated: true") {
+		t.Errorf("the error does not say the diff was truncated: %v", err)
 	}
-	if !strings.Contains(h.body, "2 of 3 changed files were not analyzed") {
-		t.Errorf("the issue does not say what the caps dropped:\n%s", h.body)
+	if h.creates != 0 {
+		t.Errorf("created %d issues with nothing to suggest; the marker would suppress the re-run", h.creates)
 	}
-	if !strings.Contains(h.body, "The analysis produced no suggestions") {
-		t.Error("the issue does not say the analysis found nothing")
+}
+
+// The BLOCKER round 5 found: text in the diff telling the model to answer in
+// prose and call no tool made every group unreported, which made the run look
+// incomplete, which forced the bot's only write. The filed issue carries the
+// release marker, so the attacker permanently suppressed re-analysis of the
+// release they poisoned.
+//
+// Mutation that must fail this test: restore any model-derived term to the
+// filing decision, e.g. `if len(findings) == 0 && a.complete() && ...` becomes
+// reachable only when complete() is true.
+func TestRunWithDoesNotFileWhenASteeredModelSilencesEveryGroup(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.FilesPerGroup = 1
+	// Every group answers in prose; the tool never fires.
+	withStubModel(t, &stubModel{reply: func(int) []*genai.Part { return nil }})
+
+	h := &filingHandler{compareFiles: `
+		{"filename":"a.go","status":"modified","patch":"+x"},
+		{"filename":"b.go","status":"modified","patch":"+y"}`}
+	gh := testClient(t, cfg, h)
+	err := runWith(context.Background(), discardLogger(), cfg, gh)
+	if err == nil {
+		t.Fatal("runWith returned nil after every group went silent")
+	}
+	if !strings.Contains(err.Error(), "finished without reporting") {
+		t.Errorf("the error does not name the silent groups: %v", err)
+	}
+	if h.creates != 0 {
+		t.Errorf("a steered model forced %d issue(s); the marker would suppress every later run", h.creates)
 	}
 }
 
@@ -566,12 +599,78 @@ func TestRunWithCountsAGroupThatFailedBeforeRecordingOnlyOnce(t *testing.T) {
 // Mutation that must fail this test: remove the GITHUB_ACTIONS check from
 // loadDotEnv.
 func TestDotEnvIsSkippedUnderActions(t *testing.T) {
-	t.Setenv("GITHUB_ACTIONS", "true")
-	if loadDotEnv() {
-		t.Error("a repository .env would be read under GitHub Actions")
+	// Written by EFFECT, not by a return value. An earlier version asserted a
+	// boolean no production caller reads, so moving the Load call above the
+	// guard would have left it green.
+	env := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(env, []byte("TARGET_REPO=attacker-controlled\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
 	}
+
+	// t.Setenv registers the restore; Unsetenv then makes the variable ABSENT,
+	// which is the state godotenv fills. It leaves a variable that is merely set
+	// to empty alone, so setting it to "" would not exercise the path at all.
+	t.Setenv("TARGET_REPO", "")
+	if err := os.Unsetenv("TARGET_REPO"); err != nil {
+		t.Fatalf("unset TARGET_REPO: %v", err)
+	}
+	t.Setenv("GITHUB_ACTIONS", "true")
+	loadDotEnv(env)
+	if got := os.Getenv("TARGET_REPO"); got != "" {
+		t.Errorf("under Actions a repository .env set TARGET_REPO=%q; it chooses where the issue is filed", got)
+	}
+
 	t.Setenv("GITHUB_ACTIONS", "")
-	if !loadDotEnv() {
-		t.Error("a local run no longer reads .env, so local configuration is broken")
+	if err := os.Unsetenv("GITHUB_ACTIONS"); err != nil {
+		t.Fatalf("unset GITHUB_ACTIONS: %v", err)
+	}
+	loadDotEnv(env)
+	if got := os.Getenv("TARGET_REPO"); got != "attacker-controlled" {
+		t.Errorf("a local run did not read .env (TARGET_REPO=%q), so local configuration is broken", got)
+	}
+}
+
+// The two disclosure counters reach the issue only through two assignment lines
+// in runWith, and every other test that "proves" disclosure hand-builds the
+// analysis value — so both lines could be deleted with the suite still green.
+// This produces a capped finding and a discarded one for real and reads the
+// filed body.
+//
+// Mutations that must fail this test: delete `a.Discarded = rec.discardedCount()`
+// or `a.CappedFindings = rec.cappedCount()` from runWith.
+func TestRunWithReportsCappedAndDiscardedFindingsItActuallyProduced(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.MaxFindingsPerGroup = 2
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn > 0 {
+			return nil
+		}
+		// Four findings against a cap of two: the last two are dropped by the
+		// cap, and of the two kept, one is emptied by sanitization.
+		return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{
+			map[string]any{"kind": "new-feature", "summary": "a real suggestion"},
+			map[string]any{"kind": "new-feature", "summary": "\u200b\u202e"},
+			map[string]any{"kind": "new-feature", "summary": "dropped by the cap"},
+			map[string]any{"kind": "new-feature", "summary": "also dropped"},
+		})}
+	}})
+
+	h := &filingHandler{}
+	gh := testClient(t, cfg, h)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1", h.creates)
+	}
+	if !strings.Contains(h.body, "2 suggestions beyond the per-group cap were dropped") {
+		t.Errorf("the filed issue does not disclose the capped suggestions:\n%s", h.body)
+	}
+	if !strings.Contains(h.body, "1 recorded suggestions were discarded") {
+		t.Errorf("the filed issue does not disclose the discarded suggestion:\n%s", h.body)
+	}
+	if !strings.Contains(h.body, "a real suggestion") {
+		t.Error("the filed issue lost the one renderable suggestion")
 	}
 }

@@ -506,6 +506,10 @@ func TestCompleteIgnoresModelControlledCounters(t *testing.T) {
 	if !(analysis{Groups: 1, CappedFindings: 40}).complete() {
 		t.Error("a cap count made the run look incomplete; a steered model could force a filing")
 	}
+	// Unreported IS in complete(), and that is deliberate: complete() no longer
+	// decides whether anything is filed, only whether the issue says the
+	// analysis was partial. runWith's filing decision reads len(findings) alone.
+	// The test below pins the decision itself.
 	// The counts a model cannot set still make it incomplete.
 	for name, a := range map[string]analysis{
 		"not attempted": {Groups: 2, NotAttempted: 1},
@@ -558,8 +562,12 @@ func TestStripControlsRemovesEveryFormatCharacter(t *testing.T) {
 			t.Errorf("a finding whose only content is %+q was not empty: it would force a filing", r)
 		}
 	}
-	// Ordinary text, including non-Latin scripts and emoji, survives.
-	for _, ok := range []string{"docs/guide.md", "café", "日本語", "→", "a\nb\tc"} {
+	// Ordinary text survives, including non-Latin scripts and single-codepoint
+	// emoji. A MULTI-codepoint emoji does not: the zero-width joiner that binds
+	// its parts is a format character, so a joined sequence is split into its
+	// component glyphs. That is a deliberate cost of stripping the category
+	// wholesale rather than a hand-picked list, and the README says so.
+	for _, ok := range []string{"docs/guide.md", "café", "日本語", "→", "🙂", "a\nb\tc"} {
 		if got := stripControls(ok); got != ok {
 			t.Errorf("stripControls(%q) = %q, want it unchanged", ok, got)
 		}
@@ -593,5 +601,29 @@ func TestCoverageNotesDiscloseCappedFindings(t *testing.T) {
 	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1, CappedFindings: 4})
 	if !strings.Contains(body, "4 suggestions beyond the per-group cap were dropped") {
 		t.Errorf("the issue does not disclose the capped suggestions:\n%s", body)
+	}
+}
+
+// Whitespace can only become leading or trailing once the format characters
+// around it are gone, so the trim has to run after the strip. Trimming first
+// leaves "\u200b \u200b" untouched (U+200B is not Go whitespace), and the strip
+// then turns it into a lone space: non-empty, so the finding is kept, renders as
+// an invisible line, and counts towards the finding total that decides whether
+// the bot writes at all.
+//
+// Mutation that must fail this test: move strings.TrimSpace back inside, so
+// neutralize reads replaceToFixpoint(stripControls(strings.TrimSpace(s))).
+func TestNeutralizeTrimsAfterStripping(t *testing.T) {
+	for _, in := range []string{"\u200b \u200b", "\ufeff\t", "  \u00ad  ", "\u2060"} {
+		if got := neutralize(in); got != "" {
+			t.Errorf("neutralize(%+q) = %+q, want empty", in, got)
+		}
+		if f := sanitizeFinding(Finding{Kind: "new-feature", Summary: in}); !f.empty() {
+			t.Errorf("a finding whose only content is %+q was not empty: it would force a filing", in)
+		}
+	}
+	// Real content around the same characters survives, trimmed.
+	if got := neutralize("\u200b  hello  \u200b"); got != "hello" {
+		t.Errorf("neutralize = %q, want %q", got, "hello")
 	}
 }

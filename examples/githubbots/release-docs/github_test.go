@@ -84,9 +84,17 @@ func failIfCalled(t *testing.T) http.Handler {
 	})
 }
 
-// issueJSON renders one issue for a list or search response.
+// issueJSON renders one issue for a list or search response, with the
+// deterministic title the bot would have filed.
 func issueJSON(number int, login, userType, body string) string {
-	return fmt.Sprintf(`{"number":%d,"user":{"login":%q,"type":%q},"body":%q}`, number, login, userType, body)
+	return issueJSONTitled(number, login, userType, issueTitle("v1.1.0"), body)
+}
+
+// issueJSONTitled is issueJSON with the title spelled out, for the cases that
+// turn on it.
+func issueJSONTitled(number int, login, userType, title, body string) string {
+	return fmt.Sprintf(`{"number":%d,"user":{"login":%q,"type":%q},"title":%q,"body":%q}`,
+		number, login, userType, title, body)
 }
 
 // --- Tag resolution ---------------------------------------------------------
@@ -400,7 +408,13 @@ func TestCompareDeduplicatesAcrossPages(t *testing.T) {
 func TestFindExistingIssueFindsTheBotsOwnIssue(t *testing.T) {
 	marker := bodyMarker("v1.0.0", "v1.1.0")
 	body := "[" + issueJSON(42, "adk-bot", "Bot", marker+"\n\nbody") + "]"
-	c := respondWith(t, testConfig(), body)
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":1,"items":`+body+`}`)
+			return
+		}
+		_, _ = io.WriteString(w, body)
+	}))
 	n, found, err := c.FindExistingIssue(context.Background(), "v1.1.0", marker)
 	if err != nil {
 		t.Fatalf("FindExistingIssue: %v", err)
@@ -761,17 +775,23 @@ func TestFileReleaseIssueIsClaimedUnderConcurrency(t *testing.T) {
 		_, _ = io.WriteString(w, `[]`)
 	}))
 
+	// Start-gated, matching the recorder's contention test: without the barrier
+	// the launch skew dominates the window a check-then-act split would be
+	// visible in, and detection here is probabilistic either way.
 	const n = 20
 	var wg sync.WaitGroup
+	start := make(chan struct{})
 	for range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.0.0", "v1.1.0", "t", "b"); err != nil {
 				t.Errorf("FileReleaseIssue: %v", err)
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 
 	if got := atomic.LoadInt32(&posts); got != 1 {
@@ -799,7 +819,8 @@ func TestFileReleaseIssueRechecksImmediatelyBeforeWriting(t *testing.T) {
 			return
 		}
 		// Another run filed it while this one was analyzing.
-		_, _ = io.WriteString(w, "["+issueJSON(99, "adk-bot", "Bot", marker+"\n\nfiled by the other run")+"]")
+		_, _ = io.WriteString(w, "["+issueJSONTitled(99, "adk-bot", "Bot", issueTitle("v1.1.0"),
+			marker+"\n\nfiled by the other run")+"]")
 	}))
 
 	n, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.0.0", "v1.1.0", "t", "b")
@@ -969,7 +990,8 @@ func TestFileReleaseIssueRechecksTheCallersBase(t *testing.T) {
 			return
 		}
 		// A concurrent run already filed this exact release.
-		_, _ = io.WriteString(w, "["+issueJSON(88, "adk-bot", "Bot", marker+"\n\nfiled by the other run")+"]")
+		_, _ = io.WriteString(w, "["+issueJSONTitled(88, "adk-bot", "Bot", issueTitle(head),
+			marker+"\n\nfiled by the other run")+"]")
 	}))
 
 	n, err := c.FileReleaseIssue(context.Background(), key, base, head, "t", "b")
@@ -1070,5 +1092,45 @@ func TestVersionTiesBreakDeterministically(t *testing.T) {
 	lr, _ := latestTag(tieR)
 	if lf != lr {
 		t.Errorf("latestTag gave %q and %q for the same releases in two orders", lf, lr)
+	}
+}
+
+// Duplicate detection accepts an issue only if the title matches too. With the
+// built-in Actions token the identity lookup fails, so trustedCreator can check
+// no more than "written by some GitHub App", and the marker is a pure function
+// of two public tag names — an issue opened by any other workflow whose body
+// begins with contributor-influenced text could otherwise suppress this bot's
+// issue for a release.
+//
+// Mutation that must fail this test: drop the title comparison from
+// isOwnMarkedIssue.
+func TestFindExistingIssueRequiresTheDeterministicTitle(t *testing.T) {
+	marker := bodyMarker("v1.0.0", "v1.1.0")
+	// Right marker, right author, WRONG title: the title is the only difference
+	// between this case and the one below, so it is the only thing under test.
+	body := "[" + issueJSONTitled(7, "adk-bot", "Bot", "Nightly build report",
+		marker+"\n\nunrelated automation") + "]"
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":1,"items":`+body+`}`)
+			return
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	if _, found, err := c.FindExistingIssue(context.Background(), "v1.1.0", marker); err != nil || found {
+		t.Errorf("FindExistingIssue = (%v, %v); another workflow's issue suppressed this release", found, err)
+	}
+
+	// The same issue under the bot's own title IS a duplicate.
+	right := "[" + issueJSONTitled(8, "adk-bot", "Bot", issueTitle("v1.1.0"), marker+"\n\nours") + "]"
+	c2 := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":1,"items":`+right+`}`)
+			return
+		}
+		_, _ = io.WriteString(w, right)
+	}))
+	if n, found, err := c2.FindExistingIssue(context.Background(), "v1.1.0", marker); err != nil || !found || n != 8 {
+		t.Errorf("FindExistingIssue = (%d, %v, %v), want (8, true, nil)", n, found, err)
 	}
 }

@@ -204,7 +204,11 @@ func neutralize(s string) string {
 	// principle expose a new match ("<!-->" becomes "(!-->"). It terminates:
 	// every replacement strictly reduces the count of backticks, "<" or ">",
 	// and no replacement text contains any of them.
-	return truncateRunes(replaceToFixpoint(stripControls(strings.TrimSpace(s))), maxFindingFieldRunes)
+	// TrimSpace runs LAST of the three. Trimming first leaves a value like
+	// "\u200b \u200b" untouched (U+200B is not Go whitespace), and the strip then
+	// turns it into a lone space -- non-empty, so the finding is kept, renders as
+	// an invisible line, and counts towards the finding total.
+	return truncateRunes(strings.TrimSpace(replaceToFixpoint(stripControls(s))), maxFindingFieldRunes)
 }
 
 // maxReplacePasses bounds the fixpoint loop. The argument above says it cannot
