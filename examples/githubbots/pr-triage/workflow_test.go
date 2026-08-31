@@ -170,6 +170,33 @@ func TestShippedWorkflowSerializesDispatchWithTheEventRun(t *testing.T) {
 	}
 }
 
+// Suppressing a security-scanner finding is a security decision, so exactly one
+// may exist here and it must be the one that was argued for. Without this, a
+// later edit could silence `template-injection` or `unpinned-uses` with the same
+// one-line comment and nothing would notice.
+func TestShippedWorkflowSuppressesOnlyTheOneScannerFindingItArguesFor(t *testing.T) {
+	wf := readWorkflow(t)
+	ignoreRe := regexp.MustCompile(`zizmor:\s*ignore\[([^\]]+)\]`)
+
+	var rules []string
+	for _, m := range ignoreRe.FindAllStringSubmatch(wf, -1) {
+		rules = append(rules, m[1])
+	}
+	if len(rules) != 1 || rules[0] != "dangerous-triggers" {
+		t.Errorf("scanner suppressions = %v, want exactly [dangerous-triggers]", rules)
+	}
+	// And the justification must still be there. A bare suppression is the thing
+	// that turns a reasoned exception into an unexplained hole.
+	for _, want := range []string{
+		"never checks out the pull request head",
+		"requires the base repository's token",
+	} {
+		if !containsFold(wf, want) {
+			t.Errorf("the suppression lost its justification (%q missing)", want)
+		}
+	}
+}
+
 func containsFold(haystack, needle string) bool {
 	return regexp.MustCompile(`(?i)` + regexp.QuoteMeta(needle)).MatchString(haystack)
 }

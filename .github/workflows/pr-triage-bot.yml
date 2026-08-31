@@ -39,7 +39,25 @@
 #   - secrets.GOOGLE_API_KEY    required: Gemini API key.
 name: PR Triage Bot
 
-on:
+# zizmor rates pull_request_target High on the grounds that it is "almost always
+# used insecurely", and it is right to. It is suppressed here rather than
+# avoided because this bot cannot do its job without it: assigning an owner to a
+# pull request from a FORK requires the base repository's token, which the plain
+# pull_request trigger does not provide. adk-python and adk-java run the same
+# trigger for the same reason.
+#
+# What the rule exists to catch is a workflow that combines that token with the
+# fork's code. This one does not, and the three things that would make it unsafe
+# are each absent by construction and asserted by a test in workflow_test.go:
+#   - it never checks out the pull request head (no `ref:` anywhere, so the
+#     default checkout is the base branch, which is trusted code);
+#   - it never builds, runs or sources anything the fork wrote -- `go run` builds
+#     from the base branch's own go.mod and go.sum;
+#   - the only event-supplied value that reaches a shell is the pull request
+#     number, passed through env: and rejected unless it matches ^[0-9]+$.
+# The pull request's text is read through the API and treated as untrusted data
+# by the bot itself. See examples/githubbots/pr-triage/README.md.
+on: # zizmor: ignore[dangerous-triggers]
   # Only events that bring in a new pull request are listed. `synchronize` and a
   # periodic backfill would each re-assign an owner a maintainer had just taken
   # off, so removing an assignee stays a decision this bot cannot undo.
