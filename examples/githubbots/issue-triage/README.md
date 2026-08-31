@@ -165,10 +165,18 @@ labels](https://docs.github.com/en/rest/issues/issues#update-an-issue) and
 silently drops the change otherwise. Whether the job token's `issues: write`
 satisfies that has not been confirmed here. The bot reads each write back and
 **fails the run** if it did not land, so the gap surfaces loudly rather than
-passing silently. Do not reach for `contents: write` as the reflex remedy: it
-grants repository push authority to a job whose highest-volume trigger anyone on
-the internet can fire, and it is not clear it changes issue-type authority at
-all. Confirm what the token can actually do first.
+passing silently — but be clear about what that means if it turns out the token
+cannot write: the failure is permanent for as long as it lasts, so the job goes
+red on every issue and on every scheduled sweep, four times a day, until it is
+resolved or the workflow is disabled.
+
+If that happens, the remedy is a credential with the authority, not a wider
+scope on this one. Run the bot with a GitHub App installation token or a PAT
+that has issue-type write on the repository, supplied as a secret in place of
+the job token. **Do not reach for `contents: write`**: it grants repository push
+authority to a job whose highest-volume trigger anyone on the internet can fire,
+and issue type and label writes are issues-scope operations, so there is no
+reason to expect it to help.
 
 Before enabling the schedule, run the workflow manually once with `dry_run: true`
 and then once against a single issue for real.
@@ -194,8 +202,8 @@ go test ./...
   a token with **push access**; without it GitHub returns success but silently
   drops the change. The bot reads back each write and **fails the run** if the
   type/label was not actually applied, so a permissions gap surfaces loudly
-  instead of passing silently. See the Actions section above for what to widen
-  if that happens.
+  instead of passing silently. The Actions section above says what to do if it
+  does.
 - **Component labels / owner assignment** from the original Python
   `adk_triaging_agent` are intentionally omitted. Both are natural extensions,
   but assignment in particular hands an attacker-influenced decision a much
@@ -203,6 +211,12 @@ go test ./...
 - **There is no per-actor rate limit.** Anyone can open issues, and each one
   costs a model call. The bounds that exist are the constant concurrency group
   (one run at a time) and `ISSUE_COUNT` per sweep, which cap the spend but do
-  not attribute it. A burst also pushes some event runs out of the queue, and
-  because the sweep takes the newest issues first, a sustained burst can leave
-  older untriaged issues unreached.
+  not attribute it. A burst also pushes some event runs out of the queue.
+- **The sweep takes the newest issues first**, which is what makes it a backstop
+  for dropped `issues: opened` events, and is also why it does not clear a
+  backlog. An issue that keeps falling outside the newest `ISSUE_COUNT` is never
+  reached. That matters for one case in particular: because a claim is one-shot
+  per run, an issue whose write failed is not retried within that run, and if it
+  has since fallen out of the newest-`ISSUE_COUNT` window no later sweep picks
+  it up either. Raise `ISSUE_COUNT`, or run a manual `workflow_dispatch` against
+  the issue.

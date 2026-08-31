@@ -60,13 +60,13 @@ func checkIssueArg(ctx context.Context, number int) (string, bool) {
 	return "", true
 }
 
-// writeFailed records a failed mutation and surfaces it as a real Go error, so
-// the run exits non-zero even though the framework also hands the error back to
-// the model as data.
+// toolFailed records an infrastructure failure and surfaces it as a real Go
+// error, so the run exits non-zero even though the framework also hands the
+// error back to the model as data.
 //
-// The claim the caller consumed stays consumed. See errNotApplied for why a
+// Any claim the caller consumed stays consumed. See errNotApplied for why a
 // failed write does not re-open it.
-func (c *Client) writeFailed(err error) (actionResult, error) {
+func (c *Client) toolFailed(err error) (actionResult, error) {
 	c.recordToolError()
 	return actionResult{}, err
 }
@@ -123,8 +123,28 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 	if !ok {
 		return errResult("issue type %q is not allowed; use one of: %s", issueType, strings.Join(allowedTypes, ", ")), nil
 	}
-	// Reserve the "type" need atomically before the write, so a concurrent
-	// duplicate call for the same issue cannot also pass this gate and overwrite.
+	// Three steps, in this order for a reason.
+	//
+	// The peek is non-consuming, so a call that would be refused anyway does not
+	// spend a network read. The re-read then happens BEFORE the claim, because
+	// the need was computed when the work set was fetched and a maintainer may
+	// have set the type since -- and because a failed read must cost nothing: if
+	// the claim were taken first, a flaky read would burn the issue's one write
+	// for the whole run. Finally the claim, still the atomic single-writer gate:
+	// of several concurrent calls that all read an empty type, exactly one can
+	// claim it and reach the API.
+	if open, authorized := c.peek(number); !authorized {
+		return errResult("issue #%d is not part of the current triage set; only triage issues you fetched", number), nil
+	} else if !open.typ {
+		return errResult("issue #%d already has a type; not overwriting", number), nil
+	}
+	fresh, err := c.confirmStillNeeded(ctx, number)
+	if err != nil {
+		return c.toolFailed(err)
+	}
+	if !fresh.typ {
+		return errResult("issue #%d now has a type; not overwriting", number), nil
+	}
 	claimed, authorized := c.claimType(number)
 	if !authorized {
 		return errResult("issue #%d is not part of the current triage set; only triage issues you fetched", number), nil
@@ -132,17 +152,8 @@ func (c *Client) doChangeType(ctx context.Context, number int, issueType string)
 	if !claimed {
 		return errResult("issue #%d already has a type; not overwriting", number), nil
 	}
-	// Re-read before writing: the need was computed when the work set was
-	// fetched, and a maintainer may have set the type since.
-	fresh, err := c.confirmStillNeeded(ctx, number)
-	if err != nil {
-		return c.writeFailed(err)
-	}
-	if !fresh.typ {
-		return errResult("issue #%d now has a type; not overwriting", number), nil
-	}
 	if err := c.SetType(ctx, number, canonical); err != nil {
-		return c.writeFailed(err)
+		return c.toolFailed(err)
 	}
 	return okResult("set issue #%d type to %s", number, canonical), nil
 }
@@ -157,9 +168,19 @@ func (c *Client) doAddLabel(ctx context.Context, number int, label string) (acti
 	if !ok {
 		return errResult("label %q is not in the allowlist; will not apply", label), nil
 	}
-	// Reserve the "label" need atomically before the write, so a concurrent
-	// duplicate call for the same issue cannot also pass this gate and add a
-	// second label.
+	// Peek, re-read, then claim -- see doChangeType for why that order.
+	if open, authorized := c.peek(number); !authorized {
+		return errResult("issue #%d is not part of the current triage set; only triage issues you fetched", number), nil
+	} else if !open.label {
+		return errResult("issue #%d already has a categorization label; not adding another", number), nil
+	}
+	fresh, err := c.confirmStillNeeded(ctx, number)
+	if err != nil {
+		return c.toolFailed(err)
+	}
+	if !fresh.label {
+		return errResult("issue #%d now has a categorization label; not adding another", number), nil
+	}
 	claimed, authorized := c.claimLabel(number)
 	if !authorized {
 		return errResult("issue #%d is not part of the current triage set; only triage issues you fetched", number), nil
@@ -167,17 +188,8 @@ func (c *Client) doAddLabel(ctx context.Context, number int, label string) (acti
 	if !claimed {
 		return errResult("issue #%d already has a categorization label; not adding another", number), nil
 	}
-	// Re-read before writing, for the same reason as the type: a maintainer may
-	// have added a categorization label since the work set was fetched.
-	fresh, err := c.confirmStillNeeded(ctx, number)
-	if err != nil {
-		return c.writeFailed(err)
-	}
-	if !fresh.label {
-		return errResult("issue #%d now has a categorization label; not adding another", number), nil
-	}
 	if err := c.AddLabel(ctx, number, canonical); err != nil {
-		return c.writeFailed(err)
+		return c.toolFailed(err)
 	}
 	return okResult("added label %q to issue #%d", canonical, number), nil
 }

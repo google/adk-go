@@ -504,10 +504,13 @@ func TestAFailedWriteDoesNotReopenTheClaim(t *testing.T) {
 	}
 }
 
-// The pre-write revalidation read is a network call like any other, and its
-// failure must not be reported as success. The claim it consumed stays
-// consumed, so the model cannot retry it with a different value.
-func TestARevalidationFailureIsReportedAndConsumesTheClaim(t *testing.T) {
+// The pre-write revalidation read must be reported when it fails, and must cost
+// nothing. A read is unambiguous -- if it failed, no mutation was attempted --
+// so unlike a failed write it must not burn the issue's one write for the run.
+// That is why the read happens before the claim.
+//
+// Killing mutation: move the claimType call above the confirmStillNeeded call.
+func TestARevalidationFailureIsReportedAndCostsNoClaim(t *testing.T) {
 	var writes int
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/graphql" {
@@ -523,11 +526,14 @@ func TestARevalidationFailureIsReportedAndConsumesTheClaim(t *testing.T) {
 	if _, err := c.doChangeType(scoped(7), 7, "Bug"); err == nil {
 		t.Fatal("doChangeType = nil error, want the revalidation failure surfaced")
 	}
+	if !c.hadToolError() {
+		t.Error("the failed read was not recorded, so the run would exit 0")
+	}
 	if writes != 0 {
 		t.Errorf("made %d mutating calls, want 0: the write must not proceed on an unverified read", writes)
 	}
-	if claimed, _ := c.claimType(7); claimed {
-		t.Error("the claim was re-opened after a failed revalidation")
+	if claimed, _ := c.claimType(7); !claimed {
+		t.Error("a failed READ consumed the claim; nothing was written, so the field must stay open")
 	}
 }
 

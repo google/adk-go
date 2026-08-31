@@ -115,6 +115,17 @@ func (c *Client) authorize(number int, n need) {
 	c.authorized[number] = n
 }
 
+// peek reports whether an issue is authorized and which of its fields are still
+// open, WITHOUT consuming anything. It is the cheap pre-check that keeps a call
+// which would be refused anyway from spending a network read; the atomic claim
+// below is still what decides the single writer.
+func (c *Client) peek(number int) (n need, authorized bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, authorized = c.authorized[number]
+	return n, authorized
+}
+
 // claimType atomically reserves an issue's type need for a single mutation. It
 // reports whether the issue is authorized at all, and whether this call won the
 // reservation (the type was still needed and is now marked satisfied). Reserving

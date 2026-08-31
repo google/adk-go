@@ -75,7 +75,7 @@ func run(ctx context.Context, log *slog.Logger, args []string) error {
 	runCtx, cancelRun := context.WithTimeout(ctx, cfg.SweepTimeout)
 	defer cancelRun()
 
-	client := NewClient(cfg, log)
+	client := newClientFn(cfg, log)
 	tools, err := client.tools()
 	if err != nil {
 		return err
@@ -238,6 +238,12 @@ func selectIssues(ctx context.Context, client *Client, cfg *Config, log *slog.Lo
 	}
 	return client.ListUntriaged(fctx, cfg.IssueCount)
 }
+
+// newClientFn builds the GitHub client run uses. A variable, like newModelFn
+// below, so a test can point the REAL run function at a local server and drive
+// the whole path end to end: selecting the work set, starting a session,
+// letting the framework execute a tool call, and aggregating the outcome.
+var newClientFn = NewClient
 
 // newModelFn builds the model run uses. It is a variable so a test can drive
 // the real run function without reaching a live backend -- in particular to

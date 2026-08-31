@@ -121,6 +121,16 @@ func TestCanonicalType(t *testing.T) {
 	}
 }
 
+func TestTruncateNonPositiveBound(t *testing.T) {
+	// Unreachable from either call site today -- both bounds are positive
+	// constants -- but the helper is package-visible and r[:n] would panic.
+	for _, n := range []int{0, -1} {
+		if got := truncate("abc", n); got != "\n…[truncated]" {
+			t.Errorf("truncate(%q, %d) = %q, want the truncation marker alone", "abc", n, got)
+		}
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	if got := truncate("hello", 10); got != "hello" {
 		t.Errorf("truncate short string changed it: %q", got)
