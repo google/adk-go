@@ -260,20 +260,53 @@ func CollectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error)
 	return texts, nil
 }
 
+// awaitDeadline bounds a single Await call. It is generous so that a loaded CI
+// machine does not fail a test that is merely slow. Note that AwaitN arms one
+// timer for all n receives, so this is the budget for the whole call rather
+// than for each value.
+const awaitDeadline = 30 * time.Second
+
 // AwaitN receives n values from ch, or fails the test via t.Fatalf if they do
 // not all arrive within a generous, contention-tolerant deadline. A closed
 // channel counts as a receive, so AwaitN also joins a goroutine that closed ch
 // without sending.
 func AwaitN[T any](t *testing.T, ch <-chan T, n int, what string) {
 	t.Helper()
-	const deadline = 30 * time.Second
-	timer := time.NewTimer(deadline)
+	timer := time.NewTimer(awaitDeadline)
 	defer timer.Stop()
 	for i := range n {
 		select {
 		case <-ch:
 		case <-timer.C:
-			t.Fatalf("%s: got %d of %d within %v", what, i, n, deadline)
+			t.Fatalf("%s: got %d of %d within %v", what, i, n, awaitDeadline)
 		}
+	}
+}
+
+// AwaitValue receives one value from ch and returns it, failing the test via
+// t.Fatalf if none arrives within the same deadline AwaitN uses.
+//
+// Unlike AwaitN, a closed channel is a failure rather than a receive. Callers
+// use the value, and a producer that closed ch without sending yields only the
+// zero value, which for a channel of interface type is nil and panics on the
+// first method call. Reporting which value never arrived is more useful than
+// that panic, especially when the producer has already recorded the underlying
+// error with t.Errorf: the panic would bury it.
+func AwaitValue[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	timer := time.NewTimer(awaitDeadline)
+	defer timer.Stop()
+	select {
+	case v, ok := <-ch:
+		if !ok {
+			var zero T
+			t.Fatalf("%s: channel closed before a value arrived", what)
+			return zero
+		}
+		return v
+	case <-timer.C:
+		var zero T
+		t.Fatalf("%s: no value within %v", what, awaitDeadline)
+		return zero
 	}
 }
