@@ -422,16 +422,24 @@ func TestRejectedDuplicateCallDoesNotInflateTheCounters(t *testing.T) {
 	cfg.MaxFindingsPerGroup = 2
 	r := newRecorder(cfg)
 	ctx := scoped(testRelease, 0)
+	// The blank finding is SECOND, inside the cap of two, so sanitization
+	// actually empties one and both counters are non-zero before the rejected
+	// call. With it last the cap would slice it off first and the discarded
+	// half of this test would assert 0 against 0.
 	args := recordArgs{Release: testRelease, GroupIndex: 0, Findings: []Finding{
 		{Kind: "new-feature", Summary: "one"},
-		{Kind: "new-feature", Summary: "two"},
-		{Kind: "new-feature", Summary: "over the cap"},
 		{Kind: "new-feature", Summary: "\u200b"},
+		{Kind: "new-feature", Summary: "over the cap"},
+		{Kind: "new-feature", Summary: "also over the cap"},
 	}}
 	if res := r.recordFindings(ctx, args); res.Status != "success" {
 		t.Fatalf("first call: %s", res.Message)
 	}
 	capped, discarded := r.cappedCount(), r.discardedCount()
+	if capped == 0 || discarded == 0 {
+		t.Fatalf("test premise: both counters must be non-zero before the rejected call (capped=%d discarded=%d)",
+			capped, discarded)
+	}
 
 	if res := r.recordFindings(ctx, args); res.Status != "error" {
 		t.Fatalf("the second call for the same group was accepted: %s", res.Message)

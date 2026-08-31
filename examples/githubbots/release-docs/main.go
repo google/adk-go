@@ -161,6 +161,17 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 				"release", key, "groups", a.Groups, "not_attempted", a.NotAttempted,
 				"failed", a.Failed, "unreported", a.Unreported, "discarded", a.Discarded,
 				"capped", a.CappedFindings, "diff_truncated", diff.diffTruncated())
+			// No issue is filed on this path, so coverageNotes never runs and a
+			// stderr line is all a maintainer would get -- a green check and
+			// nothing else. Surface it in the Actions UI instead. The text is
+			// entirely code-authored: counts and a fixed sentence, no model
+			// output, so writing to the runner's own command channel is safe.
+			gh.annotateWarning(fmt.Sprintf(
+				"Release %s produced no documentation suggestions, and the analysis was incomplete "+
+					"(%d file groups: %d never attempted, %d failed, %d finished without reporting; "+
+					"diff truncated: %v). No issue was filed.",
+				key, a.Groups, a.NotAttempted, a.Failed, a.Unreported, diff.diffTruncated(),
+			))
 		}
 		return finish(gh)
 	}

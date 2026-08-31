@@ -227,11 +227,21 @@ func neutralize(s string) string {
 	// principle expose a new match ("<!-->" becomes "(!-->"). It terminates:
 	// every replacement strictly reduces the count of backticks, "<" or ">",
 	// and no replacement text contains any of them.
-	// TrimSpace runs LAST of the three. Trimming first leaves a value like
-	// "\u200b \u200b" untouched (U+200B is not Go whitespace), and the strip then
-	// turns it into a lone space -- non-empty, so the finding is kept, renders as
-	// an invisible line, and counts towards the finding total.
-	return truncateRunes(strings.TrimSpace(replaceToFixpoint(stripControls(s))), maxFindingFieldRunes)
+	// TrimSpace runs after the strip, not before. Trimming first leaves a value
+	// like "\u200b \u200b" untouched (U+200B is not Go whitespace), and the strip
+	// then turns it into a lone space -- non-empty, so the finding is kept,
+	// renders as an invisible line, and counts towards the finding total.
+	clean := strings.TrimSpace(replaceToFixpoint(stripControls(s)))
+	// Readability is judged BEFORE truncation, because truncateRunes appends
+	// " …[truncated]", whose own letters would otherwise satisfy the check: 801
+	// blank glyphs became 800 blank glyphs plus a marker containing "truncated",
+	// and hasReadableContent found the "t". Returning "" makes the field
+	// genuinely empty, so a finding of nothing but unreadable runes is dropped
+	// and counted rather than filed.
+	if !hasReadableContent(clean) {
+		return ""
+	}
+	return truncateRunes(clean, maxFindingFieldRunes)
 }
 
 // maxReplacePasses bounds the fixpoint loop. The argument above says it cannot

@@ -549,6 +549,21 @@ var runnerLinePattern = regexp.MustCompile(`\r\n|\r|\n`)
 // workflow command, so the render stays faithful about what it changed.
 const escapedCommandPrefix = "[escaped workflow command] "
 
+// annotateWarning raises a warning in the GitHub Actions UI.
+//
+// It is the only place this program deliberately writes a workflow command, and
+// it exists for the one path where nothing is filed and a stderr line would be
+// the sole record. The caller passes code-authored text only; the newline strip
+// is a backstop so a future caller cannot smuggle a second command in.
+func (c *GitHubClient) annotateWarning(message string) {
+	if os.Getenv("GITHUB_ACTIONS") == "" {
+		return
+	}
+	if _, err := fmt.Fprintf(c.out, "::warning::%s\n", strings.NewReplacer("\n", " ", "\r", " ").Replace(message)); err != nil {
+		c.log.Warn("could not write the workflow annotation", "error", err)
+	}
+}
+
 // shouldSkip logs an intended mutation and reports whether it should be skipped
 // because dry-run is enabled. It is the single chokepoint every mutation passes
 // through, so dry-run is impossible to forget.

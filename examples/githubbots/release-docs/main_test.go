@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -346,11 +347,34 @@ func TestRunWithIsQuietOnATruncatedReleaseWithNoFindings(t *testing.T) {
 		{"filename":"b.go","status":"modified","patch":"+y"},
 		{"filename":"c.go","status":"modified","patch":"+z"}`}
 	gh := testClient(t, cfg, h)
-	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+	// Under Actions the annotation is the only maintainer-facing signal on this
+	// path, so drive that branch and capture it.
+	t.Setenv("GITHUB_ACTIONS", "true")
+	var annotated strings.Builder
+	gh.out = &annotated
+
+	var logged strings.Builder
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := runWith(context.Background(), log, cfg, gh); err != nil {
 		t.Fatalf("runWith = %v, want nil: a release with nothing to suggest is ordinary, not a failure", err)
 	}
 	if h.creates != 0 {
 		t.Errorf("created %d issues with nothing to suggest; the marker would suppress a later run", h.creates)
+	}
+	// Exiting quietly is only acceptable because what was missed is reported.
+	// Without this the test would pass identically on a release that was NOT
+	// truncated, i.e. as a duplicate of the clean-release test below.
+	out := logged.String()
+	if !strings.Contains(out, "the analysis was also incomplete") {
+		t.Errorf("the run did not report that it missed part of the release:\n%s", out)
+	}
+	if !strings.Contains(out, "diff_truncated=true") {
+		t.Errorf("the run did not report the truncation, so this test does not distinguish a truncated "+
+			"release from a clean one:\n%s", out)
+	}
+	// A stderr line alone would leave a green check and no signal in the UI.
+	if got := annotated.String(); !strings.HasPrefix(got, "::warning::") {
+		t.Errorf("no workflow annotation was raised, so the run is a silent green: %q", got)
 	}
 }
 

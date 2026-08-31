@@ -41,7 +41,7 @@ steered by that text, then ask what the Go code still refuses.
 
 | Limit | Enforced by |
 | --- | --- |
-| The model cannot silently skip a group | Each group's outcome is recorded. A group that failed, was never reached, or finished without calling the tool at all is counted and named in the issue. A model that calls the tool and reports an empty list is a genuine "nothing to suggest" answer and is not distinguishable from one steered into saying so — see Known limitations. |
+| The model cannot silently skip a group | Each group's outcome is recorded. A group that failed, was never reached, or finished without calling the tool at all is counted by category in the issue when one is filed, and in the job log and a workflow annotation when there is nothing to suggest. A model that calls the tool and reports an empty list is a genuine "nothing to suggest" answer and is not distinguishable from one steered into saying so — see Known limitations. |
 | The model cannot file an issue | It has no tool that writes to GitHub. `Issues.Create` is called by Go after the loop. |
 | The model cannot choose the target repository or the title | Both come from configuration and `issueTitle`, not from tool arguments. |
 | The model cannot attribute findings to another group or release | `authorizeGroup` checks the tool's `release` and `group_index` against the session scope; an unscoped session records nothing. |

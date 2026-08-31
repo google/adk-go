@@ -66,8 +66,9 @@
 // commit message, a file name, or a code comment. Every contributor-authored
 // blob is wrapped in a per-run [UNTRUSTED:nonce] fence drawn from crypto/rand,
 // and the nonce draw fails closed. The diff is bounded by file count, by bytes
-// per file, and by commit count, and whatever those caps drop is stated in the
-// issue rather than silently omitted.
+// per file, and by commit count. Whatever those caps drop is stated in the issue
+// when one is filed, and logged as a warning plus a workflow annotation when
+// there is nothing to suggest and so no issue to state it in.
 //
 // The counts the issue reports are influenced by the model, so none of them
 // reaches the decision of whether an issue is filed at all. Three separate
@@ -87,8 +88,9 @@
 //
 // The bot also reports what it did NOT analyze. A file group that failed, that
 // the run budget never reached, or that finished without the model calling the
-// tool at all is counted in the issue, so a partial analysis cannot be mistaken
-// for a complete one. The counts are totals, not a list of which groups.
+// tool at all is counted, so a partial analysis cannot be mistaken for a
+// complete one. The counts are totals by category, not a list of which groups,
+// and they reach the issue when one is filed and the job log otherwise.
 //
 // What that does NOT catch, and cannot: a model that calls the tool and reports
 // an empty list is indistinguishable in Go from one that genuinely found

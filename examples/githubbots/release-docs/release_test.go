@@ -673,3 +673,37 @@ func TestFindingOfBlankGlyphsIsEmpty(t *testing.T) {
 		t.Error("a finding with only a code reference was treated as empty")
 	}
 }
+
+// truncateRunes appends " …[truncated]", whose own letters satisfy
+// hasReadableContent. Judging readability after truncation therefore let a
+// finding made entirely of unreadable runes through, as long as it was long
+// enough to be truncated — which forces the bot's only write and plants the
+// marker that suppresses every later run for the release.
+//
+// Mutation that must fail this test: move the hasReadableContent check in
+// neutralize to after truncateRunes, or delete it.
+func TestReadabilityIsJudgedBeforeTheTruncationMarker(t *testing.T) {
+	for _, unreadable := range []string{
+		strings.Repeat("\u2800", maxFindingFieldRunes+1), // blank glyphs, past the cap
+		strings.Repeat(".", maxFindingFieldRunes+1),      // punctuation, past the cap
+		strings.Repeat("\u3164", maxFindingFieldRunes+1), // blank letters, past the cap
+	} {
+		if got := neutralize(unreadable); got != "" {
+			t.Errorf("neutralize of %d unreadable runes = %+q, want empty", len([]rune(unreadable)), got)
+		}
+		f := sanitizeFinding(Finding{Kind: "new-feature", Summary: unreadable})
+		if !f.empty() {
+			t.Errorf("a finding of %d unreadable runes was not empty: it would force a filing",
+				len([]rune(unreadable)))
+		}
+	}
+	// Readable content past the cap is still kept, and still truncated.
+	long := strings.Repeat("a", maxFindingFieldRunes+100)
+	got := neutralize(long)
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Errorf("a long readable value was not truncated: %q", got[max(0, len(got)-40):])
+	}
+	if n := len([]rune(got)); n <= maxFindingFieldRunes {
+		t.Errorf("truncated to %d runes; the marker should extend it past the cap", n)
+	}
+}

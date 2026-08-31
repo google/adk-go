@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1121,5 +1122,41 @@ func TestFindExistingIssueSurvivesARenamedIssue(t *testing.T) {
 	}
 	if !found || n != 42 {
 		t.Errorf("FindExistingIssue = (%d, %v), want (42, true): a retitled issue would be duplicated", n, found)
+	}
+}
+
+// The quiet-but-incomplete path files nothing, so coverageNotes never runs and a
+// stderr line would be all a maintainer gets — a green check and no signal. The
+// annotation is the one place this program writes a workflow command on purpose,
+// and its text must be code-authored only.
+//
+// Mutation that must fail this test: make annotateWarning a no-op.
+func TestAnnotateWarningReachesTheActionsUI(t *testing.T) {
+	c := testClient(t, testConfig(), failIfCalled(t))
+	var out strings.Builder
+	c.out = &out
+
+	// Outside Actions it stays quiet: a local run has the log in front of it.
+	t.Setenv("GITHUB_ACTIONS", "")
+	if err := os.Unsetenv("GITHUB_ACTIONS"); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
+	c.annotateWarning("nothing here")
+	if out.Len() != 0 {
+		t.Errorf("a local run emitted a workflow command: %q", out.String())
+	}
+
+	t.Setenv("GITHUB_ACTIONS", "true")
+	c.annotateWarning("release v1...v2 produced no suggestions\nand the analysis was incomplete")
+	got := out.String()
+	if !strings.HasPrefix(got, "::warning::") {
+		t.Errorf("annotation = %q, want it to start with ::warning::", got)
+	}
+	// One physical line, so the message cannot carry a second command.
+	if n := strings.Count(strings.TrimSuffix(got, "\n"), "\n"); n != 0 {
+		t.Errorf("the annotation spans %d extra lines: %q", n, got)
+	}
+	if !strings.Contains(got, "the analysis was incomplete") {
+		t.Errorf("the annotation lost its message: %q", got)
 	}
 }
