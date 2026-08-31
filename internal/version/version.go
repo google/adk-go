@@ -15,4 +15,4 @@
 package version
 
 // Version exposes the current ADK Go version, used for llm request tagging
-const Version = "2.0.0"
+const Version = "2.3.0"
