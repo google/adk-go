@@ -1,0 +1,146 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Assigns a shepherd to every incoming pull request, and optionally asks the
+# author for missing context. It never labels and never re-assigns. See
+# examples/githubbots/pr-triage/README.md.
+#
+# SECURITY: this workflow runs on `pull_request_target`, so it executes with the
+# BASE repository's token and secrets while the pull request comes from a fork.
+# That combination is the most dangerous trigger GitHub Actions offers, and the
+# rules below are what make it safe:
+#
+#   - It uses the DEFAULT checkout, which is the base branch — trusted code. It
+#     never checks out, builds or runs anything from the pull request head.
+#   - Nothing from the pull request reaches a shell. The bot reads the pull
+#     request through the GitHub API and treats its title, description and
+#     changed-file paths as untrusted data.
+#   - The only value that crosses into a `run:` block is the pull request
+#     number, which arrives through `env:` and is rejected unless it is digits.
+#
+# Configuration (repository settings, not this file):
+#   - vars.PR_TRIAGE_OWNER_MAP  required: "component=login,component=login".
+#                               The job is SKIPPED while this is unset, so the
+#                               bot is inert until a maintainer configures it.
+#   - vars.PR_TRIAGE_DRY_RUN    optional kill switch: set to "true" to log
+#                               intended actions without performing any. It can
+#                               force a dry run but never force a live one.
+#   - secrets.GOOGLE_API_KEY    required: Gemini API key.
+name: PR Triage Bot
+
+on:
+  # Only events that bring in a new pull request are listed. `synchronize` and a
+  # periodic backfill would each re-assign an owner a maintainer had just taken
+  # off, so removing an assignee stays a decision this bot cannot undo.
+  # Drafts are skipped by the bot and picked up here on ready_for_review.
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request to triage (leave empty for a batch over unassigned pull requests)'
+        required: false
+        type: string
+      pr_count:
+        description: 'How many pull requests to process in batch mode'
+        required: false
+        default: '10'
+        type: string
+      dry_run:
+        description: 'Log intended actions without assigning or commenting'
+        required: false
+        default: false
+        type: boolean
+
+# Never let two runs triage the same pull request at once (a reopen right after
+# an open, say). A manually dispatched batch gets its own group.
+concurrency:
+  group: pr-triage-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    # Upstream only, and only once an owner map exists. A missing map skips the
+    # job rather than failing it, so an unconfigured bot never puts a red check
+    # on a contributor's pull request.
+    if: github.repository == 'google/adk-go' && vars.PR_TRIAGE_OWNER_MAP != ''
+    runs-on: ubuntu-latest
+    # The process budget below (RUN_BUDGET) is lower, so an overrun is reported
+    # by the bot with a diagnosis instead of the job being killed here.
+    timeout-minutes: 15
+    permissions:
+      # Covers both assignees and comments on a pull request. The bot needs
+      # nothing wider: it does not label, push, or read any other repository.
+      pull-requests: write
+      contents: read
+
+    steps:
+      # Default checkout: the base branch (trusted code), NOT the pull request
+      # head. Do not add `ref:` here.
+      - name: Checkout the base branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: ./.github/actions/setup
+
+      # The pull request number is the only event-supplied value that reaches a
+      # shell. It arrives through env (never interpolated into the script) and is
+      # rejected unless it is digits, so it cannot carry shell metacharacters or
+      # a newline into the step output.
+      - name: Resolve the pull request number
+        id: target
+        env:
+          RAW_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number || '' }}
+          RAW_PR_COUNT: ${{ inputs.pr_count || '10' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${RAW_PR_NUMBER}" && ! "${RAW_PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "pr_number must be digits only; rejecting the run" >&2
+            exit 1
+          fi
+          if [[ ! "${RAW_PR_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "pr_count must be digits only; rejecting the run" >&2
+            exit 1
+          fi
+          echo "pr_number=${RAW_PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "pr_count=${RAW_PR_COUNT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run the PR triage bot
+        working-directory: examples/githubbots/pr-triage
+        env:
+          # The built-in token, scoped by the permissions block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          # The complete set of logins this bot may ever assign.
+          OWNER_MAP: ${{ vars.PR_TRIAGE_OWNER_MAP }}
+          # Empty on a batch dispatch, which is how the bot selects batch mode.
+          PULL_REQUEST_NUMBER: ${{ steps.target.outputs.pr_number }}
+          PR_COUNT: ${{ steps.target.outputs.pr_count }}
+          # Either channel can ask for a dry run and neither can veto one. A
+          # plain `vars.X || inputs.dry_run` would go the wrong way: the string
+          # "false" is truthy in an expression, so a variable set to "false"
+          # would override an explicit `dry_run: true` and run live.
+          DRY_RUN: ${{ (vars.PR_TRIAGE_DRY_RUN == 'true' || inputs.dry_run) && 'true' || 'false' }}
+          # Below the job's timeout-minutes, so the bot reports its own overrun.
+          RUN_BUDGET: 10m
+        run: |
+          set -euo pipefail
+          go run -mod=readonly .
