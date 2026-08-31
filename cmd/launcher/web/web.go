@@ -27,10 +27,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -148,11 +150,26 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+// applyServiceDefaults fills in in-memory services the caller left unset.
+//
+// Neither adkrest.NewServer nor runner.New defaults them, so a nil service here
+// reaches the request path and panics instead of returning an HTTP error. Only
+// runner.NewInMemory does, and the web launcher does not use it.
+func applyServiceDefaults(config *launcher.Config) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 	}
+	if config.ArtifactService == nil {
+		config.ArtifactService = artifact.InMemoryService()
+	}
+	if config.MemoryService == nil {
+		config.MemoryService = memory.InMemoryService()
+	}
+}
+
+// Run implements launcher.SubLauncher.
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	applyServiceDefaults(config)
 
 	router := BuildBaseRouter()
 
@@ -283,5 +300,18 @@ func logger(inner http.Handler) http.Handler {
 func BuildBaseRouter() *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 	router.Use(logger)
+	// Serve health at the root as well as under the API prefix. Load balancers
+	// and container probes are configured with a fixed path and cannot be
+	// expected to know which sublaunchers happen to be enabled.
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 	return router
+}
+
+// healthHandler reports that the web server is up. It says nothing about the
+// health of the agent or its downstream models.
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
+		log.Printf("failed to write health response: %v", err)
+	}
 }

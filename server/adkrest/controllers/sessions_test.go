@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestGetSession(t *testing.T) {
@@ -72,7 +74,11 @@ func TestGetSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:           "session does not exist",
+			// The fake reports a missing session with a bare error rather than
+			// one wrapping session.ErrNotFound, which is how any other service
+			// failure looks: it stays a 500. The 404 path is covered by
+			// TestGetSessionMissingSessionIsNotFound.
+			name:           "session service error is not a missing session",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID:      id,
 			wantErr:        fmt.Errorf("not found"),
@@ -432,6 +438,276 @@ func TestListSessions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetSessionMissingSessionIsNotFound covers the 404 path. A service that
+// wraps session.ErrNotFound is telling the handler the session is absent, not
+// that the server broke, so the client must get a 404.
+func TestGetSessionMissingSessionIsNotFound(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "missingSession"}
+	apiController := controllers.NewSessionsAPIController(session.InMemoryService())
+	rr := httptest.NewRecorder()
+
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+// TestGetSessionExistingSessionIsOK is the counterpart: a session that is there
+// is still a 200 after the not-found mapping.
+func TestGetSessionExistingSessionIsOK(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	apiController := controllers.NewSessionsAPIController(newServiceWithSession(t, id, map[string]any{"foo": "bar"}))
+	rr := httptest.NewRecorder()
+
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var got models.Session
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.ID != id.SessionID {
+		t.Errorf("GetSessionHandler() session ID = %q, want %q", got.ID, id.SessionID)
+	}
+}
+
+// TestListSessionsWithoutSessionsEncodesEmptyArray asserts the raw bytes.
+// Decoding accepts both null and [], so a test that decodes cannot tell them
+// apart — but the web UI iterates the response and a null breaks it.
+func TestListSessionsWithoutSessionsEncodesEmptyArray(t *testing.T) {
+	sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+	apiController := controllers.NewSessionsAPIController(&sessionService)
+	req, err := http.NewRequest(http.MethodGet, "/apps/testApp/users/testUser/sessions", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "testApp", "user_id": "testUser"})
+	rr := httptest.NewRecorder()
+
+	apiController.ListSessionsHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
+	}
+	if got := strings.TrimRight(rr.Body.String(), "\n"); got != "[]" {
+		t.Errorf("ListSessionsHandler() raw body = %q, want %q", got, "[]")
+	}
+}
+
+func TestUpdateSession(t *testing.T) {
+	id := fakes.SessionKey{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+
+	tc := []struct {
+		name          string
+		createSession bool
+		sessionID     fakes.SessionKey
+		body          string
+		wantStatus    int
+		wantState     map[string]any
+	}{
+		{
+			name:          "state delta is applied",
+			createSession: true,
+			sessionID:     id,
+			body:          `{"stateDelta":{"foo":"baz","count":2}}`,
+			wantStatus:    http.StatusOK,
+			wantState:     map[string]any{"foo": "baz", "count": float64(2)},
+		},
+		{
+			// The rename path: the UI stores the new name in session state.
+			name:          "session metadata round-trips",
+			createSession: true,
+			sessionID:     id,
+			body:          `{"stateDelta":{"__session_metadata__":{"displayName":"My renamed chat"}}}`,
+			wantStatus:    http.StatusOK,
+			wantState: map[string]any{
+				"foo":                  "bar",
+				"__session_metadata__": map[string]any{"displayName": "My renamed chat"},
+			},
+		},
+		{
+			name:          "empty delta leaves the session unchanged",
+			createSession: true,
+			sessionID:     id,
+			body:          `{}`,
+			wantStatus:    http.StatusOK,
+			wantState:     map[string]any{"foo": "bar"},
+		},
+		{
+			name:          "absent delta leaves the session unchanged",
+			createSession: true,
+			sessionID:     id,
+			body:          `{"stateDelta":{}}`,
+			wantStatus:    http.StatusOK,
+			wantState:     map[string]any{"foo": "bar"},
+		},
+		{
+			name:          "session does not exist",
+			createSession: false,
+			sessionID:     id,
+			body:          `{"stateDelta":{"foo":"baz"}}`,
+			wantStatus:    http.StatusNotFound,
+		},
+		{
+			name:          "malformed json",
+			createSession: true,
+			sessionID:     id,
+			body:          `{"stateDelta":`,
+			wantStatus:    http.StatusBadRequest,
+		},
+		{
+			name:          "user ID is missing in input",
+			createSession: true,
+			sessionID:     fakes.SessionKey{AppName: "testApp", SessionID: "testSession"},
+			body:          `{"stateDelta":{"foo":"baz"}}`,
+			wantStatus:    http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionService := session.InMemoryService()
+			if tt.createSession {
+				sessionService = newServiceWithSession(t, id, map[string]any{"foo": "bar"})
+			}
+			apiController := controllers.NewSessionsAPIController(sessionService)
+			rr := httptest.NewRecorder()
+
+			apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, tt.sessionID, strings.NewReader(tt.body)))
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantStatus != http.StatusOK {
+				return
+			}
+
+			var got models.Session
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if diff := cmp.Diff(tt.wantState, got.State); diff != "" {
+				t.Errorf("UpdateSession() response state mismatch (-want +got):\n%s", diff)
+			}
+
+			// A follow-up GET must show the same state: the delta has to reach
+			// the store, not just the response body.
+			getRR := httptest.NewRecorder()
+			apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, tt.sessionID, nil))
+			if getRR.Code != http.StatusOK {
+				t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", getRR.Code, http.StatusOK, getRR.Body.String())
+			}
+			var reread models.Session
+			if err := json.NewDecoder(getRR.Body).Decode(&reread); err != nil {
+				t.Fatalf("decode get response: %v", err)
+			}
+			if diff := cmp.Diff(tt.wantState, reread.State); diff != "" {
+				t.Errorf("state after re-read mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestUpdateSessionAppliesDeltaThroughAnEvent guards the mechanism, not just
+// the result: the delta must be applied through session.Service as an event, so
+// that every backend records it the way an agent turn would.
+func TestUpdateSessionAppliesDeltaThroughAnEvent(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	sessionService := newServiceWithSession(t, id, map[string]any{"foo": "bar"})
+	apiController := controllers.NewSessionsAPIController(sessionService)
+	rr := httptest.NewRecorder()
+
+	body := strings.NewReader(`{"stateDelta":{"foo":"baz"}}`)
+	apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, id, body))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	stored, err := sessionService.Get(t.Context(), &session.GetRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	events := stored.Session.Events()
+	if events.Len() != 1 {
+		t.Fatalf("session has %d events, want 1 carrying the delta", events.Len())
+	}
+	want := map[string]any{"foo": "baz"}
+	if diff := cmp.Diff(want, events.At(0).Actions.StateDelta); diff != "" {
+		t.Errorf("appended event StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestUpdateSessionResponseMatchesGetSession pins the response shape: the UI
+// reuses the PATCH response as if it came from GET.
+func TestUpdateSessionResponseMatchesGetSession(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	apiController := controllers.NewSessionsAPIController(newServiceWithSession(t, id, map[string]any{"foo": "bar"}))
+
+	patchRR := httptest.NewRecorder()
+	body := strings.NewReader(`{"stateDelta":{"foo":"baz"}}`)
+	apiController.UpdateSessionHandler(patchRR, newSessionRequest(t, http.MethodPatch, id, body))
+	if patchRR.Code != http.StatusOK {
+		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", patchRR.Code, http.StatusOK, patchRR.Body.String())
+	}
+	var patched models.Session
+	if err := json.NewDecoder(patchRR.Body).Decode(&patched); err != nil {
+		t.Fatalf("decode patch response: %v", err)
+	}
+
+	getRR := httptest.NewRecorder()
+	apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, id, nil))
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", getRR.Code, http.StatusOK, getRR.Body.String())
+	}
+	var fetched models.Session
+	if err := json.NewDecoder(getRR.Body).Decode(&fetched); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+
+	if diff := cmp.Diff(fetched, patched); diff != "" {
+		t.Errorf("PATCH response differs from GET response (-get +patch):\n%s", diff)
+	}
+}
+
+// newServiceWithSession returns an in-memory session service holding one
+// session. Unlike fakes.FakeSessionService it reports a missing session with
+// session.ErrNotFound and applies state deltas, which is what the not-found and
+// PATCH paths need.
+func newServiceWithSession(t *testing.T, id fakes.SessionKey, state map[string]any) session.Service {
+	t.Helper()
+	service := session.InMemoryService()
+	if _, err := service.Create(t.Context(), &session.CreateRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+		State:     state,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return service
+}
+
+func newSessionRequest(t *testing.T, method string, id fakes.SessionKey, body io.Reader) *http.Request {
+	t.Helper()
+	url := fmt.Sprintf("/apps/%s/users/%s/sessions/%s", id.AppName, id.UserID, id.SessionID)
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	return mux.SetURLVars(req, sessionVars(id))
 }
 
 func sessionVars(sessionID fakes.SessionKey) map[string]string {

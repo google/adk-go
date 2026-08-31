@@ -15,10 +15,18 @@
 package web
 
 import (
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestH2CFlag(t *testing.T) {
@@ -119,4 +127,207 @@ func assertProtocol(t *testing.T, client *http.Client, url string, wantMajor int
 	if resp.ProtoMajor != wantMajor {
 		t.Errorf("response protocol = %q, want HTTP/%d", resp.Proto, wantMajor)
 	}
+}
+
+func TestApplyServiceDefaultsFillsEmptyConfig(t *testing.T) {
+	config := &launcher.Config{}
+
+	applyServiceDefaults(config)
+
+	if config.SessionService == nil {
+		t.Error("SessionService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+	if config.ArtifactService == nil {
+		t.Error("ArtifactService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+	if config.MemoryService == nil {
+		t.Error("MemoryService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+}
+
+// TestApplyServiceDefaultsKeepsSuppliedServices covers the partial cases too:
+// defaulting one service must not clobber the two the caller did supply, and
+// supplying one must not stop the other two from being defaulted.
+func TestApplyServiceDefaultsKeepsSuppliedServices(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		supplySession  bool
+		supplyArtifact bool
+		supplyMemory   bool
+	}{
+		{
+			name:           "all supplied",
+			supplySession:  true,
+			supplyArtifact: true,
+			supplyMemory:   true,
+		},
+		{
+			name:          "only session supplied",
+			supplySession: true,
+		},
+		{
+			name:           "only artifact supplied",
+			supplyArtifact: true,
+		},
+		{
+			name:         "only memory supplied",
+			supplyMemory: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &launcher.Config{}
+			var (
+				wantSession  session.Service
+				wantArtifact artifact.Service
+				wantMemory   memory.Service
+			)
+			if tc.supplySession {
+				wantSession = session.InMemoryService()
+				config.SessionService = wantSession
+			}
+			if tc.supplyArtifact {
+				wantArtifact = artifact.InMemoryService()
+				config.ArtifactService = wantArtifact
+			}
+			if tc.supplyMemory {
+				wantMemory = memory.InMemoryService()
+				config.MemoryService = wantMemory
+			}
+
+			applyServiceDefaults(config)
+
+			assertService(t, "SessionService", config.SessionService, wantSession)
+			assertService(t, "ArtifactService", config.ArtifactService, wantArtifact)
+			assertService(t, "MemoryService", config.MemoryService, wantMemory)
+		})
+	}
+}
+
+// assertService checks that applyServiceDefaults left a service set. When the
+// caller supplied one, want is that value and the check is pointer identity:
+// the default must not replace it.
+func assertService(t *testing.T, name string, got, want any) {
+	t.Helper()
+
+	if got == nil {
+		t.Errorf("%s is nil after applyServiceDefaults, want a default in-memory service", name)
+		return
+	}
+	if want != nil && got != want {
+		t.Errorf("%s = %p, want the caller-supplied service %p", name, got, want)
+	}
+}
+
+// TestApplyServiceDefaultsServesRESTRoutes pins the reason the defaults exist.
+// Before them, an artifact route reached a nil service and panicked, which
+// dropped the TCP connection without sending any HTTP response at all.
+//
+// The assertion is 200, not merely "some status": the artifact controller has
+// since grown its own nil guard that answers 503, so accepting any status would
+// let the defaults disappear unnoticed. The session controller has no such
+// guard, so its route still panics outright without them.
+func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{
+			name: "list artifacts",
+			path: "/apps/a/users/u/sessions/s/artifacts",
+		},
+		{
+			name: "list sessions",
+			path: "/apps/a/users/u/sessions",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := serveWithoutPanic(t, server, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d (%s), want %d", tc.path, rec.Code, rec.Body.String(), http.StatusOK)
+			}
+		})
+	}
+}
+
+// TestApplyServiceDefaultsMemoryServiceIsCallable exercises the defaulted
+// memory service. No REST route reaches it — it is handed to the runner and
+// used by the load_memory tool mid-run — so the consequence is checked at the
+// call site: a nil service panics there instead of returning an empty result.
+func TestApplyServiceDefaultsMemoryServiceIsCallable(t *testing.T) {
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SearchMemory on the defaulted memory service panicked: %v", r)
+		}
+	}()
+
+	resp, err := config.MemoryService.SearchMemory(t.Context(), &memory.SearchRequest{
+		AppName: "a",
+		UserID:  "u",
+		Query:   "anything",
+	})
+	if err != nil {
+		t.Fatalf("SearchMemory() failed: %v", err)
+	}
+	if resp == nil {
+		t.Error("SearchMemory() response is nil, want an empty result")
+	}
+}
+
+// serveWithoutPanic serves one request and turns a handler panic into a named
+// test failure, so a regression reports the route it broke instead of taking
+// the whole test binary down with it.
+func serveWithoutPanic(t *testing.T, handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s %s panicked: %v", req.Method, req.URL.Path, r)
+		}
+	}()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestBuildBaseRouterHealth(t *testing.T) {
+	router := BuildBaseRouter()
+
+	t.Run("GET", func(t *testing.T) {
+		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /health status = %d, want %d", rec.Code, http.StatusOK)
+		}
+
+		var got map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("GET /health body %q is not JSON: %v", rec.Body.String(), err)
+		}
+		if got["status"] != "ok" {
+			t.Errorf("GET /health body = %q, want status %q", rec.Body.String(), "ok")
+		}
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodHead, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("HEAD /health status = %d, want %d", rec.Code, http.StatusOK)
+		}
+	})
 }

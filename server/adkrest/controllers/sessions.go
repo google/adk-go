@@ -23,6 +23,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 )
@@ -125,7 +126,7 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 		SessionID: sessionID.ID,
 	})
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		writeSessionServiceError(rw, err)
 		return
 	}
 	session, err := models.FromSession(storedSession.Session)
@@ -136,6 +137,84 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 	EncodeJSONResponse(session, http.StatusOK, rw)
 }
 
+// UpdateSessionHandler applies a state delta to an existing session and returns
+// the updated session.
+//
+// The ADK web UI PATCHes this route to rename a session — the new name is
+// written to state as __session_metadata__.displayName — and to edit session
+// state by hand. The delta is applied through [session.Service] by appending an
+// event carrying it in Actions.StateDelta, the same path an agent turn takes,
+// so every backend persists and scopes the change identically.
+func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(params)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	updateRequest := models.UpdateSessionRequest{}
+	if req.Body != nil {
+		err := json.NewDecoder(req.Body).Decode(&updateRequest)
+		if err != nil && !errors.Is(err, io.EOF) {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	getRequest := &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+	}
+	storedSession, err := c.service.Get(req.Context(), getRequest)
+	if err != nil {
+		writeSessionServiceError(rw, err)
+		return
+	}
+
+	// An empty or absent delta is a no-op: return the session as it stands
+	// rather than record an event that changes nothing.
+	if len(updateRequest.StateDelta) > 0 {
+		event := session.NewEvent(req.Context(), platform.NewUUID(req.Context()))
+		event.Author = "user"
+		event.Actions.StateDelta = updateRequest.StateDelta
+		if err := c.service.AppendEvent(req.Context(), storedSession.Session, event); err != nil {
+			writeSessionServiceError(rw, err)
+			return
+		}
+		// Re-read: app- and user-scoped keys are merged back in only on read,
+		// so this is what a follow-up GET would show.
+		storedSession, err = c.service.Get(req.Context(), getRequest)
+		if err != nil {
+			writeSessionServiceError(rw, err)
+			return
+		}
+	}
+
+	respSession, err := models.FromSession(storedSession.Session)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
+}
+
+// writeSessionServiceError answers a [session.Service] failure. A session the
+// service cannot find means the client asked for something that is not there,
+// which is a 404; anything else is the server's fault.
+func writeSessionServiceError(rw http.ResponseWriter, err error) {
+	if errors.Is(err, session.ErrNotFound) {
+		http.Error(rw, err.Error(), http.StatusNotFound)
+		return
+	}
+	http.Error(rw, err.Error(), http.StatusInternalServerError)
+}
+
 // ListSessionsHandler handles listing all sessions for a given app and user.
 func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
@@ -144,7 +223,9 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var sessions []models.Session
+	// Not `var sessions []models.Session`: a nil slice encodes as JSON null,
+	// and clients expect an empty list for a user with no sessions.
+	sessions := []models.Session{}
 	resp, err := c.service.List(req.Context(), &session.ListRequest{
 		AppName: sessionID.AppName,
 		UserID:  sessionID.UserID,
