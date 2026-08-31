@@ -62,7 +62,12 @@ func authorizeGroup(ctx context.Context, release string, index int) (string, boo
 		return "no file group is authorized for this session", false
 	}
 	if scope.release != release {
-		return fmt.Sprintf("session is scoped to release %s; refusing to record for %s", scope.release, release), false
+		// The requested release is model-authored and unbounded, and this message
+		// is handed back to the model as a tool result. Echo only a bounded,
+		// control-free form of it, as every other model string leaving this
+		// program is treated.
+		return fmt.Sprintf("session is scoped to release %s; refusing to record for %q",
+			scope.release, truncateRunes(stripControls(release), 64)), false
 	}
 	if scope.index != index {
 		return fmt.Sprintf("session is scoped to group %d; refusing to record for group %d", scope.index, index), false
@@ -157,16 +162,12 @@ func (r *recorder) discardedCount() int {
 	return r.discarded
 }
 
-// unreported reports how many of the first n group indexes recorded nothing at
-// all. Recording an empty list still occupies the slot, so this counts only the
+// unreportedExcept counts how many of the first n group indexes recorded
+// nothing at all, ignoring the ones named in skip.
+//
+// Recording an empty list still occupies the slot, so this counts only the
 // groups whose tool never fired -- the shape a model steered into silence, or a
 // group that died before it could report, both produce.
-func (r *recorder) unreported(n int) int {
-	return r.unreportedExcept(n, nil)
-}
-
-// unreportedExcept counts the first n group indexes that recorded nothing,
-// ignoring the ones named in skip.
 //
 // The skip set is the groups that failed: a group can record its findings and
 // then hit an error, so "failed" and "recorded nothing" are independent facts

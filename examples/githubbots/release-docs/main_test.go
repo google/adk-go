@@ -691,3 +691,43 @@ func TestRunWithReportsCappedAndDiscardedFindingsItActuallyProduced(t *testing.T
 		t.Error("the filed issue lost the one renderable suggestion")
 	}
 }
+
+// The annotation is for coverage loss an operator can act on. A patch the byte
+// cap cut is routine on a large release, and annotating it would make the yellow
+// banner meaningless — which is the same noise problem an earlier revision
+// caused one severity higher by failing the job.
+//
+// Mutation that must fail this test: widen the annotation condition back to
+// `!a.complete() || diff.diffTruncated()`.
+func TestRunWithDoesNotAnnotateARoutineTruncatedPatch(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.MaxPatchBytes = 4 // every file's patch is cut, but no file is dropped
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn > 0 {
+			return nil
+		}
+		return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{})}
+	}})
+
+	h := &filingHandler{compareFiles: `{"filename":"a.go","status":"modified","patch":"+xxxxxxxxxx"}`}
+	gh := testClient(t, cfg, h)
+	t.Setenv("GITHUB_ACTIONS", "true")
+	var annotated strings.Builder
+	gh.out = &annotated
+
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if h.creates != 0 {
+		t.Errorf("created %d issues, want 0", h.creates)
+	}
+	// The premise: the diff IS truncated, so the wider condition would fire.
+	diff := &ReleaseDiff{Files: []ChangedFile{{Path: "a.go", Patch: "+xxx", PatchTruncated: true}}}
+	if !diff.diffTruncated() {
+		t.Fatal("test premise: a cut patch must count as a truncated diff")
+	}
+	if got := annotated.String(); got != "" {
+		t.Errorf("a routine cut patch raised a warning annotation: %q", got)
+	}
+}

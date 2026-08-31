@@ -48,22 +48,6 @@ func TestToolInventoryIsPinned(t *testing.T) {
 	}
 }
 
-func TestAuthorizeGroup(t *testing.T) {
-	ctx := scoped(testRelease, 2)
-	if _, ok := authorizeGroup(ctx, testRelease, 2); !ok {
-		t.Error("the session refused its own release and group")
-	}
-	if _, ok := authorizeGroup(ctx, testRelease, 3); ok {
-		t.Error("the session accepted a DIFFERENT group index")
-	}
-	if _, ok := authorizeGroup(ctx, "v9...v9", 2); ok {
-		t.Error("the session accepted a DIFFERENT release")
-	}
-	if _, ok := authorizeGroup(context.Background(), testRelease, 2); ok {
-		t.Error("an unscoped session was authorized")
-	}
-}
-
 func TestRecordFindingsRejectsAnUnscopedOrMismatchedSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -333,7 +317,7 @@ func TestUnreportedExceptIgnoresFailedGroupsThatDidRecord(t *testing.T) {
 	}
 
 	// The naive subtraction would give unreported(3) - failed(1) = 0.
-	if got := r.unreported(3); got != 1 {
+	if got := r.unreportedExcept(3, nil); got != 1 {
 		t.Fatalf("unreported(3) = %d, want 1 (group 1)", got)
 	}
 	if got := r.unreportedExcept(3, []int{0}); got != 1 {
@@ -449,5 +433,31 @@ func TestRejectedDuplicateCallDoesNotInflateTheCounters(t *testing.T) {
 	}
 	if got := r.discardedCount(); got != discarded {
 		t.Errorf("discardedCount went from %d to %d on a REJECTED call", discarded, got)
+	}
+}
+
+// The release name in a rejection message is model-authored and unbounded, and
+// the message goes straight back to the model as a tool result. Every other
+// model string leaving this program is bounded and stripped of control
+// characters; this one must be too.
+//
+// Mutation that must fail this test: echo `release` raw instead of
+// `truncateRunes(stripControls(release), 64)`.
+func TestAuthorizeGroupBoundsTheEchoedRelease(t *testing.T) {
+	hostile := "x\n::add-mask::secret\r" + strings.Repeat("y", 5000)
+	msg, ok := authorizeGroup(scoped(testRelease, 0), hostile, 0)
+	if ok {
+		t.Fatal("authorizeGroup accepted a release the session is not scoped to")
+	}
+	if strings.ContainsAny(msg, "\n\r") {
+		t.Errorf("the rejection message carries a line terminator: %+q", msg)
+	}
+	if n := len([]rune(msg)); n > 200 {
+		t.Errorf("the rejection message is %d runes; the echoed release is unbounded", n)
+	}
+	// The scoped release, which is code-derived, is still named so the model can
+	// correct itself.
+	if !strings.Contains(msg, testRelease) {
+		t.Errorf("the message does not name the release the session IS scoped to: %q", msg)
 	}
 }

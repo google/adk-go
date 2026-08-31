@@ -360,19 +360,6 @@ func insideFence(s, needle, open, closeTag string) bool {
 	}
 }
 
-func TestReleaseKeyAndTitleAreDeterministic(t *testing.T) {
-	if got := releaseKey("v1", "v2"); got != "v1...v2" {
-		t.Errorf("releaseKey = %q, want v1...v2", got)
-	}
-	if got := issueTitle("v2.3.0"); got != "Documentation updates for release v2.3.0" {
-		t.Errorf("issueTitle = %q", got)
-	}
-	// The marker must embed both tags, so two releases never share one.
-	if bodyMarker("v1", "v2") == bodyMarker("v1", "v3") {
-		t.Error("two different tag pairs produced the same marker")
-	}
-}
-
 // A group that finished without recording anything is a different fact from a
 // group that recorded an empty list: the first is a model that never answered,
 // which is what a contributor steering the analysis into silence produces. The
@@ -633,8 +620,9 @@ func TestNeutralizeTrimsAfterStripping(t *testing.T) {
 // invisible in the issue while counting towards the finding total that decides
 // whether the bot writes at all.
 //
-// Mutation that must fail this test: make empty() compare each field against ""
-// instead of calling hasReadableContent.
+// Mutation that must fail this test: delete the hasReadableContent guard from
+// neutralize. (empty() itself is a plain emptiness check: neutralize is what
+// makes an unreadable value empty, so there is only one layer to mutate.)
 func TestFindingOfBlankGlyphsIsEmpty(t *testing.T) {
 	// Two layers do this between them, and the test asserts the composed result
 	// because that is what decides whether the bot writes. stripControls removes

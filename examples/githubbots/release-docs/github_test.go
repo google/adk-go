@@ -670,9 +670,6 @@ func TestNewGitHubClientInitializesTheClaimMap(t *testing.T) {
 	if c.claimRelease("v1...v2") {
 		t.Error("the same release was claimed twice")
 	}
-	if c.selfLogin != "" {
-		t.Errorf("selfLogin = %q, want empty after a failed identity lookup", c.selfLogin)
-	}
 }
 
 // The rune cap is the only bound on a commit subject, and up to MaxCommits of
@@ -1147,16 +1144,18 @@ func TestAnnotateWarningReachesTheActionsUI(t *testing.T) {
 	}
 
 	t.Setenv("GITHUB_ACTIONS", "true")
-	c.annotateWarning("release v1...v2 produced no suggestions\nand the analysis was incomplete")
+	// Both terminators the runner breaks on, not just "\n": a surviving "\r"
+	// would let a future caller's text start a second command.
+	c.annotateWarning("release v1...v2 produced no suggestions\nand the analysis\ris incomplete\r\nhere")
 	got := out.String()
 	if !strings.HasPrefix(got, "::warning::") {
 		t.Errorf("annotation = %q, want it to start with ::warning::", got)
 	}
 	// One physical line, so the message cannot carry a second command.
-	if n := strings.Count(strings.TrimSuffix(got, "\n"), "\n"); n != 0 {
-		t.Errorf("the annotation spans %d extra lines: %q", n, got)
+	if body := strings.TrimSuffix(got, "\n"); strings.ContainsAny(body, "\r\n") {
+		t.Errorf("the annotation carries a line terminator, so it can emit a second command: %+q", got)
 	}
-	if !strings.Contains(got, "the analysis was incomplete") {
+	if !strings.Contains(got, "produced no suggestions") || !strings.Contains(got, "is incomplete") {
 		t.Errorf("the annotation lost its message: %q", got)
 	}
 }

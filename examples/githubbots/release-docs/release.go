@@ -168,13 +168,14 @@ func sanitizeFinding(f Finding) Finding {
 // Reference counts. It is thin on its own, but dropping a finding that still has
 // text in it and then counting that drop as "nothing survived sanitization"
 // states something false in the issue.
+// It is a plain emptiness check because neutralize already returns "" for a
+// value with nothing readable in it, and docPathPattern requires DocFile to
+// start with a letter or digit. Every field reaching here has been through one
+// of those, so "non-empty" and "readable" are the same thing by the time this
+// runs; a second readability pass would be a layer with no behaviour.
 func (f Finding) empty() bool {
-	for _, v := range []string{f.Summary, f.ProposedChange, f.Reasoning, f.DocFile, f.Reference} {
-		if hasReadableContent(v) {
-			return false
-		}
-	}
-	return true
+	return f.Summary == "" && f.ProposedChange == "" && f.Reasoning == "" &&
+		f.DocFile == "" && f.Reference == ""
 }
 
 // hasReadableContent reports whether a string contains at least one letter or
@@ -223,30 +224,30 @@ func neutralize(s string) string {
 	// text renders as Markdown from there, and an @mention in it notifies a
 	// real person -- which is the whole reason the fence exists.
 	//
-	// The replacer then runs to a fixpoint, because a replacement can in
-	// principle expose a new match ("<!-->" becomes "(!-->"). It terminates:
-	// every replacement strictly reduces the count of backticks, "<" or ">",
-	// and no replacement text contains any of them.
+	// The replacer then runs to a fixpoint, because a replacement can expose a
+	// new match ("<!-->" becomes "(!-->"). It terminates: every pass strictly
+	// reduces the count of backticks, "<" and ">", and no replacement text
+	// contains any of them.
 	// TrimSpace runs after the strip, not before. Trimming first leaves a value
 	// like "\u200b \u200b" untouched (U+200B is not Go whitespace), and the strip
 	// then turns it into a lone space -- non-empty, so the finding is kept,
 	// renders as an invisible line, and counts towards the finding total.
 	clean := strings.TrimSpace(replaceToFixpoint(stripControls(s)))
-	// Readability is judged BEFORE truncation, because truncateRunes appends
-	// " …[truncated]", whose own letters would otherwise satisfy the check: 801
-	// blank glyphs became 800 blank glyphs plus a marker containing "truncated",
-	// and hasReadableContent found the "t". Returning "" makes the field
-	// genuinely empty, so a finding of nothing but unreadable runes is dropped
-	// and counted rather than filed.
+	// Readability is judged BEFORE truncation. truncateRunes appends
+	// " …[truncated]", and those letters would otherwise satisfy the check for a
+	// value that has none of its own. Returning "" makes the field genuinely
+	// empty, so a finding of nothing but unreadable runes is dropped and counted
+	// rather than filed.
 	if !hasReadableContent(clean) {
 		return ""
 	}
 	return truncateRunes(clean, maxFindingFieldRunes)
 }
 
-// maxReplacePasses bounds the fixpoint loop. The argument above says it cannot
-// be reached; the bound is here so a future replacement rule that breaks that
-// argument cannot hang the program.
+// maxReplacePasses bounds the fixpoint loop. Termination is guaranteed by the
+// argument above, but only within the number of special characters in the input
+// and not within any small constant, so this is a real bound rather than a
+// formality. Exceeding it falls back to stripping those characters outright.
 const maxReplacePasses = 8
 
 func replaceToFixpoint(s string) string {
@@ -257,10 +258,8 @@ func replaceToFixpoint(s string) string {
 		}
 		s = next
 	}
-	// Unreachable by the argument above, and it fails CLOSED anyway: returning
-	// the still-unmatched string would put a sequence the replacer could not
-	// settle straight into the issue body, which is the opposite of what this
-	// function is for.
+	// Fails CLOSED: returning the still-unmatched string would put a sequence the
+	// replacer could not settle straight into the issue body.
 	return lastResortStripper.Replace(s)
 }
 

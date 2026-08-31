@@ -259,7 +259,7 @@ func TestAgentRecordsThroughTheRealRunner(t *testing.T) {
 	if got[0].DocFile != "docs/agents.md" || got[0].Kind != "new-feature" {
 		t.Errorf("recorded finding = %+v, want the model's values after sanitization", got[0])
 	}
-	if n := rec.unreported(1); n != 0 {
+	if n := rec.unreportedExcept(1, nil); n != 0 {
 		t.Errorf("unreported(1) = %d after a successful record, want 0", n)
 	}
 }
@@ -383,7 +383,7 @@ func TestAgentCannotRecordForAnotherGroup(t *testing.T) {
 	if got := rec.findings(); len(got) != 0 {
 		t.Errorf("a call naming group 7 from a session scoped to group 0 recorded %d findings, want 0", len(got))
 	}
-	if n := rec.unreported(1); n != 1 {
+	if n := rec.unreportedExcept(1, nil); n != 1 {
 		t.Errorf("unreported(1) = %d, want 1: a refused call must leave the group unreported", n)
 	}
 }

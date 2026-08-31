@@ -130,13 +130,10 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	// suggestion? Nothing else, and in particular nothing counted from what the
 	// model did.
 	//
-	// Three rounds of review put three different counters into this decision and
-	// each was a way for a steered model to force the write. The damage is not
-	// the issue itself, it is the marker the issue carries: once filed, every
-	// later run for that tag pair is a no-op, so an attacker who can make the bot
-	// file an empty issue has permanently suppressed re-analysis of the release
-	// they poisoned. An empty issue is worth nothing to a maintainer and
-	// everything to that attacker.
+	// Nothing counted from what the model did may enter this. The issue carries
+	// the release marker, and a filed issue makes every later run for that tag
+	// pair a no-op, so a model that can force an empty issue has permanently
+	// suppressed re-analysis of the release it poisoned.
 	//
 	// The residual, which no code can remove: the finding list is model-authored,
 	// so a model steered into recording one plausible-looking suggestion does
@@ -150,13 +147,16 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 				"no issue was filed, so a re-run is not suppressed", a.Groups, a.NotAttempted, a.Failed)
 		}
 		// A release with nothing to suggest is the ordinary case, not a failure,
-		// and it must not turn the job red. An earlier revision failed here
-		// whenever the diff was truncated at all -- which one patch over the byte
-		// cap is enough to cause, so a routine release went red. What was missed
-		// is logged instead, and because no issue was filed nothing suppresses a
-		// later run.
+		// and must not turn the job red: one patch over the byte cap is enough to
+		// truncate a diff, so failing here would fail most releases. What was
+		// missed is reported instead, and because no issue was filed nothing
+		// suppresses a later run.
 		log.Info("no documentation updates suggested; not filing an issue", "release", key)
-		if !a.complete() || diff.diffTruncated() {
+		// The annotation fires on coverage loss an operator can act on: a group
+		// that never ran, or files the caps or the fetch bound dropped whole. A
+		// truncated patch or some omitted commit subjects are routine on a large
+		// release and would make the yellow banner meaningless.
+		if !a.complete() || diff.PageBoundHit || diff.OmittedFiles > 0 {
 			log.Warn("the analysis was also incomplete, so a suggestion may have been missed",
 				"release", key, "groups", a.Groups, "not_attempted", a.NotAttempted,
 				"failed", a.Failed, "unreported", a.Unreported, "discarded", a.Discarded,
