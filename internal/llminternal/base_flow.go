@@ -83,6 +83,9 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
+		// Compaction must run before contentsRequestProcessor so a summary it
+		// appends is reflected in the history assembled for this very request.
+		CompactionRequestProcessor,
 		ContentsRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
@@ -1246,6 +1249,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Author = ctx.Agent().Name()
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
+			// A tool handler holds this EventActions for the whole call, and
+			// everything on it lands on the persisted event. Compaction is the
+			// framework's to write: see session.EventActions.Compaction.
+			ev.Actions.Compaction = nil
 
 			traceTool := curTool
 			if traceTool == nil {
