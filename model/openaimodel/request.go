@@ -107,11 +107,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				return err
 			}
 			if msgRole == responses.EasyInputMessageRoleAssistant {
-				msg, err := newOutputMessage(textParts)
-				if err != nil {
-					return err
-				}
-				if msg != nil {
+				if msg := newOutputMessage(textParts); msg != nil {
 					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
 				}
 			} else {
@@ -202,10 +198,11 @@ func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *respons
 // newOutputMessage builds an assistant output message whose content uses the
 // "output_text" type, as required when replaying a prior assistant turn to the
 // OpenAI Responses API. The message ID is left unset: OpenAI assigns message
-// IDs on output, and a replayed turn has none to echo back.
-func newOutputMessage(texts []string) (*responses.ResponseOutputMessageParam, error) {
+// IDs on output, and a replayed turn has none to echo back. Returns nil when
+// every text part is blank, so no empty message is emitted.
+func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
 	if len(texts) == 0 {
-		return nil, nil
+		return nil
 	}
 	contentList := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
 	for _, txt := range texts {
@@ -220,12 +217,12 @@ func newOutputMessage(texts []string) (*responses.ResponseOutputMessageParam, er
 		})
 	}
 	if len(contentList) == 0 {
-		return nil, nil
+		return nil
 	}
 	return &responses.ResponseOutputMessageParam{
 		Content: contentList,
 		Status:  responses.ResponseOutputMessageStatusCompleted,
-	}, nil
+	}
 }
 
 func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
