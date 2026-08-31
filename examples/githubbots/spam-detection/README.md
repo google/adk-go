@@ -1,0 +1,240 @@
+# Spam Detection Bot
+
+An autonomous [ADK Go](https://github.com/google/adk-go) agent that moderates a
+GitHub repository's issues for spam. It audits open issues for SEO spam,
+unsolicited promotion of third-party products or sites, and other off-topic
+solicitation. When the model judges an issue's content to be spam it:
+
+1. **Applies the spam label** (`spam` by default), and
+2. **Posts one comment** alerting the maintainers, with a short reason.
+
+Several invariants are enforced **in Go**, not merely requested in the prompt:
+the bot never reviews content written by a configured maintainer, nor its own
+past alerts; it never re-processes an issue it has already labeled or alerted
+(idempotency);
+the model may only flag the single issue its session is scoped to, so injected
+instructions in (untrusted) issue or comment text cannot redirect it to another
+issue; and the one value the model writes into a GitHub comment is truncated in
+Go before it is posted.
+
+## What it demonstrates
+
+- An `llmagent.New` agent driven by a single typed `functiontool.New[Args, Result]`
+  tool, run **once per issue in its own isolated session** with bounded
+  concurrency (`errgroup`) — i.e. code orchestrates the loop and the model only
+  classifies.
+- A clean split between deterministic work done **in code** and the fuzzy
+  judgment delegated to the **model**: the bot fetches the issue, filters out
+  maintainer content, its own past alerts and already-handled issues, truncates
+  long text, and annotates each
+  author with their GitHub **author association** (a spam-likelihood prior) in
+  `spam.go`, then asks the model only "is this spam?" — guided by that signal and
+  a few worked examples in the prompt.
+- The **zero-waste** optimization from the original Python sample: if nothing
+  reviewable remains after filtering (or the issue was already handled), the
+  model is never invoked.
+- Calling the GitHub REST API (`go-github`) and GraphQL API (a raw POST through
+  the same authenticated client) from code.
+
+## The agent loop
+
+If you are new to ADK, this is the core flow (`main.go`):
+
+1. Code selects the candidate issues (a sweep via the Search API, or a single
+   `-issue`).
+2. For each issue, in its own goroutine (bounded by `CONCURRENCY_LIMIT`),
+   `reviewIssue` binds the session to that one issue number and hands it to
+   `runReviewFor`, which fetches the issue + comments, runs the idempotency and
+   filtering logic, and assembles the reviewable text. Issues with nothing to
+   review are skipped without a model call.
+3. The agent runs in a fresh, **issue-scoped** session. The prompt carries the
+   issue number and the assembled content (clearly fenced and marked untrusted);
+   `runner.Run(...)` returns an `iter.Seq2[*session.Event, error]` that yields one
+   streamed event or an error per iteration.
+4. The model either calls `flag_issue_as_spam(issue_number, detection_reason)`
+   or replies "No spam detected." `authorizeIssue` rejects any `issue_number`
+   other than the one the session is scoped to.
+
+A rejected tool call (wrong issue) is returned to the model as a result with
+`status: "error"` and a **nil Go error**; real I/O failures return a Go `error`,
+are recorded, and make the process exit non-zero so scheduled/CI runs fail
+loudly.
+
+> **Why embed the content in the prompt instead of a retrieval tool?** Because
+> all the deterministic pre-processing (filtering, truncation, and the
+> idempotency check that lets us skip the model entirely) happens in code
+> before the model runs. Putting the finished, untrusted-marked text in the
+> per-issue prompt keeps the model's only job — and its only tool — the spam
+> decision itself.
+
+## Running locally
+
+Requires **Go 1.26+** (see `go.mod`). Copy `.env.example` to `.env` and fill it
+in (or export the variables), then:
+
+```bash
+# Dry-run a single issue (no writes; logs intended actions).
+go run . -dry-run -issue 123
+
+# Dry-run a sweep of recent issues.
+go run . -dry-run
+
+# Act for real (omit -dry-run).
+go run . -issue 123
+```
+
+> **Dry-run is not offline.** `-dry-run` still reads GitHub and still calls the
+> model; it only suppresses writes, logging `would …` instead.
+
+## Configuration
+
+| Variable / flag | Default | Description |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | — (required) | Token with `issues: write`. |
+| `BOT_LOGIN` | (empty) | The login the bot posts as, used to recognize its own alert comments. Required under GitHub Actions, where `GET /user` is refused for the built-in token; with a personal access token the bot resolves it itself. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key (or use Vertex AI). |
+| `OWNER` | — (required) | Repository owner. |
+| `REPO` | — (required) | Repository name. |
+| `LLM_MODEL_NAME` | `gemini-flash-latest` | Model to use. |
+| `SPAM_LABEL_NAME` | `spam` | Label applied to flagged issues (must already exist). |
+| `MAINTAINERS` | (empty) | Comma-separated logins whose comments are trusted and never reviewed. |
+| `ISSUE_COUNT` | `3` | Max issues per scheduled sweep (most-recently-updated first). |
+| `CONCURRENCY_LIMIT` | `3` | How many issues to review in parallel. |
+| `FRESHNESS_WINDOW_DAYS` | `0` (off) | Restrict the sweep to issues updated within N days. |
+| `ISSUE_TIMEOUT` | `5m` | Bounds a single issue review. |
+| `RUN_TIMEOUT` | `15m` | Bounds the whole run. The workflow's `timeout-minutes` sits above it, so an overrun is reported here instead of the runner killing the job. |
+| `-dry-run` / `DRY_RUN` | `false` | Log intended actions without mutating. |
+| `-issue` | `0` | Review only this issue (0 = sweep). |
+
+Instead of an API key you can use Vertex AI via Application Default Credentials
+(`GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`).
+
+> **`MAINTAINERS` is optional but recommended.** The built-in Actions
+> `GITHUB_TOKEN` cannot list a repo's collaborators, so trusted logins are
+> supplied explicitly. With an empty set the bot still works — it just also
+> reviews maintainers' own comments (wasting a few tokens and risking a
+> false positive); it never misses spam because of it.
+
+## How it runs in CI
+
+`.github/workflows/spam-detection-bot.yml` runs this module directly: it checks
+out the repository, installs the Go version from this module's `go.mod`, builds
+the bot with `go build -o ./bot .`, and runs `./bot`. The build is a separate
+step so the cold compile is outside the bot's own `RUN_TIMEOUT` budget. It needs one repository secret,
+`GEMINI_API_KEY`; the GitHub credentials are the built-in `GITHUB_TOKEN`,
+narrowed by the job to `contents: read` and `issues: write`.
+
+Triggers:
+
+- **A sweep every six hours** (`cron: '15 */6 * * *'`), covering issues updated
+  in the last day, capped at 30. Four consecutive runs therefore cover the same
+  issue, so a run that fails or is skipped costs coverage rather than losing it.
+- **`workflow_dispatch`**, with an optional `issue` number and a `dry_run`
+  toggle that **defaults to true**. The issue input is validated against
+  `^[1-9][0-9]*$` in the shell before it reaches the program — a leading zero is
+  rejected, because Go's flag package would read `0123` as octal 83 — and it is
+  passed through `env:` rather than interpolated into the `run:` script.
+
+**There is deliberately no `issues:` or `issue_comment:` trigger.** An event
+trigger lets any drive-by commenter start a model run holding a write-scoped
+token, which is the widest attack surface this bot could have. It is also the
+shape adk-python removed from its own agent suite. The scheduled sweep is the
+backstop instead, which is why its window overlaps.
+
+The job runs only on `google/adk-go` (`if: github.repository == …`), checks out
+with `persist-credentials: false`, pins both third-party actions to a full
+commit SHA, and takes a constant `concurrency` group so two sweeps can never
+overlap — the at-most-once flag claim spans a single process, so two concurrent
+runs could each see an issue unlabeled and both post the alert.
+
+## Tests
+
+Pure logic is table-driven (`spam_test.go`: filtering, case-insensitive
+maintainer/identity matching, idempotency, truncation, suspect-text assembly,
+prompt-injection-resistant signature detection); the GitHub client is exercised
+with `httptest` (`github_test.go`, incl. PR exclusion, repo-vs-issue NOT_FOUND
+handling, and comment-before-label ordering); the tool layer's issue-scope
+authorization, within-run idempotency, and dry-run gates are verified to reject
+bad input without any HTTP call (`tools_test.go`).
+
+`agentloop_test.go` drives the real `runReviewFor` — agent loop included —
+against a scripted model and an `httptest` GitHub. It is the only place that
+proves the session scope set by `reviewIssue` survives the trip through ADK into
+the tool: a scripted tool call naming a different issue must be refused at
+runtime, with no write reaching GitHub. It also pins that the model never runs
+for an already-labeled issue or after a failed nonce draw, and that the prompt
+the model actually receives carries the issue text inside a fence keyed to a
+fresh 16-character nonce with the authorship header outside it.
+
+```bash
+go test ./...
+```
+
+## Differences from the Python sample
+
+This is adapted from the Python `adk_issue_monitoring_agent`. The behavior
+differs in a few deliberate ways:
+
+- **Scan strategy.** Python had an uncapped daily sweep (everything updated in
+  the last 24h, via `since`) plus an `INITIAL_FULL_SCAN` of every open issue.
+  This bot caps the sweep at `ISSUE_COUNT` (most-recently-updated first). The
+  schedule is the only automatic trigger, so raise `ISSUE_COUNT` or shorten the
+  cron interval if your issue volume outgrows one sweep's cap.
+- **Title review.** The issue title is reviewed in addition to the body (Python
+  reviewed only the body), so spam titles are caught.
+- **Code blocks kept.** Python stripped fenced code blocks before review; this
+  bot keeps them (bounded by truncation) so spam can't hide inside a ``` fence.
+- **Alert comment.** A plain "Maintainers, please review." line rather than
+  Python's literal `@maintainers` mention (which only pings if such a team/user
+  exists).
+- **Concurrency.** Bounded by `errgroup` (`CONCURRENCY_LIMIT`) rather than
+  Python's fixed chunk size plus an inter-batch sleep.
+- **Idempotency.** The spam **label** is the primary guard; within a run a second
+  flag of the same issue is a no-op in code; the bot's own alert comment is a
+  best-effort secondary signal that can be missed on threads with more comments
+  than the fetch window after the alert (only causing a re-alert if the label was
+  also removed).
+- **The fetch window is declared, not hidden.** The bot reads the last 100
+  comments. On a longer thread the ones it did not read are counted and named in
+  a trusted line in the prompt, so the model is never asked to judge a thread it
+  believes is complete when it is not.
+
+## Notes
+
+- The **spam label must already exist** in the target repository (the bot adds
+  it but does not create it). For `google/adk-go` it does.
+- This is a moderation aid, not a verdict: it flags and notifies for human
+  review rather than deleting or blocking. It deliberately errs toward inaction —
+  the prompt instructs the model not to flag merely unhelpful, off-topic, or
+  beginner content.
+
+## Known limitations
+
+- **Truncation padding.** Each snippet is truncated to ~1500 runes before review
+  and the whole assembly to ~40000. Within a snippet, padding placed ahead of a
+  spam link pushes it past the cutoff. Across a thread, the budget is spent
+  newest-first, so evicting a comment means posting ~25 full-length comments
+  *after* it — and when anything is evicted the prompt says so, in a trusted
+  line outside every fence, so the model is not asked to judge a thread it was
+  never told was partial. A production system would prioritize link-bearing
+  regions; this sample keeps the simple bound.
+- **A flag on a comment labels the whole issue.** Spam posted as a comment on
+  someone else's legitimate issue labels and alerts on that issue, not on the
+  comment. If a maintainer then removes the label, the bot's own alert comment
+  keeps the issue out of future sweeps — deliberately, so the bot does not
+  overturn a human decision on its next run, but it does mean the issue is no
+  longer reviewed. Deleting the bot's comment restores it.
+- **A failed label leaves the issue alerted but unlabeled.** The alert comment
+  is posted before the label, so if one of the two fails it is the label that is
+  lost rather than the notification. The next run recognizes its own alert and
+  skips the issue, so the label is not applied later: maintainers have been
+  told and the issue is visible, but it will not carry the label.
+- **Every installed GitHub App is reviewed like a user** unless it is named in
+  `MAINTAINERS`. Skipping accounts by their `[bot]` suffix would extend
+  unconditional trust to every App installed on the repository. That includes
+  the bot's own login: under Actions it is `github-actions[bot]`, shared with
+  every workflow in the repository, so only comments carrying the bot's own
+  alert marker are skipped — a sibling workflow's comment is reviewed.
+- **Author association is a prior, not proof.** It nudges borderline calls; it
+  is not a substitute for reading the content, and spam from an established
+  account is still flagged on its merits.
