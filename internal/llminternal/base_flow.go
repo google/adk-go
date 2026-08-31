@@ -83,6 +83,9 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
+		// Compaction must run before contentsRequestProcessor so a summary it
+		// appends is reflected in the history assembled for this very request.
+		CompactionRequestProcessor,
 		ContentsRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
