@@ -22,6 +22,12 @@ import (
 	"testing"
 )
 
+// wholePackageAck is the marker a directive uses to acknowledge that it
+// deliberately claims every cassette in a multi-cassette package. It is
+// recognized only as the leading token of a `//` comment line above the
+// directive (see ackedAbove).
+const wholePackageAck = "httprecord:whole-package"
+
 // TestHTTPRecordDirectivesPartitionCassettes checks that in every package which
 // declares at least one `//go:generate go test -httprecord=…` directive, each
 // of the package's testdata/*.httprr cassettes is claimed by exactly one
@@ -29,7 +35,7 @@ import (
 //
 // The -httprecord flag is a regexp matched against the cassette's file path
 // (see httprr.Recording in internal/httprr), not a -run test-name filter. That
-// makes two failure modes possible, and both are silent:
+// makes three failure modes possible, all silent:
 //
 //   - Two directives in one package match the same cassette, so
 //     `go generate ./<pkg>/...` re-records it twice against a live model in a
@@ -37,9 +43,21 @@ import (
 //     ones.
 //   - A directive matches none of its cassettes, so `go generate` appears to
 //     succeed while recording nothing.
+//   - A single directive matches every cassette in a package that has more
+//     than one, so `go generate ./<pkg>/...` re-records the whole package --
+//     against live models whose responses differ run to run -- whenever
+//     someone means to refresh just one. This is sometimes unavoidable: a
+//     package whose cassettes all come from a single test function has no
+//     per-function partition to make. So it is not forbidden; it requires a
+//     `// httprecord:whole-package` comment above the directive stating why,
+//     so the breadth is a deliberate, reviewed choice and not a silent
+//     default (see #1330, reopened after #1362 fixed only the first mode
+//     above: four packages still had an unreviewed wildcard directive then).
 //
-// Requiring exactly one directive per cassette rules out the first, and at
-// least one cassette per directive rules out the second.
+// Requiring exactly one directive per cassette rules out the first failure
+// mode, at least one cassette per directive rules out the second, and the
+// `httprecord:whole-package` acknowledgment rules out the third. The marker
+// detection itself is exercised by TestAckedAbove.
 func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 	// Start test from the parent directory, root of the module.
 	t.Chdir("..")
@@ -53,9 +71,12 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 
 	type directive struct {
 		file    string
+		lineNo  int // 1-based line of the //go:generate directive
+		text    string
 		pattern string
 		re      *regexp.Regexp
-		claims  int // cassettes in the same package this directive matched
+		claims  int  // cassettes in the same package this directive matched
+		acked   bool // comment block above carries the wholePackageAck marker
 	}
 	byPkg := make(map[string][]directive)
 	total := 0
@@ -77,8 +98,9 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, line := range strings.Split(string(content), "\n") {
-			line = strings.TrimSpace(line)
+		lines := strings.Split(string(content), "\n")
+		for i, raw := range lines {
+			line := strings.TrimSpace(raw)
 			if !strings.HasPrefix(line, "//go:generate") || !strings.Contains(line, "-httprecord") {
 				continue
 			}
@@ -101,7 +123,14 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 				t.Errorf("%s: -httprecord=%s is not a valid regexp: %v", path, pattern, err)
 				continue
 			}
-			byPkg[filepath.Dir(path)] = append(byPkg[filepath.Dir(path)], directive{file: path, pattern: pattern, re: re})
+			byPkg[filepath.Dir(path)] = append(byPkg[filepath.Dir(path)], directive{
+				file:    path,
+				lineNo:  i + 1,
+				text:    line,
+				pattern: pattern,
+				re:      re,
+				acked:   ackedAbove(lines, i),
+			})
 			total++
 		}
 		return nil
@@ -147,13 +176,134 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 		// A directive that claims nothing is a dead pattern: `go generate` runs
 		// it, records nothing, and reports success. The per-cassette check above
 		// misses this whenever a sibling directive already covers every cassette.
+		//
+		// A directive that claims EVERY cassette in a package with more than
+		// one is the opposite problem (#1330): `go generate ./<pkg>/...`
+		// silently re-records the whole package, against live models whose
+		// responses differ run to run, whenever someone means to refresh just
+		// one. Unavoidable only when every cassette comes from a single test
+		// function, so this does not forbid it -- it requires the
+		// `httprecord:whole-package` comment above the directive, so the
+		// breadth is a visible, deliberate choice in the diff that introduces
+		// or keeps it, not a silent default.
 		for _, d := range directives {
 			if d.claims == 0 {
 				t.Errorf("%s: -httprecord=%s claims none of the %d cassettes in %s/testdata; `go generate` would record nothing",
 					d.file, d.pattern, len(cassettes), pkg)
+				continue
+			}
+			if d.claims == len(cassettes) && len(cassettes) > 1 && !d.acked {
+				t.Errorf("%s:%d: -httprecord=%s claims all %d cassettes in %s/testdata, so re-recording any one "+
+					"re-records the whole package. Give each recording test function its own directive; only if "+
+					"they all come from one function, add a `// %s` comment directly above the directive explaining "+
+					"why (see TestHTTPRecordDirectivesPartitionCassettes):\n\t%s",
+					d.file, d.lineNo, d.pattern, len(cassettes), pkg, wholePackageAck, d.text)
 			}
 		}
 	}
 
 	t.Logf("checked %d -httprecord directives across %d packages", total, len(byPkg))
+}
+
+// ackedAbove reports whether the contiguous block of `//` comment lines
+// immediately above lines[directiveIdx] carries the whole-package
+// acknowledgment marker.
+//
+// The marker is recognized only as the leading token of a comment line --
+// `// httprecord:whole-package …` -- so a line that merely mentions it in
+// prose, including one that forbids it, does not satisfy the guard. The block
+// is walked upward from the directive and stops at the first line that is
+// blank, is not a `//` comment, or is itself a //go:generate directive (so an
+// ack never bleeds onto a sibling directive stacked below it). The marker may
+// sit anywhere in the block, so a longer explanation can precede it.
+func ackedAbove(lines []string, directiveIdx int) bool {
+	for j := directiveIdx - 1; j >= 0; j-- {
+		line := strings.TrimSpace(lines[j])
+		if !strings.HasPrefix(line, "//") || strings.HasPrefix(line, "//go:generate") {
+			return false
+		}
+		text := strings.TrimSpace(strings.TrimPrefix(line, "//"))
+		if strings.HasPrefix(text, wholePackageAck) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAckedAbove(t *testing.T) {
+	// The directive is always the last line; the lines before it are the
+	// candidate comment block. Placement is what matters here, not the regexp.
+	const directive = "//go:generate go test -httprecord=.*"
+
+	tests := []struct {
+		name  string
+		above []string
+		want  bool
+	}{
+		{
+			name:  "marker on the line touching the directive",
+			above: []string{"// httprecord:whole-package -- one test function"},
+			want:  true,
+		},
+		{
+			name: "marker higher in the block, explanation below it",
+			above: []string{
+				"// httprecord:whole-package",
+				"// every cassette is a subtest of the one integration test.",
+			},
+			want: true,
+		},
+		{
+			name:  "no comment at all",
+			above: []string{""},
+			want:  false,
+		},
+		{
+			name:  "blank line between marker and directive",
+			above: []string{"// httprecord:whole-package", ""},
+			want:  false,
+		},
+		{
+			name:  "marker only mentioned in prose",
+			above: []string{"// Do NOT use httprecord:whole-package in this package."},
+			want:  false,
+		},
+		{
+			name:  "block comment, not a line comment",
+			above: []string{"/* httprecord:whole-package */"},
+			want:  false,
+		},
+		{
+			name:  "marker appended to a go:generate line above",
+			above: []string{"//go:generate go test -httprecord=x // httprecord:whole-package"},
+			want:  false,
+		},
+		{
+			name: "ack does not bleed past a sibling directive",
+			above: []string{
+				"// httprecord:whole-package",
+				"//go:generate go test -httprecord=other",
+			},
+			want: false,
+		},
+		{
+			name:  "non-comment code line directly above",
+			above: []string{"const modelName = \"gemini\""},
+			want:  false,
+		},
+		{
+			name:  "marker indented inside the comment",
+			above: []string{"//   httprecord:whole-package -- indented"},
+			want:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := append(append([]string{}, tc.above...), directive)
+			if got := ackedAbove(lines, len(lines)-1); got != tc.want {
+				t.Errorf("ackedAbove(%q) = %v, want %v", tc.above, got, tc.want)
+			}
+		})
+	}
 }
