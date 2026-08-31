@@ -147,6 +147,40 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, noop, nil
 	}
 
+	// The same futility as the gate above, but across turns, which that gate
+	// cannot see: its state lives on the compaction runtime, which is built per
+	// invocation, so every turn arrives with it cleared. A standing summary
+	// already larger than the threshold puts the prompt back over the line the
+	// moment compaction finishes, so left alone this is one summarizer call
+	// every turn for the life of the session, and not one of them can succeed.
+	//
+	// Declining outright is not the answer either, because the uncovered tail
+	// would then grow without limit, which is what this strategy exists to
+	// prevent. The work is amortized instead: once the summary alone cannot
+	// fit, wait until enough new material has accumulated to be worth a call.
+	// The prompt stays bounded, by the summary plus a fraction of the threshold
+	// plus the retained tail, at a fraction of the calls.
+	//
+	// Measured on the window rather than by subtracting from the prompt count,
+	// because the two are not always on the same footing: the prompt count
+	// prefers an observed usage reading, which includes the materialized
+	// summary, but falls back to an estimate over raw events, where a
+	// compaction event renders as nothing. Subtracting would then be comparing
+	// a number that includes the summary against one that does not.
+	if standing, ok := standingSummaryTokens(events, scope, estimate); ok && standing >= cfg.TokenThreshold {
+		if fresh := window; estimate != nil {
+			// The seed is the previous summary, not new material.
+			if len(fresh) > 0 && hasCompaction(fresh[0]) {
+				fresh = fresh[1:]
+			}
+			if estimate(fresh) < cfg.TokenThreshold/rearmDivisor {
+				traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold,
+					"the standing summary alone exceeds the threshold, and too little has accumulated since to be worth a call")
+				return nil, noop, nil
+			}
+		}
+	}
+
 	summary, finish, err := summarizeTraced(ctx, cfg, sess, scope.InvocationID, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
 		// The gate is closed here rather than on the Finish callback, because
@@ -504,4 +538,41 @@ func traceDeclined(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		id = sess.ID()
 	}
 	telemetry.TraceCompactionDeclined(ctx, spanParams(cfg, id, latestInvocationID(sess), trigger, 0), reason)
+}
+
+// rearmDivisor sets how much new material must accumulate before tail
+// retention runs again, once the standing summary alone has been shown not to
+// fit under the threshold.
+//
+// A quarter of the threshold. Small enough that the prompt stays close to the
+// ceiling the strategy promises, large enough that the summarizer is not called
+// to fold in a turn or two. The exact fraction matters less than that one
+// exists: without it the call rate is one per turn regardless of how little
+// changed.
+const rearmDivisor = 4
+
+// standingSummaryTokens estimates the size of the newest visible summary on its
+// own, which is the part of the prompt no further compaction can remove.
+//
+// Reported separately from the prompt count because the two answer different
+// questions. The prompt count says whether the prompt is too large; this says
+// whether compacting could do anything about it.
+func standingSummaryTokens(events []*session.Event, scope TurnScope, estimate TokenCounter) (int, bool) {
+	if estimate == nil {
+		return 0, false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if !scope.visible(ev) || !HasUsableSummary(ev) {
+			continue
+		}
+		// Measured through the same estimator as everything else, on an event
+		// shaped like the one tail retention seeds a window with, so the number
+		// is comparable to the prompt count it is subtracted from.
+		probe := &session.Event{
+			LLMResponse: model.LLMResponse{Content: ev.Actions.Compaction.CompactedContent},
+		}
+		return estimate([]*session.Event{probe}), true
+	}
+	return 0, false
 }
