@@ -409,3 +409,37 @@ func TestRecordFindingsReportsCappedFindings(t *testing.T) {
 		t.Errorf("the issue does not disclose the capped suggestions:\n%s", body)
 	}
 }
+
+// Both disclosure counters must be incremented only after the claim is won. A
+// model that emits the same call twice would otherwise inflate a count a
+// maintainer reads: two calls carrying the same over-cap findings would report
+// twice as many dropped as there were distinct suggestions.
+//
+// Mutation that must fail this test: move r.addCapped(dropped) above the
+// r.record call.
+func TestRejectedDuplicateCallDoesNotInflateTheCounters(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFindingsPerGroup = 2
+	r := newRecorder(cfg)
+	ctx := scoped(testRelease, 0)
+	args := recordArgs{Release: testRelease, GroupIndex: 0, Findings: []Finding{
+		{Kind: "new-feature", Summary: "one"},
+		{Kind: "new-feature", Summary: "two"},
+		{Kind: "new-feature", Summary: "over the cap"},
+		{Kind: "new-feature", Summary: "\u200b"},
+	}}
+	if res := r.recordFindings(ctx, args); res.Status != "success" {
+		t.Fatalf("first call: %s", res.Message)
+	}
+	capped, discarded := r.cappedCount(), r.discardedCount()
+
+	if res := r.recordFindings(ctx, args); res.Status != "error" {
+		t.Fatalf("the second call for the same group was accepted: %s", res.Message)
+	}
+	if got := r.cappedCount(); got != capped {
+		t.Errorf("cappedCount went from %d to %d on a REJECTED call", capped, got)
+	}
+	if got := r.discardedCount(); got != discarded {
+		t.Errorf("discardedCount went from %d to %d on a REJECTED call", discarded, got)
+	}
+}

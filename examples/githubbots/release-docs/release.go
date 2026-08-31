@@ -169,8 +169,31 @@ func sanitizeFinding(f Finding) Finding {
 // text in it and then counting that drop as "nothing survived sanitization"
 // states something false in the issue.
 func (f Finding) empty() bool {
-	return f.Summary == "" && f.ProposedChange == "" && f.Reasoning == "" &&
-		f.DocFile == "" && f.Reference == ""
+	for _, v := range []string{f.Summary, f.ProposedChange, f.Reasoning, f.DocFile, f.Reference} {
+		if hasReadableContent(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasReadableContent reports whether a string contains at least one letter or
+// digit.
+//
+// A non-empty string is not the same as a readable one. Stripping the format
+// characters still leaves glyphs that render as blank -- U+2800 BRAILLE PATTERN
+// BLANK is a symbol, U+3164 HANGUL FILLER is a letter-category filler -- and a
+// "suggestion" made of those is invisible in the issue while still counting
+// towards the finding total that decides whether the bot writes at all. Rather
+// than chase a list of blank glyphs, require something a reader can actually
+// read: every real documentation suggestion contains a letter or a digit.
+func hasReadableContent(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // modelTextReplacer neutralizes the sequences that let model-authored text
@@ -265,6 +288,14 @@ func stripControls(s string) string {
 			// six of them left the rest through -- a "finding" consisting of one
 			// zero-width space was not empty, so it forced the bot's only write
 			// and rendered an invisible suggestion.
+			return -1
+		case unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r):
+			// Unicode's own property for characters that should render as
+			// nothing. It covers the Hangul fillers (U+115F, U+1160, U+3164,
+			// U+FFA0), which are category Lo -- blank glyphs that ARE letters, so
+			// neither the Cf case above nor a letter-based readability test
+			// excludes them. Using the property rather than listing them keeps
+			// this correct as Unicode adds more.
 			return -1
 		case r == '\u2028', r == '\u2029':
 			// Line and paragraph separator. Category Zl/Zp, so again not a

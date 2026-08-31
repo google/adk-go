@@ -627,3 +627,49 @@ func TestNeutralizeTrimsAfterStripping(t *testing.T) {
 		t.Errorf("neutralize = %q, want %q", got, "hello")
 	}
 }
+
+// A non-empty string is not a readable one. Stripping format characters still
+// leaves glyphs that render as blank, and a "suggestion" made of those is
+// invisible in the issue while counting towards the finding total that decides
+// whether the bot writes at all.
+//
+// Mutation that must fail this test: make empty() compare each field against ""
+// instead of calling hasReadableContent.
+func TestFindingOfBlankGlyphsIsEmpty(t *testing.T) {
+	// Two layers do this between them, and the test asserts the composed result
+	// because that is what decides whether the bot writes. stripControls removes
+	// the default-ignorable characters (the Hangul fillers are category Lo, so a
+	// letter-based test cannot see them); hasReadableContent rejects what is left
+	// and renders blank anyway.
+	for _, blank := range []string{
+		"\u2800",       // braille pattern blank: a symbol, so hasReadableContent rejects it
+		"\u3164",       // hangul filler: a LETTER, so only the strip catches it
+		"\u2800\u3164", // and together
+		"\u115f\u1160", // the other two Hangul fillers
+		"   ",
+		"...",
+		"\u200b",
+	} {
+		if f := sanitizeFinding(Finding{Kind: "new-feature", Summary: blank}); !f.empty() {
+			t.Errorf("a finding whose only content is %+q was not empty (%+q): it would force a filing",
+				blank, f.Summary)
+		}
+	}
+	// hasReadableContent's own half: what survives the strip and still renders
+	// blank.
+	for _, blank := range []string{"\u2800", "   ", "...", ""} {
+		if hasReadableContent(blank) {
+			t.Errorf("hasReadableContent(%+q) = true, want false", blank)
+		}
+	}
+	// Anything a reader can actually read counts, in any script.
+	for _, ok := range []string{"a", "7", "docs/guide.md", "日本語", "café"} {
+		if !hasReadableContent(ok) {
+			t.Errorf("hasReadableContent(%q) = false, want true", ok)
+		}
+	}
+	// A finding with content in ANY field is not empty.
+	if (Finding{Reference: "pkg/foo.go"}).empty() {
+		t.Error("a finding with only a code reference was treated as empty")
+	}
+}

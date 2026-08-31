@@ -225,7 +225,6 @@ func (r *recorder) recordFindings(ctx context.Context, a recordArgs) actionResul
 		dropped = len(raw) - r.cfg.MaxFindingsPerGroup
 		raw = raw[:r.cfg.MaxFindingsPerGroup]
 	}
-	r.addCapped(dropped)
 	clean := make([]Finding, 0, len(raw))
 	emptied := 0
 	for _, f := range raw {
@@ -238,6 +237,11 @@ func (r *recorder) recordFindings(ctx context.Context, a recordArgs) actionResul
 	if !r.record(a.GroupIndex, clean) {
 		return errResult("group %d has already recorded its findings", a.GroupIndex)
 	}
+	// Both counters are incremented only AFTER the claim is won. A rejected
+	// duplicate call would otherwise inflate a count a maintainer reads: two
+	// calls carrying the same twelve findings would report four dropped to the
+	// cap when two distinct suggestions were.
+	r.addCapped(dropped)
 	r.addDiscarded(emptied)
 	msg := fmt.Sprintf("recorded %d findings for group %d", len(clean), a.GroupIndex)
 	if dropped > 0 {

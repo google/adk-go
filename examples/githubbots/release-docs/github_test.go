@@ -1095,42 +1095,31 @@ func TestVersionTiesBreakDeterministically(t *testing.T) {
 	}
 }
 
-// Duplicate detection accepts an issue only if the title matches too. With the
-// built-in Actions token the identity lookup fails, so trustedCreator can check
-// no more than "written by some GitHub App", and the marker is a pure function
-// of two public tag names — an issue opened by any other workflow whose body
-// begins with contributor-influenced text could otherwise suppress this bot's
-// issue for a release.
+// Duplicate detection must survive a maintainer retitling the issue during
+// triage, which is an ordinary thing to do. Requiring the title would narrow the
+// App-authorship fallback, but it would break the guarantee that actually
+// matters: a re-run must not file a second issue for the same release.
 //
-// Mutation that must fail this test: drop the title comparison from
-// isOwnMarkedIssue.
-func TestFindExistingIssueRequiresTheDeterministicTitle(t *testing.T) {
+// Mutation that must fail this test: add `iss.GetTitle() == issueTitle(headTag)`
+// to isOwnMarkedIssue.
+func TestFindExistingIssueSurvivesARenamedIssue(t *testing.T) {
 	marker := bodyMarker("v1.0.0", "v1.1.0")
-	// Right marker, right author, WRONG title: the title is the only difference
-	// between this case and the one below, so it is the only thing under test.
-	body := "[" + issueJSONTitled(7, "adk-bot", "Bot", "Nightly build report",
-		marker+"\n\nunrelated automation") + "]"
+	renamed := "[" + issueJSONTitled(42, "adk-bot", "Bot", "[docs] v1.1.0 follow-ups",
+		marker+"\n\nfiled last week, retitled during triage") + "]"
 	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/search/") {
-			_, _ = io.WriteString(w, `{"total_count":1,"items":`+body+`}`)
+			// The search probe queries by the ORIGINAL title, so a renamed issue
+			// is invisible to it. The list probe is what has to catch this.
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
 			return
 		}
-		_, _ = io.WriteString(w, body)
+		_, _ = io.WriteString(w, renamed)
 	}))
-	if _, found, err := c.FindExistingIssue(context.Background(), "v1.1.0", marker); err != nil || found {
-		t.Errorf("FindExistingIssue = (%v, %v); another workflow's issue suppressed this release", found, err)
+	n, found, err := c.FindExistingIssue(context.Background(), "v1.1.0", marker)
+	if err != nil {
+		t.Fatalf("FindExistingIssue: %v", err)
 	}
-
-	// The same issue under the bot's own title IS a duplicate.
-	right := "[" + issueJSONTitled(8, "adk-bot", "Bot", issueTitle("v1.1.0"), marker+"\n\nours") + "]"
-	c2 := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/search/") {
-			_, _ = io.WriteString(w, `{"total_count":1,"items":`+right+`}`)
-			return
-		}
-		_, _ = io.WriteString(w, right)
-	}))
-	if n, found, err := c2.FindExistingIssue(context.Background(), "v1.1.0", marker); err != nil || !found || n != 8 {
-		t.Errorf("FindExistingIssue = (%d, %v, %v), want (8, true, nil)", n, found, err)
+	if !found || n != 42 {
+		t.Errorf("FindExistingIssue = (%d, %v), want (42, true): a retitled issue would be duplicated", n, found)
 	}
 }

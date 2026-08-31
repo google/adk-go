@@ -138,26 +138,31 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	// they poisoned. An empty issue is worth nothing to a maintainer and
 	// everything to that attacker.
 	//
-	// So a run with no findings NEVER files. If it also missed nothing, that is
-	// simply a release with no documentation impact. If it missed something, it
-	// fails loudly instead: the operator sees it in CI, and because no issue was
-	// filed, a re-run with a larger budget or higher caps is not suppressed.
-	//
 	// The residual, which no code can remove: the finding list is model-authored,
 	// so a model steered into recording one plausible-looking suggestion does
 	// cause an issue to be filed. That issue is read by a human, which is the
 	// point of filing suggestions rather than acting on them.
 	if len(findings) == 0 {
-		if a.complete() && !diff.diffTruncated() {
-			log.Info("no documentation updates suggested; not filing an issue", "release", key)
-			return finish(gh)
+		// Nothing at all ran, so a retry is the fix and nothing was filed to
+		// suppress it. This is the only case worth failing the job over.
+		if analyzed := a.Attempted - a.Failed; analyzed == 0 && a.Groups > 0 {
+			return fmt.Errorf("not one of the %d file groups was analyzed (%d never attempted, %d failed); "+
+				"no issue was filed, so a re-run is not suppressed", a.Groups, a.NotAttempted, a.Failed)
 		}
-		return fmt.Errorf("no suggestions were recorded and the analysis was incomplete "+
-			"(%d groups: %d never attempted, %d failed, %d finished without reporting; "+
-			"%d suggestions discarded, %d dropped to the per-group cap; diff truncated: %v); "+
-			"no issue was filed, so a re-run is not suppressed",
-			a.Groups, a.NotAttempted, a.Failed, a.Unreported, a.Discarded, a.CappedFindings,
-			diff.diffTruncated())
+		// A release with nothing to suggest is the ordinary case, not a failure,
+		// and it must not turn the job red. An earlier revision failed here
+		// whenever the diff was truncated at all -- which one patch over the byte
+		// cap is enough to cause, so a routine release went red. What was missed
+		// is logged instead, and because no issue was filed nothing suppresses a
+		// later run.
+		log.Info("no documentation updates suggested; not filing an issue", "release", key)
+		if !a.complete() || diff.diffTruncated() {
+			log.Warn("the analysis was also incomplete, so a suggestion may have been missed",
+				"release", key, "groups", a.Groups, "not_attempted", a.NotAttempted,
+				"failed", a.Failed, "unreported", a.Unreported, "discarded", a.Discarded,
+				"capped", a.CappedFindings, "diff_truncated", diff.diffTruncated())
+		}
+		return finish(gh)
 	}
 
 	// A budget-exhausted run that DID record findings is not an error: it files

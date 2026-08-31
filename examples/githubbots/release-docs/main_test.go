@@ -321,14 +321,15 @@ func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	}
 }
 
-// A release too large for the caps, with nothing to suggest, must fail loudly
-// and file NOTHING. Filing would plant the release marker and suppress the
-// re-run that a larger cap could complete, and an issue with no suggestions is
-// worth nothing to a maintainer.
+// A release too large for the caps, with nothing to suggest, must file NOTHING
+// and must NOT turn the job red. Filing would plant the release marker and
+// suppress a later run, and failing would make an ordinary release fail: one
+// patch over the byte cap is enough to truncate the diff, which is near-certain
+// in a real release.
 //
-// Mutation that must fail this test: drop `&& !diff.diffTruncated()` from the
-// don't-file condition in runWith.
-func TestRunWithFailsLoudlyWhenTruncatedWithNoFindings(t *testing.T) {
+// Mutation that must fail this test: return an error when
+// `!a.complete() || diff.diffTruncated()` and there are no findings.
+func TestRunWithIsQuietOnATruncatedReleaseWithNoFindings(t *testing.T) {
 	cfg := testConfig()
 	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
 	cfg.MaxFiles = 1
@@ -345,15 +346,11 @@ func TestRunWithFailsLoudlyWhenTruncatedWithNoFindings(t *testing.T) {
 		{"filename":"b.go","status":"modified","patch":"+y"},
 		{"filename":"c.go","status":"modified","patch":"+z"}`}
 	gh := testClient(t, cfg, h)
-	err := runWith(context.Background(), discardLogger(), cfg, gh)
-	if err == nil || !strings.Contains(err.Error(), "analysis was incomplete") {
-		t.Fatalf("runWith = %v, want an error naming the incomplete analysis", err)
-	}
-	if !strings.Contains(err.Error(), "diff truncated: true") {
-		t.Errorf("the error does not say the diff was truncated: %v", err)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith = %v, want nil: a release with nothing to suggest is ordinary, not a failure", err)
 	}
 	if h.creates != 0 {
-		t.Errorf("created %d issues with nothing to suggest; the marker would suppress the re-run", h.creates)
+		t.Errorf("created %d issues with nothing to suggest; the marker would suppress a later run", h.creates)
 	}
 }
 
@@ -377,12 +374,8 @@ func TestRunWithDoesNotFileWhenASteeredModelSilencesEveryGroup(t *testing.T) {
 		{"filename":"a.go","status":"modified","patch":"+x"},
 		{"filename":"b.go","status":"modified","patch":"+y"}`}
 	gh := testClient(t, cfg, h)
-	err := runWith(context.Background(), discardLogger(), cfg, gh)
-	if err == nil {
-		t.Fatal("runWith returned nil after every group went silent")
-	}
-	if !strings.Contains(err.Error(), "finished without reporting") {
-		t.Errorf("the error does not name the silent groups: %v", err)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith = %v, want nil", err)
 	}
 	if h.creates != 0 {
 		t.Errorf("a steered model forced %d issue(s); the marker would suppress every later run", h.creates)

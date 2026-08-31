@@ -86,7 +86,11 @@ acting on one — so the bound is **per release tag pair**, in three parts:
    release into different groups and run them side by side.
 
 An issue counts as "already filed" only when its **first line** is the exact
-marker **and** its author is this bot. Both halves matter:
+marker **and** its author is this bot. The title is deliberately *not* checked:
+requiring it would narrow the App-authorship fallback below, but a maintainer
+who retitles the issue during triage would then make the next run file a
+duplicate, which is the guarantee that actually matters. Both halves that ARE
+checked matter:
 
 - Matching the marker anywhere in the body would let model-authored text inside
   one issue name a different tag pair and suppress that release.
@@ -238,6 +242,13 @@ already has an issue reaches neither the diff nor a write.
 - **A model that fabricates a plausible suggestion causes an issue to be filed.**
   Nothing can prevent that: filing when there are suggestions is what the bot is
   for. The issue is advisory and a human reads it.
+- **A release with nothing to suggest files nothing and exits 0**, even when the
+  caps truncated the diff. What was missed is logged as a warning. Failing the
+  job instead was tried and reverted: one patch over the byte cap is enough to
+  truncate a diff, so an ordinary release went red.
+- **The search probe queries the original title**, so an issue that was retitled
+  AND has scrolled past the list probe's 300-issue bound is invisible to both. A
+  re-run for such a release would file a second issue.
 - **A prerelease head is skipped by the workflow, not by the program.** Running
   `go run .` with `-end-tag v2.4.0-rc.1` will analyze and file for it, and the
   final v2.4.0 issue will then overlap it.
