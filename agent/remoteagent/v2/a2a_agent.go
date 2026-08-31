@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -122,7 +123,11 @@ var ErrUntrustedCardInterface = errors.New("untrusted agent card interface")
 // being used. Each must be https, or http on a loopback host (the shape
 // local-development tooling emits, and a host an attacker who does not
 // already control this machine cannot redirect a fetch to), and must share
-// the origin the card was fetched from.
+// the origin of the configured agent card source -- not necessarily the
+// origin the fetch actually landed on, if the resolver followed a redirect.
+// Pinning to the configured source rather than the final URL is
+// intentional: pinning to wherever a fetch actually lands would let an open
+// redirect move the trust anchor.
 //
 // Only called for a card fetched over http(s); a card read from a local
 // file did not come off the network here, and its target is left to the
@@ -132,6 +137,7 @@ func validateCardInterfaceOrigins(card *a2a.AgentCard, source string) error {
 	if err != nil {
 		return fmt.Errorf("%w: invalid agent card source URL %q: %w", ErrUntrustedCardInterface, source, err)
 	}
+	sourceScheme, sourceHost, sourcePort := urlOrigin(sourceURL)
 
 	for _, iface := range card.SupportedInterfaces {
 		if iface == nil {
@@ -144,21 +150,58 @@ func validateCardInterfaceOrigins(card *a2a.AgentCard, source string) error {
 		if ifaceURL.Scheme != "https" && !isLoopbackHost(ifaceURL.Hostname()) {
 			return fmt.Errorf("%w: interface URL %q must use https, or http on a loopback host", ErrUntrustedCardInterface, iface.URL)
 		}
-		if ifaceURL.Scheme != sourceURL.Scheme || ifaceURL.Host != sourceURL.Host {
-			return fmt.Errorf("%w: interface URL %q does not share the origin the card was fetched from (%q)", ErrUntrustedCardInterface, iface.URL, source)
+		ifaceScheme, ifaceHost, ifacePort := urlOrigin(ifaceURL)
+		if ifaceScheme != sourceScheme || ifaceHost != sourceHost || ifacePort != sourcePort {
+			return fmt.Errorf("%w: interface URL %q does not share the origin of the configured agent card source (%q)", ErrUntrustedCardInterface, iface.URL, source)
 		}
 	}
 	return nil
 }
 
+// defaultPorts maps a scheme to the port a URL omitting one implies.
+var defaultPorts = map[string]string{"http": "80", "https": "443"}
+
+// urlOrigin returns the (scheme, host, port) triple identifying u's origin.
+// The hostname is case-folded and the port is normalized to the scheme's
+// default when u omits one, mirroring the comparison adk-python's
+// _url_origin performs (with its _DEFAULT_PORTS table). Comparing
+// url.URL.Host directly, as an earlier version of this check did, treats
+// "https://Agent.Example.com" as a different origin from
+// "https://agent.example.com", and "https://agent.example.com:443" as
+// different from "https://agent.example.com" -- rejecting same-origin
+// cards that spell the port explicitly or the host in a different case,
+// even though DNS hostnames are case-insensitive and both name the same
+// origin.
+func urlOrigin(u *url.URL) (scheme, host, port string) {
+	scheme = u.Scheme
+	host = strings.ToLower(u.Hostname())
+	port = u.Port()
+	if port == "" {
+		port = defaultPorts[scheme]
+	}
+	return scheme, host, port
+}
+
 // isLoopbackHost reports whether hostname names this machine itself
 // (loopback), not a remote host.
+//
+// A hostname is loopback only if it parses as a loopback IP address, or is
+// "localhost" or a subdomain of it (RFC 6761 reserves the whole
+// *.localhost space to loopback resolution, and "app.localhost" is a
+// common local-development shape). A plain prefix or substring test on the
+// hostname string is not equivalent to either check: "127.evil.com" is an
+// ordinary registrable DNS name an attacker controls, not the loopback
+// address its text merely starts with, and net.ParseIP correctly rejects
+// it as not an IP at all.
 func isLoopbackHost(hostname string) bool {
-	switch strings.ToLower(hostname) {
-	case "localhost", "127.0.0.1", "::1":
+	h := strings.ToLower(hostname)
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
 	}
-	return strings.HasPrefix(hostname, "127.")
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
