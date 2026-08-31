@@ -60,6 +60,9 @@ func weatherFunc(ctx context.Context, req *mcp.CallToolRequest, input Input) (*m
 
 const modelName = "gemini-2.5-flash"
 
+// httprecord:whole-package -- this is the only recording directive in the
+// package (transport_config_test.go records nothing), so there is nothing
+// to partition (see internal/httprr_directives_test.go).
 //go:generate go test -v -httprecord=.*
 
 func TestMCPToolSet(t *testing.T) {

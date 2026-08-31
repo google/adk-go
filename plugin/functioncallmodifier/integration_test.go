@@ -35,6 +35,9 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
+// httprecord:whole-package -- this is the only recording directive in the
+// package (plugin_test.go records nothing), so there is nothing to
+// partition (see internal/httprr_directives_test.go).
 //go:generate go test -v -httprecord=testdata/.*\.httprr
 
 func TestPluginCallbackIntegration(t *testing.T) {

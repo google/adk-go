@@ -32,6 +32,9 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// httprecord:whole-package -- this is the only recording directive in the
+// package, so there is nothing to partition (see
+// internal/httprr_directives_test.go).
 //go:generate go test -httprecord=testdata/.*\.httprr
 
 func TestModel_Generate(t *testing.T) {

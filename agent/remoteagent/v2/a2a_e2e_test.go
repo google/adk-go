@@ -14,6 +14,8 @@
 
 package remoteagent
 
+// httprecord:whole-package -- one directive, one small e2e test file; there
+// is nothing here to partition (see internal/httprr_directives_test.go).
 //go:generate go test -httprecord=.*
 
 import (

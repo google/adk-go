@@ -162,7 +162,11 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 - To re-record a whole package, run `go generate ./<pkg>/...`; each package's
   `//go:generate go test -httprecord=…` directives are scoped so that every
   cassette is recorded exactly once (enforced by
-  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`).
+  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`). If a directive
+  intentionally claims every cassette in a package that has more than one
+  (nothing to partition, e.g. one recording directive per package), that same
+  test requires a `// httprecord:whole-package` comment directly above it —
+  add one rather than narrowing the pattern.
 - Prefer table-driven tests; shared helpers live in `internal/testutil`.
 
 ## Boundaries
