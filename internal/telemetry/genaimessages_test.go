@@ -41,7 +41,9 @@ const cloudTraceAttributeValueLimit = 64 * 1024
 // captureContent turns on the message content opt-in for one test.
 func captureContent(t *testing.T) {
 	t.Helper()
-	t.Setenv(captureMessageContentEnvVar, "true")
+	// Spans have to be asked for by name. A truthy value means log records
+	// only, which is what the variable meant before spans could carry content.
+	t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
 	ApplyEnv()
 }
 
@@ -716,5 +718,65 @@ func TestModalityIsCaseInsensitive(t *testing.T) {
 	}
 	if got := modalityOf("application/pdf"); got != "document" {
 		t.Errorf("modalityOf(pdf) = %q, want document", got)
+	}
+}
+
+// TestContentCaptureModes pins which signals each value of the environment
+// variable turns on.
+//
+// The back-compatible case is the one that matters: this variable was a boolean
+// before spans could carry content, so a truthy value has to keep meaning log
+// records only. Logs and traces go to different backends with different
+// readers, and an upgrade must not move prompts into a new one on a
+// configuration nobody changed. adk-python reads a truthy value the same way.
+func TestContentCaptureModes(t *testing.T) {
+	for _, tc := range []struct {
+		env    string
+		inLogs bool
+		onSpan bool
+	}{
+		{"", false, false},
+		{"false", false, false},
+		{"0", false, false},
+		{"nonsense", false, false},
+		{"true", true, false},
+		{"1", true, false},
+		{" TRUE ", true, false},
+		{"EVENT_ONLY", true, false},
+		{"SPAN_ONLY", false, true},
+		{"SPAN_AND_EVENT", true, true},
+		{"span_and_event", true, true},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv(captureMessageContentEnvVar, tc.env)
+			ApplyEnv()
+			if got := getGenAICaptureMessageContent(); got != tc.inLogs {
+				t.Errorf("content in log records = %v, want %v", got, tc.inLogs)
+			}
+			if got := captureContentOnSpans(); got != tc.onSpan {
+				t.Errorf("content on spans = %v, want %v", got, tc.onSpan)
+			}
+		})
+	}
+}
+
+// TestTruthyValueDoesNotPutContentOnSpans is the regression this whole mode
+// parse exists for, stated on its own so it cannot be lost in a table: every
+// agent deployed through the CLI has this variable set to "true", and merging
+// span capture behind that value would have started shipping full conversations
+// to a tracing backend nobody opted into.
+func TestTruthyValueDoesNotPutContentOnSpans(t *testing.T) {
+	t.Setenv(captureMessageContentEnvVar, "true")
+	ApplyEnv()
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "canary"}}}},
+	}
+	for _, attr := range requestContentAttributes(req) {
+		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
+	}
+	resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "canary"}}}}
+	for _, attr := range responseContentAttributes(resp) {
+		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
 	}
 }

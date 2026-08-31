@@ -126,7 +126,7 @@ type toolResponsePart struct {
 // OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT, the same flag that
 // governs content in log records.
 func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
-	if req == nil || !getGenAICaptureMessageContent() {
+	if req == nil || !captureContentOnSpans() {
 		return nil
 	}
 	var attrs []attribute.KeyValue
@@ -158,7 +158,7 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 // Partial responses are skipped. Each streamed chunk would otherwise overwrite
 // the attribute, leaving the span holding a fragment rather than the answer.
 func responseContentAttributes(resp *model.LLMResponse) []attribute.KeyValue {
-	if resp == nil || resp.Partial || !getGenAICaptureMessageContent() {
+	if resp == nil || resp.Partial || !captureContentOnSpans() {
 		return nil
 	}
 	// A candidate suppressed by a safety filter has a finish reason and no
