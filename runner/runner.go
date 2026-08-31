@@ -324,7 +324,11 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
-			if event != nil && !event.LLMResponse.Partial {
+			if event == nil {
+				continue
+			}
+
+			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
 					clone := *event
 					clone.Output = nil
@@ -520,7 +524,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				continue
 			}
 
-			if event != nil && !event.LLMResponse.Partial {
+			if event == nil {
+				continue
+			}
+
+			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
 					clone := *event
 					clone.Output = nil
