@@ -262,3 +262,37 @@ func TestAnalyzeGroupScopesTheSession(t *testing.T) {
 		t.Error(p)
 	}
 }
+
+// "This group failed" and "this group recorded nothing" are independent facts: a
+// group can record its findings and then hit a model error. Counting unreported
+// groups by subtracting the failure count therefore hides a genuinely silent
+// group behind a failed-but-recorded one, and points the reader at the wrong
+// remediation.
+//
+// Mutation that must fail this test: make unreportedExcept ignore its skip
+// argument (i.e. behave like unreported).
+func TestUnreportedExceptIgnoresFailedGroupsThatDidRecord(t *testing.T) {
+	r := newRecorder(testConfig())
+	// Group 0 recorded (and, in the caller, then failed). Group 1 never called
+	// the tool. Group 2 recorded cleanly.
+	for _, i := range []int{0, 2} {
+		if res := r.recordFindings(scoped(testRelease, i), recordArgs{
+			Release: testRelease, GroupIndex: i,
+			Findings: []Finding{{Kind: "new-feature", Summary: "s"}},
+		}); res.Status != "success" {
+			t.Fatalf("group %d: %s", i, res.Message)
+		}
+	}
+
+	// The naive subtraction would give unreported(3) - failed(1) = 0.
+	if got := r.unreported(3); got != 1 {
+		t.Fatalf("unreported(3) = %d, want 1 (group 1)", got)
+	}
+	if got := r.unreportedExcept(3, []int{0}); got != 1 {
+		t.Errorf("unreportedExcept(3, [0]) = %d, want 1: group 1 is silent regardless of group 0's failure", got)
+	}
+	// A failed group that ALSO recorded nothing is not double-counted.
+	if got := r.unreportedExcept(3, []int{1}); got != 0 {
+		t.Errorf("unreportedExcept(3, [1]) = %d, want 0: group 1 is already counted as failed", got)
+	}
+}

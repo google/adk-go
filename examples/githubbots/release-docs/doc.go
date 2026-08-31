@@ -73,8 +73,14 @@
 // The bot also reports what it did NOT analyze. A file group that failed, that
 // the run budget never reached, or that finished without the model calling the
 // tool at all is counted and named in the issue, so a partial analysis cannot
-// be mistaken for a complete one -- and a model steered into silence shows up
-// as an unreported group rather than as "no suggestions".
+// be mistaken for a complete one.
+//
+// What that does NOT catch, and cannot: a model that calls the tool and reports
+// an empty list is indistinguishable in Go from one that genuinely found
+// nothing, because the judgement being delegated is precisely "is there
+// anything here?". Injected text that makes the model report nothing for its
+// own group is therefore a real, unremovable limit of the design. It costs a
+// missing suggestion, never a wrong write.
 //
 // # Filing into another repository
 //

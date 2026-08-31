@@ -24,12 +24,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/google/go-github/v66/github"
 )
@@ -578,11 +580,11 @@ func TestFileReleaseIssueCreatesOnlyOnce(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `[]`)
 	}))
-	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "body")
+	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "title", "body")
 	if err != nil || n != 11 {
 		t.Fatalf("first FileReleaseIssue = (%d, %v), want (11, nil)", n, err)
 	}
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "body"); err != nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "title", "body"); err != nil {
 		t.Fatalf("second FileReleaseIssue returned an error: %v", err)
 	}
 	if posts != 1 {
@@ -598,7 +600,7 @@ func TestFileReleaseIssueDryRunRendersWithoutWriting(t *testing.T) {
 	c := testClient(t, cfg, failIfCalled(t))
 	var rendered strings.Builder
 	c.out = &rendered
-	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "title", "THE BODY")
+	n, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "title", "THE BODY")
 	if err != nil || n != 0 {
 		t.Fatalf("dry-run FileReleaseIssue = (%d, %v), want (0, nil)", n, err)
 	}
@@ -627,13 +629,13 @@ func TestSecondFileAfterFailureReportsTheFailure(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `[]`)
 	}))
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", "b"); err == nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "t", "b"); err == nil {
 		t.Fatal("the first FileReleaseIssue must surface the write failure")
 	}
 	if !c.hadError() {
 		t.Error("a failed write must be recorded so the run exits non-zero")
 	}
-	_, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", "b")
+	_, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "t", "b")
 	if err == nil || !strings.Contains(err.Error(), "already failed") {
 		t.Errorf("second FileReleaseIssue = %v, want an error naming the earlier failure", err)
 	}
@@ -690,6 +692,10 @@ func TestCommitSubjectTakesTheFirstLineOnlyAndBoundsIt(t *testing.T) {
 // filingHandler serves every endpoint runWith touches and captures the create
 // request, so an end-to-end test can assert what GitHub would actually receive.
 type filingHandler struct {
+	// compareFiles overrides the files array the compare endpoint returns, so a
+	// test can drive the file caps and the grouping.
+	compareFiles string
+
 	mu sync.Mutex
 	// writes counts every non-GET request, so a mutation added anywhere shows up.
 	writes      int
@@ -707,8 +713,12 @@ func (h *filingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case strings.Contains(r.URL.Path, "/compare/"):
+		files := h.compareFiles
+		if files == "" {
+			files = `{"filename":"agent/agent.go","status":"modified","patch":"+// New exported API."}`
+		}
 		_, _ = io.WriteString(w, `{"html_url":"https://example.invalid/compare","total_commits":1,`+
-			`"files":[{"filename":"agent/agent.go","status":"modified","patch":"+// New exported API."}],`+
+			`"files":[`+files+`],`+
 			`"commits":[{"sha":"abcdef1234","commit":{"message":"feat: a new exported API"}}]}`)
 	case strings.HasPrefix(r.URL.Path, "/search/"):
 		h.searchQuery = r.URL.Query().Get("q")
@@ -759,7 +769,7 @@ func TestFileReleaseIssueIsClaimedUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b"); err != nil {
+			if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.0.0", "v1.1.0", "t", "b"); err != nil {
 				t.Errorf("FileReleaseIssue: %v", err)
 			}
 		}()
@@ -794,7 +804,7 @@ func TestFileReleaseIssueRechecksImmediatelyBeforeWriting(t *testing.T) {
 		_, _ = io.WriteString(w, "["+issueJSON(99, "adk-bot", "Bot", marker+"\n\nfiled by the other run")+"]")
 	}))
 
-	n, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b")
+	n, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.0.0", "v1.1.0", "t", "b")
 	if err != nil {
 		t.Fatalf("FileReleaseIssue: %v", err)
 	}
@@ -818,7 +828,7 @@ func TestFileReleaseIssueAbortsWhenTheRecheckFails(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"message":"boom"}`)
 	}))
-	if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.1.0", "t", "b"); err == nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1.0.0...v1.1.0", "v1.0.0", "v1.1.0", "t", "b"); err == nil {
 		t.Fatal("FileReleaseIssue proceeded despite an unusable re-check")
 	}
 	if posts != 0 {
@@ -834,24 +844,209 @@ func TestFileReleaseIssueAbortsWhenTheRecheckFails(t *testing.T) {
 // must not reach it intact.
 //
 // Mutation that must fail this test: drop the escapeWorkflowCommands call.
+// The dry-run render writes a partly model-authored body to stdout, which the
+// GitHub Actions runner scans for workflow commands. A line beginning "::" must
+// not reach it intact.
+//
+// The oracle here is deliberately INDEPENDENT of the implementation. An earlier
+// version of this test split on "\n" and trimmed " \t" — the same predicate
+// escapeWorkflowCommands used — so it could not fail for any separator or
+// whitespace character the implementation had missed, and it did miss "\r",
+// which the runner's line reader treats as a line terminator.
+//
+// Mutation that must fail this test: revert escapeWorkflowCommands to
+// strings.Split(body, "\n") with strings.TrimLeft(l, " \t").
 func TestDryRunRenderDefusesWorkflowCommands(t *testing.T) {
+	// Every separator the runner ends a line on, and a sample of the whitespace
+	// its parser trims, each carrying a command.
+	body := "line one\n" +
+		"::add-mask::secret\n" +
+		"  ::error::spaces\n" +
+		"\t::error::tab\n" +
+		"\u00a0::error::nbsp\n" +
+		"carriage\r::error::after-cr\n" +
+		"crlf\r\n::error::after-crlf\n" +
+		"std::vector stays\n"
+
 	cfg := testConfig()
 	cfg.DryRun = true
 	c := testClient(t, cfg, failIfCalled(t))
 	var rendered strings.Builder
 	c.out = &rendered
-
-	body := "line one\n::add-mask::secret\n  ::error::fake\nstd::vector stays\n"
-	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v2", "t", body); err != nil {
+	if _, err := c.FileReleaseIssue(context.Background(), "v1...v2", "v1", "v2", "t", body); err != nil {
 		t.Fatalf("FileReleaseIssue: %v", err)
 	}
-	for _, line := range strings.Split(rendered.String(), "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "::") {
+
+	// Independent oracle: re-split the render the way the RUNNER does, on any of
+	// \r\n, \r or \n, and trim the full Unicode whitespace class.
+	out := rendered.String()
+	for _, line := range regexp.MustCompile(`\r\n|\r|\n`).Split(out, -1) {
+		if strings.HasPrefix(strings.TrimLeftFunc(line, unicode.IsSpace), "::") {
 			t.Errorf("a workflow command reached the runner intact: %q", line)
 		}
 	}
-	// Only the command lines are touched: a mid-line "::" is left alone.
-	if !strings.Contains(rendered.String(), "std::vector stays") {
+	// Every command line must actually have been marked, so the test cannot pass
+	// by the body having been dropped instead of escaped.
+	if got := strings.Count(out, escapedCommandPrefix); got != 6 {
+		t.Errorf("marked %d command lines, want 6; the render lost content instead of escaping it", got)
+	}
+	// Only command lines are touched: a mid-line "::" the runner would never
+	// parse is left alone.
+	if !strings.Contains(out, "std::vector stays") {
 		t.Error("escaping mangled a mid-line :: that the runner would never parse")
+	}
+}
+
+// A control character inside a model-authored field is what carries a workflow
+// command past a line-based escape, an ANSI sequence into the Actions log, and
+// a bidi override into the issue a maintainer reads.
+//
+// Mutation that must fail this test: drop the stripControls call from neutralize.
+func TestNeutralizeStripsControlCharacters(t *testing.T) {
+	got := neutralize("ok\r::add-mask::x\x1b[31mred\u202eevil\x00")
+	for _, bad := range []string{"\r", "\x1b", "\u202e", "\x00"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("neutralize kept %q: %q", bad, got)
+		}
+	}
+	// Newlines and tabs survive: a multi-line value is legible inside the fence.
+	if n := neutralize("a\nb\tc"); n != "a\nb\tc" {
+		t.Errorf("neutralize = %q, want newlines and tabs preserved", n)
+	}
+}
+
+// The re-probe must look for the marker the body actually carries. Re-deriving
+// the base by splitting the release key at its first "..." is not the same
+// thing: validTag permits a trailing dot, so releaseKey("v1.2.", "v2.0.0") is
+// "v1.2....v2.0.0" and the split yields "v1.2". The probe would then search for
+// a marker no issue carries, report the release as new, and file a duplicate
+// while believing it had re-checked.
+//
+// Mutation that must fail this test: derive base with strings.Cut(key, "...")
+// instead of using the caller's baseTag.
+func TestFileReleaseIssueRechecksTheCallersBase(t *testing.T) {
+	const base, head = "v1.2.", "v2.0.0"
+	key := releaseKey(base, head)
+	if !validTag(base) {
+		t.Fatalf("test premise: %q must be a tag the bot accepts", base)
+	}
+	if derived, _, _ := strings.Cut(key, "..."); derived == base {
+		t.Fatalf("test premise: splitting %q must disagree with the real base", key)
+	}
+
+	marker := bodyMarker(base, head)
+	posts := 0
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts++
+			_, _ = io.WriteString(w, `{"number":2}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/search/") {
+			_, _ = io.WriteString(w, `{"total_count":0,"items":[]}`)
+			return
+		}
+		// A concurrent run already filed this exact release.
+		_, _ = io.WriteString(w, "["+issueJSON(88, "adk-bot", "Bot", marker+"\n\nfiled by the other run")+"]")
+	}))
+
+	n, err := c.FileReleaseIssue(context.Background(), key, base, head, "t", "b")
+	if err != nil {
+		t.Fatalf("FileReleaseIssue: %v", err)
+	}
+	if posts != 0 {
+		t.Errorf("filed a duplicate: %d create calls, want 0", posts)
+	}
+	if n != 88 {
+		t.Errorf("returned issue %d, want the existing 88", n)
+	}
+}
+
+// GitHub caps a comparison's files array at 300 and does not signal it with a
+// Link header, so pagination alone cannot detect that the count is a floor.
+//
+// Mutation that must fail this test: drop the `len(files) >= compareFileCap`
+// check from Compare.
+func TestCompareFlagsTheFileCap(t *testing.T) {
+	var files []string
+	for i := range compareFileCap {
+		files = append(files, fmt.Sprintf(`{"filename":"f%d.go","patch":"+x"}`, i))
+	}
+	cfg := testConfig()
+	cfg.MaxFiles = compareFileCap
+	c := respondWith(t, cfg, `{"total_commits":1,"files":[`+strings.Join(files, ",")+`],"commits":[]}`)
+	diff, err := c.Compare(context.Background(), "v1", "v2")
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if !diff.PageBoundHit {
+		t.Error("a comparison at the file cap was not flagged, so the issue would report its count as complete")
+	}
+	body := buildIssueBody(diff, []Finding{{Summary: "s"}}, analysis{Groups: 1})
+	if !strings.Contains(body, "lower bounds rather than the real counts") {
+		t.Error("the issue does not disclose that the totals are a floor")
+	}
+
+	// Below the cap it must stay false, or every release would claim to be truncated.
+	c2 := respondWith(t, cfg, `{"total_commits":1,"files":[{"filename":"a.go","patch":"+x"}],"commits":[]}`)
+	small, err := c2.Compare(context.Background(), "v1", "v2")
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if small.PageBoundHit {
+		t.Error("a small comparison was flagged as hitting the cap")
+	}
+}
+
+// total_commits is absent from some compare responses. Without a floor from the
+// commits actually fetched, the cap would drop subjects and the issue would say
+// nothing.
+//
+// Mutation that must fail this test: drop the `fetched > totalCommits` floor.
+func TestCompareCountsOmittedCommitsWithoutTotal(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxCommits = 1
+	// No "total_commits" field at all.
+	c := respondWith(t, cfg, `{"files":[],"commits":[
+		{"sha":"aaaa1111","commit":{"message":"one"}},
+		{"sha":"bbbb2222","commit":{"message":"two"}},
+		{"sha":"cccc3333","commit":{"message":"three"}}
+	]}`)
+	diff, err := c.Compare(context.Background(), "v1", "v2")
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(diff.Commits) != 1 || diff.OmittedCommits != 2 {
+		t.Errorf("commits kept=%d omitted=%d, want 1/2 from the fetched floor",
+			len(diff.Commits), diff.OmittedCommits)
+	}
+}
+
+// Two releases carrying the same numeric version must not make the answer
+// depend on the order the API returned them — that dependence is exactly what
+// version selection exists to remove.
+//
+// Mutation that must fail this test: make betterCandidate return false on a tie.
+func TestVersionTiesBreakDeterministically(t *testing.T) {
+	forward := []Release{{Tag: "v2.0.0"}, {Tag: "v1.2"}, {Tag: "v1.2.0"}}
+	reversed := []Release{{Tag: "v2.0.0"}, {Tag: "v1.2.0"}, {Tag: "v1.2"}}
+	a, err := previousTag(forward, "v2.0.0")
+	if err != nil {
+		t.Fatalf("previousTag: %v", err)
+	}
+	b, err := previousTag(reversed, "v2.0.0")
+	if err != nil {
+		t.Fatalf("previousTag: %v", err)
+	}
+	if a != b {
+		t.Errorf("previousTag gave %q and %q for the same releases in two orders", a, b)
+	}
+
+	tieF := []Release{{Tag: "v1.2"}, {Tag: "v1.2.0"}}
+	tieR := []Release{{Tag: "v1.2.0"}, {Tag: "v1.2"}}
+	lf, _ := latestTag(tieF)
+	lr, _ := latestTag(tieR)
+	if lf != lr {
+		t.Errorf("latestTag gave %q and %q for the same releases in two orders", lf, lr)
 	}
 }

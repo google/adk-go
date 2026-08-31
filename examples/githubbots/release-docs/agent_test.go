@@ -42,6 +42,9 @@ type stubModel struct {
 	// reply is called with the turn number (0-based) and returns the parts the
 	// model emits. Returning nil ends the turn with no content.
 	reply func(turn int) []*genai.Part
+	// errorOnTurn, when set, makes that turn yield a model error instead of
+	// content, so a test can drive a group that records and THEN fails.
+	errorOnTurn func(turn int) bool
 
 	mu sync.Mutex
 	// toolNames is the tool inventory the agent offered, taken from the first
@@ -52,7 +55,10 @@ type stubModel struct {
 	declaredArgs []string
 	// requiredFindingFields are the per-finding fields the schema marks required.
 	requiredFindingFields []string
-	turns                 int
+	// schemaRead records that the required-fields probe found a schema to read,
+	// so an assertion over it cannot pass on an empty result.
+	schemaRead bool
+	turns      int
 }
 
 func (m *stubModel) Name() string { return "stub" }
@@ -70,7 +76,10 @@ func (m *stubModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ 
 			for _, t := range req.Config.Tools {
 				for _, d := range t.FunctionDeclarations {
 					m.declaredArgs = append(m.declaredArgs, schemaProperties(d)...)
-					m.requiredFindingFields = append(m.requiredFindingFields, findingRequiredFields(d)...)
+					if req, ok := findingRequiredFields(d); ok {
+						m.schemaRead = true
+						m.requiredFindingFields = append(m.requiredFindingFields, req...)
+					}
 				}
 			}
 			slices.Sort(m.declaredArgs)
@@ -78,6 +87,11 @@ func (m *stubModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ 
 	}
 	m.mu.Unlock()
 
+	if m.errorOnTurn != nil && m.errorOnTurn(turn) {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{ErrorCode: "TEST_ERROR", ErrorMessage: "forced"}, nil)
+		}
+	}
 	parts := m.reply(turn)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if parts == nil {
@@ -122,10 +136,25 @@ func schemaProperties(d *genai.FunctionDeclaration) []string {
 
 // findingRequiredFields returns the fields the tool's schema marks required on a
 // single finding, so a test can assert none of them are.
-func findingRequiredFields(d *genai.FunctionDeclaration) []string {
+//
+// It reports whether it could read the schema at all. Returning a bare nil would
+// make the assertion pass vacuously if the SDK populated Parameters rather than
+// ParametersJsonSchema, which is exactly how a test comes to certify a property
+// it never looked at.
+func findingRequiredFields(d *genai.FunctionDeclaration) (fields []string, ok bool) {
+	if d.Parameters != nil {
+		p, found := d.Parameters.Properties["findings"]
+		if !found || p.Items == nil {
+			return nil, false
+		}
+		return p.Items.Required, true
+	}
+	if d.ParametersJsonSchema == nil {
+		return nil, false
+	}
 	raw, err := json.Marshal(d.ParametersJsonSchema)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	var schema struct {
 		Properties struct {
@@ -137,9 +166,9 @@ func findingRequiredFields(d *genai.FunctionDeclaration) []string {
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
-		return nil
+		return nil, false
 	}
-	return schema.Properties.Findings.Items.Required
+	return schema.Properties.Findings.Items.Required, true
 }
 
 // recordCall builds the function call the model would emit to record findings.
@@ -268,8 +297,12 @@ func TestAgentOffersExactlyTheOneTool(t *testing.T) {
 	//
 	// Mutation that must fail this test: drop ",omitempty" from any Finding tag.
 	m.mu.Lock()
-	required := slices.Clone(m.requiredFindingFields)
+	required, read := slices.Clone(m.requiredFindingFields), m.schemaRead
 	m.mu.Unlock()
+	if !read {
+		t.Fatal("could not read the finding schema from either declaration field; " +
+			"the assertion below would pass without looking at anything")
+	}
 	if len(required) != 0 {
 		t.Errorf("the finding schema marks %v as required; a model omitting any of them "+
 			"has its whole tool call rejected", required)

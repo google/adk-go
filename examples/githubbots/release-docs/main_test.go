@@ -22,6 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/genai"
 )
 
 func TestNewNonce(t *testing.T) {
@@ -135,13 +137,25 @@ func TestAnalyzeAllStopsAndReportsWhenTheBudgetRunsOut(t *testing.T) {
 // `a.BudgetExhausted = budgetCtx.Err() != nil`.
 func TestAnalyzeAllReportsABudgetThatExpiredDuringTheLastGroup(t *testing.T) {
 	cfg := testConfig()
-	cfg.RunBudget = 40 * time.Millisecond
+	cfg.RunBudget = 100 * time.Millisecond
 	cfg.GroupTimeout = time.Minute
 	groups := [][]ChangedFile{{{Path: "a"}}, {{Path: "b"}}}
 
-	// Both groups are attempted; the budget expires inside the second.
-	s := &stubRun{delay: 30 * time.Millisecond, failFrom: 99}
-	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease, s.fn)
+	// Deterministic rather than racing the clock: group 0 returns at once, and
+	// group 1 blocks until its context (a child of the budget) is done. An
+	// earlier version gave each group a 30ms sleep against a 40ms budget, which
+	// depends on group 0 finishing inside 10ms of slack and flakes under -race
+	// on a loaded machine.
+	var indexes []int
+	a := analyzeAll(context.Background(), cfg, discardLogger(), groups, testRelease,
+		func(gctx context.Context, i int) bool {
+			indexes = append(indexes, i)
+			if i == len(groups)-1 {
+				<-gctx.Done()
+			}
+			return true
+		})
+	s := &stubRun{indexes: indexes}
 	if len(s.indexes) != 2 {
 		t.Fatalf("drove %d groups, want both attempted for this case", len(s.indexes))
 	}
@@ -287,11 +301,106 @@ func TestRunWithFailsWhenTheBudgetProducedNothing(t *testing.T) {
 	}))
 
 	err := runWith(context.Background(), discardLogger(), cfg, gh)
-	if err == nil || !strings.Contains(err.Error(), "no findings were recorded") {
-		t.Fatalf("runWith = %v, want an error saying nothing was recorded", err)
+	if err == nil || !strings.Contains(err.Error(), "not one of the") {
+		t.Fatalf("runWith = %v, want an error saying no group was analyzed", err)
 	}
+	// Filing here would mark the release done and suppress the re-run that could
+	// still analyze it properly.
 	if creates != 0 {
-		t.Errorf("created %d issue(s) with no findings, want 0", creates)
+		t.Errorf("created %d issue(s) having analyzed nothing, want 0", creates)
+	}
+}
+
+// A release too large for the caps produces no findings and full per-group
+// coverage, which used to look identical to a clean run. The only place a
+// maintainer can learn the caps need raising is an issue that says so.
+//
+// Mutation that must fail this test: drop `|| diff.diffTruncated()` from the
+// don't-file condition in runWith.
+func TestRunWithFilesWhenTheDiffWasTruncatedEvenWithNoFindings(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.MaxFiles = 1
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn > 0 {
+			return nil
+		}
+		// The model calls the tool and honestly reports nothing.
+		return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{})}
+	}})
+
+	h := &filingHandler{compareFiles: `
+		{"filename":"a.go","status":"modified","patch":"+x"},
+		{"filename":"b.go","status":"modified","patch":"+y"},
+		{"filename":"c.go","status":"modified","patch":"+z"}`}
+	gh := testClient(t, cfg, h)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1: a release the caps truncated must be reported", h.creates)
+	}
+	if !strings.Contains(h.body, "2 of 3 changed files were not analyzed") {
+		t.Errorf("the issue does not say what the caps dropped:\n%s", h.body)
+	}
+	if !strings.Contains(h.body, "The analysis produced no suggestions") {
+		t.Error("the issue does not say the analysis found nothing")
+	}
+}
+
+// The counterpart: full coverage and nothing to suggest files nothing, so the
+// tracker does not collect an empty issue per release.
+func TestRunWithFilesNothingOnACleanReleaseWithNoFindings(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn > 0 {
+			return nil
+		}
+		return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{})}
+	}})
+	h := &filingHandler{}
+	gh := testClient(t, cfg, h)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if h.creates != 0 {
+		t.Errorf("created %d issues on a fully-analyzed release with no findings, want 0", h.creates)
+	}
+}
+
+// A group whose model never calls the tool must be counted and named, not
+// silently absent. The accounting line that does this was previously driven by
+// no test at all: both `Unreported = 0` and dropping the subtraction survived
+// the whole suite.
+//
+// Mutation that must fail this test: set a.Unreported = 0 in runWith.
+func TestRunWithDisclosesAGroupThatNeverReported(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.FilesPerGroup = 1
+	// Group 0 records; group 1's model answers in prose and never calls the tool.
+	withStubModel(t, &stubModel{reply: func(turn int) []*genai.Part {
+		if turn == 0 {
+			return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{
+				map[string]any{"kind": "new-feature", "summary": "a new exported API"},
+			})}
+		}
+		return nil
+	}})
+
+	h := &filingHandler{compareFiles: `
+		{"filename":"a.go","status":"modified","patch":"+x"},
+		{"filename":"b.go","status":"modified","patch":"+y"}`}
+	gh := testClient(t, cfg, h)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1", h.creates)
+	}
+	if !strings.Contains(h.body, "1 of 2 file groups finished without reporting") {
+		t.Errorf("the issue does not disclose the silent group:\n%s", h.body)
 	}
 }
 
@@ -303,5 +412,98 @@ func TestFinishTurnsARecordedErrorIntoANonZeroExit(t *testing.T) {
 	gh.recordError()
 	if err := finish(gh); err == nil {
 		t.Error("finish after a recorded error = nil; the run would exit 0 having failed")
+	}
+}
+
+// A group can record its findings and THEN fail, so "failed" and "recorded
+// nothing" are independent facts. Counting the silent groups by subtracting the
+// failure count hides one behind the other: here group 0 recorded and then
+// errored, group 1 never called the tool, and the subtraction reports zero
+// silent groups while blaming a group whose files ARE covered.
+//
+// Mutation that must fail this test: compute Unreported as
+// rec.unreported(len(groups)) - a.NotAttempted - a.Failed.
+func TestRunWithSeparatesAFailedGroupFromASilentOne(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.FilesPerGroup = 1
+
+	// Turn 0: group 0 records. Turn 1: group 0's next event is a model error.
+	// Turn 2: group 1 answers in prose and never calls the tool.
+	withStubModel(t, &stubModel{
+		errorOnTurn: func(turn int) bool { return turn == 1 },
+		reply: func(turn int) []*genai.Part {
+			if turn == 0 {
+				return []*genai.Part{recordCall("v1.0.0...v1.1.0", 0, []any{
+					map[string]any{"kind": "new-feature", "summary": "a new exported API"},
+				})}
+			}
+			return nil
+		},
+	})
+
+	h := &filingHandler{compareFiles: `
+		{"filename":"a.go","status":"modified","patch":"+x"},
+		{"filename":"b.go","status":"modified","patch":"+y"}`}
+	gh := testClient(t, cfg, h)
+	// The model error is recorded, so the run reports failure; the issue is still
+	// filed with what was found.
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err == nil {
+		t.Error("runWith returned nil despite a model error; the run would exit 0")
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1", h.creates)
+	}
+	if !strings.Contains(h.body, "1 of 2 file groups failed to complete") {
+		t.Errorf("the issue does not disclose the failed group:\n%s", h.body)
+	}
+	// The load-bearing assertion: group 1 is silent and must be named as such,
+	// not absorbed into group 0's failure.
+	if !strings.Contains(h.body, "1 of 2 file groups finished without reporting") {
+		t.Errorf("the silent group was hidden behind the failed one:\n%s", h.body)
+	}
+}
+
+// The mirror case: a group that fails BEFORE recording anything must be counted
+// once, as failed. Counting the unreported groups without excluding the failed
+// ones double-counts it, and the issue then reports two uncovered groups out of
+// two when only one is.
+//
+// Mutation that must fail this test: stop appending to a.FailedIndexes in
+// analyzeAll.
+func TestRunWithCountsAGroupThatFailedBeforeRecordingOnlyOnce(t *testing.T) {
+	cfg := testConfig()
+	cfg.StartTag, cfg.EndTag = "v1.0.0", "v1.1.0"
+	cfg.FilesPerGroup = 1
+
+	// Turn 0: group 0 errors immediately, so it never calls the tool.
+	// Turn 1: group 1 records.
+	withStubModel(t, &stubModel{
+		errorOnTurn: func(turn int) bool { return turn == 0 },
+		reply: func(turn int) []*genai.Part {
+			if turn == 1 {
+				return []*genai.Part{recordCall("v1.0.0...v1.1.0", 1, []any{
+					map[string]any{"kind": "new-feature", "summary": "a new exported API"},
+				})}
+			}
+			return nil
+		},
+	})
+
+	h := &filingHandler{compareFiles: `
+		{"filename":"a.go","status":"modified","patch":"+x"},
+		{"filename":"b.go","status":"modified","patch":"+y"}`}
+	gh := testClient(t, cfg, h)
+	if err := runWith(context.Background(), discardLogger(), cfg, gh); err == nil {
+		t.Error("runWith returned nil despite a model error")
+	}
+	if h.creates != 1 {
+		t.Fatalf("created %d issues, want 1", h.creates)
+	}
+	if !strings.Contains(h.body, "1 of 2 file groups failed to complete") {
+		t.Errorf("the issue does not disclose the failed group:\n%s", h.body)
+	}
+	if strings.Contains(h.body, "finished without reporting") {
+		t.Errorf("the failed group was counted twice, as failed AND as silent:\n%s", h.body)
 	}
 }

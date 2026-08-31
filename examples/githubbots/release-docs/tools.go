@@ -128,10 +128,27 @@ func (r *recorder) record(index int, findings []Finding) bool {
 // groups whose tool never fired -- the shape a model steered into silence, or a
 // group that died before it could report, both produce.
 func (r *recorder) unreported(n int) int {
+	return r.unreportedExcept(n, nil)
+}
+
+// unreportedExcept counts the first n group indexes that recorded nothing,
+// ignoring the ones named in skip.
+//
+// The skip set is the groups that failed: a group can record its findings and
+// then hit an error, so "failed" and "recorded nothing" are independent facts
+// and neither can be derived from the other by arithmetic.
+func (r *recorder) unreportedExcept(n int, skip []int) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	skipped := make(map[int]bool, len(skip))
+	for _, i := range skip {
+		skipped[i] = true
+	}
 	missing := 0
 	for i := range n {
+		if skipped[i] {
+			continue
+		}
 		if _, done := r.byGroup[i]; !done {
 			missing++
 		}

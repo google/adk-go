@@ -21,9 +21,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/go-github/v66/github"
 )
@@ -44,6 +46,10 @@ const (
 	// comparePages bounds the paginated compare result. GitHub returns at most
 	// 300 files across the pages of one comparison.
 	comparePages = 3
+	// compareFileCap is the maximum number of files GitHub returns for one
+	// comparison. Reaching it means the real number of changed files is unknown
+	// and at least this large.
+	compareFileCap = 300
 	// createIssueTimeout bounds the single mutation. It is separate from the
 	// analysis budget so an exhausted budget still gets to file its partial
 	// findings instead of losing the whole run.
@@ -300,14 +306,27 @@ func (c *GitHubClient) Compare(ctx context.Context, base, head string) (*Release
 		opts.Page = resp.NextPage
 	}
 
+	// GitHub caps a comparison's files array at compareFileCap and does NOT
+	// signal it with a Link header, so pagination alone cannot detect it. At the
+	// cap the count is a floor, and the issue must say so.
+	if len(files) >= compareFileCap {
+		diff.PageBoundHit = true
+	}
 	diff.TotalFiles = len(files)
 	diff.Files, diff.OmittedFiles = boundFiles(files, c.cfg.MaxFiles, c.cfg.MaxPatchBytes)
+	fetched := len(diff.Commits)
 	if len(diff.Commits) > c.cfg.MaxCommits {
 		diff.Commits = diff.Commits[:c.cfg.MaxCommits]
 	}
 	// Counted against the comparison's own total, not against the commits we
 	// happened to fetch, so a release whose commits exceed the page bound does
 	// not under-report how many subjects the analysis never saw.
+	// max of the two: total_commits is the real number when present, but it is
+	// absent from some responses, and the commits we dropped to the cap are a
+	// floor that is always available.
+	if fetched > totalCommits {
+		totalCommits = fetched
+	}
 	if totalCommits > len(diff.Commits) {
 		diff.OmittedCommits = totalCommits - len(diff.Commits)
 	}
@@ -446,7 +465,7 @@ func (c *GitHubClient) trustedCreator(u *github.User) bool {
 // is what holds if it does not. A failed write is reported as such rather than
 // as "already filed", so the run does not record an issue that was never
 // created.
-func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, headTag, title, body string) (int, error) {
+func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, baseTag, headTag, title, body string) (int, error) {
 	if !c.claimRelease(key) {
 		if c.fileAttemptFailed(key) {
 			return 0, fmt.Errorf("filing the issue for %s already failed this run", key)
@@ -463,8 +482,13 @@ func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, headTag, title
 	}
 	// Re-probe AFTER the dry-run gate: a dry run writes nothing, so it owes no
 	// proof of novelty and must not fail on an API call it does not need.
-	base, _, _ := strings.Cut(key, "...")
-	if n, found, err := c.FindExistingIssue(ctx, headTag, bodyMarker(base, headTag)); err != nil {
+	//
+	// The base arrives as an argument rather than being split back out of key.
+	// Re-deriving it would search for a marker the body does not carry whenever
+	// the split disagrees with releaseKey -- a tag ending in a dot makes
+	// "v1.2." + "..." + "v2.0.0" cut at the wrong "...", and the probe would
+	// then match nothing and report a duplicate release as new.
+	if n, found, err := c.FindExistingIssue(ctx, headTag, bodyMarker(baseTag, headTag)); err != nil {
 		c.recordFileFailure(key)
 		c.recordError()
 		return 0, fmt.Errorf("re-check for an existing issue before filing: %w", err)
@@ -497,14 +521,28 @@ func (c *GitHubClient) FileReleaseIssue(ctx context.Context, key, headTag, title
 // line is touched, and it is marked rather than silently altered, so the render
 // stays faithful to what would be filed.
 func escapeWorkflowCommands(body string) string {
-	lines := strings.Split(body, "\n")
+	// Split on every separator the runner's line reader terminates on, not just
+	// "\n": it reads lines with .NET StreamReader semantics, which end a line on
+	// a lone "\r" as well. Splitting on "\n" alone would leave a model-embedded
+	// "\r::add-mask::x" as one Go line that starts with ordinary text, and the
+	// runner would still see a command. The command parser also trims the full
+	// Unicode whitespace class before matching, so TrimLeft(" \t") is not enough.
+	lines := runnerLinePattern.Split(body, -1)
 	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimLeft(l, " \t"), "::") {
-			lines[i] = "[escaped workflow command] " + l
+		if strings.HasPrefix(strings.TrimLeftFunc(l, unicode.IsSpace), "::") {
+			lines[i] = escapedCommandPrefix + l
 		}
 	}
 	return strings.Join(lines, "\n")
 }
+
+// runnerLinePattern matches every line separator the GitHub Actions runner
+// treats as a line break.
+var runnerLinePattern = regexp.MustCompile(`\r\n|\r|\n`)
+
+// escapedCommandPrefix marks a line that would otherwise have been read as a
+// workflow command, so the render stays faithful about what it changed.
+const escapedCommandPrefix = "[escaped workflow command] "
 
 // shouldSkip logs an intended mutation and reports whether it should be skipped
 // because dry-run is enabled. It is the single chokepoint every mutation passes

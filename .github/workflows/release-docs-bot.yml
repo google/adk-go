@@ -55,7 +55,15 @@ jobs:
   analyze:
     # Never run on a fork: the analysis would file an issue on somebody else's
     # repository, or fail noisily trying.
-    if: github.repository == 'google/adk-go'
+    #
+    # A prerelease is also skipped. `release: [published]` fires for one, and
+    # analyzing v2.4.0-rc.1 files an issue that the eventual v2.4.0 issue then
+    # duplicates in substance under a different marker, because the base for
+    # both is the last full release. A manual dispatch can still name an rc
+    # explicitly.
+    if: >-
+      github.repository == 'google/adk-go' &&
+      (github.event_name != 'release' || github.event.release.prerelease == false)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

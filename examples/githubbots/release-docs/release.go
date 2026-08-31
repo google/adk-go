@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // markerPrefix identifies an issue this bot filed. The full marker names the
@@ -181,11 +182,37 @@ var modelTextReplacer = strings.NewReplacer(
 	"-->", "--)",
 )
 
-// neutralize makes one model-authored string safe to embed in the issue body:
-// it is trimmed, bounded, and stripped of the sequences that could escape the
-// fenced block it is rendered inside.
+// neutralize makes one model-authored string safe to embed in the issue body and
+// to write to a log: it is trimmed, bounded, stripped of the sequences that
+// could escape the fenced block it is rendered inside, and stripped of the
+// control and formatting characters that let text mean one thing to a reader
+// and another to a parser.
 func neutralize(s string) string {
-	return truncateRunes(modelTextReplacer.Replace(strings.TrimSpace(s)), maxFindingFieldRunes)
+	return truncateRunes(stripControls(modelTextReplacer.Replace(strings.TrimSpace(s))), maxFindingFieldRunes)
+}
+
+// stripControls removes every rune that is not printable text, plus the
+// bidirectional formatting overrides.
+//
+// Three separate consumers make this necessary, and none of them is Markdown.
+// A carriage return is a line terminator to the GitHub Actions runner, so a
+// model that embeds one splits a rendered line in two and can start the second
+// half with a workflow command. An ESC sequence is rendered as colour by the
+// Actions log viewer. A bidi override (U+202E and friends) reverses how the
+// rest of a line displays, so what a maintainer reads in the issue is not what
+// the bytes say. A newline is kept: writeField emits one line per field and a
+// multi-line value is legible inside the fence.
+func stripControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case unicode.IsControl(r), r == '\u200e', r == '\u200f',
+			r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // truncateRunes shortens s to at most n runes, appending a marker when it trims.
@@ -286,6 +313,17 @@ func compareVersions(a, b []int) int {
 	return 0
 }
 
+// betterCandidate reports whether tag/ver should replace best/bestVer. Equal
+// versions (v1.2 and v1.2.0, say) are broken by tag name rather than by
+// position, so the choice does not depend on the order the API happened to
+// return -- which is the dependence this selection exists to remove.
+func betterCandidate(tag string, ver []int, best string, bestVer []int) bool {
+	if c := compareVersions(ver, bestVer); c != 0 {
+		return c > 0
+	}
+	return tag < best
+}
+
 // latestTag returns the greatest non-prerelease version among the releases.
 // It is what an empty END_TAG resolves to.
 func latestTag(releases []Release) (string, bool) {
@@ -298,7 +336,7 @@ func latestTag(releases []Release) (string, bool) {
 		if !ok {
 			continue
 		}
-		if best == "" || compareVersions(v, bestVer) > 0 {
+		if best == "" || betterCandidate(r.Tag, v, best, bestVer) {
 			best, bestVer = r.Tag, v
 		}
 	}
@@ -342,7 +380,7 @@ func previousTag(releases []Release, head string) (string, error) {
 		if !ok || compareVersions(v, headVer) >= 0 {
 			continue
 		}
-		if best == "" || compareVersions(v, bestVer) > 0 {
+		if best == "" || betterCandidate(r.Tag, v, best, bestVer) {
 			best, bestVer = r.Tag, v
 		}
 	}
@@ -554,16 +592,37 @@ func writeField(b *strings.Builder, label, value string) {
 type analysis struct {
 	// Groups is how many file groups the release was split into.
 	Groups int
+	// Attempted is how many the loop got to, whether or not they succeeded.
+	Attempted int
 	// NotAttempted is how many the run budget never reached.
 	NotAttempted int
 	// Failed is how many errored (a nonce draw, a session, or the model call).
 	Failed int
+	// FailedIndexes names them, so an unreported group can be counted over
+	// exactly the attempted-and-not-failed set rather than by subtraction.
+	FailedIndexes []int
 	// Unreported is how many completed without recording anything at all --
 	// distinct from recording an empty list, which is a real "nothing to
 	// suggest" answer. A model steered into silence lands here.
 	Unreported int
 	// BudgetExhausted records that the run budget expired at any point.
 	BudgetExhausted bool
+}
+
+// diffTruncated reports whether the fetch or the caps dropped part of the
+// release before the analysis even started. It is separate from the per-group
+// accounting because a release can be fully analyzed group by group while most
+// of its files were never in a group at all.
+func (d *ReleaseDiff) diffTruncated() bool {
+	if d.PageBoundHit || d.OmittedFiles > 0 || d.OmittedCommits > 0 {
+		return true
+	}
+	for _, f := range d.Files {
+		if f.PatchTruncated || f.Patch == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // complete reports whether every group was analyzed and reported.

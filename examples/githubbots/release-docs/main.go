@@ -113,32 +113,38 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	a := analyzeAll(ctx, cfg, log, groups, key, func(gctx context.Context, index int) bool {
 		return runGroup(gctx, r, sessions, gh, log, diff, groups[index], index, len(groups), key)
 	})
-	// A group that finished without recording anything is distinguishable from
-	// one that recorded an empty list, because the recorder keys on the group
-	// index. That distinction is the only thing separating "the model analyzed
-	// this group and had nothing to say" from "the model was steered into
-	// silence, or never called the tool at all", and the issue says which.
-	a.Unreported = rec.unreported(len(groups)) - a.NotAttempted - a.Failed
-	if a.Unreported < 0 {
-		a.Unreported = 0
-	}
+	// Count as unreported only the groups that were attempted, did NOT fail, and
+	// still recorded nothing -- a model that never called the tool. Subtracting
+	// the failure counts instead would be wrong whenever a group recorded and
+	// then errored: it occupies its recorder slot while counting as failed, so
+	// the subtraction hides a genuinely silent group behind it and points the
+	// reader at the wrong remediation.
+	a.Unreported = rec.unreportedExcept(a.Attempted, a.FailedIndexes)
 
 	findings := rec.findings()
 	log.Info("analysis finished", "findings", len(findings),
 		"groups", a.Groups, "not_attempted", a.NotAttempted, "failed", a.Failed, "unreported", a.Unreported)
-	if len(findings) == 0 {
-		if !a.complete() {
-			// Nothing was produced and nothing will be filed, so the release is
-			// still unanalyzed. Fail loudly: a retry (or a larger RUN_BUDGET) is
-			// the fix, and a re-run is not suppressed because no issue exists.
-			return fmt.Errorf("no findings were recorded and the analysis was incomplete "+
-				"(%d groups: %d never attempted, %d failed, %d unreported)",
-				a.Groups, a.NotAttempted, a.Failed, a.Unreported)
-		}
-		// Filing an empty issue every release is noise in the tracker. Say so and
-		// leave the release un-filed; a later run may still file one.
+	// Nothing at all was analyzed, so there is nothing to report and nothing to
+	// preserve. Fail loudly WITHOUT filing: an issue here would mark the release
+	// done and suppress the re-run that could still do the job properly.
+	if analyzed := a.Attempted - a.Failed; analyzed == 0 {
+		return fmt.Errorf("not one of the %d file groups was analyzed (%d never attempted, %d failed); "+
+			"no issue was filed, so a re-run is not suppressed", a.Groups, a.NotAttempted, a.Failed)
+	}
+
+	// With nothing to suggest AND full coverage there is nothing worth a tracker
+	// entry, so the release is left un-filed and a later run may still file one.
+	// Partial coverage is different: an issue saying "this release was too large
+	// to read, here is what was skipped" is the only way a maintainer learns the
+	// caps need raising, and it is exactly the case that would otherwise look
+	// identical to a clean run.
+	if len(findings) == 0 && a.complete() && !diff.diffTruncated() {
 		log.Info("no documentation updates suggested; not filing an issue", "release", key)
 		return finish(gh)
+	}
+	if len(findings) == 0 {
+		log.Warn("no documentation updates were suggested, but the analysis was incomplete; "+
+			"filing an issue that says what it missed", "release", key)
 	}
 
 	// A budget-exhausted run that DID record findings is not an error: it files
@@ -151,7 +157,7 @@ func runWith(ctx context.Context, log *slog.Logger, cfg *Config, gh *GitHubClien
 	createCtx, cancel := context.WithTimeout(ctx, createIssueTimeout)
 	defer cancel()
 	body := buildIssueBody(diff, findings, a)
-	if _, err := gh.FileReleaseIssue(createCtx, key, head, issueTitle(head), body); err != nil {
+	if _, err := gh.FileReleaseIssue(createCtx, key, base, head, issueTitle(head), body); err != nil {
 		return err
 	}
 	return finish(gh)
@@ -245,9 +251,11 @@ func analyzeAll(ctx context.Context, cfg *Config, log *slog.Logger,
 			break
 		}
 		start := time.Now()
+		a.Attempted = i + 1
 		ok := analyzeGroup(budgetCtx, cfg, key, i, runFn)
 		if !ok {
 			a.Failed++
+			a.FailedIndexes = append(a.FailedIndexes, i)
 		}
 		log.Info("analyzed file group", "group", i+1, "of", len(groups),
 			"files", len(groups[i]), "ok", ok, "duration", time.Since(start).Round(time.Millisecond))
