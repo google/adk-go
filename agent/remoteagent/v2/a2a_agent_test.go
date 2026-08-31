@@ -1759,8 +1759,11 @@ func TestValidateCardInterfaceOrigins(t *testing.T) {
 		// Pins the scheme half.
 		{"off-origin scheme, same host", "http://127.0.0.1:8080", []string{"https://127.0.0.1:8080/rpc"}, true},
 
-		{"second interface off-origin", "https://good.example.com",
-			[]string{"https://good.example.com/rpc", "https://attacker.example.net/rpc2"}, true},
+		{
+			"second interface off-origin", "https://good.example.com",
+			[]string{"https://good.example.com/rpc", "https://attacker.example.net/rpc2"},
+			true,
+		},
 		{"plain http on non-loopback", "http://example.com", []string{"http://example.com/rpc"}, true},
 		{"off-origin port", "https://good.example.com:8443", []string{"https://good.example.com:9443/rpc"}, true},
 		{"relative interface URL", "https://good.example.com", []string{"/rpc"}, true},
@@ -1769,28 +1772,46 @@ func TestValidateCardInterfaceOrigins(t *testing.T) {
 		// Case-insensitive host comparison, matching adk-python's
 		// _url_origin: a DNS hostname's case does not change what it names.
 		// Not exercised by the cases above, which all keep host case fixed.
-		{"interface host uppercase, source lowercase", "https://good.example.com",
-			[]string{"https://Good.Example.com/rpc"}, false},
-		{"source host uppercase, interface lowercase", "https://Good.Example.com",
-			[]string{"https://good.example.com/rpc"}, false},
+		{
+			"interface host uppercase, source lowercase", "https://good.example.com",
+			[]string{"https://Good.Example.com/rpc"},
+			false,
+		},
+		{
+			"source host uppercase, interface lowercase", "https://Good.Example.com",
+			[]string{"https://good.example.com/rpc"},
+			false,
+		},
 
 		// Default-port normalization, matching adk-python's _DEFAULT_PORTS:
 		// an omitted port and its scheme's default port name the same
 		// origin. "off-origin port" above pins that differing explicit
 		// ports are still rejected; these pin that an omitted port isn't
 		// one of them.
-		{"interface has explicit default https port, source omits it", "https://good.example.com",
-			[]string{"https://good.example.com:443/rpc"}, false},
-		{"source has explicit default https port, interface omits it", "https://good.example.com:443",
-			[]string{"https://good.example.com/rpc"}, false},
-		{"interface has explicit default http port on loopback, source omits it", "http://localhost",
-			[]string{"http://localhost:80/rpc"}, false},
+		{
+			"interface has explicit default https port, source omits it", "https://good.example.com",
+			[]string{"https://good.example.com:443/rpc"},
+			false,
+		},
+		{
+			"source has explicit default https port, interface omits it", "https://good.example.com:443",
+			[]string{"https://good.example.com/rpc"},
+			false,
+		},
+		{
+			"interface has explicit default http port on loopback, source omits it", "http://localhost",
+			[]string{"http://localhost:80/rpc"},
+			false,
+		},
 
 		// isLoopbackHost has its own table (TestIsLoopbackHost below); this
 		// case exists to confirm the two functions integrate correctly, not
 		// to re-cover isLoopbackHost's own cases.
-		{"http on dns name with 127 prefix matching source", "http://127.evil.com",
-			[]string{"http://127.evil.com/rpc"}, true},
+		{
+			"http on dns name with 127 prefix matching source", "http://127.evil.com",
+			[]string{"http://127.evil.com/rpc"},
+			true,
+		},
 	}
 
 	for _, tt := range tests {
