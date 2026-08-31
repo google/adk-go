@@ -51,8 +51,15 @@ type boundMode struct {
 // WithBoundMode returns ctx carrying the mode the named agent runs under for
 // this invocation. Set by whatever places the agent: the runner for a root
 // agent, an AgentNode for a graph node.
+//
+// An empty agentName is bound like any other. Config.Name is documented as
+// required and nothing here can supply a missing one, but skipping the binding
+// would silently turn a nameless agent at a graph node into a chat agent
+// carrying the whole transcript. Binding "" leaves such an agent at the
+// placement it was given, and leaves the missing name to whatever validates
+// names.
 func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Context {
-	if agentName == "" || mode == ModeUnset {
+	if mode == ModeUnset {
 		return ctx
 	}
 	return context.WithValue(ctx, boundModeKey{}, boundMode{agent: agentName, mode: mode})
@@ -66,7 +73,7 @@ func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Con
 // agent actually runs under want [ModeFor].
 func BoundMode(ctx context.Context, agentName string) (Mode, bool) {
 	b, ok := ctx.Value(boundModeKey{}).(boundMode)
-	if !ok || b.agent == "" || b.agent != agentName {
+	if !ok || b.agent != agentName {
 		return ModeUnset, false
 	}
 	return b.mode, true

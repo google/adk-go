@@ -15,13 +15,18 @@
 package workflow_test
 
 import (
+	"context"
+	"iter"
 	"slices"
 	"sync"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -150,6 +155,61 @@ func TestNewAgentNode_ConcurrentWrappingIsRaceFree(t *testing.T) {
 			defer wg.Done()
 			if _, err := workflow.NewAgentNode(a, workflow.NodeConfig{}); err != nil {
 				t.Errorf("NewAgentNode: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// raceFreeLLM holds no mutable state, so a race the detector reports under
+// the test below is on the agent, not on the model double.
+type raceFreeLLM struct{}
+
+func (*raceFreeLLM) Name() string { return "race-free" }
+
+func (*raceFreeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "answer"}},
+		}}, nil)
+	}
+}
+
+// The wrapping test above covers only the write that construction used to
+// make. Placement is resolved again on every run, so build the nodes
+// single-threaded and race the runs instead: the write this replaces lived on
+// the run path, where it raced the contents processor's read. Run with -race.
+func TestOneAgentInstance_ConcurrentInvocationsAreRaceFree(t *testing.T) {
+	t.Parallel()
+
+	a, err := llmagent.New(llmagent.Config{Name: "worker", Model: &raceFreeLLM{}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	var wfs []*workflow.Workflow
+	for range 16 {
+		node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("NewAgentNode: %v", err)
+		}
+		wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+		if err != nil {
+			t.Fatalf("workflow.New: %v", err)
+		}
+		wfs = append(wfs, wf)
+	}
+
+	var wg sync.WaitGroup
+	for _, wf := range wfs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, err := range wf.Run(newModeTestCtx(t, a)) {
+				if err != nil {
+					t.Errorf("workflow.Run: %v", err)
+					return
+				}
 			}
 		}()
 	}

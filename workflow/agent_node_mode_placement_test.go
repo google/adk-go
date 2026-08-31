@@ -142,7 +142,7 @@ func TestAgentNode_UnsetMode_RunsAsSingleTurnEverywhere(t *testing.T) {
 	}
 	// The transfer_to_agent DECLARATION still ships here, as it does before
 	// this change: only the instruction was ever gated on the mode. Asserting
-	// its absence would pin behaviour this change does not claim to alter.
+	// its absence would pin behavior this change does not claim to alter.
 	for _, c := range llm.got.Contents {
 		for _, p := range c.Parts {
 			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
@@ -152,10 +152,10 @@ func TestAgentNode_UnsetMode_RunsAsSingleTurnEverywhere(t *testing.T) {
 	}
 }
 
-// A mode resolved for one agent must not govern another. A chat-declared
-// coordinator at a graph node must not push single_turn onto the agent it
-// transfers to, and a declared mode must beat anything the context carries.
-func TestAgentNode_BoundMode_DoesNotLeakToAnotherAgent(t *testing.T) {
+// A declared mode beats the node's default: a chat coordinator placed at a
+// graph node stays a chat coordinator, keeping its history and its identity
+// rather than being demoted to the single_turn a bare node implies.
+func TestAgentNode_DeclaredChat_BeatsNodeDefault(t *testing.T) {
 	t.Parallel()
 
 	coordLLM := &capturingLLM{}
@@ -300,5 +300,101 @@ func TestAgentNode_ExplicitIncludeContents_BeatsPlacement(t *testing.T) {
 	}
 	if !sawHistory {
 		t.Errorf("explicit IncludeContentsDefault was overridden by the placement; contents = %v", llm.got.Contents)
+	}
+}
+
+// The same override, for an agent that DECLARES single_turn rather than
+// leaving the mode to its placement. Before this change the node forced
+// IncludeContents="none" onto it, so the request went out without the
+// conversation whatever the caller had asked for.
+func TestAgentNode_DeclaredSingleTurnWithExplicitIncludeContents_KeepsHistory(t *testing.T) {
+	t.Parallel()
+
+	llm := &capturingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:            "worker",
+		Model:           llm,
+		Mode:            llmagent.ModeSingleTurn,
+		IncludeContents: llmagent.IncludeContentsDefault,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+
+	prior := &session.Event{
+		Author:      "user",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+	}
+	for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
+		if err != nil {
+			t.Fatalf("workflow.Run: %v", err)
+		}
+	}
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	var sawHistory bool
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				sawHistory = true
+			}
+		}
+	}
+	if !sawHistory {
+		t.Errorf("declared single_turn with explicit IncludeContentsDefault lost its history; contents = %v", llm.got.Contents)
+	}
+}
+
+// Config.Name is documented as required but nothing rejects an empty one, and
+// the binding is keyed by name. A nameless agent must still be placed by its
+// node rather than quietly falling back to chat and carrying the whole
+// transcript into a one-shot node.
+func TestAgentNode_UnnamedAgent_IsStillPlacedSingleTurn(t *testing.T) {
+	t.Parallel()
+
+	llm := &capturingLLM{}
+	a, err := llmagent.New(llmagent.Config{Model: llm})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	if a.Name() != "" {
+		t.Fatalf("precondition: agent name = %q, want empty", a.Name())
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+
+	prior := &session.Event{
+		Author:      "user",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+	}
+	for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
+		if err != nil {
+			t.Fatalf("workflow.Run: %v", err)
+		}
+	}
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				t.Errorf("nameless agent at a single_turn node saw conversation history; contents = %v", llm.got.Contents)
+			}
+		}
 	}
 }

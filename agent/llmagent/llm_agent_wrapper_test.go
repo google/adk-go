@@ -684,6 +684,90 @@ func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 	}
 }
 
+// A declared single_turn agent can reach the wrapper with nothing bound for
+// it: runner.findAgentToRun picks such a sub-agent to handle the next turn,
+// and no graph node is involved. The wrapper binds the mode it resolved before
+// running the agent, so the request processors take the same branch it did.
+// Without that, the wrapper drives one turn while the contents processor still
+// assembles the whole conversation.
+func TestRunLLMAgentAsNode_DeclaredSingleTurn_BindsForTheRequestProcessors(t *testing.T) {
+	t.Parallel()
+
+	llm := &recordingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "worker",
+		Model: llm,
+		Mode:  llmagent.ModeSingleTurn,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	// The current user turn has to be in the session, as the runner puts it
+	// there before running the agent: the backward scan that isolates the
+	// current turn skips this agent's own events, so a history ending on one
+	// pivots at index 0 and returns everything either way.
+	prior := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")}},
+		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current question", "user")}},
+	}
+	for _, ev := range prior {
+		if err := svc.AppendEvent(t.Context(), resp.Session, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("current question", "user"),
+		InvocationID: "inv-declared-single-turn",
+	})
+	// nodeInput is nil, as it is on the runner path: nothing seeds this agent,
+	// so hiding history rests on the binding alone.
+	for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				t.Errorf("declared single_turn agent saw conversation history; contents = %v", llm.got.Contents)
+			}
+		}
+	}
+}
+
+// recordingLLM keeps the first request it serves and always answers with text.
+type recordingLLM struct{ got *model.LLMRequest }
+
+func (*recordingLLM) Name() string { return "recording" }
+
+func (m *recordingLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if m.got == nil {
+		m.got = r
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "answer"}},
+		}}, nil)
+	}
+}
+
+var _ model.LLM = (*recordingLLM)(nil)
+
 // TestRunLLMAgentAsNode_Task_HappyPath drives a task-mode agent
 // end-to-end via the runner. The scripted LLM emits finish_task
 // immediately; the wrapper must promote the args under the wrapper

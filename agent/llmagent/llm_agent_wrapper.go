@@ -134,7 +134,13 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 }
 
 // PrepareLLMAgentInput returns the seeded user-role event for the
-// single_turn agent's first turn.
+// single_turn agent's first turn, and nil for any other agent.
+//
+// Which agents count as single_turn is decided per invocation: the mode ctx
+// bound for a, else a's own declaration. Only the runner and the workflow
+// engine bind one, so a caller outside this module gets a seed for an agent
+// that declares single_turn, and nil for one that leaves the mode to its
+// placement.
 func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil

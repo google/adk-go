@@ -99,9 +99,14 @@ func TestContentsRequestProcessor_HonoursResolvedModeOverDeclaration(t *testing.
 // A mode bound for one agent must not reach another: the second agent falls
 // back to its own declaration.
 func TestContentsRequestProcessor_BoundModeIsScopedToItsAgent(t *testing.T) {
+	// The agent's own reply has to sit between the two user turns: the
+	// backward scan in buildContentsCurrentTurnContextOnly skips this agent's
+	// events, so a history that ends on one pivots at index 0 and returns
+	// everything whether or not history is being hidden.
 	history := []*session.Event{
 		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older turn", "user")}},
-		{Author: "other", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
+		{Author: "other", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
 	}
 	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "other", Model: &testModel{}}))
 
@@ -131,12 +136,14 @@ func TestContentsRequestProcessor_BoundModeIsScopedToItsAgent(t *testing.T) {
 }
 
 // Declaring single_turn shapes the turn, but it does not by itself hide the
-// conversation: only a placement that seeded the agent with one synthetic turn
-// does that. A single_turn agent run outside such a placement keeps its history.
+// conversation: only a placement that put this agent in that mode does. A
+// declared single_turn agent reached some other way — by transfer_to_agent,
+// say — keeps its history.
 func TestContentsRequestProcessor_DeclaredSingleTurnWithoutPlacementKeepsHistory(t *testing.T) {
 	history := []*session.Event{
 		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older turn", "user")}},
-		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
+		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current turn", "user")}},
 	}
 	testAgent := utils.Must(llmagent.New(llmagent.Config{
 		Name:  "worker",
@@ -164,5 +171,65 @@ func TestContentsRequestProcessor_DeclaredSingleTurnWithoutPlacementKeepsHistory
 	}
 	if !sawHistory {
 		t.Errorf("declared single_turn outside a placement lost its history; contents = %v", req.Contents)
+	}
+}
+
+// Shaping the turn is the other half of the resolution, and it does consult
+// the declaration: an agent that declares nothing and is placed single_turn is
+// told it will get no follow-up questions, the same as one that declares the
+// mode. The nudge only reaches a scoped run, which is where a delegated
+// single_turn agent lives.
+func TestContentsRequestProcessor_ResolvedSingleTurnGetsTheNudge(t *testing.T) {
+	const agentName = "worker"
+
+	tests := []struct {
+		name     string
+		declared llmagent.Mode
+		bind     bool
+		want     bool
+	}{
+		{name: "placement resolves it", bind: true, want: true},
+		{name: "declaration alone", declared: llmagent.ModeSingleTurn, want: true},
+		{name: "neither", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:  agentName,
+				Model: &testModel{},
+				Mode:  tc.declared,
+			}))
+
+			stdCtx := t.Context()
+			if tc.bind {
+				stdCtx = llminternal.WithBoundMode(stdCtx, agentName, llminternal.ModeSingleTurn)
+			}
+			ctx := icontext.NewInvocationContext(stdCtx, icontext.InvocationContextParams{
+				Agent:          testAgent,
+				Session:        &fakeSession{},
+				IsolationScope: "scope-1",
+				UserContent:    genai.NewContentFromText("do the thing", "user"),
+			})
+
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor: %v", err)
+				}
+			}
+
+			var gotNudge bool
+			for _, c := range req.Contents {
+				for _, p := range c.Parts {
+					if p != nil && p.Text == llminternal.SingleTurnNudge {
+						gotNudge = true
+					}
+				}
+			}
+			if gotNudge != tc.want {
+				t.Errorf("single-turn nudge present = %v, want %v (contents: %v)", gotNudge, tc.want, req.Contents)
+			}
+		})
 	}
 }
