@@ -46,6 +46,22 @@ const ConversationHistoryPlaceholder = "{conversation_history}"
 // Measured over ten conversations that each ran ten or more passes, the prompt
 // without instruction 3 lost every early detail in five of them; with it, none
 // of nine lost any. See the package doc, "What bounding costs".
+//
+// It asks only for what the user stated, which is narrower than the problem.
+// Identifiers that arrive in a tool response decay the same way, and for a
+// tool-using agent that is where most of them come from. The boundary is
+// deliberate rather than considered sufficient: the measurement behind this
+// covers user-stated values, and tool output is already the bulkiest part of a
+// transcript, so instructing the model to carry it forward verbatim would
+// enlarge every subsequent summary by an amount nothing here has measured.
+// Widening it wants its own change and its own numbers.
+//
+// One consequence worth naming: the instruction argues against dropping
+// anything that looks like a durable fact, including text that arrived inside a
+// tool response. Content injected there used to decay out of a rolling summary
+// within a few passes and now has a prompt arguing for its retention. It cannot
+// forge a turn -- formatEvents escapes newlines, so a tool response cannot
+// impersonate a speaker -- but it can persist longer than it used to.
 const defaultPromptTemplate = "The following is a conversation history between a user and an AI agent." +
 	" It may or may not start from a compacted history. Please identify and" +
 	" reiterate the user request, summarize the context so far, focusing on" +

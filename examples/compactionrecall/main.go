@@ -43,11 +43,12 @@
 // # The arms
 //
 //	default   the shipped summarizer prompt
-//	terse     the same prompt without its fact-retention instruction
+//	prior     the same prompt as it was before fact retention was added
 //
-// The terse arm exists to show what that instruction is worth, and to stand in
-// for any custom PromptTemplate that asks only for a "concise" summary. If you
-// are writing your own template, run it here before trusting it.
+// The two differ in one instruction and nothing else, so the comparison
+// isolates that instruction rather than measuring a third prompt. If you are
+// writing your own PromptTemplate, add it here and run it before trusting it:
+// asking only for a "concise" summary is enough to reintroduce the loss.
 //
 // This calls a real model. One run of one arm is roughly 70 model calls, so the
 // default of two arms over three runs is a few hundred. A single transient
@@ -156,11 +157,14 @@ const noRecordSentinel = "NO_RECORD"
 // answer that both denies knowledge and happens to contain a value, which for
 // the short values here is the difference between a sound score and a lucky
 // one.
+// Kept deliberately narrow. A broad pattern like "unable to" or "do not have"
+// also matches an answer that recalls correctly -- "I am unable to browse, but
+// the region is europe-west4" -- and scoring that a miss would understate
+// recall, which is the direction that would flatter the change this harness
+// exists to test.
 var disclaimers = []string{
-	"do not have that", "don't have that", "not mentioned",
-	"you have not mentioned", "no record of", "cannot recall",
-	"do not have", "don't have", "unable to", "no information",
-	"not been shared", "not been provided", "do not see", "don't see",
+	"do not have that", "don't have that", "no record of",
+	"you have not mentioned", "cannot recall", "can't recall",
 }
 
 // filler pushes the prompt up so compaction fires, carrying nothing the probes
@@ -184,15 +188,23 @@ var filler = []string{
 	"Two sentences on when to prefer a pull over a push model.",
 }
 
-// tersePromptTemplate is the summarizer prompt without the instruction that
-// keeps concrete values alive across re-summarization. It is what the default
-// used to be, and it stands in for any custom template that asks only for a
-// short summary.
-const tersePromptTemplate = "The following is a conversation history between a user and an AI agent." +
+// priorPromptTemplate is the default summarizer prompt exactly as it shipped
+// before the fact-retention instruction was added, reproduced verbatim so the
+// two arms differ in that instruction and nothing else. Anything else here --
+// dropping the numbered framing, or instruction 2, or rewording "the rest of
+// the summary" -- would make the comparison measure a third prompt rather than
+// the change.
+const priorPromptTemplate = "The following is a conversation history between a user and an AI agent." +
 	" It may or may not start from a compacted history. Please identify and" +
 	" reiterate the user request, summarize the context so far, focusing on" +
 	" key decisions made and information obtained, as well as any unresolved" +
-	" questions or tasks. The summary should be concise and capture the" +
+	" questions or tasks. " +
+	"CRITICAL INSTRUCTIONS: " +
+	"1. Explicitly identify and state the primary language used by the user " +
+	`at the top of your summary (e.g., "Conversation Language: English"). ` +
+	"2. If the agent called any tools, accurately list the exact tool names " +
+	"used to maintain tool grounding. " +
+	"The rest of the summary should be concise and capture the" +
 	" essence of the interaction.\n\n" + compaction.ConversationHistoryPlaceholder
 
 type armResult struct {
@@ -217,7 +229,7 @@ func run() error {
 	interval := flag.Int("interval", 0, "compaction.Config.CompactionInterval, 0 to leave the sliding window off")
 	fillerx := flag.Int("fillerx", 3, "repeat the filler block this many times, to force more compaction passes")
 	runs := flag.Int("runs", 3, "repeat each arm this many times; recall is near-binary, so one run proves little")
-	armList := flag.String("arms", "default,terse", "comma-separated: default, terse")
+	armList := flag.String("arms", "default,prior", "comma-separated: default, prior")
 	verbose := flag.Bool("v", false, "print every summary and every probe answer")
 	flag.Parse()
 
@@ -230,8 +242,8 @@ func run() error {
 		want[strings.TrimSpace(n)] = true
 	}
 	for n := range want {
-		if n != "default" && n != "terse" {
-			return fmt.Errorf("unknown arm %q, want default or terse", n)
+		if n != "default" && n != "prior" {
+			return fmt.Errorf("unknown arm %q, want default or prior", n)
 		}
 	}
 
@@ -239,12 +251,12 @@ func run() error {
 	fmt.Printf("model=%s threshold=%d retention=%d interval=%d facts=%d fillerTurns=%d runs=%d\n\n",
 		*modelName, *threshold, *retention, *interval, len(facts), len(filler)**fillerx, *runs)
 
-	for _, name := range []string{"default", "terse"} {
+	for _, name := range []string{"default", "prior"} {
 		if !want[name] {
 			continue
 		}
 		var scores []string
-		totalHits, totalProbes, wipeouts := 0, 0, 0
+		totalHits, totalProbes, wipeouts, failed := 0, 0, 0, 0
 
 		for i := range *runs {
 			cfg := &compaction.Config{
@@ -254,7 +266,13 @@ func run() error {
 			}
 			res, err := runArm(ctx, name, cfg, *modelName, *fillerx, i, *verbose)
 			if err != nil {
-				return fmt.Errorf("arm %s run %d: %w", name, i+1, err)
+				// A run is hundreds of model calls and a busy model returns
+				// 503 regularly, so one transient failure must not discard the
+				// runs that already succeeded. Report it and carry on; the
+				// totals below count only completed runs.
+				fmt.Printf("  %-8s run %d: FAILED, not counted: %v\n", name, i+1, firstLine(err))
+				failed++
+				continue
 			}
 			scores = append(scores, fmt.Sprintf("%d/%d", res.hits, len(facts)))
 			totalHits += res.hits
@@ -269,8 +287,12 @@ func run() error {
 			}
 		}
 
-		fmt.Printf("  %-8s TOTAL %d/%d probes, per-run %s, runs losing everything: %d/%d\n\n",
-			name, totalHits, totalProbes, strings.Join(scores, " "), wipeouts, *runs)
+		note := ""
+		if failed > 0 {
+			note = fmt.Sprintf(", %d run(s) failed and are excluded", failed)
+		}
+		fmt.Printf("  %-8s TOTAL %d/%d probes, per-run %s, runs losing everything: %d/%d%s\n\n",
+			name, totalHits, totalProbes, strings.Join(scores, " "), wipeouts, len(scores), note)
 	}
 
 	fmt.Println("A run that lost everything is the failure that matters: the summary kept")
@@ -285,10 +307,10 @@ func runArm(ctx context.Context, name string, cfg *compaction.Config, modelName 
 		return nil, fmt.Errorf("model: %w", err)
 	}
 
-	if name == "terse" {
+	if name == "prior" {
 		sum, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 			Model:          m,
-			PromptTemplate: tersePromptTemplate,
+			PromptTemplate: priorPromptTemplate,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("summarizer: %w", err)
@@ -412,8 +434,23 @@ func recalled(answer string, f fact) bool {
 			return false
 		}
 	}
-	for _, m := range f.matchers {
-		if m.MatchString(answer) {
+	return matchesAny(f.matchers, answer)
+}
+
+// firstLine keeps a failure report to one line. A model error carries a page of
+// server-side debug detail, and printing it mid-batch buries the results.
+func firstLine(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return truncate(s, 160)
+}
+
+// matchesAny reports whether any matcher fires on s.
+func matchesAny(matchers []*regexp.Regexp, s string) bool {
+	for _, m := range matchers {
+		if m.MatchString(s) {
 			return true
 		}
 	}
@@ -463,7 +500,11 @@ func buriedFacts(ctx context.Context, svc session.Service, appName, userID, sess
 		}
 		at := ev.Timestamp.UnixNano()
 		for _, f := range facts {
-			if !strings.Contains(text, f.label) {
+			// Word-boundary matching, for the same reason the probe scoring
+			// uses it: a plain substring test finds the label "7" inside
+			// INC-77312 and tarn-staging-91, which would mark that fact buried
+			// on the strength of unrelated events.
+			if !matchesAny(f.matchers, text) {
 				continue
 			}
 			for _, s := range covered {
@@ -476,10 +517,13 @@ func buriedFacts(ctx context.Context, svc session.Service, appName, userID, sess
 	return buried, nil
 }
 
+// truncate shortens s to n runes, counting runes rather than bytes so a
+// multi-byte character is never cut in half.
 func truncate(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "..."
 }
