@@ -95,17 +95,12 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if len(textParts) == 0 {
 				return nil
 			}
-			// Assistant turns must be replayed as output messages whose content
-			// uses "output_text"; the OpenAI Responses API rejects "input_text"
-			// for the assistant role, and an EasyInputMessageParam content list
-			// can only hold input_text. A plain-string EasyInputMessageParam is
-			// also accepted, but an output message keeps one entry per part
-			// rather than flattening them into a single string. Every other role
-			// stays an easy input message.
 			msgRole, err := normalizeRole(curRole)
 			if err != nil {
 				return err
 			}
+			// The Responses API rejects "input_text" for the assistant role, so
+			// a replayed assistant turn goes out as an output message instead.
 			if msgRole == responses.EasyInputMessageRoleAssistant {
 				if msg := newOutputMessage(textParts); msg != nil {
 					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
@@ -165,7 +160,6 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 }
 
 // newMessage builds an easy input message for an already-normalized role.
-// Returns nil when every text part is blank, so no empty message is emitted.
 func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
 	if len(texts) == 0 {
 		return nil
@@ -197,9 +191,7 @@ func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *respons
 
 // newOutputMessage builds an assistant output message whose content uses the
 // "output_text" type, as required when replaying a prior assistant turn to the
-// OpenAI Responses API. The message ID is left unset: OpenAI assigns message
-// IDs on output, and a replayed turn has none to echo back. Returns nil when
-// every text part is blank, so no empty message is emitted.
+// OpenAI Responses API.
 func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
 	if len(texts) == 0 {
 		return nil
