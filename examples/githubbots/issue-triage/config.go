@@ -119,7 +119,7 @@ func loadConfig(args []string) (*Config, error) {
 		IssueCount:      env.integer("ISSUE_COUNT", 3),
 		FreshnessWindow: env.days("FRESHNESS_WINDOW_DAYS", 0),
 		IssueTimeout:    env.duration("ISSUE_TIMEOUT", 5*time.Minute),
-		SweepTimeout:    env.duration("SWEEP_TIMEOUT", 15*time.Minute),
+		SweepTimeout:    env.duration("SWEEP_TIMEOUT", 20*time.Minute),
 		DryRun:          *dryRun,
 		SingleIssue:     singleIssue,
 		UseVertexAI:     env.boolean("GOOGLE_GENAI_USE_VERTEXAI", false),
@@ -163,6 +163,14 @@ func (c *Config) validate() error {
 	}
 	if c.SweepTimeout < c.IssueTimeout {
 		return fmt.Errorf("SWEEP_TIMEOUT (%s) must be at least ISSUE_TIMEOUT (%s)", c.SweepTimeout, c.IssueTimeout)
+	}
+	// The run budget funds choosing the work set as well as triaging it. A
+	// configuration that cannot fit its own worst case exhausts the budget on
+	// an ordinary busy sweep and reports issues untriaged, which reads as a
+	// failure on a run that behaved exactly as designed.
+	if worst := time.Duration(c.IssueCount)*c.IssueTimeout + fetchTimeout; worst > c.SweepTimeout {
+		return fmt.Errorf("ISSUE_COUNT (%d) x ISSUE_TIMEOUT (%s) plus the %s work-set fetch is %s, which exceeds SWEEP_TIMEOUT (%s)",
+			c.IssueCount, c.IssueTimeout, fetchTimeout, worst, c.SweepTimeout)
 	}
 	if c.IssueCount < 1 {
 		return fmt.Errorf("ISSUE_COUNT must be at least 1, got %d", c.IssueCount)

@@ -86,14 +86,21 @@ type Client struct {
 	// error during the run, so the program can exit non-zero and CI fails loudly
 	// even though such errors are also handed back to the model as data.
 	toolErrored bool
-	// attempts counts the tool calls made against each issue, so an
+	// attempts counts the tool calls made against each (issue, field), so an
 	// attacker-steered model cannot spend unbounded GitHub reads. See
 	// maxAttemptsPerIssue.
-	attempts map[int]int
+	attempts map[attemptKey]int
+}
+
+// attemptKey counts per field rather than per issue, so a burst of type calls
+// cannot starve the label the same issue also needs.
+type attemptKey struct {
+	number int
+	field  string
 }
 
 // maxAttemptsPerIssue caps how many mutating tool calls one issue's session may
-// make. A well-behaved run makes at most two, one per field. The model is
+// make for one field. A well-behaved run makes exactly one. The model is
 // attacker-controlled by assumption and nothing bounds how many calls it emits
 // in a turn, and each one that clears the allow-list spends a GitHub read
 // (confirmStillNeeded) before the claim refuses it -- enough of them and the
@@ -108,7 +115,7 @@ func NewClient(cfg *Config, log *slog.Logger) *Client {
 		cfg:        cfg,
 		log:        log,
 		authorized: make(map[int]need),
-		attempts:   make(map[int]int),
+		attempts:   make(map[attemptKey]int),
 	}
 }
 
@@ -206,14 +213,15 @@ func (c *Client) revoke(number int) {
 
 // attempt records one mutating tool call against an issue and reports whether
 // it is within the per-issue cap.
-func (c *Client) attempt(number int) bool {
+func (c *Client) attempt(number int, field string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.attempts == nil {
-		c.attempts = make(map[int]int)
+		c.attempts = make(map[attemptKey]int)
 	}
-	c.attempts[number]++
-	return c.attempts[number] <= maxAttemptsPerIssue
+	k := attemptKey{number: number, field: field}
+	c.attempts[k]++
+	return c.attempts[k] <= maxAttemptsPerIssue
 }
 
 // recordToolError flags that a tool hit an infrastructure error this run.

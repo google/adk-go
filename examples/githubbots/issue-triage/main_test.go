@@ -244,7 +244,7 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		return &Config{
 			GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
 			AllowedLabels: defaultAllowedLabels,
-			IssueCount:    3, IssueTimeout: 5 * time.Minute, SweepTimeout: 15 * time.Minute,
+			IssueCount:    3, IssueTimeout: 5 * time.Minute, SweepTimeout: 20 * time.Minute,
 		}
 	}
 	if err := base().validate(); err != nil {
@@ -258,6 +258,10 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 		{"zero sweep", func(c *Config) { c.SweepTimeout = 0 }, "SWEEP_TIMEOUT"},
 		{"negative issue", func(c *Config) { c.IssueTimeout = -1 }, "ISSUE_TIMEOUT"},
 		{"sweep below issue", func(c *Config) { c.SweepTimeout = time.Minute }, "at least"},
+		// The run budget funds the work-set fetch as well as the issues, and a
+		// configuration that cannot fit its own worst case reports issues
+		// untriaged on a run that behaved exactly as designed.
+		{"sweep cannot fit its own worst case", func(c *Config) { c.IssueCount = 4 }, "exceeds SWEEP_TIMEOUT"},
 		{"zero count", func(c *Config) { c.IssueCount = 0 }, "ISSUE_COUNT"},
 		{"negative freshness", func(c *Config) { c.FreshnessWindow = -time.Hour }, "FRESHNESS_WINDOW_DAYS"},
 		{"no usable labels", func(c *Config) { c.AllowedLabels = nil }, "ALLOWED_LABELS"},
@@ -286,8 +290,10 @@ func TestValidateBoundsSweepAgainstIssueTimeout(t *testing.T) {
 // shape of the defect.
 func TestRunBudgetCoversModelConstruction(t *testing.T) {
 	setRequired(t)
+	t.Setenv("ISSUE_COUNT", "1")
 	t.Setenv("ISSUE_TIMEOUT", "200ms")
-	t.Setenv("SWEEP_TIMEOUT", "200ms")
+	// Must clear the work-set fetch too, which validate() now requires.
+	t.Setenv("SWEEP_TIMEOUT", "61s")
 
 	// A constructor that never returns on its own: only the budget can end it.
 	orig := newModelFn
@@ -308,7 +314,7 @@ func TestRunBudgetCoversModelConstruction(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("run() = %v, want it to wrap context.DeadlineExceeded", err)
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(90 * time.Second):
 		t.Fatal("run() never returned: the run budget does not cover model construction")
 	}
 }

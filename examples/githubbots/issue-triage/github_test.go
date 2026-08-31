@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -427,4 +428,34 @@ func TestConfirmStillNeededReflectsCurrentState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// liftAttemptCap makes a field's attempt budget effectively unlimited, for the
+// tests whose subject is contention rather than the cap. Without it the cap
+// refuses most of a concurrent fan-out before it reaches the claim, silently
+// reducing the contention the test is trying to create.
+func (c *Client) liftAttemptCap(number int, field string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempts == nil {
+		c.attempts = make(map[attemptKey]int)
+	}
+	c.attempts[attemptKey{number: number, field: field}] = -1 << 30
+}
+
+// writeClientAtomic is writeClient with the revalidation reads counted
+// atomically, for tests that drive the write path from several goroutines.
+func writeClientAtomic(t *testing.T, cfg *Config, reads *atomic.Int64, mutate http.HandlerFunc) *Client {
+	t.Helper()
+	c := testClient(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			reads.Add(1)
+			_, _ = io.WriteString(w, untriagedIssueJSON)
+			return
+		}
+		mutate(w, r)
+	}))
+	c.authorized = make(map[int]need)
+	c.attempts = make(map[attemptKey]int)
+	return c
 }

@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -339,6 +340,23 @@ func TestWorkflowScriptValidatesTheIssueNumber(t *testing.T) {
 			}
 			if args != tc.want {
 				t.Errorf("go was invoked with %q, want %q", args, tc.want)
+			}
+			// Nothing else binds the flag NAME the script emits to the flag
+			// loadConfig registers: both sides hardcode "-issue" independently,
+			// so renaming the Go flag would leave every test green. Feed the
+			// script's own argv to the real loadConfig.
+			argv := strings.Fields(strings.TrimPrefix(args, "run ."))
+			setRequired(t)
+			cfg, cfgErr := loadConfig(argv)
+			if cfgErr != nil {
+				t.Fatalf("loadConfig(%q), the arguments the workflow actually passes, = %v", argv, cfgErr)
+			}
+			want := 0
+			if tc.input != "" {
+				want, _ = strconv.Atoi(tc.input)
+			}
+			if cfg.SingleIssue != want {
+				t.Errorf("the workflow's %q reached the config as SingleIssue=%d, want %d", args, cfg.SingleIssue, want)
 			}
 		})
 	}

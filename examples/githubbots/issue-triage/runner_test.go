@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -93,6 +95,8 @@ type githubStub struct {
 	notFound  bool
 	// reads counts the by-number revalidation reads.
 	reads int
+	// slowMutation delays every mutating response.
+	slowMutation time.Duration
 }
 
 func newStub(untriaged int) *githubStub {
@@ -131,6 +135,9 @@ func (g *githubStub) handler(t *testing.T) http.Handler {
 			return
 		}
 
+		if g.slowMutation > 0 {
+			time.Sleep(g.slowMutation)
+		}
 		if g.mutationStatus != 0 {
 			w.WriteHeader(g.mutationStatus)
 			_, _ = w.Write([]byte(`{"message":"boom"}`))
@@ -207,6 +214,9 @@ type runSpec struct {
 	args []string
 	// dryRun sets DRY_RUN for this run.
 	dryRun bool
+	// keepEnv leaves the caller's ISSUE_COUNT/ISSUE_TIMEOUT/SWEEP_TIMEOUT in
+	// place instead of imposing driveRun's defaults.
+	keepEnv bool
 	// preauthorize is authorized on the client before the run starts, so a test
 	// can isolate the session-scope gate from the need-claim gate: without it
 	// both refuse an out-of-scope issue and no single mutation separates them.
@@ -220,10 +230,14 @@ type runSpec struct {
 func driveRun(t *testing.T, spec runSpec) (writes map[int]string, turnsUsed int, err error) {
 	t.Helper()
 	stub := spec.stub
-	setRequired(t)
-	t.Setenv("ISSUE_COUNT", "1")
-	t.Setenv("ISSUE_TIMEOUT", "30s")
-	t.Setenv("SWEEP_TIMEOUT", "30s")
+	if !spec.keepEnv {
+		setRequired(t)
+		t.Setenv("ISSUE_COUNT", "1")
+		t.Setenv("ISSUE_TIMEOUT", "30s")
+		// Must satisfy the budget invariant validate() enforces: ISSUE_COUNT x
+		// ISSUE_TIMEOUT plus the work-set fetch.
+		t.Setenv("SWEEP_TIMEOUT", "3m")
+	}
 	if spec.dryRun {
 		t.Setenv("DRY_RUN", "true")
 	}
@@ -504,5 +518,42 @@ func TestOneTurnCanFillBothFields(t *testing.T) {
 	}
 	if gotLabel != "bug" {
 		t.Errorf("issue #42 label = %q, want bug", gotLabel)
+	}
+}
+
+// A per-issue deadline expiring mid-write must reach run() as an error. It is
+// the one budget this module does not report itself: sweep checks the RUN
+// budget, and a tool call killed by the per-issue one takes the context-error
+// exemption in toolFailed, so the guarantee rests on the runner surfacing the
+// cancellation from its event stream.
+//
+// That is framework behaviour rather than ours, which is why it is pinned here
+// rather than asserted in a comment: if a future adk-go swallows a cancelled
+// context, this goes red instead of the bot quietly half-triaging an issue and
+// exiting 0. Measured on adk/v2 v2.2.0, the runner does report it.
+func TestRunReportsAnExpiredPerIssueBudget(t *testing.T) {
+	stub := newStub(42)
+	stub.slowMutation = 2 * time.Second
+	setRequired(t)
+	t.Setenv("ISSUE_COUNT", "1")
+	t.Setenv("ISSUE_TIMEOUT", "300ms")
+	t.Setenv("SWEEP_TIMEOUT", "90s")
+
+	_, turns, err := driveRun(t, runSpec{stub: stub, keepEnv: true, turns: []*genai.Content{
+		toolCall("change_issue_type", map[string]any{"issue_number": 42, "issue_type": "Bug"}),
+		finalText("done"),
+	}})
+	if turns == 0 {
+		t.Fatal("the model was never consulted, so nothing reached the deadline")
+	}
+	if err == nil {
+		t.Fatal("run() = nil after a per-issue deadline expired mid-write: the issue's write is spent and the job is green")
+	}
+	// Either route is acceptable: the runner may surface the cancellation
+	// itself, or triageOne's own check catches it when the runner does not.
+	// Which one fires is timing-dependent, which is exactly why the check
+	// exists -- measured before it, run() returned nil.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("run() = %v, want it to wrap context.DeadlineExceeded", err)
 	}
 }

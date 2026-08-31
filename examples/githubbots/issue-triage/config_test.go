@@ -71,6 +71,8 @@ func TestLoadConfigFlagsAndEnv(t *testing.T) {
 	t.Setenv("REPO", "widgets")
 	t.Setenv("ALLOWED_LABELS", "bug, enhancement ,docs")
 	t.Setenv("ISSUE_COUNT", "7")
+	// The budget has to fit 7 issues plus the work-set fetch.
+	t.Setenv("SWEEP_TIMEOUT", "40m")
 	t.Setenv("FRESHNESS_WINDOW_DAYS", "30")
 
 	cfg, err := loadConfig([]string{"-dry-run", "-issue", "42"})

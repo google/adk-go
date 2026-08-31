@@ -259,6 +259,10 @@ func TestDoChangeTypeConcurrentSingleWrite(t *testing.T) {
 		_, _ = io.WriteString(w, `{"number":7,"type":{"name":"Bug"}}`)
 	})
 	c.authorize(7, need{typ: true})
+	// The attempt cap would otherwise refuse all but the first
+	// maxAttemptsPerIssue goroutines before they reach the claim, quietly
+	// reducing the contention this test exists to create.
+	c.liftAttemptCap(7, "type")
 
 	// Released together from a barrier, and enough of them to make the
 	// interleaving likely: without the barrier the goroutines are staggered by
@@ -303,6 +307,7 @@ func TestDoAddLabelConcurrentSingleWrite(t *testing.T) {
 		_, _ = io.WriteString(w, `[{"name":"bug"}]`)
 	})
 	c.authorize(7, need{label: true})
+	c.liftAttemptCap(7, "label")
 
 	const goroutines = 64
 	var (
@@ -638,6 +643,37 @@ func TestAFullPageLabelResponseIsConfirmedNotGuessed(t *testing.T) {
 	}
 }
 
+// The confirming read is a network call and can fail. That must surface, not be
+// read as either outcome.
+//
+// Killing mutation: drop the error return from the confirmation branch.
+func TestAFailedLabelConfirmationIsReported(t *testing.T) {
+	var page []string
+	for i := range labelResponsePage {
+		page = append(page, fmt.Sprintf(`{"name":"area/%d"}`, i))
+	}
+	fullPage := "[" + strings.Join(page, ",") + "]"
+
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"message":"boom"}`)
+			return
+		}
+		_, _ = io.WriteString(w, fullPage)
+	}))
+	err := c.AddLabel(context.Background(), 7, "bug")
+	if err == nil {
+		t.Fatal("AddLabel = nil, want the failed confirmation surfaced")
+	}
+	if errors.Is(err, errNotApplied) {
+		t.Error("a failed confirmation was reported as a demonstrable non-application")
+	}
+	if !strings.Contains(err.Error(), "confirm label") {
+		t.Errorf("AddLabel = %v, want it to name the failed confirmation", err)
+	}
+}
+
 // A short response is decisive on its own; the confirming read must not happen.
 func TestAShortLabelResponseNeedsNoConfirmation(t *testing.T) {
 	var reads int
@@ -782,6 +818,54 @@ func TestToolsEnforceTheSessionScopeThroughTheRealWrapper(t *testing.T) {
 	}
 }
 
+// The full-page confirmation re-reads the issue, so it too can find the issue
+// gone between the add and the confirmation. That is the same benign race as
+// the pre-write read and must not red the run.
+//
+// Killing mutation: drop the ErrIssueNotFound branch after c.AddLabel in
+// doAddLabel.
+func TestAVanishedIssueDuringLabelConfirmationIsNotAFailure(t *testing.T) {
+	var page []string
+	for i := range labelResponsePage {
+		page = append(page, fmt.Sprintf(`{"name":"area/%d"}`, i))
+	}
+	fullPage := "[" + strings.Join(page, ",") + "]"
+
+	// The pre-write read finds the issue needing a label; the confirming read,
+	// after the add, finds it gone.
+	var graphQLCalls int
+	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			graphQLCalls++
+			if graphQLCalls == 1 {
+				_, _ = io.WriteString(w, untriagedIssueJSON)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND",`+
+				`"path":["repository","issue"],"message":"gone"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, fullPage)
+	}))
+	c.authorized = make(map[int]need)
+	c.attempts = make(map[attemptKey]int)
+	c.authorize(7, need{label: true})
+
+	res, err := c.doAddLabel(scoped(7), 7, "bug")
+	if err != nil {
+		t.Fatalf("doAddLabel returned a Go error for an issue that vanished mid-confirmation: %v", err)
+	}
+	if res.Status != "error" || !strings.Contains(res.Message, "no longer exists") {
+		t.Errorf("doAddLabel = %+v, want a model-readable refusal", res)
+	}
+	if c.hadToolError() {
+		t.Error("a vanished issue was recorded as an infrastructure failure; the scheduled sweep would go red")
+	}
+	if graphQLCalls != 2 {
+		t.Errorf("made %d GraphQL calls, want 2: the confirming read must have run", graphQLCalls)
+	}
+}
+
 // A NOT_FOUND about the REPOSITORY is a configuration failure, not a vanished
 // issue, and must stay loud. GitHub uses the same error type for both, so only
 // the path distinguishes them -- and reading a wrong OWNER/REPO as "the issue
@@ -856,50 +940,64 @@ func TestAVanishedIssueIsNotAFailure(t *testing.T) {
 //
 // Killing mutation: delete the c.attempt check from checkIssueArg.
 func TestAnIssueGetsABoundedNumberOfAttempts(t *testing.T) {
-	var reads, writes int
-	c := testClient(t, testConfig(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/graphql" {
-			reads++
-			// Always still needing a type, so nothing but the cap can stop the
-			// model retrying.
-			_, _ = io.WriteString(w, untriagedIssueJSON)
-			return
-		}
-		writes++
-		// Report the type as unset, so the write is judged not applied and the
-		// model has a reason to keep trying.
-		_, _ = io.WriteString(w, `{"number":7}`)
-	}))
-	c.authorized = make(map[int]need)
-	c.attempts = make(map[int]int)
+	// The reads the cap exists to bound are only spendable CONCURRENTLY: once
+	// one call claims the field, later sequential calls are refused at peek
+	// with no network. So release the fan-out together, the way the framework
+	// does, and count the reads that actually reach GitHub.
+	var reads, writes atomic.Int64
+	c := writeClientAtomic(t, testConfig(), &reads, func(w http.ResponseWriter, _ *http.Request) {
+		writes.Add(1)
+		_, _ = io.WriteString(w, `{"number":7,"type":{"name":"Bug"}}`)
+	})
 	c.authorize(7, need{typ: true, label: true})
 
-	var refusals int
-	for range maxAttemptsPerIssue * 3 {
-		res, err := c.doChangeType(scoped(7), 7, "Bug")
-		if err != nil {
-			continue // the not-applied write, expected
-		}
-		if strings.Contains(res.Message, "tool calls for this run") {
-			refusals++
-		}
+	const callers = 64
+	var (
+		wg       sync.WaitGroup
+		refusals atomic.Int64
+		start    = make(chan struct{})
+	)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res, err := c.doChangeType(scoped(7), 7, "Bug")
+			if err != nil {
+				return
+			}
+			if strings.Contains(res.Message, "attempts for this run") {
+				refusals.Add(1)
+			}
+		}()
 	}
+	close(start)
+	wg.Wait()
 
-	if refusals == 0 {
+	if refusals.Load() == 0 {
 		t.Fatal("the attempt cap never fired; a model can spend unbounded GitHub reads")
 	}
-	readsAtCap := reads
-	// Every further call must be refused without touching the network.
-	for range 5 {
-		if _, err := c.doChangeType(scoped(7), 7, "Bug"); err != nil {
-			t.Fatalf("a capped call returned a Go error: %v", err)
-		}
+	// This is the property the cap is for: reads are bounded by the cap, not by
+	// how many calls the model chose to emit.
+	if got := reads.Load(); got > maxAttemptsPerIssue {
+		t.Errorf("%d callers spent %d GitHub reads, want at most the cap of %d",
+			callers, got, maxAttemptsPerIssue)
 	}
-	if reads != readsAtCap {
-		t.Errorf("calls past the cap made %d further reads, want 0", reads-readsAtCap)
+	if got := writes.Load(); got != 1 {
+		t.Errorf("made %d writes, want exactly 1: the claim is one-shot", got)
 	}
-	if writes > 1 {
-		t.Errorf("made %d writes, want at most 1: the claim is one-shot", writes)
+
+	// The cap must stay small enough to be a bound. A well-behaved run makes one
+	// call per field, so anything past a handful is not bounding anything.
+	if maxAttemptsPerIssue > 16 {
+		t.Errorf("maxAttemptsPerIssue = %d, which is too high to bound read amplification", maxAttemptsPerIssue)
+	}
+
+	// The cap is per field, so a burst on the type must not starve the label.
+	// Only the refusal matters here, so it is enough that the label call gets
+	// past checkIssueArg -- an out-of-budget call never reaches the network.
+	if msg, ok := c.checkIssueArg(scoped(7), 7, "label"); !ok {
+		t.Errorf("a burst of type calls exhausted the label's budget too (%s); the cap must be per field", msg)
 	}
 }
 
@@ -914,7 +1012,7 @@ func TestAnOutOfScopeRefusalIsLogged(t *testing.T) {
 		cfg:        testConfig(),
 		log:        slog.New(slog.NewTextHandler(&buf, nil)),
 		authorized: make(map[int]need),
-		attempts:   make(map[int]int),
+		attempts:   make(map[attemptKey]int),
 	}
 	c.authorize(99, need{typ: true})
 
