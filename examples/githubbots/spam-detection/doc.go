@@ -23,22 +23,26 @@
 // The bot is code-orchestrated: code finds the candidate issues and runs the
 // LLMAgent once per issue in its own isolated session, with bounded concurrency
 // via errgroup. Each issue's session is scoped to that issue (withAuditedIssue),
-// so injected instructions in the (untrusted) issue or comment text cannot make
-// a tool act on a different issue. The deterministic pre-processing is done
+// so injected instructions in the (untrusted) issue text cannot make a tool act
+// on a different issue. The deterministic pre-processing is done
 // entirely in code and the finished, untrusted-marked text is embedded in the
 // per-issue prompt; the model's only tool is flag_issue_as_spam. Before the
 // model is ever invoked, the bot:
+//   - narrows the input to the issue's OWN title and body. Comments are fetched
+//     to recognize the bot's past alerts and are never sent to the model:
+//     flagging labels the whole thread, so any content the decision may rest on
+//     is content a stranger could use to get somebody else's issue labelled;
 //   - skips issues already labeled spam or already carrying the bot's alert
 //     comment;
-//   - drops comments from maintainers and its own past alerts. A bot account
-//     is dropped only by being named in MAINTAINERS: skipping every "[bot]"
-//     login by suffix would extend unconditional trust to every GitHub App
-//     installed on the repository;
-//   - truncates long text, per blob and in total, spending the total budget
-//     newest-comment-first and saying in the prompt when anything was dropped
-//     (it does not strip fenced code blocks, so spam cannot hide inside a ```
-//     fence);
-//   - annotates each remaining author with their GitHub author association
+//   - skips issues opened by a maintainer. A bot account is skipped only by
+//     being named in MAINTAINERS: skipping every "[bot]" login by suffix would
+//     extend unconditional trust to every GitHub App installed on the
+//     repository, and an issue opened under the bot's own (shared) Actions
+//     identity is reviewed like any other;
+//   - truncates the title and the body independently, saying in a trusted line
+//     of the prompt when either was cut (it does not strip fenced code blocks,
+//     so spam cannot hide inside a ``` fence);
+//   - annotates the author with their GitHub author association
 //     (e.g. FIRST_TIME_CONTRIBUTOR), which the prompt uses as a spam-likelihood
 //     prior alongside a few worked examples.
 //
@@ -51,9 +55,7 @@
 // guard (the sweep excludes already-labeled issues and the per-issue check skips
 // them); within a run, flagging an issue twice is a no-op in code; the bot's own
 // alert comment is a best-effort secondary signal, recognized by an invisible
-// marker only this bot emits (see github.go for its bound). Comments beyond the
-// fetch window, and any the assembly budget drops, are counted and named in a
-// trusted line in the prompt rather than silently withheld from the model.
+// marker only this bot emits (see github.go for its bound).
 //
 // Each review builds its own agent, runner and session service. ADK initializes
 // mutable state on the agent during the first run, so a shared runner races
@@ -62,7 +64,9 @@
 // Deliberate differences from the Python adk_issue_monitoring_agent original:
 // the scheduled sweep is capped (ISSUE_COUNT, most-recently-updated first)
 // rather than Python's uncapped 24h "since" sweep / INITIAL_FULL_SCAN; the issue
-// title is reviewed in addition to the body; fenced code blocks are kept (Python
+// title is reviewed in addition to the body; comments are NOT reviewed (Python
+// fed them to the model, which lets a stranger's comment get somebody else's
+// issue labelled); fenced code blocks are kept (Python
 // stripped them) so spam cannot hide in a code fence; the alert is plain text
 // rather than an @maintainers mention; and bounded concurrency replaces Python's
 // inter-batch sleep. See README.md for the full list.

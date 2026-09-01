@@ -40,7 +40,7 @@ import (
 // mutations left it green, because the tests all called the pure helpers with
 // hand-built arguments instead of driving the real path.
 //
-//	assembleSuspectText(iss, gh.selfLogin, nil, …)   the maintainer set
+//	assembleSuspectText(iss, gh.maintainers, …)   the maintainer set
 //	alreadyHandled(iss, "", cfg.SpamLabel)           the bot's own identity
 //	deleting gh.recordError() on the fetch path      exit 0 on a rate limit
 //	deleting gh.recordError() in the event loop      exit 0 on a model error
@@ -51,6 +51,12 @@ import (
 // comments, so a test can produce the state it wants instead of asserting on
 // state it installed by hand.
 func issueWith(number int, author, body string, labels []string, comments ...Comment) string {
+	return issueTitled(number, author, "Free followers", body, labels, comments...)
+}
+
+// issueTitled is issueWith with the title spelled out, for the tests where the
+// title is part of the scenario rather than boilerplate.
+func issueTitled(number int, author, title, body string, labels []string, comments ...Comment) string {
 	labelNodes := make([]any, 0, len(labels))
 	for _, l := range labels {
 		labelNodes = append(labelNodes, map[string]any{"name": l})
@@ -64,7 +70,7 @@ func issueWith(number int, author, body string, labels []string, comments ...Com
 		})
 	}
 	payload := map[string]any{"data": map[string]any{"repository": map[string]any{"issue": map[string]any{
-		"number": number, "title": "Free followers", "body": body,
+		"number": number, "title": title, "body": body,
 		"author":            map[string]any{"login": author, "__typename": "User"},
 		"authorAssociation": "NONE",
 		"labels":            map[string]any{"nodes": labelNodes},
@@ -728,7 +734,7 @@ func nonceIn(t *testing.T, prompt string) string {
 // The reviewer factory must hand every concurrent review its OWN runner.
 //
 // ADK's runner.Run lazily initializes mutable state on the agent it is given
-// (a read at runner.go:210 against a write at :212 in v2.2.0), so a shared
+// (a read at runner.go:579 against a write at :581 in adk v2.3.0), so a shared
 // runner races as soon as two reviews overlap — which the shipped
 // CONCURRENCY_LIMIT=3 does on any sweep with two candidates.
 //
@@ -950,5 +956,63 @@ func TestClaimAndRecordShareOneCriticalSection(t *testing.T) {
 	// And its consequence, which is what the user would actually see.
 	if got := writes.Load(); got != 2 {
 		t.Errorf("made %d writes, want 2 (one alert comment and one label): %d callers won the at-most-once claim", got, got/2)
+	}
+}
+
+// A stranger's comment must not get someone else's issue labelled.
+//
+// The bot's unit of action is the issue: flagging applies a label and posts an
+// alert on the whole thread. So anything it is allowed to judge is, in effect,
+// something a third party can use to mark a maintainer's legitimate issue as
+// spam. The only content the issue's own author is answerable for is the title
+// and the body, so that is the only content the review may rest on.
+// The issue itself is still reviewed -- its own text is legitimate, so the model
+// is asked and says so. What must not happen is the stranger's text reaching the
+// model at all, and that is asserted on the prompt rather than on the outcome: a
+// "no label was applied" check alone would also hold if the model simply chose
+// not to flag, which is a judgement call and not a guarantee.
+func TestReviewIgnoresSpamInAThirdPartyComment(t *testing.T) {
+	const strangerSpam = "Buy followers cheap at http://smm-panel.example — best SMM panel!"
+	body := issueTitled(7, "realuser", "Runner blocks on a closed channel",
+		"Reproduced on v2.3.0. Stack trace attached.", nil,
+		Comment{Author: "spammer", Association: "NONE", Body: strangerSpam})
+	h := newReviewHarness(t, body, textTurn("No spam detected."))
+
+	h.review(t, 7)
+
+	if got := h.model.calls(); got != 1 {
+		t.Fatalf("the model was invoked %d time(s), want 1: the issue's own text still has to be judged", got)
+	}
+	if prompt := h.model.prompt(); strings.Contains(prompt, "smm-panel.example") {
+		t.Errorf("a stranger's comment reached the model:\n%s", prompt)
+	}
+	if got := h.writes.recorded(); len(got) != 0 {
+		t.Errorf("a stranger's comment got someone else's issue labelled: %v", got)
+	}
+}
+
+// The other half of the same rule: the issue's OWN author is still judged, so
+// narrowing the input does not switch detection off.
+//
+// The title is deliberately innocuous and the spam is in the body, and the
+// prompt is asserted on directly. A scripted model flags whatever it is handed,
+// so "the label landed" alone would still hold if the body never reached the
+// model and only the title did.
+func TestReviewStillJudgesTheIssueAuthorsOwnText(t *testing.T) {
+	const authorSpam = "Buy followers cheap at http://smm-panel.example"
+	body := issueTitled(7, "spammer", "Question about the runner", authorSpam, nil,
+		Comment{Author: "helpful", Association: "MEMBER", Body: "Reported, thanks."})
+	h := newReviewHarness(t, body, flagCallTurn(7, "promotional link"), textTurn("Flagged."))
+
+	h.review(t, 7)
+
+	if got := h.model.calls(); got == 0 {
+		t.Fatal("the issue author's own spam was never reviewed")
+	}
+	if prompt := h.model.prompt(); !strings.Contains(prompt, authorSpam) {
+		t.Errorf("the author's own body never reached the model:\n%s", prompt)
+	}
+	if got := h.writes.recorded(); len(got) != 2 {
+		t.Errorf("writes = %v, want the alert comment and the label", got)
 	}
 }

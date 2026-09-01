@@ -17,7 +17,6 @@ package main
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 )
 
@@ -43,24 +42,10 @@ const botAlertMarker = "<!-- adk-go-spam-detection-bot -->"
 // keeps the prompt small and the run cheap.
 const maxSnippetRunes = 1500
 
-// maxSuspectRunes bounds the TOTAL text assembled for one issue, across every
-// blob. maxSnippetRunes alone does not bound it: the fetch takes up to 100
-// comments, so a thread bumped inside the freshness window could otherwise send
-// on the order of 150k runes of attacker-authored text to the model, on every
-// sweep, four times a day.
-//
-// It is set well above what a normal thread needs, because every rune of
-// headroom is a comment an attacker cannot push out of the prompt by padding.
-// When the bound does bite, assembleSuspectText says so in the prompt rather
-// than letting the model judge a thread it was never told was partial.
-const maxSuspectRunes = 40000
-
-// truncNoteText is the TRUSTED annotation on a header whose blob was cut. The
+// truncNoteText is the TRUSTED annotation on a header whose text was cut. The
 // " …[truncated]" marker clean() leaves is inside the fence, and the prompt
 // tells the model not to trust anything in there -- and an attacker can type it.
 const truncNoteText = " [truncated for length]"
-
-var truncNoteRunes = len([]rune(truncNoteText))
 
 // maxReasonRunes bounds the model-authored detection_reason before it is posted
 // under the bot's identity. The model is treated as attacker-influenced and Go
@@ -90,12 +75,9 @@ type Issue struct {
 	// Association is the issue author's GitHub author association (see Comment).
 	Association string
 	Labels      []string
-	Comments    []Comment
-	// UnfetchedComment counts comments the fetch window left behind. They are
-	// content the model is never shown, so assembleSuspectText declares them
-	// alongside the ones its own budget dropped -- otherwise a thread with more
-	// than the window's worth of comments reaches the model looking complete.
-	UnfetchedComment int
+	// Comments are fetched for the idempotency checks only -- hasBotAlert reads
+	// them. They are never sent to the model; see assembleSuspectText.
+	Comments []Comment
 }
 
 // maintainerSet builds a lowercased lookup set of maintainer logins. GitHub
@@ -243,147 +225,75 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + " …[truncated]"
 }
 
-// assembleSuspectText builds the text handed to the model for one issue: the
-// issue's own title/body (when its author is reviewable) followed by each
-// reviewable comment, with long text truncated. It returns "" when there is
-// nothing to review (e.g. every author is a maintainer or a bot), which lets the
+// assembleSuspectText builds the text handed to the model for one issue: its
+// title and body, and nothing else. It returns "" when there is nothing to
+// review -- the author is a maintainer, or the issue is empty -- which lets the
 // caller skip the issue without invoking the model.
 //
-// Trust boundary: the authorship/association headers are TRUSTED scaffolding
-// generated here from GitHub API metadata and are emitted OUTSIDE the fence.
-// Each user-controlled blob (title+body, or a comment body) is wrapped in its
-// own [UNTRUSTED:nonce] ... [/UNTRUSTED:nonce] fence. Because the nonce is
+// COMMENTS ARE NOT INCLUDED, and that is the point rather than an omission.
+// Flagging acts on the whole issue: it labels the thread and posts an alert on
+// it. So any content the review is allowed to rest on is content a third party
+// could use to get someone else's legitimate issue marked as spam -- a stranger
+// leaves one promotional comment on a maintainer's bug report and the bot
+// labels the bug report. The issue's author is answerable for the title and the
+// body and for nothing else, so that is the whole of the input.
+//
+// This is enforced here rather than asked of the model. The prompt does say the
+// bot judges only the issue's own text, but a prompt cannot be relied on to
+// resist text that argues with it, and comment bodies are attacker-controlled.
+// Not putting them in the prompt is the only version of this rule that holds.
+//
+// An issue OPENED under the bot's own identity is still reviewed. In production
+// that identity is github-actions[bot], the login of every Actions workflow in
+// the repository, so exempting it would exempt any sibling workflow that files
+// an issue quoting user text. Only the maintainer set skips a review.
+//
+// Trust boundary: the authorship/association header is TRUSTED scaffolding
+// generated here from GitHub API metadata and is emitted OUTSIDE the fence. The
+// user-controlled title and body are wrapped in a single
+// [UNTRUSTED:nonce] ... [/UNTRUSTED:nonce] fence. Because the nonce is
 // unguessable, a spammer cannot close the fence to escape it, and because the
-// headers live outside the fence they cannot forge a "Comment by @owner
-// [author association: OWNER]" line inside their own text — any such attempt
-// stays trapped inside the fence as inert data.
+// header lives outside the fence they cannot forge a trusted authorship line --
+// any such attempt stays trapped inside the fence as inert data.
 //
 // It is pure so it can be exhaustively table-tested.
-func assembleSuspectText(iss Issue, selfLogin string, maintainers map[string]bool, maxRunes int, nonce string) string {
+func assembleSuspectText(iss Issue, maintainers map[string]bool, maxRunes int, nonce string) string {
+	if isIgnoredAuthor(iss.Author, maintainers) {
+		return ""
+	}
+
 	open, closeTag := "[UNTRUSTED:"+nonce+"]", "[/UNTRUSTED:"+nonce+"]"
-	fence := func(s string) string { return open + "\n" + s + "\n" + closeTag }
+	header := fmt.Sprintf("Issue #%d opened by @%s%s", iss.Number, authorName(iss.Author), assocNote(iss.Association))
 
-	var sections []string
-	// budget is the remaining allowance across the whole assembly, charged for
-	// the trusted scaffolding as well as the text, so it bounds the assembled
-	// prompt and not merely its untrusted parts. Each blob is still capped at
-	// maxRunes; this stops a hundred capped blobs adding up.
-	// Reserved up front for the omission note below, which is emitted after the
-	// budget is spent and would otherwise push the assembly past the bound.
-	budget := maxSuspectRunes - 256
-	fenceCost := len([]rune(open)) + len([]rune(closeTag)) + len([]rune("\n\n---\n\n")) + 3
-
-	// take returns as much of s as the budget allows, charged for the fence and
-	// for the header the caller will put on it. It charges NOTHING when it
-	// returns nothing, so a run of whitespace-only comments cannot drain the
-	// allowance without contributing any text.
-	// truncated records whether the last take() cut its input, so the caller can
-	// say so in the TRUSTED header. The " …[truncated]" marker clean() leaves is
-	// inside the fence, and the prompt tells the model not to trust anything in
-	// there -- and an attacker can type the marker themselves.
-	truncated := false
-	take := func(s, header string) string {
-		truncated = false
-		// truncNoteRunes is charged unconditionally: the annotation is emitted
-		// outside the fence when a blob is cut, and leaving it uncharged made
-		// maxSuspectRunes a soft bound on exactly the threads that hit it.
-		cost := fenceCost + len([]rune(header)) + truncNoteRunes
-		if budget <= cost {
-			return ""
-		}
-		allowed := min(maxRunes, budget-cost)
-		trimmed := strings.TrimSpace(s)
-		out := clean(s, allowed)
-		if out == "" {
-			return ""
-		}
-		// Against the ALLOWANCE, not against len(out): clean() appends a 13-rune
-		// marker when it cuts, so comparing lengths reported "not truncated" for
-		// any cut of 13 runes or fewer -- exactly the header signal the prompt
-		// tells the model to rely on, silently absent.
-		truncated = len([]rune(trimmed)) > allowed
-		budget -= len([]rune(out)) + cost
-		return out
+	var content strings.Builder
+	cut := false
+	if title, trimmed := clean(iss.Title, maxRunes), strings.TrimSpace(iss.Title); title != "" {
+		content.WriteString("Title: " + title)
+		cut = cut || len([]rune(trimmed)) > maxRunes
 	}
-
-	// truncNote renders the trusted "this was cut" annotation.
-	truncNote := func(cut bool) string {
-		if cut {
-			return truncNoteText
-		}
-		return ""
-	}
-
-	if !isIgnoredAuthor(iss.Author, maintainers) {
-		header := fmt.Sprintf("Issue #%d opened by @%s%s", iss.Number, authorName(iss.Author), assocNote(iss.Association))
-		var content strings.Builder
-		cut := false
-		if title := take(iss.Title, header); title != "" {
-			content.WriteString("Title: " + title)
-			cut = cut || truncated
-		}
-		if body := take(iss.Body, header); body != "" {
-			if content.Len() > 0 {
-				content.WriteString("\n")
-			}
-			content.WriteString("Body:\n" + body)
-			cut = cut || truncated
-		}
+	if body, trimmed := clean(iss.Body, maxRunes), strings.TrimSpace(iss.Body); body != "" {
 		if content.Len() > 0 {
-			sections = append(sections, header+truncNote(cut)+"\n"+fence(content.String()))
+			content.WriteString("\n")
 		}
+		content.WriteString("Body:\n" + body)
+		cut = cut || len([]rune(trimmed)) > maxRunes
 	}
-
-	// The budget is spent NEWEST FIRST. FetchIssue asks for comments(last: N) and
-	// GitHub returns those oldest-first, so spending it in slice order starved
-	// the most recent comment — which on a thread the sweep selected precisely
-	// because it was just updated is the one most likely to be new spam. The
-	// sections are emitted back in thread order below, so the model still reads
-	// the conversation the way it was written.
-	var commentSections []string
-	// Seeded with the comments the fetch never retrieved. A thread longer than
-	// the fetch window would otherwise reach the model indistinguishable from a
-	// complete one -- the same state the budget's own note exists to prevent,
-	// reached by a different route and without any note at all.
-	omitted := iss.UnfetchedComment
-	for i := len(iss.Comments) - 1; i >= 0; i-- {
-		c := iss.Comments[i]
-		// The bot's own alerts are skipped by their marker, not by their author:
-		// anything else written under the same shared Actions identity is
-		// reviewed like any other comment.
-		if isIgnoredAuthor(c.Author, maintainers) || isOwnAlert(c.Author, c.Body, selfLogin) {
-			continue
-		}
-		header := fmt.Sprintf("Comment by @%s%s:", authorName(c.Author), assocNote(c.Association))
-		body := take(c.Body, header)
-		if body == "" {
-			// Either the comment was empty, or the budget is gone. Only the
-			// second is worth telling the model about.
-			if strings.TrimSpace(c.Body) != "" {
-				omitted++
-			}
-			continue
-		}
-		commentSections = append(commentSections, header+truncNote(truncated)+"\n"+fence(body))
-	}
-	slices.Reverse(commentSections)
-	sections = append(sections, commentSections...)
-
-	if len(sections) == 0 {
+	if content.Len() == 0 {
 		return ""
 	}
-	if omitted > 0 {
-		// A trusted line, outside every fence. Without it the model would judge
-		// a partial thread as if it were the whole one, and answer "no spam"
-		// over content it was never shown.
-		sections = append(sections, fmt.Sprintf(
-			"NOTE (trusted): %d comment(s) on this issue were omitted because the "+
-				"review length limit was reached. Judge only what is shown; do not assume "+
-				"the omitted comments were harmless.", omitted,
-		))
-	}
 
-	return strings.Join(sections, "\n\n---\n\n")
+	// The cut is announced in the TRUSTED header. clean() leaves a marker inside
+	// the fence, but the prompt tells the model not to trust anything in there --
+	// and an attacker can type that marker themselves.
+	return header + truncNote(cut) + "\n" + open + "\n" + content.String() + "\n" + closeTag
+}
+
+// truncNote renders the trusted "this was cut" annotation.
+func truncNote(cut bool) string {
+	if cut {
+		return truncNoteText
+	}
+	return ""
 }
 
 // authorName renders a login for a trusted header, naming a deleted account

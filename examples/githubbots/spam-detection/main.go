@@ -173,7 +173,7 @@ func reviewerFor(cfg *Config, mdl model.LLM, tools []tool.Tool, instruction stri
 // One per review, not one for the whole sweep. ADK's runner.Run initializes
 // mutable state on the agent it is given the first time it runs, so two
 // concurrent Run calls on a shared runner race on that state: `go test -race`
-// reports a read at runner.go:210 against a write at runner.go:212 as soon as
+// reports a read at runner.go:579 against a write at runner.go:581 as soon as
 // two reviews overlap, which the shipped configuration (CONCURRENCY_LIMIT=3)
 // does on any sweep with two candidates. There is no exported way to
 // pre-initialize it, so isolation is the fix. Everything here is struct
@@ -341,7 +341,7 @@ func runReviewFor(ictx context.Context, newReviewer reviewerFactory, gh *GitHubC
 		gh.recordError()
 		return
 	}
-	suspect := assembleSuspectText(iss, gh.selfLogin, gh.maintainers, maxSnippetRunes, nonce)
+	suspect := assembleSuspectText(iss, gh.maintainers, maxSnippetRunes, nonce)
 	if suspect == "" {
 		l.Debug("no reviewable content; skipping")
 		return

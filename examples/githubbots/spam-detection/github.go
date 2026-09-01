@@ -339,11 +339,7 @@ type rawIssue struct {
 		} `json:"nodes"`
 	} `json:"labels"`
 	Comments struct {
-		// TotalCount is every comment on the issue, not just the fetched page.
-		// The difference is content the model is never shown, and it has to be
-		// declared to it rather than silently dropped.
-		TotalCount int         `json:"totalCount"`
-		Nodes      []ghComment `json:"nodes"`
+		Nodes []ghComment `json:"nodes"`
 	} `json:"comments"`
 }
 
@@ -371,18 +367,14 @@ func (r *rawIssue) toIssue() Issue {
 	for _, c := range r.Comments.Nodes {
 		comments = append(comments, Comment{Author: login(c.Author), Association: c.AuthorAssociation, Body: c.Body})
 	}
-	// Never negative: totalCount cannot be below the number of nodes returned,
-	// but a malformed or absent field must not produce a nonsense count.
-	unfetched := max(r.Comments.TotalCount-len(comments), 0)
 	return Issue{
-		Number:           r.Number,
-		Title:            r.Title,
-		Body:             r.Body,
-		Author:           login(r.Author),
-		Association:      r.AuthorAssociation,
-		Labels:           labels,
-		Comments:         comments,
-		UnfetchedComment: unfetched,
+		Number:      r.Number,
+		Title:       r.Title,
+		Body:        r.Body,
+		Author:      login(r.Author),
+		Association: r.AuthorAssociation,
+		Labels:      labels,
+		Comments:    comments,
 	}
 }
 
@@ -397,7 +389,6 @@ query($owner: String!, $name: String!, $number: Int!, $commentLimit: Int!) {
       authorAssociation
       labels(first: 100) { nodes { name } }
       comments(last: $commentLimit) {
-        totalCount
         nodes { author { login __typename } authorAssociation body }
       }
     }
