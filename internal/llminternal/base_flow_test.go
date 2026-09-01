@@ -451,6 +451,16 @@ func TestDisplayableToolResultText(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:   "empty string result is not displayable",
+			result: map[string]any{"result": ""},
+			wantOK: false,
+		},
+		{
+			name:   "nil result is not displayable",
+			result: map[string]any{"result": nil},
+			wantOK: false,
+		},
+		{
 			name:     "single plain-text result key is shown as-is",
 			result:   map[string]any{"result": "sub-agent output"},
 			wantText: "sub-agent output",
@@ -466,6 +476,12 @@ func TestDisplayableToolResultText(t *testing.T) {
 			name:     "structured result is rendered as JSON",
 			result:   map[string]any{"status": "ok", "count": 3},
 			wantText: `{"count":3,"status":"ok"}`,
+			wantOK:   true,
+		},
+		{
+			name:     "JSON output is not HTML-escaped",
+			result:   map[string]any{"url": "https://example.com/a&b<c>"},
+			wantText: `{"url":"https://example.com/a&b<c>"}`,
 			wantOK:   true,
 		},
 	}

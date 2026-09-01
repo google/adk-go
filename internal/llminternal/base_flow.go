@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1100,8 +1101,8 @@ func (c *cancelledToolContext) Value(key any) any {
 // displayableToolResultText renders a tool result as text for the case where
 // SkipSummarization suppresses the LLM's own summary of it. It returns
 // ok=false for results that carry nothing worth showing: error responses,
-// and empty results such as those from control-flow-only tools (e.g.
-// exitlooptool), which return no meaningful output of their own.
+// and empty or null results such as those from control-flow-only tools
+// (e.g. exitlooptool), which return no meaningful output of their own.
 //
 // Tools that wrap a single plain-text result under a "result" key (the
 // convention used by agenttool) are shown as-is; anything else is rendered
@@ -1113,14 +1114,35 @@ func displayableToolResultText(result map[string]any) (string, bool) {
 	if _, isErr := result["error"]; isErr {
 		return "", false
 	}
-	if text, ok := result["result"].(string); ok && len(result) == 1 {
-		return text, true
+	if len(result) == 1 {
+		if v, ok := result["result"]; ok {
+			if v == nil {
+				return "", false
+			}
+			if text, ok := v.(string); ok {
+				return text, text != ""
+			}
+		}
 	}
-	b, err := json.Marshal(result)
+	b, err := marshalJSONNoHTMLEscape(result)
 	if err != nil {
 		return "", false
 	}
 	return string(b), true
+}
+
+// marshalJSONNoHTMLEscape is json.Marshal without HTML-escaping the output.
+// json.Marshal escapes '<', '>' and '&' (e.g. a URL's "&" becomes "&"),
+// which is meant for embedding JSON in HTML but only hurts readability of
+// text meant for a chat transcript.
+func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
@@ -1267,18 +1289,21 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			// SkipSummarization causes the parent agent loop to terminate on this
 			// event (see session.Event.IsFinalResponse) without the LLM ever
 			// seeing the function response. Since most UIs don't render function
-			// response parts, attach the result as a visible text part so it isn't
-			// silently dropped from the terminal event.
+			// response parts, attach the result as a visible text part so it
+			// isn't silently dropped from the terminal event.
 			//
-			// Skip this when a tool confirmation was requested on the call: that
-			// path (agent.Context.RequestConfirmation) also sets SkipSummarization
-			// to stop the loop while the caller waits on the confirmation, but the
-			// pending result isn't a final answer meant for display - callers
-			// already key off RequestedToolConfirmations to drive their own UI
-			// for it.
-			if actions := toolCtx.Actions(); actions.SkipSummarization && len(actions.RequestedToolConfirmations) == 0 {
-				if text, ok := displayableToolResultText(result); ok {
-					parts = append(parts, &genai.Part{Text: text})
+			// This only applies to tools that opt in via
+			// SkipSummarizationResultDisplayer (agenttool): SkipSummarization is
+			// also set by tools whose result is an internal detail never meant
+			// for display - e.g. a pending tool confirmation (see
+			// RequestedToolConfirmations above) or a UI/widget tool's
+			// acknowledgement - and those must not have their result leaked into
+			// a visible text part.
+			if actions := toolCtx.Actions(); actions.SkipSummarization {
+				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
+					if text, ok := displayableToolResultText(result); ok {
+						parts = append(parts, &genai.Part{Text: text})
+					}
 				}
 			}
 

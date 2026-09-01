@@ -15,92 +15,24 @@
 package llminternal_test
 
 import (
-	"context"
-	"iter"
 	"testing"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
-	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-type skipSummaryArgs struct{}
-type skipSummaryResult struct {
-	Result string `json:"result"`
-}
-
-func skipSummaryFunc(ctx agent.Context, _ skipSummaryArgs) (skipSummaryResult, error) {
-	ctx.Actions().SkipSummarization = true
-	return skipSummaryResult{Result: "tool output"}, nil
-}
-
-// skipSummaryModel returns a single function call and, if invoked again,
-// fails the test: SkipSummarization is expected to end the run after one
-// function response, so the model must never be asked to summarize it.
-type skipSummaryModel struct {
-	model.LLM
-	t     *testing.T
-	calls int
-}
-
-func (m *skipSummaryModel) Name() string { return "skip-summary-model" }
-
-func (m *skipSummaryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		m.calls++
-		if m.calls > 1 {
-			m.t.Fatalf("model called %d times; SkipSummarization should end the run after the first function response", m.calls)
-			return
-		}
-		yield(&model.LLMResponse{
-			Content: &genai.Content{
-				Role: "model",
-				Parts: []*genai.Part{
-					{
-						FunctionCall: &genai.FunctionCall{
-							ID:   "call_1",
-							Name: "skip_summary",
-							Args: map[string]any{},
-						},
-					},
-				},
-			},
-		}, nil)
-	}
-}
-
-// TestHandleFunctionCalls_SkipSummarizationDisplaysResult verifies that when
-// a tool sets SkipSummarization, the parent agent loop still terminates on
-// the function response event (the flag's documented effect), but the
-// terminal event carries the tool's result as a visible text part rather
-// than a bare, unrendered FunctionResponse.
-func TestHandleFunctionCalls_SkipSummarizationDisplaysResult(t *testing.T) {
-	skipSummaryTool, err := functiontool.New(functiontool.Config{
-		Name:        "skip_summary",
-		Description: "returns a result and skips summarization",
-	}, skipSummaryFunc)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	m := &skipSummaryModel{t: t}
-
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "tester",
-		Description: "Tester agent",
-		Instruction: "You are a tester agent.",
-		Model:       m,
-		Tools:       []tool.Tool{skipSummaryTool},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// runSkipSummarizationScenario runs rootAgent (backed by a singleCallMockModel
+// that calls toolName once) to completion and returns the collected events.
+func runSkipSummarizationScenario(t *testing.T, rootAgent agent.Agent) []*session.Event {
+	t.Helper()
 
 	sessionService := session.InMemoryService()
 	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{
@@ -112,7 +44,7 @@ func TestHandleFunctionCalls_SkipSummarizationDisplaysResult(t *testing.T) {
 	}
 
 	r, err := runner.New(runner.Config{
-		Agent:          a,
+		Agent:          rootAgent,
 		SessionService: sessionService,
 		AppName:        "testApp",
 	})
@@ -132,9 +64,55 @@ func TestHandleFunctionCalls_SkipSummarizationDisplaysResult(t *testing.T) {
 		}
 		events = append(events, ev)
 	}
+	return events
+}
+
+// TestHandleFunctionCalls_SkipSummarization_AgentToolDisplaysResult verifies
+// that when agenttool sets SkipSummarization, the parent agent loop still
+// terminates on the function response event (the flag's documented effect),
+// but the terminal event carries the sub-agent's answer as a visible text
+// part rather than a bare, unrendered FunctionResponse.
+func TestHandleFunctionCalls_SkipSummarization_AgentToolDisplaysResult(t *testing.T) {
+	subAgentModel := &testutil.MockModel{
+		Responses: []*genai.Content{
+			genai.NewContentFromText("sub-agent answer", genai.RoleModel),
+		},
+	}
+	subAgent, err := llmagent.New(llmagent.Config{
+		Name:        "sub_agent",
+		Description: "answers questions",
+		Instruction: "Answer the question.",
+		Model:       subAgentModel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentTool := agenttool.New(subAgent, &agenttool.Config{SkipSummarization: true})
+
+	rootModel := &singleCallMockModel{
+		toolName: agentTool.Name(),
+		fcID:     "call_1",
+		args:     map[string]any{"request": "what is the answer?"},
+	}
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:        "root",
+		Description: "root agent",
+		Instruction: "Delegate to the sub-agent.",
+		Model:       rootModel,
+		Tools:       []tool.Tool{agentTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := runSkipSummarizationScenario(t, rootAgent)
 
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events (function call, function response), got %d", len(events))
+	}
+	if rootModel.calls != 1 {
+		t.Errorf("root model called %d times, want 1: SkipSummarization should end the run after the first function response", rootModel.calls)
 	}
 
 	respEvent := events[1]
@@ -157,9 +135,60 @@ func TestHandleFunctionCalls_SkipSummarizationDisplaysResult(t *testing.T) {
 		t.Errorf("expected final event to retain the FunctionResponse part")
 	}
 	if !gotText {
-		t.Errorf("expected final event to carry a visible text part with the tool result")
+		t.Errorf("expected final event to carry a visible text part with the sub-agent's answer")
 	}
-	if text != "tool output" {
-		t.Errorf("text part = %q, want %q", text, "tool output")
+	if text != "sub-agent answer" {
+		t.Errorf("text part = %q, want %q", text, "sub-agent answer")
+	}
+}
+
+// TestHandleFunctionCalls_SkipSummarization_PlainToolResultNotDisplayed
+// verifies that SkipSummarization set by a tool other than agenttool still
+// ends the parent agent loop, but does NOT get its result surfaced as text.
+// SkipSummarization is also used by UI/widget and pending-confirmation tools
+// to suppress an internal acknowledgement that was never meant to be shown;
+// unconditionally displaying it would leak that payload into the transcript
+// and bypass client-side filters that strip FunctionResponse parts.
+func TestHandleFunctionCalls_SkipSummarization_PlainToolResultNotDisplayed(t *testing.T) {
+	const toolName = "widget_ack"
+
+	widgetTool, err := functiontool.New(functiontool.Config{
+		Name:        toolName,
+		Description: "acknowledges a widget interaction",
+	}, func(ctx agent.Context, _ struct{}) (map[string]string, error) {
+		ctx.Actions().SkipSummarization = true
+		return map[string]string{"status": "ok"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootModel := &singleCallMockModel{toolName: toolName, fcID: "call_1"}
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:        "root",
+		Description: "root agent",
+		Instruction: "Use the widget tool.",
+		Model:       rootModel,
+		Tools:       []tool.Tool{widgetTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := runSkipSummarizationScenario(t, rootAgent)
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (function call, function response), got %d", len(events))
+	}
+	if rootModel.calls != 1 {
+		t.Errorf("root model called %d times, want 1: SkipSummarization should end the run after the first function response", rootModel.calls)
+	}
+
+	respEvent := events[1]
+	if !respEvent.IsFinalResponse() {
+		t.Errorf("expected function response event to be the final response, IsFinalResponse() = false")
+	}
+	if len(respEvent.Content.Parts) != 1 || respEvent.Content.Parts[0].FunctionResponse == nil {
+		t.Errorf("expected final event to carry only the FunctionResponse part, got %d parts: %+v", len(respEvent.Content.Parts), respEvent.Content.Parts)
 	}
 }
