@@ -301,6 +301,137 @@ func TestRequestContentAttributes_ToolTurnRole(t *testing.T) {
 	}
 }
 
+func TestRequestContentAttributes_ToolDefinitions(t *testing.T) {
+	captureContent(t)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{
+				{
+					FunctionDeclarations: []*genai.FunctionDeclaration{
+						{
+							Name:        "get_weather",
+							Description: "Gets the weather for a city.",
+							ParametersJsonSchema: map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"city": map[string]any{
+										"type":        "string",
+										"description": "The city name.",
+									},
+								},
+								"required": []string{"city"},
+							},
+						},
+						{
+							Name:        "get_time",
+							Description: "Gets the current time for a timezone.",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	key := attribute.Key("gen_ai.tool.definitions")
+	encoded, ok := attrString(requestContentAttributes(req), key)
+	if !ok {
+		t.Fatalf("gen_ai.tool.definitions was not set")
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
+	}
+	want := []map[string]any{
+		{
+			"name":        "get_weather",
+			"description": "Gets the weather for a city.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city": map[string]any{
+						"type":        "string",
+						"description": "The city name.",
+					},
+				},
+				"required": []any{"city"},
+			},
+			"type": "function",
+		},
+		{
+			"name":        "get_time",
+			"description": "Gets the current time for a timezone.",
+			"parameters":  nil,
+			"type":        "function",
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("tool definitions (-want +got):\n%s", diff)
+	}
+}
+
+func TestRequestContentAttributes_ToolDefinitions_Parameters(t *testing.T) {
+	captureContent(t)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name: "get_weather",
+					Parameters: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"city": {Type: genai.TypeString},
+						},
+						Required: []string{"city"},
+					},
+				}},
+			}},
+		},
+	}
+
+	encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
+	if !ok {
+		t.Fatal("gen_ai.tool.definitions was not set")
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
+	}
+	want := []map[string]any{{
+		"name":        "get_weather",
+		"description": "",
+		"parameters": map[string]any{
+			"type": "OBJECT",
+			"properties": map[string]any{
+				"city": map[string]any{"type": "STRING"},
+			},
+			"required": []any{"city"},
+		},
+		"type": "function",
+	}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("tool definitions with Parameters (-want +got):\n%s", diff)
+	}
+}
+
+func TestRequestContentAttributes_ToolDefinitionsRespectsCapture(t *testing.T) {
+	t.Setenv(captureMessageContentEnvVar, "")
+	ApplyEnv()
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "get_weather"}},
+			}},
+		},
+	}
+	if _, ok := attrString(requestContentAttributes(req), genAIToolDefinitions); ok {
+		t.Fatal("gen_ai.tool.definitions was set while content capture was disabled")
+	}
+}
+
 func TestRequestContentAttributes_SystemInstructions(t *testing.T) {
 	captureContent(t)
 

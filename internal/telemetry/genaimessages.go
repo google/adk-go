@@ -31,6 +31,7 @@ var (
 	genAIInputMessages      = attribute.Key("gen_ai.input.messages")
 	genAIOutputMessages     = attribute.Key("gen_ai.output.messages")
 	genAISystemInstructions = attribute.Key("gen_ai.system_instructions")
+	genAIToolDefinitions    = attribute.Key("gen_ai.tool.definitions")
 )
 
 // Part type discriminators and roles defined by the message JSON schemas.
@@ -117,6 +118,49 @@ type toolResponsePart struct {
 	Response json.RawMessage `json:"response"`
 }
 
+// functionToolDefinition is the representation used by the GenAI semantic
+// conventions for a function declaration. Description and parameters are kept
+// as explicit fields so their absence is distinguishable from an empty value
+// in the recorded JSON.
+type functionToolDefinition struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
+	Type        string `json:"type"`
+}
+
+// toolDefinitions converts the function declarations present in the actual
+// model request into the gen_ai.tool.definitions representation. Reading the
+// request is important because a Toolset may produce a different set of tools
+// for each model call.
+func toolDefinitions(config *genai.GenerateContentConfig) []functionToolDefinition {
+	if config == nil {
+		return nil
+	}
+	var definitions []functionToolDefinition
+	for _, tool := range config.Tools {
+		if tool == nil {
+			continue
+		}
+		for _, declaration := range tool.FunctionDeclarations {
+			if declaration == nil {
+				continue
+			}
+			parameters := any(declaration.Parameters)
+			if declaration.ParametersJsonSchema != nil {
+				parameters = declaration.ParametersJsonSchema
+			}
+			definitions = append(definitions, functionToolDefinition{
+				Name:        declaration.Name,
+				Description: declaration.Description,
+				Parameters:  parameters,
+				Type:        "function",
+			})
+		}
+	}
+	return definitions
+}
+
 // requestContentAttributes returns the gen_ai.system_instructions and
 // gen_ai.input.messages attributes for req, or nil when content capture is off
 // or req carries nothing to record.
@@ -134,6 +178,9 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 		if parts := semconvParts(req.Config.SystemInstruction.Parts); len(parts) > 0 {
 			attrs = appendJSON(attrs, genAISystemInstructions, parts)
 		}
+	}
+	if definitions := toolDefinitions(req.Config); len(definitions) > 0 {
+		attrs = appendJSON(attrs, genAIToolDefinitions, definitions)
 	}
 	if len(req.Contents) > 0 {
 		// Messages MUST be recorded in the order they were sent. A turn whose
