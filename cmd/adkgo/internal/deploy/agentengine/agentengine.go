@@ -13,7 +13,6 @@
 // limitations under the License.
 
 // Package agentengine handles command line parameters and execution logic for agentengine deployment.
-
 package agentengine
 
 import (
@@ -24,6 +23,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -35,9 +36,9 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	"google.golang.org/adk/cmd/adkgo/internal/deploy"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/agentengine"
+	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/agentengine"
 )
 
 type gCloudFlags struct {
@@ -176,6 +177,68 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
+// defaultBuilderGoVersion is a last-resort builder image tag, used only when the
+// application's go.mod cannot be read and the running toolchain version cannot
+// be determined. It is a rolling tag rather than a pinned version: since this
+// branch is reached only when the required toolchain is entirely unknown, a
+// pinned default would re-rot exactly like the hardcoded tag this change removes,
+// whereas "latest" can never be too old for the app. GOTOOLCHAIN=auto in the
+// builder stage still downgrades in-image if the module needs an older toolchain.
+const defaultBuilderGoVersion = "latest"
+
+// builderGoVersion returns the Go version tag for the builder image. It prefers
+// the go directive declared in the application's go.mod so the managed build
+// uses a toolchain that satisfies what the app requires, falling back to the
+// version of the toolchain running adkgo, then to defaultBuilderGoVersion.
+func builderGoVersion(sourceDir string) string {
+	dir := sourceDir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if v := goVersionFromModFile(data); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimPrefix(runtime.Version(), "go"); isGoVersion(v) {
+		return v
+	}
+	return defaultBuilderGoVersion
+}
+
+// goVersionFromModFile extracts the value of the top-level `go` directive
+// (e.g. "1.26.5") from go.mod contents, or "" if it is absent or malformed.
+func goVersionFromModFile(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		// Drop a trailing line comment (e.g. `go 1.26.5 // pinned`) so it does
+		// not leak into the FROM instruction and break the Dockerfile.
+		if i := strings.Index(rest, "//"); i >= 0 {
+			rest = rest[:i]
+		}
+		if v := strings.TrimSpace(rest); isGoVersion(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+// goVersionPattern matches a Go version number such as "1", "1.26", "1.26.5",
+// or "1.26rc1". Validating the whole shape (not just the leading digit) guards
+// against matching a module path inside a require block and against carrying a
+// malformed value like "1abc" into a "golang:1abc" tag that does not exist.
+var goVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}([a-z]+[0-9]+)?$`)
+
+// isGoVersion reports whether s looks like a Go version number.
+func isGoVersion(s string) bool {
+	return goVersionPattern.MatchString(s)
+}
+
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
@@ -183,9 +246,14 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 			p("Writing:", f.build.dockerfileBuildPath)
 
 			var b strings.Builder
-			b.WriteString(`
-FROM golang:1.25 as builder
-WORKDIR /app
+			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
+			// GOTOOLCHAIN=auto lets the in-image go command fetch the toolchain
+			// go.mod requires when the base tag is older than the module needs.
+			// The official golang images pin GOTOOLCHAIN=local, so without this a
+			// residual version mismatch (Docker Hub publishing lag, or a transitive
+			// dependency requiring a newer toolchain) is fatal instead of recoverable.
+			b.WriteString("ENV GOTOOLCHAIN=auto\n")
+			b.WriteString(`WORKDIR /app
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
@@ -279,9 +347,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "NUM_WORKERS", Value: "1"},
 								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
 								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
 							},
 						},
 						ClassMethods: methods,

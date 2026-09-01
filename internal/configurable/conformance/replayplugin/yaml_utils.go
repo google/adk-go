@@ -54,7 +54,7 @@ func normalizeYAMLNode(node *yaml.Node) {
 
 			// 1. Fix known type mismatches and singular/plural fields
 			switch keyNode.Value {
-			case "systeminstruction":
+			case "systeminstruction", "system_instruction":
 				if valueNode.Kind == yaml.ScalarNode {
 					val := valueNode.Value
 					valueNode.Kind = yaml.MappingNode

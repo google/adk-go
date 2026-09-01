@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package functiontool provides a tool that wraps a Go function.
 package functiontool
 
 import (
@@ -24,15 +23,15 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/typeutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // StreamingFunc represents a Go function that streams results.
-type StreamingFunc[TArgs any] func(agent.ToolContext, TArgs) iter.Seq2[string, error]
+type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
 
 // NewStreaming creates a new streaming tool.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
@@ -100,7 +99,7 @@ func (f *streamingFunctionTool[TArgs]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -127,7 +126,7 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 }
 
 // RunStream executes the tool with the provided context and yields events.
-func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.ToolContext, args any) iter.Seq2[string, error] {
+func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		defer func() {
 			if r := recover(); r != nil {

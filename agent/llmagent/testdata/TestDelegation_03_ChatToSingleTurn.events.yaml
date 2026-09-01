@@ -1,0 +1,85 @@
+- author: user
+  role: user
+  parts:
+    - text: Translate 'hello' to Spanish.
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: translator
+        id: 8oyvnqk0
+        args:
+            request: Translate 'hello' to Spanish
+  node_info:
+    path: coordinator
+- author: translator
+  branch: translator@1
+  role: model
+  parts:
+    - text: |-
+        {
+          "translation": "hola"
+        }
+  node_info:
+    path: coordinator/translator@1
+    message_as_output: true
+    output_for:
+        - coordinator/translator@1
+- author: coordinator
+  role: user
+  parts:
+    - function_response:
+        name: translator
+        id: 8oyvnqk0
+        response:
+            result:
+                translation: hola
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: The translation of "hello" into Spanish is "hola".
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: Now translate the same word to French.
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: translator
+        id: vplqmufs
+        args:
+            request: Translate 'hello' to French
+  node_info:
+    path: coordinator
+- author: translator
+  branch: translator@1
+  role: model
+  parts:
+    - text: "{\n  \"translation\": \"bonjour\"\n} "
+  node_info:
+    path: coordinator/translator@1
+    message_as_output: true
+    output_for:
+        - coordinator/translator@1
+- author: coordinator
+  role: user
+  parts:
+    - function_response:
+        name: translator
+        id: vplqmufs
+        response:
+            result:
+                translation: bonjour
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: The translation of "hello" into French is "bonjour".
+  node_info:
+    path: coordinator

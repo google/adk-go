@@ -28,12 +28,15 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/internal/fakes"
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
@@ -76,16 +79,17 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			controller := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{
-				Plugins: tt.plugins,
-			}, false)
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SSETimeout:   10 * time.Second,
+				PluginConfig: runner.PluginConfig{Plugins: tt.plugins},
+			})
 
 			if controller == nil {
 				t.Fatal("NewRuntimeAPIController returned nil")
 			}
 
 			if got := len(controller.pluginConfig.Plugins); got != tt.wantPlugins {
-				t.Errorf("NewRuntimeAPIController() plugins count = %v, want %v", got, tt.wantPlugins)
+				t.Errorf("NewRuntimeAPIControllerWithConfig() plugins count = %v, want %v", got, tt.wantPlugins)
 			}
 		})
 	}
@@ -117,7 +121,7 @@ func testAgent(results []testAgentResult) func(ctx agent.InvocationContext) iter
 }
 
 func makeEvent(id, author, text string) *session.Event {
-	e := session.NewEventWithContext(context.Background(), id)
+	e := session.NewEvent(context.Background(), id)
 	e.Author = author
 	e.LLMResponse.Content = &genai.Content{
 		Parts: []*genai.Part{{Text: text}},
@@ -195,15 +199,11 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 
 			// Setup controller
-			controller := NewRuntimeAPIController(
-				&sessionService,
-				nil,
-				agent.NewSingleLoader(fakeAgent),
-				nil,
-				10*time.Second,
-				runner.PluginConfig{},
-				false,
-			)
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: &sessionService,
+				AgentLoader:    agent.NewSingleLoader(fakeAgent),
+				SSETimeout:     10 * time.Second,
+			})
 
 			// Create request
 			reqObj := models.RunAgentRequest{
@@ -237,5 +237,75 @@ func TestRunSSEHandler(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+		"functionCallEventId": "fce-1"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	got, err := decodeRequestBody(req)
+	if err != nil {
+		t.Fatalf("decodeRequestBody: unexpected error: %v", err)
+	}
+	if got.FunctionCallEventID == nil || *got.FunctionCallEventID != "fce-1" {
+		t.Errorf("FunctionCallEventID = %v, want %q", got.FunctionCallEventID, "fce-1")
+	}
+}
+
+func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {},
+		"totallyMadeUpField": 123
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	if _, err := decodeRequestBody(req); err == nil {
+		t.Errorf("decodeRequestBody: expected error for unknown field, got nil")
+	}
+}
+
+// TestNewRuntimeAPIController_BackwardCompatible pins that the constructor
+// keeps the signature it was released with, and that the options live on a
+// sibling rather than on a trailing variadic parameter grown onto it.
+//
+// The assertion is the declared type of runtimeCtor below, not anything in the
+// body. A call expression cannot do this job: it keeps compiling when the
+// function it calls gains a trailing variadic, which is exactly the change that
+// breaks a caller using the identifier as a value.
+func TestNewRuntimeAPIController_BackwardCompatible(t *testing.T) {
+	c := runtimeCtor(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false)
+	if c == nil {
+		t.Fatal("NewRuntimeAPIController() returned nil")
+	}
+	if c.eventsCompactionConfig != nil {
+		t.Errorf("eventsCompactionConfig = %v, want nil when no option is supplied", c.eventsCompactionConfig)
+	}
+}
+
+// runtimeCtor fails to compile if [NewRuntimeAPIController] changes shape.
+var runtimeCtor NewRuntimeAPIControllerFunc = NewRuntimeAPIController
+
+// NewRuntimeAPIControllerFunc is the released signature of
+// [NewRuntimeAPIController].
+type NewRuntimeAPIControllerFunc = func(session.Service, memory.Service, agent.Loader, artifact.Service, time.Duration, runner.PluginConfig, bool) *RuntimeAPIController
+
+func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
+	cfg := &compaction.Config{CompactionInterval: 2}
+	c := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SSETimeout: 10 * time.Second,
+		Compaction: cfg,
+	})
+	if c.eventsCompactionConfig != cfg {
+		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
 	}
 }

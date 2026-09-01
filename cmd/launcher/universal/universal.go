@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher"
 )
 
 // uniLauncher contains information about sublaunchers
@@ -33,6 +33,9 @@ type uniLauncher struct {
 
 // Execute implements launcher.Launcher. Parses args and runs the chosen launcher. Returns error if there are non-parsed arguments.
 func (l *uniLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	return l.ParseAndRun(ctx, config, args, ErrorOnUnparsedArgs)
 }
 

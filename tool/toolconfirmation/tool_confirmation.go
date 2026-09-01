@@ -21,7 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/converters"
+	"google.golang.org/adk/v2/internal/converters"
 )
 
 // FunctionCallName defines the specific name for the FunctionCall event

@@ -25,15 +25,15 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/loadartifactstool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
 func main() {
@@ -91,7 +91,7 @@ func main() {
 }
 
 // This is a function tool to generate images using Vertex AI's Imagen model.
-func generateImage(ctx agent.ToolContext, input generateImageInput) (generateImageResult, error) {
+func generateImage(ctx agent.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -129,7 +129,7 @@ type generateImageResult struct {
 
 // This is function tool that loads image from the artifacts service and
 // saves is to the local filesystem.
-func saveImage(ctx agent.ToolContext, input saveImageInput) (saveImageResult, error) {
+func saveImage(ctx agent.Context, input saveImageInput) (saveImageResult, error) {
 	filename := input.Filename
 	resp, err := ctx.Artifacts().Load(ctx, filename)
 	if err != nil {

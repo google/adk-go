@@ -1,0 +1,82 @@
+- author: user
+  role: user
+  parts:
+    - text: Run the chained tools.
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: sub
+        id: axn9agj2
+        args:
+            request: Execute the chained tools.
+  node_info:
+    path: coordinator
+- author: sub
+  branch: sub@1
+  role: model
+  parts:
+    - function_call:
+        name: tool_one
+        id: bjqewbip
+  node_info:
+    path: coordinator/sub@1
+- author: sub
+  branch: sub@1
+  role: user
+  parts:
+    - function_response:
+        name: tool_one
+        id: bjqewbip
+        response:
+            token: alpha-42
+  node_info:
+    path: coordinator/sub@1
+- author: sub
+  branch: sub@1
+  role: model
+  parts:
+    - function_call:
+        name: tool_two
+        id: 8t7zjdck
+        args:
+            token: alpha-42
+  node_info:
+    path: coordinator/sub@1
+- author: sub
+  branch: sub@1
+  role: user
+  parts:
+    - function_response:
+        name: tool_two
+        id: 8t7zjdck
+        response:
+            result: got alpha-42
+  node_info:
+    path: coordinator/sub@1
+- author: sub
+  branch: sub@1
+  role: model
+  parts:
+    - text: 'The execution of the chained tools is complete. The result string returned by tool_two is: "got alpha-42".'
+  node_info:
+    path: coordinator/sub@1
+    message_as_output: true
+    output_for:
+        - coordinator/sub@1
+- author: coordinator
+  role: user
+  parts:
+    - function_response:
+        name: sub
+        id: axn9agj2
+        response:
+            result: 'The execution of the chained tools is complete. The result string returned by tool_two is: "got alpha-42".'
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: The sub agent successfully executed the chained tools, returning the final result "got alpha-42".
+  node_info:
+    path: coordinator

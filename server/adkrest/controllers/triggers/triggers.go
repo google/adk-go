@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package triggers provides HTTP handlers that run an agent in response
+// to external events such as Pub/Sub or Eventarc, retrying rate-limited
+// runs with exponential backoff and jitter.
 package triggers
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -26,15 +31,18 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
+// RetriableRunner runs an agent with retry semantics, creating a new session per retry.
 type RetriableRunner struct {
 	sessionService  session.Service
 	agentLoader     agent.Loader
@@ -42,17 +50,98 @@ type RetriableRunner struct {
 	artifactService artifact.Service
 	pluginConfig    runner.PluginConfig
 	triggerConfig   TriggerConfig
+
+	eventsCompactionConfig *compaction.Config
 }
 
+// ControllerConfig carries everything the trigger controllers need.
+//
+// A config struct rather than functional options, matching the rest of this
+// repository. Options would have solved only the compaction field and left the
+// six positional parameters in place; a struct absorbs both, and a field added
+// to it breaks no existing caller.
+type ControllerConfig struct {
+	SessionService  session.Service
+	AgentLoader     agent.Loader
+	MemoryService   memory.Service
+	ArtifactService artifact.Service
+	PluginConfig    runner.PluginConfig
+	TriggerConfig   TriggerConfig
+
+	// Compaction enables context compaction for the runners a trigger
+	// controller creates, replacing older session events with summaries.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and it only fires when
+	// more events accumulate between sliding-window compactions than
+	// EventRetentionSize holds back, so a short interval with a large retention
+	// size leaves it idle. See [compaction.Config].
+	//
+	// Note what a trigger surface is. A delivery gets a session of its own, so
+	// history does not accumulate across messages and a sliding window counting
+	// completed invocations has little to count. Tail retention works normally,
+	// because it measures the prompt inside a single run.
+	//
+	// optional
+	Compaction *compaction.Config
+}
+
+// newRetriableRunner builds the shared runner behind both trigger controllers.
+//
+// Two sliding-window configurations are worth a word, and neither is fatal, so
+// both are logged rather than rejected:
+//
+//   - An interval of 1 fires on every delivery, including a single-turn one. It
+//     spends a summarizer call to write a summary into a session that is
+//     discarded when the delivery ends, so nothing ever reads it.
+//   - A larger interval will not fire on a delivery handled in one attempt,
+//     because that session sees a single invocation. Retries of one delivery do
+//     share a session, so it can still fire on a message that was throttled.
+func newRetriableRunner(cfg ControllerConfig) *RetriableRunner {
+	switch {
+	case cfg.Compaction == nil:
+	case cfg.Compaction.CompactionInterval == 1:
+		log.Printf("adk: sliding-window compaction is configured on a trigger controller with " +
+			"CompactionInterval 1, so it fires on every delivery and writes a summary into a " +
+			"session that is discarded when the delivery ends. Use TokenThreshold and " +
+			"EventRetentionSize to compact within a single run.")
+	case cfg.Compaction.CompactionInterval > 1:
+		log.Printf("adk: sliding-window compaction is configured on a trigger controller, but a " +
+			"delivery handled in one attempt runs a single invocation, so the window will not " +
+			"reach its interval. Use TokenThreshold and EventRetentionSize to compact within a " +
+			"single run.")
+	}
+	return &RetriableRunner{
+		sessionService:         cfg.SessionService,
+		agentLoader:            cfg.AgentLoader,
+		memoryService:          cfg.MemoryService,
+		artifactService:        cfg.ArtifactService,
+		pluginConfig:           cfg.PluginConfig,
+		triggerConfig:          cfg.TriggerConfig,
+		eventsCompactionConfig: cfg.Compaction,
+	}
+}
+
+func (r *RetriableRunner) validateCompaction() error {
+	return compactionvalidate.AgainstAgents(r.eventsCompactionConfig, r.agentLoader, runner.Config{
+		SessionService:  r.sessionService,
+		MemoryService:   r.memoryService,
+		ArtifactService: r.artifactService,
+		PluginConfig:    r.pluginConfig,
+	})
+}
+
+// RunAgent runs the agent for the given message and returns the resulting events.
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
-	// Each retry = new session
+	// One session per delivery. Retries of that delivery reuse it, so a
+	// throttled message accumulates invocations rather than starting over.
 	sessReq := &session.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	}
 	sessResp, err := r.sessionService.Create(ctx, sessReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session: %v", err)
+		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
 	userMessage := genai.Content{
@@ -64,7 +153,7 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 
 	curAgent, err := r.agentLoader.LoadAgent(appName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load agent: %v", err)
+		return nil, fmt.Errorf("failed to load agent: %w", err)
 	}
 
 	runR, err := runner.New(runner.Config{
@@ -74,9 +163,10 @@ func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, message
 		MemoryService:   r.memoryService,
 		ArtifactService: r.artifactService,
 		PluginConfig:    r.pluginConfig,
+		Compaction:      r.eventsCompactionConfig,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner: %v", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
 	return r.runAgentWithRetry(ctx, runR, sessResp.Session.UserID(), sessResp.Session.ID(), &userMessage)
@@ -93,6 +183,14 @@ func (r *RetriableRunner) runAgentWithRetry(ctx context.Context, runR *runner.Ru
 		isThrottled := false
 		for event, err := range resp {
 			if err != nil {
+				// A compaction failure is bookkeeping, not the delivery. The
+				// agent has already answered and its events are persisted, so
+				// failing here would NACK a message that was handled, and on
+				// Pub/Sub push that means redelivering work already done.
+				if errors.Is(err, compaction.ErrCompaction) {
+					log.Printf("triggers: %v", err)
+					continue
+				}
 				runErr = err
 				if isResourceExhausted(err) {
 					isThrottled = true

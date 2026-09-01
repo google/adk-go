@@ -25,13 +25,13 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -465,7 +465,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent1,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_1"
 				yield(ev, nil)
 			}
@@ -478,7 +478,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent2,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_2"
 				yield(ev, nil)
 			}

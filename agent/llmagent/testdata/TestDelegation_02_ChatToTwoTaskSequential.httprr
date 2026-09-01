@@ -1,0 +1,343 @@
+httprr trace v1
+1898 2107
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1665
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Order 2 pizzas. Pay with card 4111111111111111, cvv 123."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You orchestrate the order pipeline in TWO sequential steps:\n\n  1. First call order_collector with a request describing the user's\n     order (item + quantity). Wait for its structured `output`.\n  2. Then call payment_collector with a request describing the user's\n     payment details. Wait for its structured `output`.\n  3. Reply with one concise sentence acknowledging both pieces.\n\nNever ask the user follow-up questions; the user's first message\nalways contains everything needed for both steps.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls order_collector, then payment_collector, then summarises.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Collects the order item and quantity from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"order_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}},{"description":"Collects credit card details from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"payment_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:04 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=10316
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "order_collector",
+              "args": {
+                "request": "Collect the order for 2 pizzas."
+              },
+              "id": "xqv510lg"
+            },
+            "thoughtSignature": "EqEFCp4FAQw51sdGII6gcQHVp5GrduQT1sHzHA+TIBUXuz14iJ28R6OAOXd0dCfeUPFHM4zS46d00SxXm/CsSv6b6UEcSxmbRAIJ3/ance0g2b57xWIywtXSvZDlurrFjdVZqKAGXjzpkT5lcIhaKoJsLQ0poZioTcAcW4jFiNCIkRalTWLvr+vGeu3wlLvwGfKokLbf+XPmd47AkLiBQMRiTTCqHJRlDOey31Pv/neL/F6AP9wAdcRBxpAQdafjSVMiJGGLreqOj/P/29YYgJEQ1+9zlBRA0i2mL4VHAqCtFzNeubMvGihj8Q4fkWHwpWR326WY3kOFui2dZsI+iw9aB3xfrvC3Ovd1J9oLErsExMI80ASRRQqFkNgg7Y8gw777AzFGcEn9G/IMg0IUy8BiK4LV63z0R8mF5g/5PxclINWab/bjnt7yeWNF7skxg98GKiBF0xA6JtTGymPCbfgZHGCBaBfJzHGq8RhzFACP9MGVuF9T9F3WDlyWJfHJchoyDQQvbmSEmMyq6T6N/f82drg5Iaiz8Iy5+L2L3EQUhfD+emi9t2wZ8Y8L0WeUAbZAodjpYHjZC/wClO+pK2iA23ULIOD1CXjtuaF+h4NNbwTPCnaOklerUSHMzSho5bAKM0rOa4BCGfmGLaI+dUKvvf72Ezrj4aC4TpSNK+OXyvYMSEt292UPbkmQdkWv6OY9Xkjz1QTAwRIxmqc9F33WM6kttA0pXQhOCcCB6sB10dnXEdn01KICLnn+Z11U4pcCDILAr9eFR7OZ8pg6rjf2BfyNT7RUaObgADogeBpBxf7YV54J3Ots3sq+6u2pGRvZMI+BllKtwbLgPWX2jhjwrezZOrvIUCETp5gJi5LEHiSMRIwoX4TSN67mwhQxX4l80A=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 351,
+    "candidatesTokenCount": 23,
+    "totalTokenCount": 536,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 351
+      }
+    ],
+    "thoughtsTokenCount": 162,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "Incyapi6LcugnsEP2o-D-A4"
+}
+1802 1908
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1569
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Collect the order for 2 pizzas.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Extract the order from the request and immediately call\n`finish_task` with {item, quantity}. The request always contains\nboth. Do not ask the user any questions.\n\nYou are an agent. Your internal name is \"order_collector\". The description about you is \"Collects the order item and quantity from the request.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"item":{"type":"STRING"},"quantity":{"type":"INTEGER"}},"required":["item","quantity"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:13 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=8804
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "quantity": 2,
+                "item": "pizza"
+              },
+              "id": "55relgui"
+            },
+            "thoughtSignature": "Eo8ECowEAQw51sdGmI9ZltyiOAZ6fN2EwJMVyv3q85eukPJWu2ZDQPYLksrMHu+5Zph62XL4bbT1CBjtC5at4jTJUeSDwHQN2JO1MMj53qXaeO2rpBp0dXpgWr8JjMhmlppKNNPjpOpXpBEmeA8dQ5dfBgpyihYOiZ4r/iapJlLd0HvYY/PojuXKXCH2O3bW6BMAGYOG7wI4wZFtbKu/LFbwVZvONq9VAXVGVg2MrdySbAN4+HGk+DDjpMMAhFWlGJm5swvMpWcePHXPAo4mBPqoEJhzGaPYhiyaNEBnJJ85sHPDEaEmaiMH5yBFaK+qq0SY/4q20Lc40eYx/YLw3gdJBr0ivQSoxxdj5B1kVlJgfgXPeu1p8hrruOGFeFmQ+7BOxXTvbbjbLycfqdfUdW6ZSUBy+WLuoBtW7rj3gZ0VKLGcq6YbCQpcXlTldYA0eYol3KwHFocqYHqVVkV3WVTjFy3vxRN/vEZv10AnGYC5MzVpIPFODW9tcCD2ElnT58S2felGInZWMNNEzbZcwfbEzeFXDPVODU3DeQD01G2mDP6rIwORxAU88WTdmMbRoUR8GXTddrQm76RzMRJbRp51q5EpxIAgaZvcucy/qGq1lVbCjUW/vIl9BfHZzjo5Jcp5H9/iezg5SdnQwTI8aYsGmQ0YsAGAeRIerJgz/ryPY9ywMcwjMWPg6IillL3YkQQ="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 323,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 491,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 323
+      }
+    ],
+    "thoughtsTokenCount": 148,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "LXcyauOMBum-nsEPvdmBkAk"
+}
+3095 1683
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2862
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Order 2 pizzas. Pay with card 4111111111111111, cvv 123."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Collect the order for 2 pizzas."},"id":"xqv510lg","name":"order_collector"},"thoughtSignature":"EqEFCp4FAQw51sdGII6gcQHVp5GrduQT1sHzHA+TIBUXuz14iJ28R6OAOXd0dCfeUPFHM4zS46d00SxXm/CsSv6b6UEcSxmbRAIJ3/ance0g2b57xWIywtXSvZDlurrFjdVZqKAGXjzpkT5lcIhaKoJsLQ0poZioTcAcW4jFiNCIkRalTWLvr+vGeu3wlLvwGfKokLbf+XPmd47AkLiBQMRiTTCqHJRlDOey31Pv/neL/F6AP9wAdcRBxpAQdafjSVMiJGGLreqOj/P/29YYgJEQ1+9zlBRA0i2mL4VHAqCtFzNeubMvGihj8Q4fkWHwpWR326WY3kOFui2dZsI+iw9aB3xfrvC3Ovd1J9oLErsExMI80ASRRQqFkNgg7Y8gw777AzFGcEn9G/IMg0IUy8BiK4LV63z0R8mF5g/5PxclINWab/bjnt7yeWNF7skxg98GKiBF0xA6JtTGymPCbfgZHGCBaBfJzHGq8RhzFACP9MGVuF9T9F3WDlyWJfHJchoyDQQvbmSEmMyq6T6N/f82drg5Iaiz8Iy5+L2L3EQUhfD+emi9t2wZ8Y8L0WeUAbZAodjpYHjZC/wClO+pK2iA23ULIOD1CXjtuaF+h4NNbwTPCnaOklerUSHMzSho5bAKM0rOa4BCGfmGLaI+dUKvvf72Ezrj4aC4TpSNK+OXyvYMSEt292UPbkmQdkWv6OY9Xkjz1QTAwRIxmqc9F33WM6kttA0pXQhOCcCB6sB10dnXEdn01KICLnn+Z11U4pcCDILAr9eFR7OZ8pg6rjf2BfyNT7RUaObgADogeBpBxf7YV54J3Ots3sq+6u2pGRvZMI+BllKtwbLgPWX2jhjwrezZOrvIUCETp5gJi5LEHiSMRIwoX4TSN67mwhQxX4l80A=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"xqv510lg","name":"order_collector","response":{"item":"pizza","quantity":2}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You orchestrate the order pipeline in TWO sequential steps:\n\n  1. First call order_collector with a request describing the user's\n     order (item + quantity). Wait for its structured `output`.\n  2. Then call payment_collector with a request describing the user's\n     payment details. Wait for its structured `output`.\n  3. Reply with one concise sentence acknowledging both pieces.\n\nNever ask the user follow-up questions; the user's first message\nalways contains everything needed for both steps.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls order_collector, then payment_collector, then summarises.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Collects the order item and quantity from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"order_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}},{"description":"Collects credit card details from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"payment_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:17 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3611
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "payment_collector",
+              "args": {
+                "request": "Collect payment details for card 4111111111111111 with CVV 123."
+              },
+              "id": "dvmv5eqa"
+            },
+            "thoughtSignature": "EssCCsgCAQw51setZmWS91wOaHZ/6BXDhAucWU6RfUwymd8wzFJPGtSqy/DrU3CC3oRxApZY+ms4p/9KGKqjpY0CyorORL0UceLoSHlTI0aFhr8yCaFcdGq1+L2NqzVOtsMGQHRumyH72qVgHbHXY5Wm4G6DCItEgneSCyzKHFazz4r/HFY7d0uBOPfGlQXklLPAdSv6ZwMVsmyltn5i+F6Qgf61fdW9rI0HcH9McMaZIYDg3cUT4aK6MwUb/M5btd5Pmse8uIXdG/eZkcJ9DKHEcGjgwMP++Bo9HGuR3OJTBbaEGhK/lqVGEYauVYIX1ZXW+nlh8zxqxr5fcIFbCxR3SCHJM53wypMAeOV4P5+//C/5KY06qmU1YqPItRuLTu4yJrXtzfrQN+eoXuVhvrgytFS+boZNQQowzihco2LN7rzuEKdIfKW34/Cw7Q=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 554,
+    "candidatesTokenCount": 45,
+    "totalTokenCount": 693,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 554
+      }
+    ],
+    "thoughtsTokenCount": 94,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "NXcyatvfNsWfkdUP_Zyf-Qc"
+}
+1857 1940
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1624
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Collect payment details for card 4111111111111111 with CVV 123.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Extract credit_card_number and cvv from the request and\nimmediately call `finish_task` with both fields. The request always\ncontains both. Do not ask the user any questions.\n\nYou are an agent. Your internal name is \"payment_collector\". The description about you is \"Collects credit card details from the request.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"credit_card_number":{"type":"STRING"},"cvv":{"type":"STRING"}},"required":["credit_card_number","cvv"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:22 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=5536
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "credit_card_number": "4111111111111111",
+                "cvv": "123"
+              },
+              "id": "fm6nag3h"
+            },
+            "thoughtSignature": "EpQECpEEAQw51se7TIxosZDWsDq9nO5Fd7XIl56jfctCVBSLWGDvqTbsYlkqgwa5f4QsYbWuXnrWxksN1r/um7GboCEd9D7CjbXCNAuQccI1MxPnukMoA6hvv60ff3VkWsbzrYthxHDCPDO/gtgRVt+SXtfy7gTQGZ6G2izIB/9jn8wvA1npmywPvFSSA8aiCS+4627EgG5+4Hb3rXagbhRZtxXXTJX8/tgegrk2+jICNrwLOHjsB1EziPIlnT7YCjCpMJLEF09jB2LN54qcXeKDhOKcJCocI3hnT4Bk1ZPR1FAYApgNycnw1lcM1q8LUle/7LfKfo3fhh0KjV8mbyPwN/YI1bn7hUXEzA3AjoiVARxBMZI6KUzjLOUbJz3++omZ355RyQf4GDSe6z+bR0Mzh24G34cF24Jc1ytJ9XImc7x8vbn+SpqWSgJNp7jyoTdO2t+yxCBuQqbLjPsd1oMnS0k/84B2VYLalRW38r8+kG3Sk64pTjckA9WRPQ5ouEO3cRhxYubYamlb04gd915SKnTsDxd4A3Ym9RDshTCQUZlRv5PJSXqCZdtsPeYAhMdslxqUXdkuXOv1NMaKpeLBGVPdFnzK5FN6440S4klja6qzP/aXQHw4yQtZk6sBOizvlFowu4Du0etoG3NnDpGTtbwl4rKSv0iS0SvCM/iIgskwuzmmnsOfoiKxLBC7gLcvF19uLw=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 356,
+    "candidatesTokenCount": 44,
+    "totalTokenCount": 547,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 356
+      }
+    ],
+    "thoughtsTokenCount": 147,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "OXcyarbuHtb7nsEP6tOLgA8"
+}
+3896 1463
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3663
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Order 2 pizzas. Pay with card 4111111111111111, cvv 123."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Collect the order for 2 pizzas."},"id":"xqv510lg","name":"order_collector"},"thoughtSignature":"EqEFCp4FAQw51sdGII6gcQHVp5GrduQT1sHzHA+TIBUXuz14iJ28R6OAOXd0dCfeUPFHM4zS46d00SxXm/CsSv6b6UEcSxmbRAIJ3/ance0g2b57xWIywtXSvZDlurrFjdVZqKAGXjzpkT5lcIhaKoJsLQ0poZioTcAcW4jFiNCIkRalTWLvr+vGeu3wlLvwGfKokLbf+XPmd47AkLiBQMRiTTCqHJRlDOey31Pv/neL/F6AP9wAdcRBxpAQdafjSVMiJGGLreqOj/P/29YYgJEQ1+9zlBRA0i2mL4VHAqCtFzNeubMvGihj8Q4fkWHwpWR326WY3kOFui2dZsI+iw9aB3xfrvC3Ovd1J9oLErsExMI80ASRRQqFkNgg7Y8gw777AzFGcEn9G/IMg0IUy8BiK4LV63z0R8mF5g/5PxclINWab/bjnt7yeWNF7skxg98GKiBF0xA6JtTGymPCbfgZHGCBaBfJzHGq8RhzFACP9MGVuF9T9F3WDlyWJfHJchoyDQQvbmSEmMyq6T6N/f82drg5Iaiz8Iy5+L2L3EQUhfD+emi9t2wZ8Y8L0WeUAbZAodjpYHjZC/wClO+pK2iA23ULIOD1CXjtuaF+h4NNbwTPCnaOklerUSHMzSho5bAKM0rOa4BCGfmGLaI+dUKvvf72Ezrj4aC4TpSNK+OXyvYMSEt292UPbkmQdkWv6OY9Xkjz1QTAwRIxmqc9F33WM6kttA0pXQhOCcCB6sB10dnXEdn01KICLnn+Z11U4pcCDILAr9eFR7OZ8pg6rjf2BfyNT7RUaObgADogeBpBxf7YV54J3Ots3sq+6u2pGRvZMI+BllKtwbLgPWX2jhjwrezZOrvIUCETp5gJi5LEHiSMRIwoX4TSN67mwhQxX4l80A=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"xqv510lg","name":"order_collector","response":{"item":"pizza","quantity":2}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Collect payment details for card 4111111111111111 with CVV 123."},"id":"dvmv5eqa","name":"payment_collector"},"thoughtSignature":"EssCCsgCAQw51setZmWS91wOaHZ/6BXDhAucWU6RfUwymd8wzFJPGtSqy/DrU3CC3oRxApZY+ms4p/9KGKqjpY0CyorORL0UceLoSHlTI0aFhr8yCaFcdGq1+L2NqzVOtsMGQHRumyH72qVgHbHXY5Wm4G6DCItEgneSCyzKHFazz4r/HFY7d0uBOPfGlQXklLPAdSv6ZwMVsmyltn5i+F6Qgf61fdW9rI0HcH9McMaZIYDg3cUT4aK6MwUb/M5btd5Pmse8uIXdG/eZkcJ9DKHEcGjgwMP++Bo9HGuR3OJTBbaEGhK/lqVGEYauVYIX1ZXW+nlh8zxqxr5fcIFbCxR3SCHJM53wypMAeOV4P5+//C/5KY06qmU1YqPItRuLTu4yJrXtzfrQN+eoXuVhvrgytFS+boZNQQowzihco2LN7rzuEKdIfKW34/Cw7Q=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"dvmv5eqa","name":"payment_collector","response":{"credit_card_number":"4111111111111111","cvv":"123"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You orchestrate the order pipeline in TWO sequential steps:\n\n  1. First call order_collector with a request describing the user's\n     order (item + quantity). Wait for its structured `output`.\n  2. Then call payment_collector with a request describing the user's\n     payment details. Wait for its structured `output`.\n  3. Reply with one concise sentence acknowledging both pieces.\n\nNever ask the user follow-up questions; the user's first message\nalways contains everything needed for both steps.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls order_collector, then payment_collector, then summarises.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Collects the order item and quantity from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"order_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}},{"description":"Collects credit card details from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"payment_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:25 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2478
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Your order for 2 pizzas has been successfully processed using the credit card ending in 1111.",
+            "thoughtSignature": "EroCCrcCAQw51sfHFwx8Y+QUkdUnt8ssSeiwkQYJBpX3qewmhASI5LcJs78AMYiQa4Gnvz3x136F3DQwHsOC9bYYqrzjybQYjgK+J9ndNGRJZy8Bml/YNEay05hpCUEg0w8lVIJix2xV7dCCzmYlnpCXV/zAzKg4nwpFucVGgUHvFX5wEyt03/EOlMW6oMe9o8xT9jXRvmKU8OGso4+aX7GwXtrV0MALIVguI8a1wc/GJwEmIAIiKT59gOpbgx/hRogPvYC+MdpawWU9t8jDruNxLFc0GudRbhXzs6jW4oFUoiHRCdHs/wVbSxYAgqD0SIcRaOUC+I4IRhwi5qyAXshG/zKWp3PdBp7dvymNXe2glSNTFnEfKASlm6cHx7ue5SZ1l0IKghmJQuBpYQH/o7nF4zgAQpH/LX1bDQg="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 735,
+    "candidatesTokenCount": 22,
+    "totalTokenCount": 840,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 735
+      }
+    ],
+    "thoughtsTokenCount": 83,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "P3cyarS4Bt7MkdUPtPaC0Ag"
+}
+4550 1842
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 4317
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Order 2 pizzas. Pay with card 4111111111111111, cvv 123."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Collect the order for 2 pizzas."},"id":"xqv510lg","name":"order_collector"},"thoughtSignature":"EqEFCp4FAQw51sdGII6gcQHVp5GrduQT1sHzHA+TIBUXuz14iJ28R6OAOXd0dCfeUPFHM4zS46d00SxXm/CsSv6b6UEcSxmbRAIJ3/ance0g2b57xWIywtXSvZDlurrFjdVZqKAGXjzpkT5lcIhaKoJsLQ0poZioTcAcW4jFiNCIkRalTWLvr+vGeu3wlLvwGfKokLbf+XPmd47AkLiBQMRiTTCqHJRlDOey31Pv/neL/F6AP9wAdcRBxpAQdafjSVMiJGGLreqOj/P/29YYgJEQ1+9zlBRA0i2mL4VHAqCtFzNeubMvGihj8Q4fkWHwpWR326WY3kOFui2dZsI+iw9aB3xfrvC3Ovd1J9oLErsExMI80ASRRQqFkNgg7Y8gw777AzFGcEn9G/IMg0IUy8BiK4LV63z0R8mF5g/5PxclINWab/bjnt7yeWNF7skxg98GKiBF0xA6JtTGymPCbfgZHGCBaBfJzHGq8RhzFACP9MGVuF9T9F3WDlyWJfHJchoyDQQvbmSEmMyq6T6N/f82drg5Iaiz8Iy5+L2L3EQUhfD+emi9t2wZ8Y8L0WeUAbZAodjpYHjZC/wClO+pK2iA23ULIOD1CXjtuaF+h4NNbwTPCnaOklerUSHMzSho5bAKM0rOa4BCGfmGLaI+dUKvvf72Ezrj4aC4TpSNK+OXyvYMSEt292UPbkmQdkWv6OY9Xkjz1QTAwRIxmqc9F33WM6kttA0pXQhOCcCB6sB10dnXEdn01KICLnn+Z11U4pcCDILAr9eFR7OZ8pg6rjf2BfyNT7RUaObgADogeBpBxf7YV54J3Ots3sq+6u2pGRvZMI+BllKtwbLgPWX2jhjwrezZOrvIUCETp5gJi5LEHiSMRIwoX4TSN67mwhQxX4l80A=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"xqv510lg","name":"order_collector","response":{"item":"pizza","quantity":2}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Collect payment details for card 4111111111111111 with CVV 123."},"id":"dvmv5eqa","name":"payment_collector"},"thoughtSignature":"EssCCsgCAQw51setZmWS91wOaHZ/6BXDhAucWU6RfUwymd8wzFJPGtSqy/DrU3CC3oRxApZY+ms4p/9KGKqjpY0CyorORL0UceLoSHlTI0aFhr8yCaFcdGq1+L2NqzVOtsMGQHRumyH72qVgHbHXY5Wm4G6DCItEgneSCyzKHFazz4r/HFY7d0uBOPfGlQXklLPAdSv6ZwMVsmyltn5i+F6Qgf61fdW9rI0HcH9McMaZIYDg3cUT4aK6MwUb/M5btd5Pmse8uIXdG/eZkcJ9DKHEcGjgwMP++Bo9HGuR3OJTBbaEGhK/lqVGEYauVYIX1ZXW+nlh8zxqxr5fcIFbCxR3SCHJM53wypMAeOV4P5+//C/5KY06qmU1YqPItRuLTu4yJrXtzfrQN+eoXuVhvrgytFS+boZNQQowzihco2LN7rzuEKdIfKW34/Cw7Q=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"dvmv5eqa","name":"payment_collector","response":{"credit_card_number":"4111111111111111","cvv":"123"}}}],"role":"user"},{"parts":[{"text":"Your order for 2 pizzas has been successfully processed using the credit card ending in 1111.","thoughtSignature":"EroCCrcCAQw51sfHFwx8Y+QUkdUnt8ssSeiwkQYJBpX3qewmhASI5LcJs78AMYiQa4Gnvz3x136F3DQwHsOC9bYYqrzjybQYjgK+J9ndNGRJZy8Bml/YNEay05hpCUEg0w8lVIJix2xV7dCCzmYlnpCXV/zAzKg4nwpFucVGgUHvFX5wEyt03/EOlMW6oMe9o8xT9jXRvmKU8OGso4+aX7GwXtrV0MALIVguI8a1wc/GJwEmIAIiKT59gOpbgx/hRogPvYC+MdpawWU9t8jDruNxLFc0GudRbhXzs6jW4oFUoiHRCdHs/wVbSxYAgqD0SIcRaOUC+I4IRhwi5qyAXshG/zKWp3PdBp7dvymNXe2glSNTFnEfKASlm6cHx7ue5SZ1l0IKghmJQuBpYQH/o7nF4zgAQpH/LX1bDQg="}],"role":"model"},{"parts":[{"text":"What did I order, and how am I paying?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You orchestrate the order pipeline in TWO sequential steps:\n\n  1. First call order_collector with a request describing the user's\n     order (item + quantity). Wait for its structured `output`.\n  2. Then call payment_collector with a request describing the user's\n     payment details. Wait for its structured `output`.\n  3. Reply with one concise sentence acknowledging both pieces.\n\nNever ask the user follow-up questions; the user's first message\nalways contains everything needed for both steps.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls order_collector, then payment_collector, then summarises.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Collects the order item and quantity from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"order_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}},{"description":"Collects credit card details from the request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"payment_collector","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:30:27 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2291
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "You ordered 2 pizzas, and you are paying with your credit card ending in 1111.",
+            "thoughtSignature": "EuEECt4EAQw51scX43EfsUbXbmO0qviMc0BumpOtYvTCrND2H2uuRZnKUUdzRx8RFvJfbMAZJ0gnaFaijR5e4ktStvZ4XAcPgmp9c/2PIwaIZHG4PFEEQnQ5aIkA6LByygd64WDa1Kf8ggiHHnTLRmF00ztDqzPwtziu6dRDxbaVMYgq38dhDCd9K8FMJfc28k0YLjhxKN6VRxz6L3fbLZWfFKBSEvQrwYgos80zLI4OyozgZVL9uW3QZ4SOxxb9C4hQOC0A+0Ks8wvUGgnIXw47lV0/5NA7GZzstKt6ZjxWHbieQ6kUlFm+qyJy5tcQxH/j2DN6l0QCMY1KuAWVeoll+y8knIgWbGxWacFRITxxpAaPfwqmAh8vahSG7mjz/aaA0vdvg0dKr4QsGpthFC1oZvJHwkkVFE/1dCD4YKqcFmOjychLNpanhvU1eVjutgz2CpLu/bTFYS+3fYdSod5m8oSXMn4HVMfNBmuNZKcSrdDRxHtfMeRqBu8E+EndA/Iy8DkQsLN4JqOuhR9Y3AucbSLOy4K1pqhAbDpmeaUjN5cMQIdNSVbyOTU0L8x5VM6MLju3nIgKGtoNTqLgHW9cy1ktLG/rrPdocb7Tr5k28A9PKMr1cgdcU1vzVbA7IibtdthvXjHBsfXOb9F2EufTDY7ZHHtYe+NigLKdcIBf06bYMYY7c8Kwe9kGOZq2nQCFqEp8OkRe//yuaUlGwnQ6o+UxSFz4tjPrphCxySmp5hhKZfFR0kFwkQqP6mHBF46HoD8KRL9K2yh4tNRzPmZek5u+c5mx4CENAYeKgD8FWvw9"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 853,
+    "candidatesTokenCount": 22,
+    "totalTokenCount": 1024,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 853
+      }
+    ],
+    "thoughtsTokenCount": 149,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "QXcyapuZILCakdUP_aCVuAg"
+}

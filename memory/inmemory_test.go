@@ -17,15 +17,17 @@ package memory_test
 import (
 	"iter"
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func Test_inMemoryService_SearchMemory(t *testing.T) {
@@ -225,4 +227,44 @@ func must[V any](v V, err error) V {
 		panic(err)
 	}
 	return v
+}
+
+// Test_inMemoryService_SearchMemory_Concurrent runs SearchMemory and
+// AddSessionToMemory on the same app/user in parallel. The service is
+// documented as thread-safe, so under -race (as CI runs it) the two must not
+// touch the per-user session map without synchronization.
+func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
+	s := memory.InMemoryService()
+	ctx := t.Context()
+
+	// Seed one session so the per-user map is non-empty while searchers iterate.
+	if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", "seed", nil)); err != nil {
+		t.Fatalf("AddSessionToMemory() error = %v", err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				id := "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
+				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, nil)); err != nil {
+					t.Errorf("AddSessionToMemory() error = %v", err)
+					return
+				}
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if _, err := s.SearchMemory(ctx, &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "x"}); err != nil {
+					t.Errorf("SearchMemory() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

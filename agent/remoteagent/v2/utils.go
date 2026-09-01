@@ -22,9 +22,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/server/adka2a/v2"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 type userFunctionCall struct {
@@ -109,7 +109,10 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	result := make([]*a2a.Part, 0, partCount)
 	for i := lastRemoteResponseIndex + 1; i < events.Len(); i++ {
 		event := events.At(i)
-		if event.Author != "user" && event.Author != ctx.Agent().Name() {
+		// Only wrap foreign agent events as user messages when the current agent has an explicit name.
+		// If Agent().Name() is empty (e.g., in anonymous wrappers or conformance harnesses), event.Author != ""
+		// would falsely match and attribute events as foreign turns.
+		if ctx.Agent().Name() != "" && event.Author != "user" && event.Author != ctx.Agent().Name() {
 			event = presentAsUserMessage(ctx, event)
 		}
 		if event.Content == nil || len(event.Content.Parts) == 0 {
@@ -126,7 +129,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 }
 
 func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event) *session.Event {
-	event := session.NewEventWithContext(ctx, ctx.InvocationID())
+	event := session.NewEvent(ctx, ctx.InvocationID())
 	event.Author = "user"
 
 	if agentEvent.Content == nil {

@@ -24,10 +24,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/adkrest/controllers/triggers"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 )
 
 type pubsubConfig struct {
@@ -112,14 +112,18 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 		MaxConcurrentRuns: p.config.triggerMaxRuns,
 	}
 
-	controller := triggers.NewPubSubController(
-		config.SessionService,
-		config.AgentLoader,
-		config.MemoryService,
-		config.ArtifactService,
-		config.PluginConfig,
-		triggerConfig,
-	)
+	controller, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
+		SessionService:  config.SessionService,
+		AgentLoader:     config.AgentLoader,
+		MemoryService:   config.MemoryService,
+		ArtifactService: config.ArtifactService,
+		PluginConfig:    config.PluginConfig,
+		TriggerConfig:   triggerConfig,
+		Compaction:      config.Compaction,
+	})
+	if err != nil {
+		return err
+	}
 
 	subrouter := router
 	if p.config.pathPrefix != "" && p.config.pathPrefix != "/" {

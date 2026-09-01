@@ -15,18 +15,21 @@
 package method
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type simpleEvent struct {
@@ -43,7 +46,7 @@ func TestSimpleText(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(cc agent.Context) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},
@@ -161,5 +164,116 @@ func newStringWriter() *stringWriter {
 	return &stringWriter{
 		sb: strings.Builder{},
 		h:  http.Header{},
+	}
+}
+
+// countingSummarizer records that compaction reached the summarizer.
+type countingSummarizer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingSummarizer) SummarizeEvents(context.Context, []*session.Event) (compaction.SummarizeResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return compaction.SummarizeResult{Content: genai.NewContentFromText("a summary", genai.RoleModel)}, nil
+}
+
+func (c *countingSummarizer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestAgentEngineActuallyRunsCompaction pins that the compaction config this
+// surface accepts reaches the runners it builds.
+//
+// Both Agent Engine methods build a runner.Config per request, and deleting the
+// line that copies Compaction into it left the whole server suite
+// green. A test that only checks a compaction failure is tolerated cannot tell
+// that apart: a surface that never runs compaction tolerates its failures
+// perfectly. Counting summarizer calls is what distinguishes the two.
+func TestAgentEngineActuallyRunsCompaction(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		method  string
+		stream  func(*launcher.Config, string) func(context.Context, http.ResponseWriter, []byte) error
+		payload func(sessionID, userID string) []byte
+	}{
+		{
+			name:   "stream_query",
+			method: "async_stream_query",
+			stream: func(c *launcher.Config, app string) func(context.Context, http.ResponseWriter, []byte) error {
+				return NewStreamQueryHandler(c, app, "async_stream_query", "").streamJSONL
+			},
+			payload: func(sessionID, userID string) []byte {
+				return []byte(`{"class_method":"async_stream_query","input":{"message":{"parts":[{"text":"hi"}],"role":"user",` +
+					`"role":"user"},"session_id":"` + sessionID + `","user_id":"` + userID + `"}}`)
+			},
+		},
+		{
+			name:   "streaming_agent_run_with_events",
+			method: "async_stream_agent_run_with_events",
+			stream: func(c *launcher.Config, app string) func(context.Context, http.ResponseWriter, []byte) error {
+				return NewStreamingAgentRunWithEventsHandler(c, app, "async_stream_agent_run_with_events", "").streamJSONL
+			},
+			// This method carries its request as a JSON string inside the
+			// envelope rather than as an object.
+			payload: func(sessionID, userID string) []byte {
+				inner, err := json.Marshal(map[string]any{
+					"message":    map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}},
+					"session_id": sessionID,
+					"user_id":    userID,
+				})
+				if err != nil {
+					panic(err)
+				}
+				outer, err := json.Marshal(map[string]any{
+					"class_method": "async_stream_agent_run_with_events",
+					"input":        map[string]any{"request_json": string(inner)},
+				})
+				if err != nil {
+					panic(err)
+				}
+				return outer
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const appName, userID = "123", "u"
+			a, err := llmagent.New(llmagent.Config{
+				Name: "Echo",
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(cc agent.Context) (*genai.Content, error) { return cc.UserContent(), nil },
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			summarizer := &countingSummarizer{}
+			config := &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(a),
+				SessionService: session.InMemoryService(),
+				Compaction: &compaction.Config{
+					CompactionInterval: 1,
+					Summarizer:         summarizer,
+				},
+			}
+			stream := tc.stream(config, appName)
+
+			ctx := t.Context()
+			sess, err := config.SessionService.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			payload := tc.payload(sess.Session.ID(), userID)
+			if err := stream(ctx, newStringWriter(), payload); err != nil {
+				t.Fatalf("streamJSONL() error = %v", err)
+			}
+			if got := summarizer.count(); got == 0 {
+				t.Error("the summarizer was never called, so this surface accepts a compaction config and does nothing with it")
+			}
+		})
 	}
 }

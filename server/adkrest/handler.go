@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package adkrest provides an HTTP server for the ADK REST API.
 package adkrest
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -23,18 +25,45 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/routers"
-	"google.golang.org/adk/server/adkrest/internal/services"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/internal/routers"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
+
+// validateCompactionAgainstAgents reports whether the compaction config can
+// actually serve every app this server knows about.
+func validateCompactionAgainstAgents(cfg ServerConfig) error {
+	return compactionvalidate.AgainstAgents(cfg.Compaction, cfg.AgentLoader, runner.Config{
+		SessionService:  cfg.SessionService,
+		MemoryService:   cfg.MemoryService,
+		ArtifactService: cfg.ArtifactService,
+		PluginConfig:    cfg.PluginConfig,
+	})
+}
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
+	// Validated here rather than left to the first request. A compaction config
+	// is rejected inside runner.New, which this server calls per request, so an
+	// invalid one would otherwise start cleanly and then fail every request
+	// with a 500 that names nothing the operator can act on.
+	//
+	// Against the agents, not just the shape. Validate() only checks the config
+	// on its own, and the failure operators actually hit is a config with no
+	// Summarizer over a root agent that is not an LLM agent, which is perfectly
+	// well-shaped and 500s every request. Building a runner is the same code
+	// path the request takes, so this cannot drift from it.
+	if err := validateCompactionAgainstAgents(cfg); err != nil {
+		return nil, err
+	}
+
 	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
 		TraceCapacity: cfg.DebugConfig.TraceCapacity,
 	})
@@ -43,20 +72,39 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	router := mux.NewRouter().StrictSlash(true)
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
-	setupRouter(router,
+
+	subrouters := []routers.Router{
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithConfig(controllers.RuntimeAPIControllerConfig{
+			SessionService:  cfg.SessionService,
+			MemoryService:   cfg.MemoryService,
+			AgentLoader:     cfg.AgentLoader,
+			ArtifactService: cfg.ArtifactService,
+			SSETimeout:      cfg.SSEWriteTimeout,
+			PluginConfig:    cfg.PluginConfig,
+			Compaction:      cfg.Compaction,
+		})),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
-		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
 		&routers.EvalAPIRouter{},
-	)
+	}
+	if cfg.DebugAPIConfig.IncludeDebugAPI {
+		subrouters = append(subrouters, routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)))
+	}
+
+	setupRouter(router, subrouters...)
 	return &Server{
 		router:         router,
 		telemetryStore: debugTelemetry,
 	}, nil
+}
+
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // ServerConfig contains parameters for the ADK REST API server.
@@ -68,6 +116,30 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
+	DebugAPIConfig  DebugAPIConfig
+
+	// Compaction enables context compaction for the sessions the
+	// runners created here drive, replacing older events with summaries. Nil,
+	// the default, disables compaction.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and it only fires when
+	// more events accumulate between sliding-window compactions than
+	// EventRetentionSize holds back, so a short interval with a large retention
+	// size leaves it idle. See [compaction.Config].
+	//
+	// This setting is server-wide. One server can serve many applications
+	// through its agent loader, and they all get this config or none of them
+	// do, including the same Summarizer instance and so the same model. If
+	// different applications need different compaction, or must not share a
+	// summarizer, run them on separate servers.
+	Compaction *compaction.Config
+}
+
+// DebugAPIConfig contains parameters for the debug API.
+type DebugAPIConfig struct {
+	// Controls if [routers.NewDebugAPIRouter] is included
+	IncludeDebugAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.

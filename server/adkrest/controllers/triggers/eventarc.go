@@ -20,12 +20,12 @@ import (
 	"io"
 	"net/http"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adkrest/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 const eventArcDefaultUserID = "eventarc-caller"
@@ -37,18 +37,41 @@ type EventarcController struct {
 }
 
 // NewEventarcController creates a new EventarcController.
+// Deprecated: use [NewEventarcControllerWithConfig], which does not have to grow a
+// parameter every time the controller gains a setting, and which surfaces a
+// configuration error instead of discarding it. This one is kept because it is
+// released API and every existing call site still compiles; it is a candidate
+// for removal at the next major version.
 func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
-	return &EventarcController{
-		runner: &RetriableRunner{
-			sessionService:  sessionService,
-			agentLoader:     agentLoader,
-			memoryService:   memoryService,
-			artifactService: artifactService,
-			pluginConfig:    pluginConfig,
-			triggerConfig:   triggerConfig,
-		},
-		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+	// No compaction, so nothing that can be rejected. The error return exists
+	// for the config form, which can be handed a configuration that cannot
+	// serve the apps behind this controller.
+	c, _ := NewEventarcControllerWithConfig(ControllerConfig{
+		SessionService:  sessionService,
+		AgentLoader:     agentLoader,
+		MemoryService:   memoryService,
+		ArtifactService: artifactService,
+		PluginConfig:    pluginConfig,
+		TriggerConfig:   triggerConfig,
+	})
+	return c
+}
+
+// NewEventarcControllerWithConfig creates the controller from a config struct.
+//
+// A separate constructor rather than a variadic parameter on the one above:
+// adding a parameter would change that function's type, which breaks any caller
+// holding it as a value even though ordinary call sites still compile, and it
+// is released API.
+func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController, error) {
+	retriable := newRetriableRunner(cfg)
+	if err := retriable.validateCompaction(); err != nil {
+		return nil, err
 	}
+	return &EventarcController{
+		runner:    retriable,
+		semaphore: make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns),
+	}, nil
 }
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.

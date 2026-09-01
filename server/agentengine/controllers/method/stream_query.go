@@ -17,6 +17,7 @@ package method
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -25,12 +26,13 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/agentengine/internal/helper"
-	"google.golang.org/adk/server/agentengine/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/agentengine/internal/helper"
+	"google.golang.org/adk/v2/server/agentengine/internal/models"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type streamQueryHandler struct {
@@ -68,7 +70,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		errText := json.Unmarshal(payload, &reqText)
 		if errText != nil {
 			// cannot unmarshall to models.StreamQueryRequest and models.StreamQueryTextRequest
-			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%v) and models.StreamQueryTextRequest (%v)", err, errText)
+			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%w) and models.StreamQueryTextRequest (%w)", err, errText)
 			log.Print(err.Error())
 			return err
 		}
@@ -98,6 +100,16 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	for event, err := range events {
 		log.Printf("Processing event: %+v err: %+v\n", event, err)
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so emitting
+			// an error and closing the stream would tell the client its request
+			// failed after it has received the response, in order to report
+			// that a later prompt will be larger. The other three serving
+			// surfaces log and carry on, and this one was the outlier.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("agentengine: %v", err)
+				continue
+			}
 			log.Printf("error in events: %v\n", err)
 			e := helper.EmitJSONError(rw, err)
 			if e != nil {
@@ -113,8 +125,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			continue
 		}
 
-		chunk := *event
-		err = helper.EmitJSON(rw, chunk)
+		err = helper.EmitJSON(rw, *event)
 		if err != nil {
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
 			log.Print(e.Error())
@@ -198,10 +209,11 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 		MemoryService:     config.MemoryService,
 		ArtifactService:   config.ArtifactService,
 		PluginConfig:      config.PluginConfig,
+		Compaction:        config.Compaction,
 		AutoCreateSession: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner: %v", err)
+		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
 	return r.Run(ctx, req.Input.UserID, req.Input.SessionID, message, agent.RunConfig{

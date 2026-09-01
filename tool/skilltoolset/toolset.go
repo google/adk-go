@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package skilltoolset provides a toolset that lets an agent discover and
+// use skills: folders of instructions and resources that extend its
+// capabilities.
 package skilltoolset
 
 import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
-	"google.golang.org/adk/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/skilltoolset/internal/skilltool"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
 const (
@@ -39,7 +42,7 @@ Skills are folders of instructions and resources that extend your capabilities f
 This is very important:
 
 ` +
-		"1. If a skill seems relevant to the current user query, you MUST use the `load_skill` tool with `skill_name=\"<SKILL_NAME>\"` to read its full instructions before proceeding.\n" +
+		"1. If a skill seems relevant to the current user query, you MUST use the `load_skill` tool with `name=\"<SKILL_NAME>\"` to read its full instructions before proceeding.\n" +
 		"2. Once you have read the instructions, follow them exactly as documented before replying to the user. For example, If the instruction lists multiple steps, please make sure you complete all of them in order.\n" +
 		"3. The `load_skill_resource` tool is for viewing files within a skill's directory (e.g., `references/*`, `assets/*`, `scripts/*`). Do NOT use other tools to access these files.\n"
 )
@@ -104,7 +107,7 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
 // the list of available skills and the system instruction explaining to the
 // agent what it can do with these skills.
-func (ts *SkillToolset) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (ts *SkillToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	skills, err := ts.source.ListFrontmatters(ctx)
 	if err != nil {
 		return err

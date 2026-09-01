@@ -22,10 +22,10 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	imemory "google.golang.org/adk/internal/memory"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	imemory "google.golang.org/adk/v2/internal/memory"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestMemory_AddAndSearch(t *testing.T) {
@@ -40,8 +40,11 @@ func TestMemory_AddAndSearch(t *testing.T) {
 	content1 := genai.NewContentFromText("The quick brown fox", genai.RoleUser)
 	content2 := genai.NewContentFromText("jumps over the lazy dog", genai.RoleUser)
 
+	// IDs are set explicitly. AppendEvent assigns one when it is missing, so
+	// leaving them empty would make the entries below depend on a fresh UUID.
 	events := []*session.Event{
 		{
+			ID:        "event-1",
 			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 			Author:    "user1",
 			LLMResponse: model.LLMResponse{
@@ -49,6 +52,7 @@ func TestMemory_AddAndSearch(t *testing.T) {
 			},
 		},
 		{
+			ID:        "event-2",
 			Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
 			Author:    "user1",
 			LLMResponse: model.LLMResponse{
@@ -78,11 +82,13 @@ func TestMemory_AddAndSearch(t *testing.T) {
 
 	// Expected MemoryEntry items
 	entry1 := memory.Entry{
+		ID:        "event-1",
 		Content:   content1,
 		Author:    "user1",
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 	}
 	entry2 := memory.Entry{
+		ID:        "event-2",
 		Content:   content2,
 		Author:    "user1",
 		Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),

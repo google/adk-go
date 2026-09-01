@@ -21,16 +21,16 @@ import (
 
 // fakeToolContext shows the intended usage: embed StrictContextMock and
 // override only the methods the test needs. This mirrors how out-of-tree
-// consumers build a ToolContext test double without tracking every method.
+// consumers build a Context test double without tracking every method.
 type fakeToolContext struct {
 	StrictContextMock
 }
 
-var _ ToolContext = (*fakeToolContext)(nil)
+var _ Context = (*fakeToolContext)(nil)
 
 func TestStrictContextMock_ValueDelegatesToCtx(t *testing.T) {
 	type key struct{}
-	ctx := context.WithValue(context.Background(), key{}, "v")
+	ctx := context.WithValue(t.Context(), key{}, "v")
 
 	f := &fakeToolContext{StrictContextMock{Ctx: ctx}}
 
@@ -40,7 +40,7 @@ func TestStrictContextMock_ValueDelegatesToCtx(t *testing.T) {
 }
 
 func TestStrictContextMock_ADKMethodPanics(t *testing.T) {
-	f := &fakeToolContext{StrictContextMock{Ctx: context.Background()}}
+	f := &fakeToolContext{StrictContextMock{Ctx: t.Context()}}
 
 	defer func() {
 		if r := recover(); r == nil {

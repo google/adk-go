@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package controllers implements the HTTP controllers for the Agent
+// Engine API, dispatching query requests to registered method handlers.
 package controllers
 
 import (
@@ -23,9 +25,9 @@ import (
 	"net/http"
 	"time"
 
-	"google.golang.org/adk/server/agentengine/controllers/method"
-	"google.golang.org/adk/server/agentengine/internal/models"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/server/agentengine/controllers/method"
+	"google.golang.org/adk/v2/server/agentengine/internal/models"
+	"google.golang.org/adk/v2/session"
 )
 
 // AgentEngineAPIController holds information about the supported methods

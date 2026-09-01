@@ -29,36 +29,38 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/agent/runconfig"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal/googlellm"
-	"google.golang.org/adk/internal/plugininternal/plugincontext"
-	"google.golang.org/adk/internal/telemetry"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/platform"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
+// ErrModelNotConfigured is returned when the model is not configured.
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
 
-type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
-type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
-type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
-type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
-type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
+// Flow is a base implementation of the agent flow.
 type Flow struct {
 	Model model.LLM
 
@@ -81,6 +83,9 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
+		// Compaction must run before contentsRequestProcessor so a summary it
+		// appends is reflected in the history assembled for this very request.
+		CompactionRequestProcessor,
 		ContentsRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
@@ -98,8 +103,23 @@ var (
 	}
 )
 
+// maxConsecutiveThoughtOnlyTurns bounds how many thought-only ("thinking")
+// turns in a row the flow accepts before giving up, so the model is re-called
+// at most maxConsecutiveThoughtOnlyTurns-1 times waiting for an answer. A model
+// that keeps emitting thoughts without ever surfacing an answer would otherwise
+// spin forever, appending an event per turn and re-sending an ever-growing
+// history. Any turn that is not a final response resets the count.
+//
+// This is a safety net against a degenerate model, not a tuning knob: it is
+// deliberately not configurable, because a caller has no basis for choosing a
+// value. It is set high on purpose. A bound that is too low never requests an
+// answer the model was about to give, which is worse than a few wasted calls
+// before a degenerate model is cut off.
+const maxConsecutiveThoughtOnlyTurns = 10
+
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		thoughtOnlyTurns := 0
 		for {
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
@@ -113,8 +133,25 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			if lastEvent == nil || lastEvent.IsFinalResponse() {
+			if lastEvent == nil {
 				return
+			}
+			if lastEvent.IsFinalResponse() {
+				// A thought-only ("thinking") turn reports as final but has no
+				// answer; don't stop on it — call the model again. Give up once
+				// the model has produced only thoughts too many times in a row,
+				// leaving the last thinking event as the result.
+				if !isThoughtOnlyTurn(lastEvent) {
+					return
+				}
+				thoughtOnlyTurns++
+				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
+					return
+				}
+			} else {
+				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
 				// We may have reached max token limit during streaming mode.
@@ -124,6 +161,26 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 		}
 	}
+}
+
+// isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
+// whose parts are all model "thinking" (Thought) parts — no surfaced answer.
+// Thought signatures ride on substantive parts (text, function calls), which
+// are not Thought, so any such part makes the turn non-thought-only.
+func isThoughtOnlyTurn(ev *session.Event) bool {
+	if ev == nil || ev.LLMResponse.Partial {
+		return false
+	}
+	content := ev.LLMResponse.Content
+	if content == nil || len(content.Parts) == 0 {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p != nil && !p.Thought {
+			return false
+		}
+	}
+	return true
 }
 
 type activeTask struct {
@@ -324,7 +381,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				}
 			}
-
+			// TODO(kdroste): refactor underlying context
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
@@ -346,6 +403,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			eventsChan := make(chan *session.Event)
+			// Producers must guard sends with connCtx: once a reconnect (or any
+			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
+			// what unblocks them (issue #1152).
 			errChan := make(chan error)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
@@ -353,6 +413,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err)
 					sess.pushError(err)
+					// cleanup, not a bare return: genai dials the live socket
+					// with a context-less websocket.DefaultDialer.Dial, and
+					// nothing in the SDK watches a context, so only an explicit
+					// Close releases it. Returning without cleanup strands the
+					// connection for the life of the process.
+					cleanup()
 					return
 				}
 			}
@@ -362,7 +428,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
-						errChan <- err
+						select {
+						case errChan <- err:
+						case <-connCtx.Done():
+						}
 						return
 					}
 					if resp != nil {
@@ -379,7 +448,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								}
 							}
 						}
-						ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
 						select {
@@ -403,7 +472,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -412,7 +484,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -501,6 +576,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						break // Break the select
 					}
 					sess.pushError(err)
+					cleanup()
+					return
+				case <-sess.done:
 					cleanup()
 					return
 				case <-ctx.Done():
@@ -644,7 +722,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
 				return
 			}
-			for ev, err := range nextAgent.Run(ctx) {
+			type nodeRunner interface {
+				RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+			}
+			var nextStream iter.Seq2[*session.Event, error]
+			if nr, ok := nextAgent.(nodeRunner); ok {
+				nextStream = nr.RunNode(agent.Promote(ctx), nil)
+			} else {
+				nextStream = nextAgent.Run(ctx)
+			}
+			for ev, err := range nextStream {
 				if !yield(ev, err) || err != nil { // forward
 					return
 				}
@@ -745,7 +832,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		// Streaming mode comes from the invocation context's RunConfig rather than
+		// the runconfig context value: agent.Run() may be invoked directly (outside
+		// the runner), in which case no runconfig is stored in the Go context and
+		// runconfig.FromContext returns nil (issue #586).
+		useStream := false
+		if rc := ctx.RunConfig(); rc != nil {
+			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
@@ -811,6 +905,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
 			ModelName:    m.Name(),
 			InvocationID: ctx.InvocationID(),
+			Request:      req,
 		})
 		ctx = ctx.WithContext(spanCtx)
 		backend := googlellm.GetGoogleLLMVariant(m)
@@ -928,7 +1023,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
 	utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.ID = resp.eventID // TODO change NewEvent to accept event id
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
@@ -985,7 +1080,7 @@ Suggested fixes:
 }
 
 type cancelledToolContext struct {
-	agent.ToolContext
+	agent.Context
 	cancelCtx context.Context
 }
 
@@ -1024,14 +1119,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	}
 
 	fnResponseEvents := make([]*session.Event, len(fnCalls))
-	var wg sync.WaitGroup
 
+	// Tool calls run via the context's task runner: concurrent goroutines by
+	// default, or a caller-installed runner (platform.WithTaskRunner).
+	tasks := make([]func(context.Context), len(fnCalls))
 	for i, fnCall := range fnCalls {
-		wg.Add(1)
-		go func(i int, fnCall *genai.FunctionCall) {
-			defer wg.Done()
-
-			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
+		tasks[i] = func(taskCtx context.Context) {
+			sctx, span := telemetry.StartExecuteToolSpan(taskCtx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
 				Args:     fnCall.Args,
 			})
@@ -1066,10 +1160,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
 						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
-						cancelCtx, cancel := context.WithCancel(toolCtx)
+						cancelCtx, cancel := toolCtx.WithAgentCancel()
 						cancelToolCtx := &cancelledToolContext{
-							ToolContext: toolCtx,
-							cancelCtx:   cancelCtx,
+							Context:   toolCtx,
+							cancelCtx: cancelCtx,
 						}
 						if impl, ok := liveSess.(*liveSessionImpl); ok {
 							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
@@ -1129,8 +1223,16 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
-			// TODO: handle long-running tool.
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			if result == nil {
+				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
+					return
+				}
+				if curTool != nil && curTool.IsLongRunning() {
+					return
+				}
+			}
+
+			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",
@@ -1148,6 +1250,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Author = ctx.Agent().Name()
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
+			// A tool handler holds this EventActions for the whole call, and
+			// everything on it lands on the persisted event. Compaction is the
+			// framework's to write: see session.EventActions.Compaction.
+			ev.Actions.Compaction = nil
 
 			traceTool := curTool
 			if traceTool == nil {
@@ -1169,9 +1275,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			})
 
 			fnResponseEvents[i] = ev
-		}(i, fnCall)
+		}
 	}
-	wg.Wait()
+	platform.RunTasks(ctx, tasks)
 	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
@@ -1179,7 +1285,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	return mergedEvent, nil
 }
 
-func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
+func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
 	pluginManager := pluginManagerFromContext(toolCtx)
 	if pluginManager != nil {
 		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
@@ -1190,7 +1296,7 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
@@ -1237,7 +1343,7 @@ func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionToo
 	return response
 }
 
-func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
+func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
 	for _, callback := range f.BeforeToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs)
 		if err != nil {
@@ -1252,7 +1358,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.To
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
@@ -1268,7 +1374,7 @@ func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinte
 	return fResult, fErr
 }
 
-func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.OnToolErrorCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fErr)
 		if err != nil {
@@ -1293,23 +1399,29 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	}
 	var parts []*genai.Part
 	var actions *session.EventActions
+	var result *session.Event // first non-nil event, reused as the merged result
 	for _, ev := range events {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
+		if result == nil {
+			result = ev
+		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
 		actions = mergeEventActions(actions, &ev.Actions)
 	}
-	// reuse events[0]
-	ev := events[0]
-	ev.LLMResponse = model.LLMResponse{
+	// All entries were nil (e.g. every call was long-running/deferred).
+	if result == nil {
+		return nil, nil
+	}
+	result.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,
 		},
 	}
-	ev.Actions = *actions
-	return ev, nil
+	result.Actions = *actions
+	return result, nil
 }
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {
@@ -1332,7 +1444,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -1340,6 +1454,22 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions.
+// This is a deliberate divergance from adk-python which uses last-write-wins.
+func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		return maps.Clone(src)
+	}
+	for key, value := range src {
+		if dstVal, ok := dst[key]; ok {
+			dst[key] = max(dstVal, value)
+		} else {
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
@@ -1367,10 +1497,10 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
-	RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
-	RunOnModelErrorCallback(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
-	RunBeforeToolCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error)
-	RunAfterToolCallback(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
-	RunOnToolErrorCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+	RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+	RunAfterModelCallback(cctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+	RunOnModelErrorCallback(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+	RunBeforeToolCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error)
+	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }

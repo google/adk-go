@@ -29,9 +29,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"google.golang.org/adk/internal/version"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 const (
@@ -57,24 +57,17 @@ var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
 	trace.WithSchemaURL(semconv.SchemaURL),
 )
 
-type agent interface {
-	Name() string
-	Description() string
-}
-
-// StartInvokeAgentSpan starts a new semconv invoke_agent span.
-// It returns a new context with the span and the span itself.
-func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID, invocationID string) (context.Context, trace.Span) {
-	agentName := agent.Name()
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
-		gcpVertexAgentInvocationID.String(invocationID), // used by adk-web
-		semconv.GenAIOperationNameInvokeAgent,
-		semconv.GenAIAgentDescription(agent.Description()),
-		semconv.GenAIAgentName(agentName),
-		semconv.GenAIConversationID(sessionID),
-	))
-
-	return spanCtx, span
+// OverrideTracerForTesting replaces the package-level tracer with one
+// derived from tp for the duration of the calling test. The original
+// tracer is restored via t.Cleanup.
+func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
+	original := tracer
+	tracer = tp.Tracer(
+		systemName,
+		trace.WithInstrumentationVersion(version.Version),
+		trace.WithSchemaURL(semconv.SchemaURL),
+	)
+	t.Cleanup(func() { tracer = original })
 }
 
 type TraceAgentResultParams struct {
@@ -93,17 +86,31 @@ type StartGenerateContentSpanParams struct {
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
+	// Request is the request about to be sent to the model. It is used only
+	// to record the opt-in gen_ai.input.messages and
+	// gen_ai.system_instructions attributes, and may be nil.
+	Request *model.LLMRequest
 }
 
 // StartGenerateContentSpan starts a new semconv generate_content span.
 func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
 		gcpVertexAgentInvocationID.String(params.InvocationID),
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
-	))
+	}
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
+	// After the sampling decision, not before: converting a whole conversation
+	// costs milliseconds, and on a span the sampler drops it buys nothing. The
+	// conventions list the attributes worth having at span creation for
+	// sampling, and content is not among them. Still before the model call, so
+	// the prompt is on the span even when the call fails and no response is
+	// ever traced.
+	if span.IsRecording() {
+		span.SetAttributes(requestContentAttributes(params.Request)...)
+	}
 	return spanCtx, span
 }
 
@@ -123,6 +130,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 		gcpVertexAgentEventID.String(params.EventID),
 		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
 	)
+	span.SetAttributes(responseContentAttributes(params.Response)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
