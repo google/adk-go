@@ -96,6 +96,57 @@ func e2eNewModel(ctx context.Context, cfg *Config) (model.LLM, error) {
 	return newModel(ctx, cfg)
 }
 
+// recordingLLM wraps the real model and captures everything it produced: its
+// prose and the arguments of every tool call.
+//
+// This exists to separate MODEL COMPLIANCE from the GUARANTEE. A test that only
+// asserts the published comment is clean passes identically whether the model
+// refused the payload or the Go layer discarded it, so it cannot show which one
+// is doing the work. A sibling bot measured the model complying with output
+// injection in 2 of 5 runs while its published output stayed inert -- the model
+// contributed nothing and only the Go layer did. Without recording both, that
+// would have read as the model resisting.
+type recordingLLM struct {
+	inner model.LLM
+	mu    sync.Mutex
+	seen  []string
+}
+
+func (r *recordingLLM) Name() string { return r.inner.Name() }
+
+func (r *recordingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	inner := r.inner.GenerateContent(ctx, req, stream)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for resp, err := range inner {
+			if resp != nil && resp.Content != nil {
+				for _, part := range resp.Content.Parts {
+					if part == nil {
+						continue
+					}
+					r.mu.Lock()
+					if part.Text != "" {
+						r.seen = append(r.seen, part.Text)
+					}
+					if part.FunctionCall != nil {
+						r.seen = append(r.seen, fmt.Sprint(part.FunctionCall.Args))
+					}
+					r.mu.Unlock()
+				}
+			}
+			if !yield(resp, err) {
+				return
+			}
+		}
+	}
+}
+
+// output returns everything the model produced this run, concatenated.
+func (r *recordingLLM) output() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.seen, "\n")
+}
+
 // e2eStats separates scenarios that actually measured something from ones the
 // provider took away.
 //
@@ -502,6 +553,10 @@ type e2eResult struct {
 	commented map[int][]string
 	paths     []string
 	hadError  bool
+	// modelOutput is everything the model produced: prose plus tool-call args.
+	// Compare it against what was published to tell model compliance apart from
+	// the Go guarantee.
+	modelOutput string
 }
 
 // assignedTo returns the single login assigned to the audited pull request, or
@@ -568,10 +623,11 @@ func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 		recLog := slog.New(slog.NewTextHandler(&lockedWriter{w: &logBuf, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 		client := newE2EClientWithLog(t, cfg, srv, recLog)
-		mdl, err := e2eNewModel(context.Background(), cfg)
+		inner, err := e2eNewModel(context.Background(), cfg)
 		if err != nil {
 			t.Fatalf("newModel: %v", err)
 		}
+		mdl := &recordingLLM{inner: inner}
 		tools, err := client.tools()
 		if err != nil {
 			t.Fatalf("tools: %v", err)
@@ -587,7 +643,10 @@ func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 		logMu.Lock()
 		lastLog = logBuf.String()
 		logMu.Unlock()
-		last = e2eResult{assigned: a, commented: c, paths: p, hadError: client.hadError()}
+		last = e2eResult{
+			assigned: a, commented: c, paths: p,
+			hadError: client.hadError(), modelOutput: mdl.output(),
+		}
 		if !last.hadError {
 			e2eRan()
 			return last

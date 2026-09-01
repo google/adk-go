@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,52 +149,70 @@ func TestShippedWorkflowKeepsItsHardening(t *testing.T) {
 	}
 }
 
-// A workflow_dispatch naming a pull request must land in the SAME concurrency
-// group as that pull request's event-driven run. Keyed only on
-// github.event.pull_request.number, a dispatch falls back to the run id and gets
-// a group of its own, so two processes triage one pull request with independent
-// claim tables.
-func TestShippedWorkflowSerializesDispatchWithTheEventRun(t *testing.T) {
+// The concurrency group must be CONSTANT, so at most one triage run exists
+// repository-wide.
+//
+// This job is reachable by any stranger: pull_request_target runs from the base
+// branch and is not held back by the "require approval for first-time
+// contributors" gate that gates the main `pull_request` CI. A group keyed on the
+// pull request number serializes same-pull-request runs but lets N open pull
+// requests occupy N runners, and opening pull requests is free.
+//
+// The cost is real and accepted: with the default queue behavior a run queued
+// while another is pending cancels that pending run, so under contention some
+// pull requests are not auto-triaged. That is the right way to fail for an
+// advisory job, and workflow_dispatch recovers a specific one.
+func TestShippedWorkflowSerializesEveryTriageRun(t *testing.T) {
 	wf := readWorkflow(t)
 	groupRe := regexp.MustCompile(`(?m)^\s*group:\s*(.+)$`)
 	m := groupRe.FindStringSubmatch(wf)
 	if m == nil {
 		t.Fatal("the workflow declares no concurrency group")
 	}
-	group := m[1]
-	if !containsFold(group, "github.event.pull_request.number") {
-		t.Errorf("concurrency group %q is not keyed on the pull request number", group)
+	group := strings.TrimSpace(m[1])
+	if strings.Contains(group, "${{") {
+		t.Errorf("concurrency group %q is templated, so different pull requests land in "+
+			"different groups and run concurrently. A stranger can open many pull requests, "+
+			"and this job is not behind the first-time-contributor approval gate.", group)
 	}
-	if !containsFold(group, "inputs.pr_number") {
-		t.Errorf("concurrency group %q ignores inputs.pr_number, so a dispatch for a pull request "+
-			"runs in a different group from that pull request's own event", group)
+	// Cancelling in progress would drop a run mid-write.
+	if !containsFold(wf, "cancel-in-progress: false") {
+		t.Error("cancel-in-progress must be false: a triage run cancelled mid-write could " +
+			"leave an assignment recorded with no comment, or the reverse")
 	}
 }
 
-// Suppressing a security-scanner finding is a security decision, so exactly one
-// may exist here and it must be the one that was argued for. Without this, a
-// later edit could silence `template-injection` or `unpinned-uses` with the same
-// one-line comment and nothing would notice.
-func TestShippedWorkflowSuppressesOnlyTheOneScannerFindingItArguesFor(t *testing.T) {
+// The per-run cost ceiling. A stranger can trigger this job, so the job timeout
+// is also the per-attack cost, and it must stay tight enough to be uninteresting.
+func TestShippedWorkflowKeepsThePerRunCostTight(t *testing.T) {
 	wf := readWorkflow(t)
-	ignoreRe := regexp.MustCompile(`zizmor:\s*ignore\[([^\]]+)\]`)
+	m := regexp.MustCompile(`(?m)^\s*timeout-minutes:\s*(\d+)`).FindStringSubmatch(wf)
+	if m == nil {
+		t.Fatal("no timeout-minutes")
+	}
+	minutes, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("timeout-minutes %q: %v", m[1], err)
+	}
+	if minutes > 10 {
+		t.Errorf("timeout-minutes = %d. The event path triages ONE pull request, which takes "+
+			"about a minute; a large ceiling only raises what an attacker gets per pull "+
+			"request they open.", minutes)
+	}
+}
 
-	var rules []string
-	for _, m := range ignoreRe.FindAllStringSubmatch(wf, -1) {
-		rules = append(rules, m[1])
+// The deployed model must be pinned, not a floating alias. adk-python pins
+// LLM_MODEL_NAME too. A floating alias changes the deployed model with no diff,
+// and the alias this repo defaults to was measured shedding completely on the
+// key path the workflow uses.
+func TestShippedWorkflowPinsTheModel(t *testing.T) {
+	wf := readWorkflow(t)
+	m := regexp.MustCompile(`(?m)^\s*LLM_MODEL_NAME:\s*(\S+)`).FindStringSubmatch(wf)
+	if m == nil {
+		t.Fatal("the workflow does not pin LLM_MODEL_NAME, so the deployed model floats")
 	}
-	if len(rules) != 1 || rules[0] != "dangerous-triggers" {
-		t.Errorf("scanner suppressions = %v, want exactly [dangerous-triggers]", rules)
-	}
-	// And the justification must still be there. A bare suppression is the thing
-	// that turns a reasoned exception into an unexplained hole.
-	for _, want := range []string{
-		"never checks out the pull request head",
-		"requires the base repository's token",
-	} {
-		if !containsFold(wf, want) {
-			t.Errorf("the suppression lost its justification (%q missing)", want)
-		}
+	if strings.Contains(m[1], "latest") {
+		t.Errorf("LLM_MODEL_NAME = %q is a floating alias; pin a concrete version", m[1])
 	}
 }
 

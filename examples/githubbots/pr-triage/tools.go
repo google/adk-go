@@ -106,6 +106,21 @@ func claimRejection(res claimResult, number int, act action) actionResult {
 	}
 }
 
+// chargeAndCheck counts this tool call against the pull request's budget and
+// returns a terminal result once it is spent.
+//
+// The message deliberately does not invite a retry: the point is to stop a model
+// that is looping, and every extra turn costs the whole transcript again.
+func (c *GitHubClient) chargeAndCheck(number int) (actionResult, bool) {
+	used, exhausted := c.chargeToolCall(number)
+	if !exhausted {
+		return actionResult{}, false
+	}
+	c.log.Warn("tool-call budget exhausted", "pr", number, "calls", used, "budget", maxToolCallsPerPR)
+	return errResult("the tool-call budget for pull request #%d is exhausted after %d calls; "+
+		"stop calling tools and reply with your summary", number, used), true
+}
+
 // assignOwner is the body of the assign_owner_to_pull_request tool, factored out
 // so it can be unit-tested without going through the agent.
 //
@@ -117,6 +132,9 @@ func claimRejection(res claimResult, number int, act action) actionResult {
 func (c *GitHubClient) assignOwner(ctx context.Context, number int, component string) (actionResult, error) {
 	if msg, ok := authorizePR(ctx, number); !ok {
 		return errResult("%s", msg), nil
+	}
+	if res, over := c.chargeAndCheck(number); over {
+		return res, nil
 	}
 	key := strings.ToLower(strings.TrimSpace(component))
 	owner, known := c.cfg.OwnerMap[key]
@@ -190,6 +208,9 @@ var maxContextItems = len(contextItems)
 func (c *GitHubClient) requestMoreContext(ctx context.Context, number int, items []string) (actionResult, error) {
 	if msg, ok := authorizePR(ctx, number); !ok {
 		return errResult("%s", msg), nil
+	}
+	if res, over := c.chargeAndCheck(number); over {
+		return res, nil
 	}
 	if len(items) == 0 {
 		return errResult("missing_items is empty; name at least one of: %s",

@@ -783,3 +783,53 @@ func TestToolInventoryIsPinned(t *testing.T) {
 		})
 	}
 }
+
+// The ADK agent loop is unbounded in tool-call turns, and a refused call is not
+// free: it returns a model-readable result with a nil Go error, which is fed
+// back as data and buys another turn, with the whole transcript re-sent each
+// time. Without a budget the only limit is wall clock, and this bot's trigger is
+// reachable by any stranger.
+func TestToolCallBudgetStopsALoopingModel(t *testing.T) {
+	h := newRecordingHandler()
+	c := eligibleClient(t, testConfig(), h)
+	ctx := withAuditedPR(context.Background(), 7)
+
+	// Every call after the first is refused by the one-shot claim, which is
+	// exactly the shape that would otherwise loop for free.
+	var lastMsg string
+	for i := range maxToolCallsPerPR + 5 {
+		res, err := c.assignOwner(ctx, 7, "core")
+		if err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		lastMsg = res.Message
+	}
+	if !strings.Contains(lastMsg, "budget") {
+		t.Errorf("after %d calls the tool still did not report an exhausted budget; got %q",
+			maxToolCallsPerPR+5, lastMsg)
+	}
+	// And the budget must not have cost a write: one assignment, as always.
+	if got := len(h.writes()); got != 1 {
+		t.Errorf("made %d writes across %d calls, want 1", got, maxToolCallsPerPR+5)
+	}
+}
+
+// The budget is per pull request, not global: one noisy pull request must not
+// silence triage for the next one in a batch.
+func TestToolCallBudgetIsPerPullRequest(t *testing.T) {
+	h := newRecordingHandler()
+	c := eligibleClient(t, testConfig(), h)
+	c.markEligible(8)
+
+	for range maxToolCallsPerPR + 2 {
+		_, _ = c.assignOwner(withAuditedPR(context.Background(), 7), 7, "core")
+	}
+	// A different pull request starts with a full budget.
+	res, err := c.assignOwner(withAuditedPR(context.Background(), 8), 8, "core")
+	if err != nil {
+		t.Fatalf("assignOwner on a second pull request: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("second pull request = %+v, want success: the budget must be per pull request", res)
+	}
+}

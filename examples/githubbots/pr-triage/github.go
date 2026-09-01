@@ -119,6 +119,34 @@ type GitHubClient struct {
 	eligible map[int]bool
 	// claims records the single attempt allowed per (pull request, action).
 	claims map[claimKey]outcome
+	// toolCalls counts every tool invocation per pull request, successful or
+	// not. See maxToolCallsPerPR.
+	toolCalls map[int]int
+}
+
+// maxToolCallsPerPR bounds how many times the model may invoke a tool while
+// triaging one pull request.
+//
+// The ADK agent loop is not bounded in tool-call turns -- it runs until the
+// model emits a final response -- so without this the only limit is wall clock.
+// That matters here because a REFUSED call is not free: it returns a
+// model-readable result with a nil Go error, which is fed back as data and buys
+// another turn, and each turn re-sends the whole transcript, so token cost grows
+// with the square of the turn count. A pull request needs at most two calls
+// (assign, ask for context); anything past this is a model that is not
+// converging, and the run should stop paying for it.
+const maxToolCallsPerPR = 12
+
+// chargeToolCall counts one tool invocation and reports whether the pull
+// request's budget is now exhausted.
+func (c *GitHubClient) chargeToolCall(number int) (used int, exhausted bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.toolCalls == nil {
+		c.toolCalls = make(map[int]int)
+	}
+	c.toolCalls[number]++
+	return c.toolCalls[number], c.toolCalls[number] > maxToolCallsPerPR
 }
 
 // NewGitHubClient builds a client authenticated with the configured token and
@@ -127,11 +155,12 @@ type GitHubClient struct {
 func NewGitHubClient(ctx context.Context, cfg *Config, log *slog.Logger) (*GitHubClient, error) {
 	rest := github.NewClient(nil).WithAuthToken(cfg.GitHubToken)
 	c := &GitHubClient{
-		rest:     rest,
-		cfg:      cfg,
-		log:      log,
-		eligible: make(map[int]bool),
-		claims:   make(map[claimKey]outcome),
+		rest:      rest,
+		cfg:       cfg,
+		log:       log,
+		eligible:  make(map[int]bool),
+		claims:    make(map[claimKey]outcome),
+		toolCalls: make(map[int]int),
 	}
 
 	// The bot needs its own login to recognize its own past context-request

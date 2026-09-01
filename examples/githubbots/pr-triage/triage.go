@@ -230,11 +230,11 @@ func assemblePRContext(pr PullRequest, maxFiles int, nonce string) string {
 	// component-owner precondition.
 	sections = append(sections, fmt.Sprintf("Pull request #%d.", pr.Number))
 
-	if title := clean(pr.Title, maxSnippetRunes); title != "" {
-		sections = append(sections, "Title (untrusted):\n"+fence(title))
+	if title, cut := clean(pr.Title, maxSnippetRunes); title != "" {
+		sections = append(sections, "Title (untrusted"+truncNote(cut)+"):\n"+fence(title))
 	}
-	if body := clean(pr.Body, maxSnippetRunes); body != "" {
-		sections = append(sections, "Description (untrusted):\n"+fence(body))
+	if body, cut := clean(pr.Body, maxSnippetRunes); body != "" {
+		sections = append(sections, "Description (untrusted"+truncNote(cut)+"):\n"+fence(body))
 	} else {
 		// State the absence outside the fence. "The description is empty" is a
 		// fact the bot established, and it is the single strongest signal for the
@@ -268,7 +268,8 @@ func fileList(paths []string, maxFiles int) (string, int) {
 		if shown >= maxFiles {
 			break
 		}
-		if p = clean(p, maxPathRunes); p == "" {
+		p, _ = clean(p, maxPathRunes)
+		if p == "" {
 			continue
 		}
 		if b.Len() > 0 {
@@ -278,6 +279,16 @@ func fileList(paths []string, maxFiles int) (string, int) {
 		shown++
 	}
 	return b.String(), shown
+}
+
+// truncNote renders the trusted, unforgeable truncation announcement. It lives
+// in the header OUTSIDE the fence, so an author cannot claim their text was
+// truncated (or hide that it was) by typing a marker into it.
+func truncNote(truncated bool) string {
+	if truncated {
+		return ", truncated"
+	}
+	return ""
 }
 
 // fileCountNote describes how many of the pull request's files are shown.
@@ -300,22 +311,27 @@ func fileCountNote(shown, totalFiles int) string {
 // It deliberately does NOT strip fenced code blocks: text hidden inside a ```
 // fence would then never be reviewed, and the nonce fence -- not the absence of
 // backticks -- is what makes the content inert.
-func clean(s string, maxRunes int) string {
+func clean(s string, maxRunes int) (string, bool) {
 	return truncateRunes(strings.TrimSpace(s), maxRunes)
 }
 
-// truncateRunes shortens s to at most n runes, appending a marker when it trims.
-// It is rune-based so a multibyte character at the boundary is never split into
-// invalid UTF-8.
-func truncateRunes(s string, n int) string {
+// truncateRunes shortens s to at most n runes. It is rune-based so a multibyte
+// character at the boundary is never split into invalid UTF-8.
+//
+// It appends NO marker. A marker would sit inside the nonce fence, where the
+// author can type the identical string, so the model could not tell real
+// truncation from claimed truncation. Truncation is announced by the caller in
+// the TRUSTED header instead, next to the file count, which is already handled
+// that way -- this function used to be the one inconsistency in the file.
+func truncateRunes(s string, n int) (string, bool) {
 	if n < 0 {
 		n = 0
 	}
 	r := []rune(s)
 	if len(r) <= n {
-		return s
+		return s, false
 	}
-	return string(r[:n]) + " …[truncated]"
+	return string(r[:n]), true
 }
 
 // buildContextComment renders the comment asking the author for more context.

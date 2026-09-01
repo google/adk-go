@@ -23,6 +23,7 @@ import (
 	"iter"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -186,7 +187,12 @@ func newAgentStack(cfg *Config, mdl model.LLM, tools []tool.Tool, log *slog.Logg
 		// the result, so the model still sees the error and can react.
 		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
 			func(_ agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
-				log.Error("tool call failed", "tool", t.Name(), "args", args, "error", err)
+				// Argument NAMES only. The values are model output derived from
+				// attacker-controlled pull request text, and on a public
+				// repository the workflow log is public -- logging them would
+				// republish whatever a stranger wrote, under our identity, in a
+				// place nobody is reviewing.
+				log.Error("tool call failed", "tool", t.Name(), "arg_names", argNames(args), "error", err)
 				return nil, nil
 			},
 		},
@@ -204,6 +210,16 @@ func newAgentStack(cfg *Config, mdl model.LLM, tools []tool.Tool, log *slog.Logg
 		return nil, fmt.Errorf("create runner: %w", err)
 	}
 	return &agentStack{runner: r, sessions: sessions}, nil
+}
+
+// argNames returns a tool call's argument names, sorted, with no values.
+func argNames(args map[string]any) []string {
+	names := make([]string, 0, len(args))
+	for k := range args {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // newModel builds the Gemini model. If a Gemini API key is configured it is used

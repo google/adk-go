@@ -81,13 +81,28 @@ on: # zizmor: ignore[dangerous-triggers]
         default: false
         type: boolean
 
-# Never let two runs triage the same pull request at once. Keying on the number
-# alone was not enough: a workflow_dispatch has no github.event.pull_request, so
-# a dispatch for #42 fell through to a group of its own and could run beside the
-# event-driven run for #42, with an independent in-process claim table. Every
-# batch dispatch shares one group for the same reason.
+# ONE triage run at a time, repository-wide. The group is deliberately constant.
+#
+# A per-pull-request group serializes same-pull-request runs but lets DIFFERENT
+# pull requests run concurrently, and this job is reachable by any stranger:
+# pull_request_target runs from the base branch and is not subject to the
+# "require approval for first-time contributors" gate that holds back the main
+# `pull_request` CI. So N open pull requests meant N concurrent runners, and
+# opening pull requests is free.
+#
+# The trade-off, stated plainly because it is not free: with the default
+# `queue: single`, a run queued while another is pending CANCELS that pending
+# run. Under contention some pull requests are therefore not auto-triaged. That
+# is the right failure mode here -- the bot is advisory, a maintainer can assign
+# by hand, and workflow_dispatch with a pr_number re-runs triage for a specific
+# one. Dropping an advisory action under load beats handing a stranger the
+# organisation's runner pool.
+#
+# (`queue: max` would queue up to 100 instead of dropping, which is strictly
+# better, but actionlint 1.7.12 does not know that key yet and rejects the file.
+# Worth revisiting when the linter catches up.)
 concurrency:
-  group: pr-triage-${{ github.event.pull_request.number || inputs.pr_number || 'batch' }}
+  group: pr-triage
   cancel-in-progress: false
 
 permissions:
@@ -100,9 +115,12 @@ jobs:
     # on a contributor's pull request.
     if: github.repository == 'google/adk-go' && vars.PR_TRIAGE_OWNER_MAP != ''
     runs-on: ubuntu-latest
+    # Deliberately tight. The event path triages exactly ONE pull request, which
+    # takes about a minute; the old 15 was sized for a batch. Since a stranger
+    # can trigger this job directly, the ceiling is also the per-attack cost.
     # The process budget below (RUN_BUDGET) is lower, so an overrun is reported
     # by the bot with a diagnosis instead of the job being killed here.
-    timeout-minutes: 15
+    timeout-minutes: 8
     permissions:
       # Covers both assignees and comments on a pull request. The bot needs
       # nothing wider: it does not label, push, or read any other repository.
@@ -166,7 +184,15 @@ jobs:
           # would override an explicit `dry_run: true` and run live.
           DRY_RUN: ${{ (vars.PR_TRIAGE_DRY_RUN == 'true' || inputs.dry_run) && 'true' || 'false' }}
           # Below the job's timeout-minutes, so the bot reports its own overrun.
-          RUN_BUDGET: 10m
+          RUN_BUDGET: 5m
+          # One pull request; the default 5m was sized for a batch.
+          PR_TIMEOUT: 3m
+          # Pinned, not floating. adk-python pins LLM_MODEL_NAME too, and a
+          # floating alias silently changes the deployed model. gemini-flash-latest
+          # measured 0/5 on this key path during a shedding window while
+          # gemini-3.6-flash measured 5/5. The Go default is left alone so the
+          # example stays copyable; the deployed model is a reviewable line here.
+          LLM_MODEL_NAME: gemini-3.6-flash
         run: |
           set -euo pipefail
           go run -mod=readonly .
