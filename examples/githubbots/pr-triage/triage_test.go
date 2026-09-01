@@ -15,6 +15,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -359,6 +360,57 @@ func TestBuildContextComment(t *testing.T) {
 	}
 	if got := buildContextComment(nil); got != "" {
 		t.Errorf("buildContextComment(nil) = %q, want \"\"", got)
+	}
+}
+
+// TestTheNoPushClaimStaysTrue pins a factual claim the bot publishes to a
+// contributor, rather than the wording it publishes it in.
+//
+// The comment ends "Editing the description is enough — no need to push
+// anything." That is not decoration. It tells a contributor what they have to
+// do, under the repository's identity, and it is true only while every item the
+// bot can ask for can actually be answered by editing the description. All six
+// can today. Add one that needs a code change -- write a test, rebase, rename a
+// symbol -- and the sentence becomes false without a single character of it
+// changing.
+//
+// That is the failure mode a fixed string invites. It cannot drift by accident,
+// so nobody re-reads it when the behavior around it moves, and no security gate
+// would flag it: the text is correctly fenced, carries no link, breaks no
+// scoping rule, and is simply untrue.
+//
+// So this pins the CAPABILITY SET, not the prose. Rewording any item is free.
+// Adding or removing one fails here and sends whoever did it back to the
+// sentence to decide whether it still holds. A pin that fired on every rewording
+// would be deleted the first time someone improved the wording, which is a
+// slower way of not having a pin.
+//
+// It lives in the default suite deliberately. A check on what the software
+// publishes must not be gated on a flag, a model or a credential -- the
+// end-to-end assertion on this comment sits behind PR_TRIAGE_E2E and would not
+// have caught this.
+func TestTheNoPushClaimStaysTrue(t *testing.T) {
+	// Every key here must be answerable in the pull request description alone.
+	want := []string{"problem", "summary", "linked_issue", "reproduction", "testing", "breaking_change"}
+	if got := contextItemKeys(); !slices.Equal(got, want) {
+		t.Errorf("the set of things the bot can ask for changed:\n  got  %v\n  want %v\n"+
+			"Re-read the last line of buildContextComment. It promises the author that "+
+			"editing the description is enough and that they need not push anything. That "+
+			"is only true while every item above can be answered in the description. If the "+
+			"new item can, update this list. If it cannot, the promise is now false and the "+
+			"sentence has to change with it.", got, want)
+	}
+
+	// If the claim is gone, the list above is guarding nothing, and that should
+	// be a deliberate decision rather than a silent one. Checked by key term so
+	// the sentence can be rewritten freely.
+	body := buildContextComment([]string{"problem"})
+	for _, term := range []string{"description", "push"} {
+		if !strings.Contains(body, term) {
+			t.Errorf("the posted comment no longer mentions %q, so the promise this test "+
+				"protects may have been reworded away. Either restore it or drop this test "+
+				"on purpose:\n%s", term, body)
+		}
 	}
 }
 
