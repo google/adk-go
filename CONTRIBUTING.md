@@ -195,12 +195,37 @@ otherwise read the relevant `SKILL.md` before starting that kind of work.
 
 # ADK Web
 
-## Updating ADK web version to latest
+## Refreshing the embedded web bundle
 
--   Run `./scripts/adk-web/update-adk-web.sh` to update the web UI to the latest version from [GitHub](https://github.com/google/adk-web).
+The web UI ships as a prebuilt Angular bundle, committed under
+`cmd/launcher/web/webui/distr/` and embedded into the server binary. It is built
+from a pinned revision of [adk-web](https://github.com/google/adk-web), not from
+the latest `main`.
+
+-   Run `./scripts/adk-web/update-adk-web.sh` to rebuild the bundle from the
+    pinned revision. It reports the previous and the new upstream commit, and a
+    URL comparing the two.
+-   The committed bundle predates the pin and carries no provenance file, so
+    the pin does not yet describe what is in `distr/`. The first refresh will
+    therefore move the UI forward to the pinned revision rather than reproduce
+    the current bundle. Review that refresh as a version bump. It reads the
+    previous commit out of that missing file, so it reports the previous commit
+    as unknown and prints no compare URL. Every refresh after it prints both.
 -   Run `docker run -it adk-web-builder:latest sh -c "<COMMAND>"` to start the container and debug the build, e.g.:
     -   `docker run -it adk-web-builder:latest sh -c "ls -alh dist/agent_framework_web/browser"` to view the built files.
     -   `docker run -it adk-web-builder:latest sh -c "npm run build"` to debug the build output.
+
+Please leave the revision pinned. It used to track `main`, so one refresh
+silently pulled in an upstream change that moved 30 API endpoints, and most of
+the UI returned 404 for two months.
+
+See [scripts/adk-web/README.md](scripts/adk-web/README.md) for how to bump the
+pin deliberately, and for the checklist to apply when reviewing a refresh. A
+refresh also needs the UI-to-server route contract test to pass:
+
+```bash
+go test ./server/adkrest/ -run TestUIContract
+```
 
 ### Documentation
 
