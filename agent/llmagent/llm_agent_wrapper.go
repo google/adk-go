@@ -37,7 +37,7 @@ import (
 )
 
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
-// Per-mode behaviour:
+// Per-mode behavior:
 //
 //   - single_turn: the wrapper forces IncludeContents=none, seeds the
 //     agent with a single user-content event derived from nodeInput,
@@ -405,7 +405,7 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.C
 	return out, nil
 }
 
-// synthesizeTaskFREvent builds the synthesised FR event for a completed
+// synthesizeTaskFREvent builds the synthesized FR event for a completed
 // task delegation.
 func synthesizeTaskFREvent(ctx context.Context, invocationID string, fc *genai.FunctionCall, output any) *session.Event {
 	var response map[string]any
@@ -478,7 +478,7 @@ func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*sessio
 //  1. Pre-LLM scan: replay any unresolved task FCs from prior turns.
 //     Their dispatched sub-agents may complete or pause (HITL).
 //  2. Run Agent.Run; on every fresh task FC, dispatch via RunNode and
-//     synthesise an FR event so the LLM sees the result on the next
+//     synthesize an FR event so the LLM sees the result on the next
 //     round.
 //  3. Re-enter Agent.Run after each dispatch round; the loop ends when
 //     the LLM finishes without delegating.
@@ -492,7 +492,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 				// Task sub-agent paused on a long-running tool
 				// (e.g. its tool called ctx.RequestConfirmation
 				// and is awaiting the user's reply). Do NOT
-				// synthesise a delegation-closing FR: leaving
+				// synthesize a delegation-closing FR: leaving
 				// the delegation unresolved makes
 				// findUnresolvedTaskDelegations re-dispatch it on
 				// the next user turn, where the
@@ -522,7 +522,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// observes a successful finish_task FR, so out==nil
 			// means the task did not actually finish.
 			//
-			// Treating this as a completion would (a) synthesise
+			// Treating this as a completion would (a) synthesize
 			// a misleading delegation-closing FR, and (b) route
 			// the user's next message to the coordinator instead
 			// of back into the paused task, causing the
@@ -564,7 +564,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// flows emit partial events with the same content as the
 			// eventual final aggregated event; partials are not
 			// persisted to the session, so dispatching off a partial
-			// would synthesise an FR whose matching FC is absent from
+			// would synthesize an FR whose matching FC is absent from
 			// history, breaking the next LLM turn's content rearrange.
 			if ev == nil || ev.LLMResponse.Partial {
 				continue
@@ -577,7 +577,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			}
 			if len(taskFCs) > 0 {
 				// Close this inner iteration; outer loop re-enters
-				// Agent.Run so the LLM sees the synthesised FR(s).
+				// Agent.Run so the LLM sees the synthesized FR(s).
 				hadTaskFC = true
 				break
 			}
@@ -670,7 +670,7 @@ type wrappedSession struct {
 	// FC/FR rounds). Putting the seed at the tail instead would let the
 	// backward-scan in buildContentsCurrentTurnContextOnly pivot on the
 	// seed and drop the agent's own tool history between rounds; see
-	// adk-python's behaviour (which appends to session.events before
+	// adk-python's behavior (which appends to session.events before
 	// run_async, achieving the same ordering for free).
 	insertAt int
 }

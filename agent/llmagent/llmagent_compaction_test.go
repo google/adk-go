@@ -109,7 +109,7 @@ const minCassetteBytes = 1024
 //
 // The cassette is sensitive to anything that changes prompt bytes, including the
 // summarizer prompt template, the transcript line format, tool-argument
-// rendering and truncation behaviour. Any of those changes requires re-recording.
+// rendering and truncation behavior. Any of those changes requires re-recording.
 //go:generate go test -httprecord=^testdata[/\\]TestCompactionE2E\.httprr$
 
 func TestCompactionE2E(t *testing.T) {
@@ -211,8 +211,8 @@ func TestCompactionE2E(t *testing.T) {
 	const sessionID = "compaction_session"
 	turns := []string{
 		"What is the weather in Zurich?",
-		"My favourite colour is teal, remember that.",
-		"What was my favourite colour again?",
+		"My favourite color is teal, remember that.",
+		"What was my favourite color again?",
 		// A tool call after the compaction point, so the prompt that follows it
 		// carries a function call and its response alongside a summary. That is
 		// the arrangement the call-pairing and call-recovery paths exist for,
@@ -343,7 +343,7 @@ func TestCompactionE2E(t *testing.T) {
 	// working.
 	recall := strings.ToLower(strings.Join(answers[2], " "))
 	if !strings.Contains(recall, "teal") {
-		t.Errorf("the model could not recall the colour from the summary alone; answer was %q", recall)
+		t.Errorf("the model could not recall the color from the summary alone; answer was %q", recall)
 	}
 
 	// Structural checks, asserted here rather than inferred from the fact that a

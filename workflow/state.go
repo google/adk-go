@@ -65,9 +65,9 @@ const (
 	// policy (if any) has been exhausted. Terminal.
 	NodeFailed
 
-	// NodeCancelled means the node was cancelled: either because a
-	// sibling node failed and the engine cancelled all running tasks,
-	// or because the invocation context was cancelled from outside the
+	// NodeCancelled means the node was canceled: either because a
+	// sibling node failed and the engine canceled all running tasks,
+	// or because the invocation context was canceled from outside the
 	// engine. Terminal in both cases — the two are told apart by
 	// whether the run reports an error, not by this status.
 	NodeCancelled

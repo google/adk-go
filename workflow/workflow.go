@@ -226,14 +226,14 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 // the exact key shape). It must be unique within any session that
 // runs more than one workflow: two workflows sharing a name and a
 // session will silently overwrite each other's RunState, leading
-// to corrupted resume behaviour. The same workflow may safely
+// to corrupted resume behavior. The same workflow may safely
 // share a name across different sessions.
 //
 // An empty name disables persistence: the workflow runs normally
 // but its RunState is neither saved nor loaded, so Resume on a
 // follow-up turn will find nothing to resume from.
 //
-// Optional Option values configure engine behaviour
+// Optional Option values configure engine behavior
 // (concurrency cap, etc.); see WithMaxConcurrency.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {

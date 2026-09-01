@@ -286,7 +286,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	if compactionctx.FromContext(ctx).AlreadyCompacted() {
 		return nil
 	}
-	// Compaction is an optimisation, so a cancelled or expired run should not
+	// Compaction is an optimisation, so a canceled or expired run should not
 	// spend a model call on it, nor write a summary the caller never waited
 	// for.
 	if ctx.Err() != nil {

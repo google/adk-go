@@ -153,7 +153,7 @@ func TestCompactionProcessorAppendsThroughASessionWrapper(t *testing.T) {
 	}
 }
 
-// TestCompactionProcessorSkipsOnCancelledContext checks that a cancelled turn
+// TestCompactionProcessorSkipsOnCancelledContext checks that a canceled turn
 // does not spend a model call on compaction, nor write a summary the caller is
 // no longer waiting for.
 func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
@@ -179,10 +179,10 @@ func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
 	}
 
 	if summarizer.calls != 0 {
-		t.Errorf("summarizer ran %d time(s) on a cancelled turn", summarizer.calls)
+		t.Errorf("summarizer ran %d time(s) on a canceled turn", summarizer.calls)
 	}
 	if got := len(storedCompactions(t, svc)); got != 0 {
-		t.Errorf("stored %d compaction events on a cancelled turn", got)
+		t.Errorf("stored %d compaction events on a canceled turn", got)
 	}
 }
 

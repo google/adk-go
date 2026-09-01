@@ -380,7 +380,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 			return "", errors.New("error b")
 		}
 		if input == "c" {
-			// Block until cancelled
+			// Block until canceled
 			<-ctx.Done()
 			atomic.StoreInt32(&workerCCancelled, 1)
 			close(cancelledCh)
@@ -420,11 +420,11 @@ func TestParallelWorker_FailFast(t *testing.T) {
 	case <-cancelledCh:
 		// Good
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for worker C to be cancelled")
+		t.Fatal("timeout waiting for worker C to be canceled")
 	}
 
 	if atomic.LoadInt32(&workerCCancelled) != 1 {
-		t.Error("expected worker c to be cancelled")
+		t.Error("expected worker c to be canceled")
 	}
 }
 

@@ -33,7 +33,7 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 	if resolvedSchema != nil {
 		// Validate the JSON-decoded form rather than the Go value:
 		// struct validation can't account for `omitempty` or custom
-		// marshalling (see
+		// marshaling (see
 		// https://github.com/google/jsonschema-go/issues/23).
 		var decoded any
 		if err := json.Unmarshal(rawArgs, &decoded); err != nil {

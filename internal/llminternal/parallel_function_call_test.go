@@ -392,7 +392,7 @@ func TestParallelFunctionCalls(t *testing.T) {
 			a, err := llmagent.New(llmagent.Config{
 				Name:        "calculator",
 				Description: "A calculator that can add two integers",
-				Instruction: "You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.",
+				Instruction: "You are a calculator assistant. You will receive requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.",
 				Model:       geminiModel,
 				Tools: []tool.Tool{
 					sumTool,

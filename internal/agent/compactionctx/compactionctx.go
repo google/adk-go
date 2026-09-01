@@ -226,7 +226,7 @@ func (rt *Runtime) AlreadyCompacted() bool {
 
 // Configured reports whether compaction is enabled for this run.
 //
-// Prompt assembly gates on this rather than simply honouring any compaction
+// Prompt assembly gates on this rather than simply honoring any compaction
 // record it finds. A record instructs the prompt builder to drop a range of
 // history and substitute content in its place, so acting on one that this
 // runner did not ask for would turn a stored field into an erase-and-inject

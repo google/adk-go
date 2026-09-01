@@ -52,10 +52,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// A compaction record instructs prompt assembly to drop a span of
 		// history and substitute content in its place. EventActions is
 		// writable by tool code, and the REST create-session body maps it
-		// verbatim onto the stored event, so honouring any record found in a
+		// verbatim onto the stored event, so honoring any record found in a
 		// session would be an erase-and-inject primitive that works even for an
 		// application that never enabled compaction. Records are therefore only
-		// honoured when this run actually has compaction configured.
+		// honored when this run actually has compaction configured.
 		compactionEnabled := compactionctx.FromContext(ctx).Configured()
 
 		var events []*session.Event

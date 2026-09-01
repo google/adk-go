@@ -531,7 +531,7 @@ func TestSelectSlidingWindowCoversEverythingInItsRange(t *testing.T) {
 	}
 }
 
-// TestSelectSlidingWindowIncludesIDlessEvents pins the specific behaviour the
+// TestSelectSlidingWindowIncludesIDlessEvents pins the specific behavior the
 // invariant depends on, so a future refactor that starts filtering again fails
 // loudly rather than silently dropping events.
 func TestSelectSlidingWindowIncludesIDlessEvents(t *testing.T) {

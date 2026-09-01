@@ -17,8 +17,12 @@ linters:
   enable:
     - goheader
     - revive
+    - misspell
 
   settings:
+
+    misspell:
+      locale: US
 
     revive:
       rules:

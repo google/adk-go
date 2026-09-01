@@ -200,7 +200,7 @@ type Config struct {
 	// compaction has no exclusions, no positional guard and no race check, so
 	// "the reference does this" is evidence about consistency and not about
 	// safety. The reason to leave it is that running plugins inside an
-	// invocation is a behaviour change, and the reason to document it is that a
+	// invocation is a behavior change, and the reason to document it is that a
 	// silent gap in a redaction path is worse than a stated one.
 	TokenThreshold int
 
@@ -313,7 +313,7 @@ type Summarizer interface {
 	//
 	// Either may carry [SummarizeResult.Usage].
 	//
-	// ctx must be honoured. An implementation that ignores it holds the turn
+	// ctx must be honored. An implementation that ignores it holds the turn
 	// open for as long as it runs, and cancelling the caller's context does not
 	// cut it short, because the run does not return until this call does.
 	// Post-invocation compaction is driven from a deferred call, so this

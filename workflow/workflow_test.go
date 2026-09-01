@@ -60,7 +60,7 @@ func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) age
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
-// t.Context(), which is automatically cancelled when the test ends
+// t.Context(), which is automatically canceled when the test ends
 // — preventing leaked scheduler goroutines from outliving the test.
 func newMockCtx(t *testing.T) *MockInvocationContext {
 	t.Helper()

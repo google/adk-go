@@ -326,7 +326,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			//
 			// This case passes with or without the errChan guards: the sender
 			// exits through the existing connCtx.Done() arm, so nothing is
-			// stranded. It pins the terminal-path behaviour; it is not a
+			// stranded. It pins the terminal-path behavior; it is not a
 			// regression guard for the leak.
 			name: "non-resumable error terminates after one connection",
 			serveConn: func(connNum int, conn *websocket.Conn) {

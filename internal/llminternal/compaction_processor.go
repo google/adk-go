@@ -70,7 +70,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// session down to each child.
 		before := compactioninternal.KnownEventIDs(sess)
 
-		// Compaction is an optimisation, so a cancelled or expired turn should
+		// Compaction is an optimisation, so a canceled or expired turn should
 		// not spend a model call on it.
 		if ctx.Err() != nil {
 			return
@@ -123,11 +123,11 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		//
 		// The plugin pipeline itself is still not run here. A redaction plugin
 		// therefore sees every sliding-window summary and none of these, which
-		// is a real gap and a behaviour change to close rather than a bug to
+		// is a real gap and a behavior change to close rather than a bug to
 		// patch quietly. ADK Kotlin, which this design was adapted from, runs
 		// no plugin hook on either of its compaction paths, so the gap is
 		// consistent with the reference; that is a statement about consistency
-		// rather than a defence of the behaviour. It is documented on the
+		// rather than a defence of the behavior. It is documented on the
 		// exported surface at compaction.Config.TokenThreshold.
 		if !compactioninternal.SanitizeSummary(summary) {
 			finish(nil, "the summary held nothing usable")
@@ -204,7 +204,7 @@ func degrade(ctx context.Context, stage string, err error) {
 // error is yielded into the flow's error channel, which reaches the workflow
 // scheduler, and the scheduler tests for a context.Canceled chain before
 // anything else and drops the error when it finds one. A summarizer that failed
-// because its own context was cancelled would therefore end the turn with no
+// because its own context was canceled would therefore end the turn with no
 // answer, no events and no error at all: the most confusing outcome available.
 //
 // Cutting the chain keeps the cause in the message and keeps the error matchable

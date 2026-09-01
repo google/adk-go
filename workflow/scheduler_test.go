@@ -158,7 +158,7 @@ func TestScheduler_FailedSiblingsCancelled(t *testing.T) {
 
 	failErr := errors.New("B failed intentionally")
 
-	// A and C block until their context is cancelled. B errors
+	// A and C block until their context is canceled. B errors
 	// immediately. After B's failure, A and C should observe ctx.Done.
 	a := newCancelObservingNode("A")
 	b := newErroringNode("B", failErr)
@@ -239,7 +239,7 @@ func TestScheduler_ExternalCancellationDuringPendingRetry(t *testing.T) {
 	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
 
 	// The delay only has to outlast the test: the retry must still be
-	// pending when the context is cancelled, and must never fire.
+	// pending when the context is canceled, and must never fire.
 	n := newRetryTestNode("flaky", 100, NodeConfig{
 		RetryConfig: &RetryConfig{
 			MaxAttempts:   5,
@@ -286,7 +286,7 @@ func TestScheduler_ExternalCancellationDuringPendingRetry(t *testing.T) {
 // that failed for its own reason keeps that error even though the
 // invocation context is dead. Reporting a bare context.Canceled here would
 // hide the reason the run stopped, which matters most when the caller
-// cancelled *because* something went wrong.
+// canceled *because* something went wrong.
 func TestScheduler_ExternalCancellationPrefersNodeError(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 	ctx, cancel := context.WithCancel(mockCtx.Context)
@@ -328,9 +328,9 @@ func TestScheduler_ExternalCancellationPrefersNodeError(t *testing.T) {
 }
 
 // TestScheduler_ExternalCancellationMarksNodeCancelled pins the lifecycle
-// status of an externally cancelled node. adk-python marks every task it
+// status of an externally canceled node. adk-python marks every task it
 // reaps during shutdown CANCELLED whether the engine or the caller
-// cancelled it (_workflow.py _cleanup_all_tasks, run from a finally), and
+// canceled it (_workflow.py _cleanup_all_tasks, run from a finally), and
 // leaving the node at NodeRunning here would instead claim it still has a
 // task in flight.
 // Both flavours of a dying context are covered: on a deadline runNode
@@ -702,9 +702,9 @@ func waitForCalls(t *testing.T, n *retryTestNode, want int32) {
 	}
 }
 
-// cancelObservingNode blocks until its context is cancelled, then
+// cancelObservingNode blocks until its context is canceled, then
 // records that fact via cancelObserved. Used to verify sibling
-// cancellation and timeout behaviour.
+// cancellation and timeout behavior.
 type cancelObservingNode struct {
 	BaseNode
 	started        chan struct{}
@@ -913,7 +913,7 @@ func TestScheduler_RetryInChain(t *testing.T) {
 }
 
 // TestScheduler_RetryCancelled verifies that a node waiting for retry
-// does not run if the workflow is cancelled.
+// does not run if the workflow is canceled.
 func TestScheduler_RetryCancelled(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 	ctx, cancel := context.WithCancel(mockCtx.Context)

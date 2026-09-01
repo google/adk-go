@@ -544,7 +544,7 @@ func newCoverIndex(events []*session.Event) coverIndex {
 // never described it.
 //
 // Unioning is the safe direction. A hole is the claim "this event was not
-// summarized". Honouring a hole that was not needed leaves an event raw beside a
+// summarized". Honoring a hole that was not needed leaves an event raw beside a
 // summary of it, which is visible and recoverable. Ignoring one that was needed
 // deletes conversation. When records disagree, the claim of absence wins.
 //

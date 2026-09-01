@@ -174,7 +174,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	// Recording the attempt disarmed compaction for the rest of the invocation
 	// with nothing stored in exchange. Moving it past the summarizer fixed the
 	// transient-error case and left four others: the caller can still discard
-	// the result because the turn was cancelled, a re-read failed, a competing
+	// the result because the turn was canceled, a re-read failed, a competing
 	// compaction landed, or the append failed. Each left the gate closed on a
 	// summary that never existed, and Recovered cannot reopen it because the
 	// prompt never drops.
@@ -466,7 +466,7 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope
 	// make every summary built on top of it universally visible.
 	prev := latest.Actions.Compaction
 	seed := &session.Event{
-		// Labelled as the previous summary rather than left anonymous. Without
+		// Labeled as the previous summary rather than left anonymous. Without
 		// it the seed is indistinguishable from an ordinary model turn, so the
 		// transcript renders a summary as if the agent had said it, and nothing
 		// downstream can tell how many times content has been re-summarized.

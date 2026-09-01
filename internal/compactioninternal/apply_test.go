@@ -780,7 +780,7 @@ func TestRepairAfterAppendRescuesAStragglerFromThePrompt(t *testing.T) {
 // contains the other, so choosing a winner drops the holes the loser named and
 // that straggler is covered by a summary that never described it. The holes are
 // unioned instead: a hole is the claim that an event was not summarized, and
-// honouring one that was not needed leaves an event raw, which is visible,
+// honoring one that was not needed leaves an event raw, which is visible,
 // while ignoring one that was needed deletes conversation.
 func TestTwoCorrectionsKeepBothStragglers(t *testing.T) {
 	t.Parallel()
@@ -829,7 +829,7 @@ func TestRepairContextOutlivesTheCallersCancellation(t *testing.T) {
 	cancel()
 
 	if err := repairCtx.Err(); err != nil {
-		t.Errorf("repair context is %v once the caller cancelled, want it still live: the summary is already stored and nothing has corrected its range", err)
+		t.Errorf("repair context is %v once the caller canceled, want it still live: the summary is already stored and nothing has corrected its range", err)
 	}
 	if got, _ := repairCtx.Value(ctxKey{}).(string); got != "carried" {
 		t.Errorf("repair context dropped the caller's values, got %q, want %q", got, "carried")
@@ -1100,7 +1100,7 @@ func TestARescuedStragglerCanStillBeSummarized(t *testing.T) {
 	repair.ID = "s2"
 	all = append(all, repair)
 
-	// Assembly keeps it raw, which is the round-6 behaviour.
+	// Assembly keeps it raw, which is the round-6 behavior.
 	if !slices.Contains(ids(Apply(all)), "straggler") {
 		t.Fatal("the straggler is not in the prompt, so this test is not reproducing the case")
 	}
