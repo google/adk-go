@@ -1,5 +1,5 @@
 httprr trace v1
-1000 2106
+1000 1854
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -8,9 +8,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:26 GMT
+Date: Mon, 31 Aug 2026 12:43:57 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1162
+Server-Timing: gfet4t7; dur=1351
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,9 +30,9 @@ X-Xss-Protection: 0
               "args": {
                 "city": "Zurich"
               },
-              "id": "call_156800"
+              "id": "call_3445095"
             },
-            "thoughtSignature": "Et4ECtsEARFNMg+mULUQ83jwmVgWmMDjjtDc0pk+4l6IA60xz+5EkWz5WTJQQZibk4C6F2LZB/GXuSjrXxX2GBMtrgTjsHqcTIk2ENcmHQ4Q5YCwUNQR/yX2eFPXJlKLZml7wmfa1jSyd2u6D7qQqyjZrvenktqN9HCLL2m7PTBR1Z7WJVbKnbSTry2tNUwvL7P36ddw7YjrAdO5PTtnaqidMB4c0vBOPPP6zX2s6WB3jJN/PN3lqqekizo/twpL5/a5mTNIHymCpjpMwJeNx1o640W5GOyyq6dpc57I9fYrsm0ofSvPJwoPXiAVd4bPmRwabrjfE5GJi59RMxhe+raMSOs2IIaJh9JC09eheNq3dPeXrdbRFCs9srTUMfM1uHId/lVlo0uVzDZUFBhtAO129Iv0lcUH11rxO+1/NUJk0JNn6v+qU/x3OLG60rnuEMUn1NAnhlMzRlaegVLQo/rS2yc/QNBWcBsCHPzKcyHkqNWWFRIwvy/+lucvH/5nn84fUH3tfZPj1xVV+CT//frl9lJ8Tz1RxikldUqkpsMmHERIOnWOVTS8w01F8kBDAKM9Kwiw6wmb9oH97l0kEngueYgmEOX4oJ9nYPDn5ArbZfdN+IhlInx701e3sjriQqONSfhPOmlJawaWV2hsSFn8F9eRLQ238hOnpN+zKzjudJtRtJiOTMZxgxBPLdqjPDiS7WCbV0KsnNcD+Zk+DbjHsk3qkVnxb/ZRxTK+JVOENoXi1OikQZ1KnilfNW3es3dnFehLqrJJZ3tmXZKkMsPRcPfiq7Vb49tmO4xCSk9F"
+            "thoughtSignature": "EqEDCp4DARFNMg8fvkN9H7IJF37HbQzdctqOkd5UPMoy8r4zKaLytkFTk0CKplXRX77FIB0nahZGR34JssqpZgDJZXraHyZd2sGL6T8VvZjOR/MpGSNkpj1msp8lFDcA1xw24hPLzx+rWehQBHTTUU3hagq/hZs6nZX4u0a5eNBkh8V4YZWjBXPJn1X+eK/wx7kquRlD7bDkYYSKIbpViGIWYczJhna7y8LOJrPS+tLEnYnJXocS/JJI1rWh7wBrIjNzqUM4Iqt57kY5Ii6sg/mOQXDefsxdm99mr9+1W/Soc8dTjieakqei1iHnIOmtni+a1gcUyNJWtlnZWkw8obP4bg2cm9G3iFaSHPpZpZQmVqG/peDMt/6vhHMaBbPdIRVNcbDLA7xY9M/taeGTmsKNxya5JPil+JaygQYyib3gBxGh9Jyj07iawlo0gUL7tAdtuVogaDCNbk1ZzRviO4qRIsuDUTfogwt1MWlkoCg8qzmvXcNnsm29lpyHE3izk4O2zGPLJDEYlYog0mT6F+sLdMoJaKlseo5SJaq80NhyaDAp"
           }
         ],
         "role": "model"
@@ -45,33 +45,33 @@ X-Xss-Protection: 0
   "usageMetadata": {
     "promptTokenCount": 128,
     "candidatesTokenCount": 17,
-    "totalTokenCount": 258,
+    "totalTokenCount": 222,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 128
       }
     ],
-    "thoughtsTokenCount": 113,
+    "thoughtsTokenCount": 77,
     "serviceTier": "standard",
     "rawPromptTokenCount": 167
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "fDuMarnNOv_Z7M8Pre6rsAk",
-  "turnToken": "v1_ChdmRHVNYXJuTk92X1o3TThQcmU2cnNBaxIXZkR1TWFybk5Pdl9aN004UHJlNnJzQWs"
+  "responseId": "C3eVar2hMaeixN8P5_HquA8",
+  "turnToken": "v1_ChdDM2VWYXIyaE1hZWl4TjhQNV9IcXVBOBIXQzNlVmFyMmhNYWVpeE44UDVfSHF1QTg"
 }
-2076 1445
+1826 1459
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1843
+Content-Length: 1593
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"call_156800","name":"get_weather"},"thoughtSignature":"Et4ECtsEARFNMg+mULUQ83jwmVgWmMDjjtDc0pk+4l6IA60xz+5EkWz5WTJQQZibk4C6F2LZB/GXuSjrXxX2GBMtrgTjsHqcTIk2ENcmHQ4Q5YCwUNQR/yX2eFPXJlKLZml7wmfa1jSyd2u6D7qQqyjZrvenktqN9HCLL2m7PTBR1Z7WJVbKnbSTry2tNUwvL7P36ddw7YjrAdO5PTtnaqidMB4c0vBOPPP6zX2s6WB3jJN/PN3lqqekizo/twpL5/a5mTNIHymCpjpMwJeNx1o640W5GOyyq6dpc57I9fYrsm0ofSvPJwoPXiAVd4bPmRwabrjfE5GJi59RMxhe+raMSOs2IIaJh9JC09eheNq3dPeXrdbRFCs9srTUMfM1uHId/lVlo0uVzDZUFBhtAO129Iv0lcUH11rxO+1/NUJk0JNn6v+qU/x3OLG60rnuEMUn1NAnhlMzRlaegVLQo/rS2yc/QNBWcBsCHPzKcyHkqNWWFRIwvy/+lucvH/5nn84fUH3tfZPj1xVV+CT//frl9lJ8Tz1RxikldUqkpsMmHERIOnWOVTS8w01F8kBDAKM9Kwiw6wmb9oH97l0kEngueYgmEOX4oJ9nYPDn5ArbZfdN+IhlInx701e3sjriQqONSfhPOmlJawaWV2hsSFn8F9eRLQ238hOnpN+zKzjudJtRtJiOTMZxgxBPLdqjPDiS7WCbV0KsnNcD+Zk+DbjHsk3qkVnxb/ZRxTK+JVOENoXi1OikQZ1KnilfNW3es3dnFehLqrJJZ3tmXZKkMsPRcPfiq7Vb49tmO4xCSk9F"}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_156800","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"call_3445095","name":"get_weather"},"thoughtSignature":"EqEDCp4DARFNMg8fvkN9H7IJF37HbQzdctqOkd5UPMoy8r4zKaLytkFTk0CKplXRX77FIB0nahZGR34JssqpZgDJZXraHyZd2sGL6T8VvZjOR/MpGSNkpj1msp8lFDcA1xw24hPLzx+rWehQBHTTUU3hagq/hZs6nZX4u0a5eNBkh8V4YZWjBXPJn1X+eK/wx7kquRlD7bDkYYSKIbpViGIWYczJhna7y8LOJrPS+tLEnYnJXocS/JJI1rWh7wBrIjNzqUM4Iqt57kY5Ii6sg/mOQXDefsxdm99mr9+1W/Soc8dTjieakqei1iHnIOmtni+a1gcUyNJWtlnZWkw8obP4bg2cm9G3iFaSHPpZpZQmVqG/peDMt/6vhHMaBbPdIRVNcbDLA7xY9M/taeGTmsKNxya5JPil+JaygQYyib3gBxGh9Jyj07iawlo0gUL7tAdtuVogaDCNbk1ZzRviO4qRIsuDUTfogwt1MWlkoCg8qzmvXcNnsm29lpyHE3izk4O2zGPLJDEYlYog0mT6F+sLdMoJaKlseo5SJaq80NhyaDAp"}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_3445095","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:26 GMT
+Date: Mon, 31 Aug 2026 12:43:58 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=923
+Server-Timing: gfet4t7; dur=1056
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -86,8 +86,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "It is currently sunny in Zurich.",
-            "thoughtSignature": "EoQCCoECARFNMg9M5SkpUzCBMw6zh0wpziEm7+0asa2MjpZZ9MBkBq2WXreN29gInxvaCfb/zD9EjK6hntcc7PSoGjJkwWbOed5DTtfOshzYNOIPC+fzkyd0AczSgOVol/iYrb/ckGQL9Ckfho4ZevYKMONVIg79L0SDQCn0d0nALlexs5ag1jo1nS2b+rTor3q7QH9srJ1XyAbmGwOcFf65UN+YSLr9QM/haVEa/KqSbICoD7stiyIT6XZXKFey7bVNhputrPUZ3U8Gmy/DSW/fzypdO52snzIKMEG38XIOsHn13zn/ofGpBbTx5fUKtv0I3N3ozeNu7GaMp2E+AzPMK4/jpXg="
+            "text": "The weather in Zurich is currently sunny.",
+            "thoughtSignature": "EocCCoQCARFNMg8mgPsRsvvfJtvcxN35lzfxyNGDGmqeT9zHfhnVx7fugribdhEdQOhzdqCzxSMfGuoKxGvy1DTErBtY7Do6RJzwDZ5PE54JbTAGtB6q9Z1DknyrJ8IZvFA1unVxFrLwijswu2LjpGOVhHrThmMfVJZSDKln9Am2n/j4nzTkfvjxuGyacMeXx/CF+7yVzpIxdcn9XtJ9+FlvBvv8aHnnnSVxI8/khvWM4RpRDMHgj4/sfN8pcMhUvVWGlgahA5exsQkuxKn1HSweEZ3qhAN8T5fM6Pc/+bNtIgfNcoweZrUiRUKaMnwkRxqgnpTPOGrLO4u7yIJeJwgiWd7yGutkhIA="
           }
         ],
         "role": "model"
@@ -97,35 +97,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 274,
-    "candidatesTokenCount": 7,
-    "totalTokenCount": 313,
+    "promptTokenCount": 238,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 282,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 274
+        "tokenCount": 238
       }
     ],
-    "thoughtsTokenCount": 32,
+    "thoughtsTokenCount": 36,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 323
+    "rawPromptTokenCount": 287
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "fjuMapTrBMuznsEP--DtUA",
-  "turnToken": "v1_ChZmanVNYXBUckJNdXpuc0VQLS1EdFVBEhZmanVNYXBUckJNdXpuc0VQLS1EdFVB"
+  "responseId": "DXeVatnuB7uUvdIPkpLEMQ",
+  "turnToken": "v1_ChZEWGVWYXRudUI3dVV2ZElQa3BMRU1REhZEWGVWYXRudUI3dVV2ZElQa3BMRU1R"
 }
-2602 1499
+2365 1471
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 2369
+Content-Length: 2132
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"call_156800","name":"get_weather"},"thoughtSignature":"Et4ECtsEARFNMg+mULUQ83jwmVgWmMDjjtDc0pk+4l6IA60xz+5EkWz5WTJQQZibk4C6F2LZB/GXuSjrXxX2GBMtrgTjsHqcTIk2ENcmHQ4Q5YCwUNQR/yX2eFPXJlKLZml7wmfa1jSyd2u6D7qQqyjZrvenktqN9HCLL2m7PTBR1Z7WJVbKnbSTry2tNUwvL7P36ddw7YjrAdO5PTtnaqidMB4c0vBOPPP6zX2s6WB3jJN/PN3lqqekizo/twpL5/a5mTNIHymCpjpMwJeNx1o640W5GOyyq6dpc57I9fYrsm0ofSvPJwoPXiAVd4bPmRwabrjfE5GJi59RMxhe+raMSOs2IIaJh9JC09eheNq3dPeXrdbRFCs9srTUMfM1uHId/lVlo0uVzDZUFBhtAO129Iv0lcUH11rxO+1/NUJk0JNn6v+qU/x3OLG60rnuEMUn1NAnhlMzRlaegVLQo/rS2yc/QNBWcBsCHPzKcyHkqNWWFRIwvy/+lucvH/5nn84fUH3tfZPj1xVV+CT//frl9lJ8Tz1RxikldUqkpsMmHERIOnWOVTS8w01F8kBDAKM9Kwiw6wmb9oH97l0kEngueYgmEOX4oJ9nYPDn5ArbZfdN+IhlInx701e3sjriQqONSfhPOmlJawaWV2hsSFn8F9eRLQ238hOnpN+zKzjudJtRtJiOTMZxgxBPLdqjPDiS7WCbV0KsnNcD+Zk+DbjHsk3qkVnxb/ZRxTK+JVOENoXi1OikQZ1KnilfNW3es3dnFehLqrJJZ3tmXZKkMsPRcPfiq7Vb49tmO4xCSk9F"}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_156800","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"},{"parts":[{"text":"It is currently sunny in Zurich.","thoughtSignature":"EoQCCoECARFNMg9M5SkpUzCBMw6zh0wpziEm7+0asa2MjpZZ9MBkBq2WXreN29gInxvaCfb/zD9EjK6hntcc7PSoGjJkwWbOed5DTtfOshzYNOIPC+fzkyd0AczSgOVol/iYrb/ckGQL9Ckfho4ZevYKMONVIg79L0SDQCn0d0nALlexs5ag1jo1nS2b+rTor3q7QH9srJ1XyAbmGwOcFf65UN+YSLr9QM/haVEa/KqSbICoD7stiyIT6XZXKFey7bVNhputrPUZ3U8Gmy/DSW/fzypdO52snzIKMEG38XIOsHn13zn/ofGpBbTx5fUKtv0I3N3ozeNu7GaMp2E+AzPMK4/jpXg="}],"role":"model"},{"parts":[{"text":"My favourite colour is teal, remember that."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"What is the weather in Zurich?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Zurich"},"id":"call_3445095","name":"get_weather"},"thoughtSignature":"EqEDCp4DARFNMg8fvkN9H7IJF37HbQzdctqOkd5UPMoy8r4zKaLytkFTk0CKplXRX77FIB0nahZGR34JssqpZgDJZXraHyZd2sGL6T8VvZjOR/MpGSNkpj1msp8lFDcA1xw24hPLzx+rWehQBHTTUU3hagq/hZs6nZX4u0a5eNBkh8V4YZWjBXPJn1X+eK/wx7kquRlD7bDkYYSKIbpViGIWYczJhna7y8LOJrPS+tLEnYnJXocS/JJI1rWh7wBrIjNzqUM4Iqt57kY5Ii6sg/mOQXDefsxdm99mr9+1W/Soc8dTjieakqei1iHnIOmtni+a1gcUyNJWtlnZWkw8obP4bg2cm9G3iFaSHPpZpZQmVqG/peDMt/6vhHMaBbPdIRVNcbDLA7xY9M/taeGTmsKNxya5JPil+JaygQYyib3gBxGh9Jyj07iawlo0gUL7tAdtuVogaDCNbk1ZzRviO4qRIsuDUTfogwt1MWlkoCg8qzmvXcNnsm29lpyHE3izk4O2zGPLJDEYlYog0mT6F+sLdMoJaKlseo5SJaq80NhyaDAp"}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_3445095","name":"get_weather","response":{"weather":"sunny in Zurich"}}}],"role":"user"},{"parts":[{"text":"The weather in Zurich is currently sunny.","thoughtSignature":"EocCCoQCARFNMg8mgPsRsvvfJtvcxN35lzfxyNGDGmqeT9zHfhnVx7fugribdhEdQOhzdqCzxSMfGuoKxGvy1DTErBtY7Do6RJzwDZ5PE54JbTAGtB6q9Z1DknyrJ8IZvFA1unVxFrLwijswu2LjpGOVhHrThmMfVJZSDKln9Am2n/j4nzTkfvjxuGyacMeXx/CF+7yVzpIxdcn9XtJ9+FlvBvv8aHnnnSVxI8/khvWM4RpRDMHgj4/sfN8pcMhUvVWGlgahA5exsQkuxKn1HSweEZ3qhAN8T5fM6Pc/+bNtIgfNcoweZrUiRUKaMnwkRxqgnpTPOGrLO4u7yIJeJwgiWd7yGutkhIA="}],"role":"model"},{"parts":[{"text":"My favourite colour is teal, remember that."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:27 GMT
+Date: Mon, 31 Aug 2026 12:43:59 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=930
+Server-Timing: gfet4t7; dur=989
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -141,7 +141,7 @@ X-Xss-Protection: 0
         "parts": [
           {
             "text": "I will remember that your favorite color is teal.",
-            "thoughtSignature": "Ep4CCpsCARFNMg9NJLpJc1VEmEpt/7sMnGngE+Ap4rbp/999jJBbfSLpunruxzZ9WCdUJc00NhzMRbUkwRjcWxsUDv6jCrRDJZH7R/x4x+gyriRy8SltzCb5pdgQ7OTJrOSkAcBeMJOZpsUTi5Hnak1t24JEQv0wMNl2GhN5A3bZb0z/RMWvP6zxvwMaASwdNT+43ZGVg1l1mguKLxDenO16SyxzDnPMLdh20delpVBl/OMy3hRgyviA5H5LruKISOEf2NBQC2PFnfm3BWQ1oDHowJCRGvtYZ8H88g/77Kqwn4r6RDUlQMNcDZIVGtT2Oj9UVDbzHPqJQDcA5ToPl4C59QdzhtEKT333VcXRAme4jxLFFAEd3WGPGUNCIep0zw=="
+            "thoughtSignature": "EocCCoQCARFNMg+1DmRvI7NuZmqMruwOD2p3ioHwUXh72ye67S29380clS2TyaqrjDFbHQnvNLMv38AH5Zo3WIXDPqanKAaaxqk3macrMWzkBOw8ppLMOQb//lCJ7ox66RXI1YvOBLvxMGDr3TU/gY/SvC3dJ39R4e+6Oi+/pojFsj0RBq4z8Xej56hULesHnab4NAUGGnQRLgngtnFqV1Bih/MnmYU2xU5UPZyCkQeed9QNHn5GczPjCBbFYQpQZgoLy1NyIA2KXK+np6/AzC/Rusqzlje0eNcGv6ZLn+VpAHBiOEZJ6ZjTstim64ZOtKHWXSGsTCDvj0D0UoOJXGw+7IRfYWCuKJE="
           }
         ],
         "role": "model"
@@ -151,35 +151,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 324,
+    "promptTokenCount": 293,
     "candidatesTokenCount": 10,
-    "totalTokenCount": 369,
+    "totalTokenCount": 332,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 324
+        "tokenCount": 293
       }
     ],
-    "thoughtsTokenCount": 35,
+    "thoughtsTokenCount": 29,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 385
+    "rawPromptTokenCount": 354
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "fzuMapoL9a6ewQ-Krd_hBw",
-  "turnToken": "v1_ChZmenVNYXBvTDlhNmV3US1LcmRfaEJ3EhZmenVNYXBvTDlhNmV3US1LcmRfaEJ3"
+  "responseId": "DneVaqKFCpmv28oP-e-6qA8",
+  "turnToken": "v1_ChdEbmVWYXFLRkNwbXYyOG9QLWUtNnFBOBIXRG5lVmFxS0ZDcG12MjhvUC1lLTZxQTg"
 }
-1295 4974
+1783 6264
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1062
+Content-Length: 1550
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: What is the weather in Zurich?\ncompaction_agent called tool: get_weather({city: Zurich})\nTool response from get_weather: {weather: sunny in Zurich}\ncompaction_agent: It is currently sunny in Zurich.\nuser: My favourite colour is teal, remember that.\ncompaction_agent: I will remember that your favorite color is teal."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: What is the weather in Zurich?\ncompaction_agent called tool: get_weather({city: Zurich})\nTool response from get_weather: {weather: sunny in Zurich}\ncompaction_agent: The weather in Zurich is currently sunny.\nuser: My favourite colour is teal, remember that.\ncompaction_agent: I will remember that your favorite color is teal."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:31 GMT
+Date: Mon, 31 Aug 2026 12:44:03 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=3175
+Server-Timing: gfet4t7; dur=4505
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -194,8 +194,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal. (Prior to this, the user asked for the current weather in Zurich).\n\n### Context Summary\n* **Information Obtained & Decisions Made:**\n  * The user asked about the weather in Zurich. \n  * The agent called the tool `get_weather` with the argument `city: Zurich` to retrieve the current conditions.\n  * The tool reported that the weather is sunny, which the agent communicated to the user.\n  * The user shared a personal preference (favorite color is teal) for future reference, which the agent acknowledged and committed to remembering.\n* **Tools Used:** \n  * `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks.",
-            "thoughtSignature": "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"
+            "text": "Conversation Language: English\n\n### User Request\nThe user initially requested the current weather in Zurich and subsequently asked the agent to remember their favorite color.\n\n### Context Summary\nThe user asked about the weather in Zurich. The agent invoked a weather tool and informed the user that it is currently sunny. Following this, the user stated that their favorite color is teal, and the agent acknowledged this preference to remember it for future interactions.\n\n### Tools Called\n* `get_weather`\n\n### Unresolved Questions or Tasks\nNone.\n\n### Durable facts\n* The user's favorite color: \"My favourite colour is teal\"",
+            "thoughtSignature": "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"
           }
         ],
         "role": "model"
@@ -205,35 +205,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 215,
-    "candidatesTokenCount": 180,
-    "totalTokenCount": 922,
+    "promptTokenCount": 313,
+    "candidatesTokenCount": 126,
+    "totalTokenCount": 1250,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 215
+        "tokenCount": 313
       }
     ],
-    "thoughtsTokenCount": 527,
+    "thoughtsTokenCount": 811,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 246
+    "rawPromptTokenCount": 344
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "fzuMaqnDOeDwnsEPysWK-Qk",
-  "turnToken": "v1_ChdmenVNYXFuRE9lRHduc0VQeXNXSy1RaxIXZnp1TWFxbkRPZUR3bnNFUHlzV0stUWs"
+  "responseId": "D3eVar2wCbL4xN8P0PW30As",
+  "turnToken": "v1_ChdEM2VWYXIyd0NiTDR4TjhQMFBXMzBBcxIXRDNlVmFyMndDYkw0eE44UDBQVzMwQXM"
 }
-1883 1959
+1687 2143
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1650
+Content-Length: 1454
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal. (Prior to this, the user asked for the current weather in Zurich).\n\n### Context Summary\n* **Information Obtained \u0026 Decisions Made:**\n  * The user asked about the weather in Zurich. \n  * The agent called the tool `get_weather` with the argument `city: Zurich` to retrieve the current conditions.\n  * The tool reported that the weather is sunny, which the agent communicated to the user.\n  * The user shared a personal preference (favorite color is teal) for future reference, which the agent acknowledged and committed to remembering.\n* **Tools Used:** \n  * `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks."}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Conversation Language: English\n\n### User Request\nThe user initially requested the current weather in Zurich and subsequently asked the agent to remember their favorite color.\n\n### Context Summary\nThe user asked about the weather in Zurich. The agent invoked a weather tool and informed the user that it is currently sunny. Following this, the user stated that their favorite color is teal, and the agent acknowledged this preference to remember it for future interactions.\n\n### Tools Called\n* `get_weather`\n\n### Unresolved Questions or Tasks\nNone.\n\n### Durable facts\n* The user's favorite color: \"My favourite colour is teal\""}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:32 GMT
+Date: Mon, 31 Aug 2026 12:44:05 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1236
+Server-Timing: gfet4t7; dur=1458
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -249,7 +249,7 @@ X-Xss-Protection: 0
         "parts": [
           {
             "text": "Your favorite color is teal.",
-            "thoughtSignature": "EoQFCoEFARFNMg8waSifAc1tCO0PJI1q2mZdiqtdHOuG5ltqeQjy+jLf/LcRnL5SiyKMyr2dqMA2EW4ZQhCKR1IyrVwHb7GQ0NxFtFTTCeSdS7fsApTMTz3YAPpF0qYfqV2KAi7I2ZPZ7LYowe9wybVYyAdv2MciQ1UuugIkgNQO+Ya6035NDyZAJ2D4cIJxY7LWJ1Tvj/J4Fgrm/DgDqbFYycyp1RAhITDAUl93gzcLnYTPELA+D8NY+Uu9ZeA1MnUV8nrHjPxj3KhvkiVNzEV+lW4ZG/L2IMW7T+UxBNoOCbYt1myZi0JxCzr1dkkKO5B/hS4tZLIIAi0lwrxpkTINn7Rq+xBI/sqLUPZPiX1KqbSlmjhSxJ0bEZiCEx47HJ8SOFmnWex8l9Y+Y5FtayLn6pe+7kaCsUkpnMrOB1hhEZhc1H1x4ayDIKdgcBeig5BZNBWUHJM/cpH54afY57SHfQLtuF0FnL5WfoZpuoPlykaa6fdCtXxwKdp81Ev59dSjvHcIOmEivzwrZZu1aYwLO1LCaoKCoQLW+bxYAXkc63oSEs0MV1/v9ydcw1/FImG5OqVulAb/1JVzxXIdmE+lBWE0jXKiMDUbb6NUZ0Js5xecSPAqEuTXCgHi8yp1YcMk/APzdJVHQ8SEeXqiSnULSnNuGTNtbkYmQh84U5yPlu9FhqcouXlcFtneXO4/jvSwz/lUg0Gzht1t0VbtVwP2N5GLuCJ5AXunf8ycB7Y+lzxs2FFEp54LLkn/2Ek7sG593JsYHphPG5YwGSEx9IwDuOq6zCmMd9g2NoYzx8d5KaZbPFKrUVR+gdBg+Y+CpjIYgfdm89H6kZzlNnxj2MjGeNUhabc="
+            "thoughtSignature": "EpAGCo0GARFNMg8OIG29WJO+bp376b06O80467eaVTZq7oTxaonmmIX41RrZFOyU8fjTnM+C9/2pDTml/dirBC4g8eKtGeL3NFekn2R/XEpytojusQM6wtWvUSkS1epQdrGgH6CnVZRLd+3be7uFlrJbmMuG5kVlvlUdRZvnsfG1vr1/cmF+inoqjSjrRW0AyakjufumJBQ+4qcjXGL+X99egprKm4YlZ1weUB2YVFMpv4cWz5Z2fBjfYW4L9gwEQNFN5+/OyD1IvHRNFTZ7oTuF4aCGNj3VXCNSqdNztgRNCdQ0ZFTWwsoaEouw+YLnO0uD+lEW017aUb5MSH4ET00hmECl6aGmD+UE3IohqC9WGt4VWeK/rLK4Am3PvfA3OVrKmDpzU0SwTnhNMlgmcAbzoahci7+77qX2W0M3f3NHedZtUxdTl1EiHVWGlmmWxo8xhacCAdWON3OSZjXOtlfoRO6KqBHzK7hidZpZiFD8HAM2vJR1SeYoHACPdUsBdq4HEAggvTmkXYXoAnYId5wFfTaI3G51FOm16ZI//MwX8b9o9IV3VEFHCSoKvQA1JGCLBJ+B3IcyY2mgDU3/sn1K1fx3UPygbr+Ma9L8/NQu3ea0NjlerEm8YXmZonp2MJIFGi5lMl3tvjHPHY0jGVmKRG3CngkzTKOJCbWID052Xyy3IuV+fF4gbTPfM84l0+CqQoiA3VehzVcCT7H39lU9L4eKqZ4XT7lvSXHLwpTEdul+DffG7GWqJpiTKQ+M5AKhXYffjImw+LT0uFI0TNRY2Q22REO3Ub3yuWu+GPNkuI/BNG8vWWAnXD1I/AooD3ZSY3rx/SI50g451nmO81w78NDcFdUY6Ay94qOtUAL/oVP+Xq3Z7KnqAYyQT8NFbBEzjLmM6xzbcqTFhbqgxf6h0oGpO7PzWESqbw4aTiC8zZwzraHqR2M+oDHNWvUDdh/JdVWYZeCdf9Tm0sxoZnyQbjWRv7ej0/FQqKPiubftwp2xZin698jcDatorXZFgCV9GrzHQyhGIP/bNOk/DgHt4g=="
           }
         ],
         "role": "model"
@@ -259,35 +259,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 309,
+    "promptTokenCount": 255,
     "candidatesTokenCount": 6,
-    "totalTokenCount": 433,
+    "totalTokenCount": 428,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 309
+        "tokenCount": 255
       }
     ],
-    "thoughtsTokenCount": 118,
+    "thoughtsTokenCount": 167,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 352
+    "rawPromptTokenCount": 298
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "gzuMaq2tB5iunsEPnOnYsQw",
-  "turnToken": "v1_ChdnenVNYXEydEI1aXVuc0VQbk9uWXNRdxIXZ3p1TWFxMnRCNWl1bnNFUG5PbllzUXc"
+  "responseId": "E3eVauS2KcjnxN8P5-S3OQ",
+  "turnToken": "v1_ChZFM2VWYXVTMktjam54TjhQNS1TM09REhZFM2VWYXVTMktjam54TjhQNS1TM09R"
 }
-2904 1919
+2896 1640
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 2671
+Content-Length: 2663
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal. (Prior to this, the user asked for the current weather in Zurich).\n\n### Context Summary\n* **Information Obtained \u0026 Decisions Made:**\n  * The user asked about the weather in Zurich. \n  * The agent called the tool `get_weather` with the argument `city: Zurich` to retrieve the current conditions.\n  * The tool reported that the weather is sunny, which the agent communicated to the user.\n  * The user shared a personal preference (favorite color is teal) for future reference, which the agent acknowledged and committed to remembering.\n* **Tools Used:** \n  * `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks."}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"},{"parts":[{"text":"Your favorite color is teal.","thoughtSignature":"EoQFCoEFARFNMg8waSifAc1tCO0PJI1q2mZdiqtdHOuG5ltqeQjy+jLf/LcRnL5SiyKMyr2dqMA2EW4ZQhCKR1IyrVwHb7GQ0NxFtFTTCeSdS7fsApTMTz3YAPpF0qYfqV2KAi7I2ZPZ7LYowe9wybVYyAdv2MciQ1UuugIkgNQO+Ya6035NDyZAJ2D4cIJxY7LWJ1Tvj/J4Fgrm/DgDqbFYycyp1RAhITDAUl93gzcLnYTPELA+D8NY+Uu9ZeA1MnUV8nrHjPxj3KhvkiVNzEV+lW4ZG/L2IMW7T+UxBNoOCbYt1myZi0JxCzr1dkkKO5B/hS4tZLIIAi0lwrxpkTINn7Rq+xBI/sqLUPZPiX1KqbSlmjhSxJ0bEZiCEx47HJ8SOFmnWex8l9Y+Y5FtayLn6pe+7kaCsUkpnMrOB1hhEZhc1H1x4ayDIKdgcBeig5BZNBWUHJM/cpH54afY57SHfQLtuF0FnL5WfoZpuoPlykaa6fdCtXxwKdp81Ev59dSjvHcIOmEivzwrZZu1aYwLO1LCaoKCoQLW+bxYAXkc63oSEs0MV1/v9ydcw1/FImG5OqVulAb/1JVzxXIdmE+lBWE0jXKiMDUbb6NUZ0Js5xecSPAqEuTXCgHi8yp1YcMk/APzdJVHQ8SEeXqiSnULSnNuGTNtbkYmQh84U5yPlu9FhqcouXlcFtneXO4/jvSwz/lUg0Gzht1t0VbtVwP2N5GLuCJ5AXunf8ycB7Y+lzxs2FFEp54LLkn/2Ek7sG593JsYHphPG5YwGSEx9IwDuOq6zCmMd9g2NoYzx8d5KaZbPFKrUVR+gdBg+Y+CpjIYgfdm89H6kZzlNnxj2MjGeNUhabc="}],"role":"model"},{"parts":[{"text":"Now check the weather in Oslo."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Conversation Language: English\n\n### User Request\nThe user initially requested the current weather in Zurich and subsequently asked the agent to remember their favorite color.\n\n### Context Summary\nThe user asked about the weather in Zurich. The agent invoked a weather tool and informed the user that it is currently sunny. Following this, the user stated that their favorite color is teal, and the agent acknowledged this preference to remember it for future interactions.\n\n### Tools Called\n* `get_weather`\n\n### Unresolved Questions or Tasks\nNone.\n\n### Durable facts\n* The user's favorite color: \"My favourite colour is teal\""}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"},{"parts":[{"text":"Your favorite color is teal.","thoughtSignature":"EpAGCo0GARFNMg8OIG29WJO+bp376b06O80467eaVTZq7oTxaonmmIX41RrZFOyU8fjTnM+C9/2pDTml/dirBC4g8eKtGeL3NFekn2R/XEpytojusQM6wtWvUSkS1epQdrGgH6CnVZRLd+3be7uFlrJbmMuG5kVlvlUdRZvnsfG1vr1/cmF+inoqjSjrRW0AyakjufumJBQ+4qcjXGL+X99egprKm4YlZ1weUB2YVFMpv4cWz5Z2fBjfYW4L9gwEQNFN5+/OyD1IvHRNFTZ7oTuF4aCGNj3VXCNSqdNztgRNCdQ0ZFTWwsoaEouw+YLnO0uD+lEW017aUb5MSH4ET00hmECl6aGmD+UE3IohqC9WGt4VWeK/rLK4Am3PvfA3OVrKmDpzU0SwTnhNMlgmcAbzoahci7+77qX2W0M3f3NHedZtUxdTl1EiHVWGlmmWxo8xhacCAdWON3OSZjXOtlfoRO6KqBHzK7hidZpZiFD8HAM2vJR1SeYoHACPdUsBdq4HEAggvTmkXYXoAnYId5wFfTaI3G51FOm16ZI//MwX8b9o9IV3VEFHCSoKvQA1JGCLBJ+B3IcyY2mgDU3/sn1K1fx3UPygbr+Ma9L8/NQu3ea0NjlerEm8YXmZonp2MJIFGi5lMl3tvjHPHY0jGVmKRG3CngkzTKOJCbWID052Xyy3IuV+fF4gbTPfM84l0+CqQoiA3VehzVcCT7H39lU9L4eKqZ4XT7lvSXHLwpTEdul+DffG7GWqJpiTKQ+M5AKhXYffjImw+LT0uFI0TNRY2Q22REO3Ub3yuWu+GPNkuI/BNG8vWWAnXD1I/AooD3ZSY3rx/SI50g451nmO81w78NDcFdUY6Ay94qOtUAL/oVP+Xq3Z7KnqAYyQT8NFbBEzjLmM6xzbcqTFhbqgxf6h0oGpO7PzWESqbw4aTiC8zZwzraHqR2M+oDHNWvUDdh/JdVWYZeCdf9Tm0sxoZnyQbjWRv7ej0/FQqKPiubftwp2xZin698jcDatorXZFgCV9GrzHQyhGIP/bNOk/DgHt4g=="}],"role":"model"},{"parts":[{"text":"Now check the weather in Oslo."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:33 GMT
+Date: Mon, 31 Aug 2026 12:44:06 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=990
+Server-Timing: gfet4t7; dur=1182
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -307,9 +307,9 @@ X-Xss-Protection: 0
               "args": {
                 "city": "Oslo"
               },
-              "id": "call_2010978"
+              "id": "call_1314234"
             },
-            "thoughtSignature": "EtQDCtEDARFNMg/WY+2b2BY+zTqXTVopqLpYo9dFObaQZoXW/t9BwZWCbDaoboOV45qyUx7cOKo+Bp+vqlwuwUpij/sn+3ne3y0aXR0ngvo2xdQfu7yqKzwmvwcLw+Noxn9n0Bc/46mCqHN3Tc9fdDjuYLp4dszrHLI7H/J8xvqHdg8NaQFrRkDV7QmeNbZEoNSJen0Yc2qRqKNPKgSEVnTG1QOeZEBHvoBsUM0s6AkgVKSJy5ZOqMAzNUG3hSwNWGmrT3+X8xRWxY6iKrZSo+f+jSlBE+y2FJYy5s7Io/kvLmAiyBwtAcCPZc7XO5FT1h4/xu7k875Gs5vnIBCXHuKLOOlFAOe+kVeEywXfDjlSRJqGlivD0hcvH5ZeOQ6orWZp5zDj2CUsNmBGr8+4AfduvPZsktrvJ1BycgxPI1fhP7lWo9FkfqxuL30FkGS/yZiccQ363mRIeyl+cmUd3TPHGlY1nUNKxJ5Pe9XNNKhc1xUs8R9bq4KEXbVZ1/Z9geXM/4pRjfvcMj2GbYKgDkr5Ydcc4UPsvp4BdO9ajKbqaaovn3aaDhljZvrb5ho4MJuhJOAk41C2yEKH2fJ7b087ri+0VrE7KcgNusMcPrTlHCXwSb9/"
+            "thoughtSignature": "EoACCv0BARFNMg+idxyVftoWK0dmsqggX1ZJR3zUA7kIL0H9NTUCyUm+JxnE16gaZXJ/LNTemWZFnSoPUWR2skXY66u9zvrVC3/gVakBwZfXAKur2v+NvTXRWhYQKWv1VE2bL3SvsJMpbW4viHp6i6xqGoixEAU+JndKGupdChgx6Xl+/oD3QINSnht6z1wrD+nlmCN9AyZGnfA+sHgHAkh0dEOHVktTogiMiPVTOt3tKm1BrwpltDKl1FeoU9twz6FxYPU11jnwb9anItAJxOrKggC/xKbOU2JCx8Av+ZEE4+iUfKpyJfVPkp+oS+1a8Mf1Uz86qazJo0DsRn3f958x9A=="
           }
         ],
         "role": "model"
@@ -320,35 +320,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 442,
+    "promptTokenCount": 437,
     "candidatesTokenCount": 17,
-    "totalTokenCount": 554,
+    "totalTokenCount": 497,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 442
+        "tokenCount": 437
       }
     ],
-    "thoughtsTokenCount": 95,
+    "thoughtsTokenCount": 43,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 497
+    "rawPromptTokenCount": 492
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "hDuMaqi9FcXlnsEPmOny4QU",
-  "turnToken": "v1_ChdoRHVNYXFpOUZjWGxuc0VQbU9ueTRRVRIXaER1TWFxaTlGY1hsbnNFUG1Pbnk0UVU"
+  "responseId": "FXeVavvFB-bwxs0P2q-KkA0",
+  "turnToken": "v1_ChdGWGVWYXZ2RkItYnd4czBQMnEtS2tBMBIXRlhlVmF2dkZCLWJ3eHMwUDJxLUtrQTA"
 }
-3793 1608
+3505 1388
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 3560
+Content-Length: 3272
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user's most recent request was for the agent to remember that their favorite color is teal. (Prior to this, the user asked for the current weather in Zurich).\n\n### Context Summary\n* **Information Obtained \u0026 Decisions Made:**\n  * The user asked about the weather in Zurich. \n  * The agent called the tool `get_weather` with the argument `city: Zurich` to retrieve the current conditions.\n  * The tool reported that the weather is sunny, which the agent communicated to the user.\n  * The user shared a personal preference (favorite color is teal) for future reference, which the agent acknowledged and committed to remembering.\n* **Tools Used:** \n  * `get_weather`\n\n### Unresolved Questions or Tasks\n* There are currently no unresolved questions or pending tasks."}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"},{"parts":[{"text":"Your favorite color is teal.","thoughtSignature":"EoQFCoEFARFNMg8waSifAc1tCO0PJI1q2mZdiqtdHOuG5ltqeQjy+jLf/LcRnL5SiyKMyr2dqMA2EW4ZQhCKR1IyrVwHb7GQ0NxFtFTTCeSdS7fsApTMTz3YAPpF0qYfqV2KAi7I2ZPZ7LYowe9wybVYyAdv2MciQ1UuugIkgNQO+Ya6035NDyZAJ2D4cIJxY7LWJ1Tvj/J4Fgrm/DgDqbFYycyp1RAhITDAUl93gzcLnYTPELA+D8NY+Uu9ZeA1MnUV8nrHjPxj3KhvkiVNzEV+lW4ZG/L2IMW7T+UxBNoOCbYt1myZi0JxCzr1dkkKO5B/hS4tZLIIAi0lwrxpkTINn7Rq+xBI/sqLUPZPiX1KqbSlmjhSxJ0bEZiCEx47HJ8SOFmnWex8l9Y+Y5FtayLn6pe+7kaCsUkpnMrOB1hhEZhc1H1x4ayDIKdgcBeig5BZNBWUHJM/cpH54afY57SHfQLtuF0FnL5WfoZpuoPlykaa6fdCtXxwKdp81Ev59dSjvHcIOmEivzwrZZu1aYwLO1LCaoKCoQLW+bxYAXkc63oSEs0MV1/v9ydcw1/FImG5OqVulAb/1JVzxXIdmE+lBWE0jXKiMDUbb6NUZ0Js5xecSPAqEuTXCgHi8yp1YcMk/APzdJVHQ8SEeXqiSnULSnNuGTNtbkYmQh84U5yPlu9FhqcouXlcFtneXO4/jvSwz/lUg0Gzht1t0VbtVwP2N5GLuCJ5AXunf8ycB7Y+lzxs2FFEp54LLkn/2Ek7sG593JsYHphPG5YwGSEx9IwDuOq6zCmMd9g2NoYzx8d5KaZbPFKrUVR+gdBg+Y+CpjIYgfdm89H6kZzlNnxj2MjGeNUhabc="}],"role":"model"},{"parts":[{"text":"Now check the weather in Oslo."}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Oslo"},"id":"call_2010978","name":"get_weather"},"thoughtSignature":"EtQDCtEDARFNMg/WY+2b2BY+zTqXTVopqLpYo9dFObaQZoXW/t9BwZWCbDaoboOV45qyUx7cOKo+Bp+vqlwuwUpij/sn+3ne3y0aXR0ngvo2xdQfu7yqKzwmvwcLw+Noxn9n0Bc/46mCqHN3Tc9fdDjuYLp4dszrHLI7H/J8xvqHdg8NaQFrRkDV7QmeNbZEoNSJen0Yc2qRqKNPKgSEVnTG1QOeZEBHvoBsUM0s6AkgVKSJy5ZOqMAzNUG3hSwNWGmrT3+X8xRWxY6iKrZSo+f+jSlBE+y2FJYy5s7Io/kvLmAiyBwtAcCPZc7XO5FT1h4/xu7k875Gs5vnIBCXHuKLOOlFAOe+kVeEywXfDjlSRJqGlivD0hcvH5ZeOQ6orWZp5zDj2CUsNmBGr8+4AfduvPZsktrvJ1BycgxPI1fhP7lWo9FkfqxuL30FkGS/yZiccQ363mRIeyl+cmUd3TPHGlY1nUNKxJ5Pe9XNNKhc1xUs8R9bq4KEXbVZ1/Z9geXM/4pRjfvcMj2GbYKgDkr5Ydcc4UPsvp4BdO9ajKbqaaovn3aaDhljZvrb5ho4MJuhJOAk41C2yEKH2fJ7b087ri+0VrE7KcgNusMcPrTlHCXwSb9/"}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_2010978","name":"get_weather","response":{"weather":"sunny in Oslo"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Conversation Language: English\n\n### User Request\nThe user initially requested the current weather in Zurich and subsequently asked the agent to remember their favorite color.\n\n### Context Summary\nThe user asked about the weather in Zurich. The agent invoked a weather tool and informed the user that it is currently sunny. Following this, the user stated that their favorite color is teal, and the agent acknowledged this preference to remember it for future interactions.\n\n### Tools Called\n* `get_weather`\n\n### Unresolved Questions or Tasks\nNone.\n\n### Durable facts\n* The user's favorite color: \"My favourite colour is teal\""}],"role":"model"},{"parts":[{"text":"What was my favourite colour again?"}],"role":"user"},{"parts":[{"text":"Your favorite color is teal.","thoughtSignature":"EpAGCo0GARFNMg8OIG29WJO+bp376b06O80467eaVTZq7oTxaonmmIX41RrZFOyU8fjTnM+C9/2pDTml/dirBC4g8eKtGeL3NFekn2R/XEpytojusQM6wtWvUSkS1epQdrGgH6CnVZRLd+3be7uFlrJbmMuG5kVlvlUdRZvnsfG1vr1/cmF+inoqjSjrRW0AyakjufumJBQ+4qcjXGL+X99egprKm4YlZ1weUB2YVFMpv4cWz5Z2fBjfYW4L9gwEQNFN5+/OyD1IvHRNFTZ7oTuF4aCGNj3VXCNSqdNztgRNCdQ0ZFTWwsoaEouw+YLnO0uD+lEW017aUb5MSH4ET00hmECl6aGmD+UE3IohqC9WGt4VWeK/rLK4Am3PvfA3OVrKmDpzU0SwTnhNMlgmcAbzoahci7+77qX2W0M3f3NHedZtUxdTl1EiHVWGlmmWxo8xhacCAdWON3OSZjXOtlfoRO6KqBHzK7hidZpZiFD8HAM2vJR1SeYoHACPdUsBdq4HEAggvTmkXYXoAnYId5wFfTaI3G51FOm16ZI//MwX8b9o9IV3VEFHCSoKvQA1JGCLBJ+B3IcyY2mgDU3/sn1K1fx3UPygbr+Ma9L8/NQu3ea0NjlerEm8YXmZonp2MJIFGi5lMl3tvjHPHY0jGVmKRG3CngkzTKOJCbWID052Xyy3IuV+fF4gbTPfM84l0+CqQoiA3VehzVcCT7H39lU9L4eKqZ4XT7lvSXHLwpTEdul+DffG7GWqJpiTKQ+M5AKhXYffjImw+LT0uFI0TNRY2Q22REO3Ub3yuWu+GPNkuI/BNG8vWWAnXD1I/AooD3ZSY3rx/SI50g451nmO81w78NDcFdUY6Ay94qOtUAL/oVP+Xq3Z7KnqAYyQT8NFbBEzjLmM6xzbcqTFhbqgxf6h0oGpO7PzWESqbw4aTiC8zZwzraHqR2M+oDHNWvUDdh/JdVWYZeCdf9Tm0sxoZnyQbjWRv7ej0/FQqKPiubftwp2xZin698jcDatorXZFgCV9GrzHQyhGIP/bNOk/DgHt4g=="}],"role":"model"},{"parts":[{"text":"Now check the weather in Oslo."}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Oslo"},"id":"call_1314234","name":"get_weather"},"thoughtSignature":"EoACCv0BARFNMg+idxyVftoWK0dmsqggX1ZJR3zUA7kIL0H9NTUCyUm+JxnE16gaZXJ/LNTemWZFnSoPUWR2skXY66u9zvrVC3/gVakBwZfXAKur2v+NvTXRWhYQKWv1VE2bL3SvsJMpbW4viHp6i6xqGoixEAU+JndKGupdChgx6Xl+/oD3QINSnht6z1wrD+nlmCN9AyZGnfA+sHgHAkh0dEOHVktTogiMiPVTOt3tKm1BrwpltDKl1FeoU9twz6FxYPU11jnwb9anItAJxOrKggC/xKbOU2JCx8Av+ZEE4+iUfKpyJfVPkp+oS+1a8Mf1Uz86qazJo0DsRn3f958x9A=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_1314234","name":"get_weather","response":{"weather":"sunny in Oslo"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"compaction_agent\". The description about you is \"agent used to exercise context compaction\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Returns the weather in a city.","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"the city to look up","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather":{"type":"string"}},"required":["weather"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:34 GMT
+Date: Mon, 31 Aug 2026 12:44:07 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=923
+Server-Timing: gfet4t7; dur=1217
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -363,8 +363,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "The weather in Oslo is currently sunny.",
-            "thoughtSignature": "EvUCCvICARFNMg/S48fJzW40RK6Y3a3xUezedGISYZlcUBHucZm/xegoN+S4TGyomJaN9K2Ol7w+F8FmNMa+lbuvf9nWBgZhL+h3rvp7l91T5Bkrr4l8vSfZHAjxpDnEnW3Rp+wCuxKXgAaFy4i3OB52w7tXufKy6UhCemShNoxNbJ23mGrdijek3J4DMTSreRDi1r1ZBBKrCk4d9/8T/zEo3YLMgzdZCJlYF4TDQFN4FPtGT86aDW+r1zVNmu2WRZ+fGkXAj+X2UgaaJmjuEBwzt9bz7YIkAwQBelZG3AaGAcA4PR3LoKqn3nQF8StvSfZo0bUoitc9NRXC5aHh+h0m/kc8xVB82DSiX1GvhZIJo9pdRLaa2+498WlGKVDGX09P6B8hD5HjsOf4mdKZ7u9hWcnkbwKBEQRiZtmj3zwFdvg61AVsUUoY7RAUrESVBApbY4S0zO9LBfOgLkFUCyuSj5ZxBMOK2VafIyMXRJdUj0S5Agi/VQ=="
+            "text": "It is currently sunny in Oslo.",
+            "thoughtSignature": "EtgBCtUBARFNMg+Q8enx/8oCtc50LhEGxvY0hRTE8zUqQG0AChoYxXhXLqajzNZi78z0VHWvNXf9HRPzClWc40nTJU6WecVb+4PX1/n6r3pX1C209PPxwdSarJlulg1gEyKqeRuYbAO86p3Kj9n3R84CS0L1tEDPywQJarAlOniN0aWLNx9USymRV7E7XrY/spIl1/poN1v2+lrmLAruwrd8uwFGYAosCXfkxA1dFa55oSCwmTF4jHH5qioIZHbaZri2t1lujXuiEmZ9lgEZhS8f28wCEKY1OjmM"
           }
         ],
         "role": "model"
@@ -374,35 +374,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 570,
-    "candidatesTokenCount": 8,
-    "totalTokenCount": 645,
+    "promptTokenCount": 513,
+    "candidatesTokenCount": 7,
+    "totalTokenCount": 547,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 570
+        "tokenCount": 513
       }
     ],
-    "thoughtsTokenCount": 67,
+    "thoughtsTokenCount": 27,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 635
+    "rawPromptTokenCount": 578
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "hTuMapKlFb3lnsEP8L_BmQY",
-  "turnToken": "v1_ChdoVHVNYXBLbEZiM2xuc0VQOExfQm1RWRIXaFR1TWFwS2xGYjNsbnNFUDhMX0JtUVk"
+  "responseId": "FneVaqnFE5SjvdIPu72n2Aw",
+  "turnToken": "v1_ChdGbmVWYXFuRkU1U2p2ZElQdTcybjJBdxIXRm5lVmFxbkZFNVNqdmRJUHU3Mm4yQXc"
 }
-1269 4721
+1739 7080
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1036
+Content-Length: 1506
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: What was my favourite colour again?\ncompaction_agent: Your favorite color is teal.\nuser: Now check the weather in Oslo.\ncompaction_agent called tool: get_weather({city: Oslo})\nTool response from get_weather: {weather: sunny in Oslo}\ncompaction_agent: The weather in Oslo is currently sunny."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: What was my favourite colour again?\ncompaction_agent: Your favorite color is teal.\nuser: Now check the weather in Oslo.\ncompaction_agent called tool: get_weather({city: Oslo})\nTool response from get_weather: {weather: sunny in Oslo}\ncompaction_agent: It is currently sunny in Oslo."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 24 Aug 2026 12:39:37 GMT
+Date: Mon, 31 Aug 2026 12:44:13 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=2982
+Server-Timing: gfet4t7; dur=6119
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -417,8 +417,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "**Conversation Language:** English\n\n### User Request\nThe user asked to recall their favorite color and then requested to check the current weather in Oslo.\n\n### Context Summary\n* **Information Obtained:** \n  * The user's favorite color is teal.\n  * The weather in Oslo is currently sunny.\n* **Tools Used:** \n  * `get_weather` was called to retrieve the weather for Oslo.\n\n### Unresolved Questions or Tasks\nThere are currently no unresolved tasks or pending questions.",
-            "thoughtSignature": "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"
+            "text": "Conversation Language: English\n\n### User Request\nThe user requested to know their favorite color and then asked to check the weather in Oslo.\n\n### Context Summary\nThe conversation began with the user asking to be reminded of their favorite color. The agent recalled that it is teal. The user then requested a weather update for Oslo. The agent invoked a weather tool and informed the user that it is currently sunny in Oslo. There are no currently unresolved questions or tasks.\n\n### Tools Used\n* `get_weather`\n\n### Durable Facts\n* Favorite color: teal\n* Location of interest: Oslo",
+            "thoughtSignature": "EtkfCtYfARFNMg9fwpjFeijOmdNcKxcFONj1sW9tJHrMDQGm6nkbFzzv6vTw1k5x2OGRnbGoDsF5TbZGRzY5w8nmtoFKcvkJop69a0OQRgV5P/sOwxERJCGj2Vb/pR+CRDo1EO6kXvo/m7DRVFWr3jEjeQbQAlD/YlgY95+gtj81ZLohQlftC3UxVBYBc6J6En3vwBJOopJ96DyMfahe/FOuVS/Fyy4C/lVJyZcsRIFUIoJwpx+E+eWUGmTDSuqR4986JDYGT5DsG/p1NehQtFcO/ZHIh8yrWqllDxcpDCMUDFW94IhiATFZvK/Hj32eyXLUPIWQd4BxtAuxSaYRXRQy7F7kOD+ya6zei9yziVqZbrxj9fHg4ipp1rGTJreqz21rTkd6s2hw2B93otmPNYXTCKpJ5tF7aeNSRNQvpaqRiGn6boI9+X5bg0dbLYnuquW8MVkTXMJXNT64c/047EZFFn2Te6Q4d4IrIXzNJ5BYmF26nU0pcz6W8Zbj7DlWIyNov9npxfq2h4IRIS6G2hKocCO+IjPboTeNycxEAOUYA1utwQIoJZ4AuPduBJ5KalHwuYSHlmKbywhfIrBl0cTeGiO4r9mSwpAltYs5U4ZcvjjrJnVo1I+w3CfH7CIl+hoKhkVaOAymiXSTD7BpOEsnbz/g2465aEjVkaJlUuqI/k/e9F8BQEWK6vw537/Fwm51/c39ZsFdoNLNuZU9dH1rN4l00fOdkiU3pjt0w7umAua30Qy78OiQO8UTStsHqxHG3qt6OXM00tx/KLNEAB4er3JYKGvdG5jRJhezh4sF4n44d6ZAOjZTM6dCNs5kJu21UUq5BnokFsqpw5RP3C4gKsULWEP6IS/AwWLc9RGCacGENXW7L1WWOMdDdFq4i6lXWTGi85wRqjnLd8BxvlkG9rPvvLHW9+Quwya6Vii6kZSgKhTaSRl44429NHNaqKRGH9tj1lj+/T5mlUIWdbY/jLd9dnOIVLiZp0obMpspYwWt1xu0nQqB8nIU//bRcEsbLOKFL0oMrms1YN0KhUucikuCr92uK6dQuW6X4BpfqgvW0xTfJmQK3lsmD1UVZdK1SiE1D8VhBQbheSul4AC9TgYqRidYet7F5DbsYfXv108ZOfGIg7fDQYUXORTL5mAKpeUMeGNsBFBgmJJ/5ajPu0innzHtCmWXSzPw5hbl26OMFSDequhsFDFREUVodGcYciJabtcyqzoAvInSyyuZ7sHZiNzeuEW5iOEZGvmq75XAFUA95jmtKmHGmkkR4ra20BFgAH3c0RhgqfHKpE4zHrT+QrcbG02B+fPHOzw5vrH0b6XlExivzAx0b5vel13yBQhm5mT5Fpk8ppixvaWeKnRckEc/O92bdlJwuzn8IRgoNPusRz5zyM4Z3qB70KHl/tF433GfHa4wMmEeSDATA2O4VMql1oOnQOw8UJ/Br9CPngHcxQo9ceh6hGGRvDfI4mhm7FkQ6/v1oC6TRT21gQdVd0Q86nJ7qP14lj289j2TceYKx3/p+Mc928kbD8AqkjAMNqeoIzG52wsXH71rNZ7FgNb3X09hviQUmpqfjsMuvm772LH+A383F2UCfdAfWFY8/5S+HjUU8EodOVnsqalA8N6lCBwOSVFnmJY6RAsOD1unQjPV0JiYC+szMLUoRiMPO54Kar2mJc+zz8S8F88A5UMC+Fxv5ORb8IewAvl9gPhJkNzXqcFBddUmvdl/YcDIxmlZ6lF0ZQHkJbxTOy4MK/v98wgePhJGCa7cAP+k09ybIokUVZJsgKWVWM6iLw7xIxroijzc6bTOS7qfNPmAzR0hiTyeTZ9ikHkUfsW5JCfgYIWUQk1apjOxGczS5LGSaQtZFq1rDJwlx75+cD1ZKFbsMH+FC9gKlX+KpxGlvNO1P+vDXfExjdUjwP2qw3unFLGCX/0WiSpWTFy6FVNuEZT7OI2akaooyqLkkKeIZHC7tp4c8HhGYaQTZ2v2JSfP17bvOwtudW1JS7gaXFP/gEEdr15BfGW5+Ej5WeSqQW+8VrTx1Js8r3NVNeQ/2w0s6Ov8hWK2LtQd59UaXxOcSKM6tEPmtFs3VA+2owLXlQMVPP2Xj+FKgqVA68bUSVO44Wq5W0pbSNctjMlo/y65ukbYHgaeHU6BQ45VdbBGd6Yp9y3hjs76C2p+P05OpkkFNhZEZIySGLGwcPmvcfKtlMGVNOwe0VTReqEkm0neJ0o2gbWcSyFvOVenoTzS3uQoaLQIlGYnlYPjuJVzcpc12I2o7fQhI/XkH6wB5vLgqfMbJJXhkXi7teljDIqYIfKn/crh4wcS65qhShCUNe4MzLewPmmCRHf/PvvBAWQ/lpAI+6VfTja378BNyZ3WBNUfRkQ6uglUvx/0QPn2cN4XqCYpf2RkJH+MvjWFgGUEX5cq+oQoSAM/OaWBdlpsuJkCeOidtj2sLm8o0LEc+ls+xtESbAcRH6JRNXvcY/+l9woxmCJ5ESS6i8fpDBdusEomODOuSTWW2Nl4IgJ2YIv+FKpxPj0oXp7Qu7XslO/y8RinAZwHqfbwHnjctEJD7mXEYafwVnfpC0bW+A7PX06SL3S51uSghcbghaOYpkdyLhN9RMrjGiZjnTLx7BHp2+yTBLvkthjU73UxoZ8kPBon+Dognwosz1eJF8Y67fByV6ZIWR/OWe+J9ltqW7kjIHA52MjVZm8m/bliHnrlZBpzxfEVzk9jA5efGTCmYPp5CgkyUtBiH6zs5Ttv3kmuo9XFOLBsvpos9ctTZBzjVLrfhl71sPwqu3a37hA8vT/4VKDPgPVtOKORi07ouLYGRby8n18UtKo/59j7tbIL/9XJbCHa11rmReMycL1ouYMy+5QRa4w7lIPtCLCJ/stG9k++o7mh3jzC8XQWPEdbKRA2WZk8s4falqJe+UdFf1aQ97IvzY1SveI7w3yHY3ZXXe1N6Sh35BkiTcJ/gWW7Bljk8nfTIN2KyRDQzBCyb+aR3d3LMMIVgm9NfV71f77dBaMaedlZXQWoYWKQ1r6oOn1rHZuvmkvcCUvJo42Qu5EjoU9+Jj26sOP3EsfbJJYtPWizjsD6y5LL0s7USztFylPD8IRhRaBAdiSm0Tomyajvo9yjaoC/q9Spwk7U/tDwHs+mYLAN03vcYDNTosut/B5bHbZ4cMjL2TkHLLWYQm2NNfEBqsx//2syGsuzCvgxBgXIsnfbgSMsD06re2lX1fWP7q/pkXmBbck6aBm0HgtBnldXuIoi9cfMoD/3zhxHh9YdUc3EJc2JNekQDHXmskvx3NiwrJ9fHGXebaRiKLV6cn8tHT1Hux4MulsMUdvJYaHrPZv2xaJwxwhOsAfDlTeYC9P8j5M+E9d0VPiaGRnPLjukmVPW0WdEJEZ+jfm6fnD2fSttUotiRRLpR+yxkLD5+Zg2BpXGlPfUUc+a0kwMLR00FYrL7pmNqTOjdO7WWOpQOsg+Kno/f6hsUL7C3Y2D0Z0rN8RM2rxDpGqHzrYTC/nzWgYqaUuKK5egy4C/R8GFFyBbAx8SNDb3RnlOrxwEiYptUIOpxXynU+rib9IDaLFFeYGfxv7U5vrhaB68rSOAdOgLYeD2NM1qKMjGaT8IDV8pXkmiU5ycj61mkovew07oyYQW8WCMBan3sVNoB9OPsXQLPEEoJfSa0b+62fGBJrqM0Y4Lve07/7ggXz19aHh0tz43cbEzwunQIQtRF1WKsp4q0p7HAHq9+OdLpTZXOuILQQlH+8u0ypnkmAXAZ6x9uozZ98biAbEp3MRdvJhfBbs8OQVUnD2pCGmaOmxflbndH4ldwTdWyRpHDCUR+I3hOSWnmqk3uJ9Y1ElpLehEC3NZyprT60t1QAHC4qWES2yHpkBZov3xHyLdp51RaUHB+DVuRtSIiqeiA3XdSTVFAUMj1Hrx7T0HsqI0H5nDOEY9BFP6RKnyoBiRQkILtz+oZel+FDF3VyBmVVgO/YJ2XsFURjiKvdCQIBIyOVCJGCH1kqQs74VhfKnImEbuzgsazesPaeU4ivM43YXcbFhQY3GIRriTYToe+bDdYWzEsg2WwxDyFgM9ycwvBYhYYAfGih4hs5tCtRGGtWxCFRuBgbnV4WLU5qIARjAth648SZQ8RaGHYh6qczkENqPNx7NP7oPrZ1LftGe1aVvI1mQVqGxKo9vZptcfFCMFAZRIUHmaDGyUsA44FzvzcLGdxKuJTRpVAhWDKutiJyAp/bzzZeamEcRc+caA0oXvVdY4NtvU5dMHvG7mJ6DtsnartOoHAdhiVOc422KOcYD1M8bHqOiWVaEviCFxhfLAfxgzKQUfTZUWWVOFC10Swtq2oibORyRGFnpAJvwSM+I/tLdiL/bnxqOlwgWOWD65t3ypVXnDnCETbzcc9w7wceZhGxpdwgOtuVSwhI1r0pbKJvjI3PBGMlyx76xwTWIGrGxr9V3dAbOMOlYcYCk5EDnNxlGv5OMNUFnlLPq+2qCfRvQIVezEbDfPGluKDf5wiTzEkKZgbNeQGiKMhvFCYlUXjiNxALO3+NE4kWsgxFM9/qLYKb5luE/NbFc5VlDceyL8Bk0tvyFWOl08GgN8SgJ3P2IWa4yFVcBr6DZJDSRAOGAtECF778gdjSjl4dbew/DxddrQwwzwnpSGfBBIFDZA8zl12n+Y9B5Gwii0Nu8KwKOXiBT0woL9LRZPAmuMEWl90SO7hnBWDcJus7Uebxmz80UCAG2vHP7mCqpt1pKVVeHuXWZ6IaR32o2CUjUo8xeXOHCehuKLdS7IrBJuTdR54sjnQd8ooJQXguj/nzr2LVSZ7Lq/+QerwoUYVcAetX65jywnncSuACzwd2GpzpTJkeBxRSOApjfqS6EW1UYkndFjlwtIHc04Iw4wxQdAh52+NDAH1B89CNebswgq4Dm38Aben9ch44Ne0AgjVI/U7bksj47U/dcfxwqGBXYDJB/ax4kdGPYjPg59Mnx7DGMGtREeSBe+G94W+Jpo0j3CX5T9yViz0vKvzm75yDavVCOmEaNVNMte5ikPtqov++YxK40qSXuAHJXpkOBi1zHnzsC+pBQpdghlzsY/btVX56BZNKwb2nEMwg2YqrqbEAZwVaGvHypJu0Vm/YXRFkgqNuJFT+mnx0G3Ebd/EjBys4WlERd9LnZcWMOTTmF6yd3r4ga8yJcYjHJ7uk+KZf2HaSTHYD0pdW3jV3w+OqeEBayxi91CK0vMTiZSH+XbPSyB4faMjxvi79Hn6P6CNNCYfzDLZRNtlHJHqLIxd1k0iY+qNteacyqMifH4+QT4qfKDZM1NGhbS0BaFj+X03PxrtnaO9a69vsZxR4ogRUQ+pDK+DAcV+pz43TkiRVcvcRdnSoZjNmHkwodxyXAXE4aPqo9W+ojtAq4fCqTRw4uYDlwztcvFUlrSMA=="
           }
         ],
         "role": "model"
@@ -428,20 +428,20 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 210,
-    "candidatesTokenCount": 104,
-    "totalTokenCount": 883,
+    "promptTokenCount": 306,
+    "candidatesTokenCount": 120,
+    "totalTokenCount": 1401,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 210
+        "tokenCount": 306
       }
     ],
-    "thoughtsTokenCount": 569,
+    "thoughtsTokenCount": 975,
     "serviceTier": "standard",
-    "rawPromptTokenCount": 241
+    "rawPromptTokenCount": 337
   },
   "modelVersion": "gemini-3.5-flash",
-  "responseId": "hjuMarfHEOqhnsEP2tjesQg",
-  "turnToken": "v1_ChdoanVNYXJmSEVPcWhuc0VQMnRqZXNRZxIXaGp1TWFyZkhFT3FobnNFUDJ0amVzUWc"
+  "responseId": "F3eVaoj_IPPPvdIP_eavwAQ",
+  "turnToken": "v1_ChdGM2VWYW9qX0lQUFB2ZElQX2VhdndBURIXRjNlVmFval9JUFBQdmRJUF9lYXZ3QVE"
 }
