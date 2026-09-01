@@ -1287,3 +1287,44 @@ func estimateFromEvents(events []*session.Event) int {
 	}
 	return EstimateTokensFromContents(contents)
 }
+
+// TestTailRetentionAmortizationDoesNotStallOnAnUndercountedTail pins the
+// backstop on the amortized gate.
+//
+// The size rule rests on the token estimator, which is documented as a floor:
+// it counts text, tool calls and tool responses, but not inline data. A tail of
+// images therefore reads as almost nothing while costing the real prompt a
+// great deal. Holding compaction off on the strength of that reading would let
+// the prompt grow without limit, which is a worse failure than the wasted calls
+// the gate exists to prevent.
+func TestTailRetentionAmortizationDoesNotStallOnAnUndercountedTail(t *testing.T) {
+	t.Parallel()
+
+	oversized := compactionEvent("s1", 1, 1, 2, strings.Repeat("x", 400))
+
+	// Events the estimator cannot see: inline data only, no text and no tool
+	// traffic. Enough of them to pass the count backstop.
+	events := []*session.Event{oversized}
+	for i := range rearmMaxPendingEvents*2 + 6 {
+		ev := modelTextEvent("blob", "inv2", i+3, "")
+		ev.LLMResponse.Content = &genai.Content{Role: "model", Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("payload")}},
+		}}
+		events = append(events, ev)
+	}
+	events = append(events, withUsage(modelTextEvent("last", "inv3", 99, "a"), 5000))
+
+	cfg := &compaction.Config{
+		TokenThreshold:     50,
+		EventRetentionSize: 2,
+		Summarizer:         &fakeSummarizer{summary: "sum"},
+	}
+	got, err := tailRetentionStored(context.Background(), cfg,
+		&staticSession{events: events}, TurnScope{}, estimateFromEvents, &recordingGate{allow: true})
+	if err != nil {
+		t.Fatalf("tailRetentionStored() error = %v", err)
+	}
+	if got == nil {
+		t.Error("compaction never ran behind the amortized gate for a tail the estimator cannot measure, so the prompt would grow without limit")
+	}
+}

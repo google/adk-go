@@ -173,7 +173,16 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 			if len(fresh) > 0 && hasCompaction(fresh[0]) {
 				fresh = fresh[1:]
 			}
-			if estimate(fresh) < cfg.TokenThreshold/rearmDivisor {
+			// A count as well as a size, because the estimator is a floor. It
+			// counts text, tool calls and tool responses, but not inline data,
+			// so a tail of images reads as almost nothing while costing the
+			// real prompt a great deal -- and holding compaction off on the
+			// strength of that reading would let the prompt grow without
+			// limit, which is worse than the wasted calls this guard exists to
+			// stop. Whichever bound is reached first releases it.
+			enough := estimate(fresh) >= cfg.TokenThreshold/rearmDivisor ||
+				len(fresh) >= rearmMaxPendingEvents*cfg.EventRetentionSize
+			if !enough {
 				traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold,
 					"the standing summary alone exceeds the threshold, and too little has accumulated since to be worth a call")
 				return nil, noop, nil
@@ -550,6 +559,15 @@ func traceDeclined(ctx context.Context, cfg *compaction.Config, sess session.Ses
 // exists: without it the call rate is one per turn regardless of how little
 // changed.
 const rearmDivisor = 4
+
+// rearmMaxPendingEvents bounds how many events may pile up behind the amortized
+// gate, as a multiple of the retained tail, regardless of what they estimate to.
+//
+// The size rule above rests on an estimator that is explicitly a floor, so this
+// is the backstop for the case where it reads low and the prompt is growing
+// anyway. Generous on purpose: it should almost never be the rule that fires,
+// only the one that stops "almost never" from meaning "never".
+const rearmMaxPendingEvents = 8
 
 // standingSummaryTokens estimates the size of the newest visible summary on its
 // own, which is the part of the prompt no further compaction can remove.
