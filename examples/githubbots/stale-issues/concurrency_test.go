@@ -16,6 +16,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"iter"
 	"log/slog"
@@ -129,6 +132,64 @@ func TestNewAuditRunnerReturnsAFreshRunnerEachCall(t *testing.T) {
 	}
 	if ss1 == ss2 {
 		t.Error("both calls returned the same session service")
+	}
+}
+
+// Both pins above hold only while audit() still fans out over perIssueRunFn.
+// Hoisting the construction ABOVE that call — build one runner in audit(), hand
+// auditAll a closure over it — shares one agent across every issue and puts the
+// write/write race back. Nothing catches it: measured, the full suite plus vet,
+// staticcheck and golangci-lint stay green in 5 of 5 fresh processes, and the
+// `unused` check stays quiet because the test above still calls perIssueRunFn.
+//
+// No runtime test can reach that edit. audit() is the composition root: it
+// builds a real GitHub client and a real Gemini model before it reaches the
+// fan-out, so a test cannot call it, and there is no seam left to inject at.
+// The wiring is therefore pinned where it is written rather than where it runs.
+//
+// This test is deliberately brittle. Restructuring this call is exactly the
+// moment someone should have to re-read why the runner is built per issue.
+func TestAuditFansOutOverPerIssueRunFn(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	var auditFn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "audit" {
+			auditFn = fd
+			break
+		}
+	}
+	if auditFn == nil {
+		t.Fatal("main.go has no func audit: the fan-out moved, so re-point this pin at its new home rather than deleting it")
+	}
+
+	var found bool
+	ast.Inspect(auditFn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "auditAll" {
+			return true
+		}
+		if len(call.Args) == 0 {
+			return false
+		}
+		arg, ok := call.Args[len(call.Args)-1].(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		if id, ok := arg.Fun.(*ast.Ident); ok && id.Name == "perIssueRunFn" {
+			found = true
+		}
+		return false
+	})
+
+	if !found {
+		t.Error("audit() no longer passes perIssueRunFn(...) as auditAll's run function: whatever it passes instead is not what TestConcurrentAuditsDoNotShareAgentState exercises, and a runner built once above the fan-out is shared by every issue in the sweep")
 	}
 }
 
