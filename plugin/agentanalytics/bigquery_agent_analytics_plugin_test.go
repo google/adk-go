@@ -15,11 +15,13 @@
 package agentanalytics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -377,4 +379,229 @@ func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Error("Timed out waiting for request")
 	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+
+	createCalled := false
+	var requestBody string
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			// Table metadata request: returns 404 Not Found to trigger creation
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			// Table creation request
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createCalled = true
+				bodyBytes, _ := io.ReadAll(r.Body)
+				requestBody = string(bodyBytes)
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	_, err = NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Plugin initialization error: %v", err)
+	}
+
+	if !createCalled {
+		t.Error("Expected table creation to be called")
+	}
+
+	if !strings.Contains(requestBody, "timePartitioning") {
+		t.Errorf("Expected request body to contain 'timePartitioning', got: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "DAY") {
+		t.Errorf("Expected partitioning type to be 'DAY', got request body: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "timestamp") {
+		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
+	}
+}
+
+func TestHybridContentParser(t *testing.T) {
+	ctx := context.Background()
+
+	// Test Case 1: Inline parsing (offloader is nil)
+	t.Run("InlineParsingNoOffloader", func(t *testing.T) {
+		parser := newHybridContentParser(nil, "conn-id", 100) // maxLen = 100
+
+		// Test string
+		strInput := "This is a very long string that should be truncated because it exceeds the max length of 100 characters."
+		res, parts, trunc := parser.parse(ctx, strInput, "trace-1", "span-1")
+		if !trunc {
+			t.Error("Expected truncated to be true")
+		}
+		strRes, ok := res.(string)
+		if !ok {
+			t.Fatalf("Expected result to be string, got %T", res)
+		}
+		if !strings.Contains(strRes, "truncated") {
+			t.Errorf("Expected result to be truncated, got: %s", strRes)
+		}
+		if len(parts) != 0 {
+			t.Errorf("Expected parts to be empty, got %d", len(parts))
+		}
+
+		// Test genai.Content
+		contentInput := &genai.Content{
+			Parts: []*genai.Part{
+				{Text: "Short text"},
+				{Text: "Another somewhat longer text that will still fit but combined with the other it might exceed if we joined them?"},
+			},
+		}
+		res, parts, _ = parser.parse(ctx, contentInput, "trace-1", "span-1")
+		resMap, ok := res.(map[string]any)
+		if !ok {
+			t.Fatalf("Expected result to be map, got %T", res)
+		}
+		summary := resMap["text_summary"].(string)
+		if !strings.Contains(summary, "Short text") {
+			t.Errorf("Expected summary to contain 'Short text', got: %s", summary)
+		}
+		if len(parts) != 2 {
+			t.Errorf("Expected 2 parts, got %d", len(parts))
+		}
+		// When offloader is nil, part 2 should just be inline text even if long, but truncated to maxLen
+		if parts[1]["storage_mode"] != "INLINE" {
+			t.Errorf("Expected storage mode INLINE, got %s", parts[1]["storage_mode"])
+		}
+	})
+
+	// Test Case 2: Offloading with mock GCS server
+	t.Run("OffloadingWithGCS", func(t *testing.T) {
+		var uploadedData []byte
+		var uploadedContentType string
+		var uploadedPath string
+
+		// Start mock GCS server
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// GCS JSON API upload endpoint is /upload/storage/v1/b/bucket/o
+			// The client might send a POST request.
+			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/upload/storage/v1/b/test-bucket/o") {
+				uploadedContentType = r.Header.Get("Content-Type")
+				uploadedPath = r.URL.Query().Get("name")
+				var err error
+				uploadedData, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("failed to read request body: %v", err)
+				}
+
+				// Return GCS Object response
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"kind": "storage#object", "name": "test-path", "bucket": "test-bucket"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer ts.Close()
+
+		// Create GCS offloader
+		offloader, err := newGCSOffloader(
+			ctx, "test-project", "test-bucket",
+			option.WithHTTPClient(ts.Client()),
+			option.WithEndpoint(ts.URL),
+		)
+		if err != nil {
+			t.Fatalf("failed to create GCS offloader: %v", err)
+		}
+		defer func() { _ = offloader.close() }()
+
+		// Use hybridContentParser with offloader, maxLen=50, inlineTextLimit = 10 (which is smaller than our test text)
+		parser := &hybridContentParser{
+			offloader:       offloader,
+			connectionID:    "conn-123",
+			maxLen:          50,
+			inlineTextLimit: 10,
+		}
+
+		// Test large text part
+		contentInput := &genai.Content{
+			Parts: []*genai.Part{
+				{Text: "This is a large text that exceeds the limit of 10"},
+			},
+		}
+
+		_, parts, _ := parser.parseContentObject(ctx, contentInput, "trace-x", "span-y")
+		if len(parts) != 1 {
+			t.Fatalf("Expected 1 part, got %d", len(parts))
+		}
+
+		part := parts[0]
+		if part["storage_mode"] != "GCS_REFERENCE" {
+			t.Errorf("Expected storage mode GCS_REFERENCE, got %v", part["storage_mode"])
+		}
+
+		uri := part["uri"].(string)
+		if !strings.HasPrefix(uri, "gs://test-bucket/2") || !strings.HasSuffix(uri, "span-y_p0.txt") {
+			t.Errorf("Unexpected GCS URI: %s", uri)
+		}
+
+		if !strings.Contains(string(uploadedData), "This is a large text") {
+			t.Errorf("Uploaded data mismatch, got %s", string(uploadedData))
+		}
+
+		if !strings.Contains(uploadedContentType, "multipart/related") && !strings.Contains(uploadedContentType, "text/plain") {
+			t.Errorf("Expected uploaded Content-Type to contain 'multipart/related' or 'text/plain', got '%s'", uploadedContentType)
+		}
+
+		if !strings.Contains(uploadedPath, "trace-x") || !strings.Contains(uploadedPath, "span-y") {
+			t.Errorf("Expected uploaded path to contain trace-x and span-y, got '%s'", uploadedPath)
+		}
+
+		objRef, ok := part["object_ref"].(map[string]any)
+		if !ok || objRef == nil {
+			t.Fatal("Expected object_ref in part metadata")
+		}
+		if objRef["authorizer"] != "conn-123" {
+			t.Errorf("Expected connection_id to be conn-123, got %v", objRef["authorizer"])
+		}
+	})
 }

@@ -55,7 +55,7 @@ func TestBatchProcessor_AppendAndFlush(t *testing.T) {
 	config.BatchFlushIntv = 100 * time.Millisecond
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config, nil)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestBatchProcessor_WriteBatchErrors(t *testing.T) {
 			config := DefaultConfig()
 			config.RetryConfig.MaxRetries = 0 // Prevent generic reconnect on nil client
 
-			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config, nil)
 			if err != nil {
 				t.Fatalf("NewBatchProcessor error: %v", err)
 			}
@@ -144,7 +144,7 @@ func TestBatchProcessor_DataTypes(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config, nil)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestBatchProcessor_QueueFull(t *testing.T) {
 	config.BatchSize = 10
 	config.QueueMaxSize = 1
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config, nil)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor error: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config, nil)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor error: %v", err)
 	}

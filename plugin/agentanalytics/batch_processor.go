@@ -36,6 +36,7 @@ type BatchProcessor struct {
 	streamName   string
 	config       Config
 	queue        chan map[string]any
+	offloader    *gcsOffloader
 
 	flushMu     sync.Mutex
 	arrowSchema *arrow.Schema
@@ -48,7 +49,7 @@ type BatchProcessor struct {
 }
 
 // NewBatchProcessor creates a new BatchProcessor instance.
-func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config) (*BatchProcessor, error) {
+func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config, offloader *gcsOffloader) (*BatchProcessor, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	schemaBytes, err := SerializedArrowSchema()
 	if err != nil {
@@ -64,6 +65,7 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		queue:        make(chan map[string]any, config.QueueMaxSize),
 		arrowSchema:  ArrowSchema(),
 		allocator:    memory.NewGoAllocator(), // Use Go memory allocator
+		offloader:    offloader,
 		ctx:          ctx,
 		cancel:       cancel,
 		done:         make(chan struct{}),
@@ -180,6 +182,72 @@ func (b *BatchProcessor) blockingFlush(ctx context.Context) {
 
 // writeBatch allocates a new Apache Arrow RecordBuilder from the batch and commits the writes to BigQuery.
 func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any) error {
+	parser := newHybridContentParser(b.offloader, b.config.ConnectionID, b.config.MaxContentLen)
+
+	// Pre-parse and offload/format raw elements inside the background writer loop!
+	for idx, row := range batch {
+		if rawContent, ok := row["_raw_content"]; ok && rawContent != nil {
+			traceID, _ := row["trace_id"].(string)
+			spanID, _ := row["span_id"].(string)
+
+			jsonPayload, contentParts, isTruncated := parser.parse(ctx, rawContent, traceID, spanID)
+
+			if jsonPayload != nil {
+				jsonPayloadRaw, _, _ := SmartTruncate(jsonPayload, b.config.MaxContentLen)
+				row["content"] = string(jsonPayloadRaw)
+			}
+			if len(contentParts) > 0 {
+				row["content_parts"] = contentParts
+			}
+			if isTruncated {
+				row["is_truncated"] = true
+			}
+
+			if extraAttrs, ok := row["_extra_attrs"].(map[string]any); ok && len(extraAttrs) > 0 {
+				attrs := make(map[string]any)
+				for k, v := range b.config.CustomTags {
+					attrs[k] = v
+				}
+				for k, v := range extraAttrs {
+					if k == "span_id_override" || k == "parent_span_id_override" {
+						continue
+					}
+					switch k {
+					case "error_message", "status":
+						if strVal, ok := v.(string); ok {
+							if len(strVal) > b.config.MaxContentLen {
+								row[k] = strVal[:b.config.MaxContentLen]
+								row["is_truncated"] = true
+							} else {
+								row[k] = strVal
+							}
+						} else {
+							truncVal, truncated, _ := SmartTruncate(v, b.config.MaxContentLen)
+							row[k] = string(truncVal)
+							row["is_truncated"] = row["is_truncated"].(bool) || truncated
+						}
+					case "latency_ms":
+						truncVal, truncated, _ := SmartTruncate(v, b.config.MaxContentLen)
+						row[k] = string(truncVal)
+						row["is_truncated"] = row["is_truncated"].(bool) || truncated
+					default:
+						attrs[k] = v
+					}
+				}
+
+				if len(attrs) > 0 {
+					truncAttrs, truncated, _ := SmartTruncate(attrs, b.config.MaxContentLen)
+					row["attributes"] = string(truncAttrs)
+					row["is_truncated"] = row["is_truncated"].(bool) || truncated
+				}
+			}
+
+			delete(row, "_raw_content")
+			delete(row, "_extra_attrs")
+			batch[idx] = row
+		}
+	}
+
 	builder := array.NewRecordBuilder(b.allocator, b.arrowSchema)
 	defer builder.Release()
 

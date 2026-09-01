@@ -18,11 +18,14 @@ package agentanalytics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
+	gcs "cloud.google.com/go/storage"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/api/option"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -102,6 +105,10 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 		err = tableRef.Create(ctx, &bq.TableMetadata{
 			Schema: EventsSchema(),
+			TimePartitioning: &bq.TimePartitioning{
+				Field: "timestamp",
+				Type:  bq.DayPartitioningType,
+			},
 			Clustering: &bq.Clustering{
 				Fields: config.ClusteringFields,
 			},
@@ -113,15 +120,28 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 	}
 
+	// Initialize GCS client if bucket offload is enabled
+	var offloader *gcsOffloader
+	if config.GCSBucketName != "" {
+		var err error
+		offloader, err = newGCSOffloader(ctx, config.ProjectID, config.GCSBucketName, config.ClientOptions...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCS client: %w", err)
+		}
+	}
+
 	// Determine destination stream
 	streamName := fmt.Sprintf("projects/%s/datasets/%s/tables/%s/streams/_default", config.ProjectID, config.DatasetID, config.TableName)
 
-	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
+	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config, offloader)
 	if err != nil {
 		if closeErr := writeClient.Close(); closeErr != nil {
 			if config.Logger != nil {
 				config.Logger.Printf("failed to close BigQuery write client: %v", closeErr)
 			}
+		}
+		if offloader != nil {
+			_ = offloader.close()
 		}
 		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
@@ -155,54 +175,15 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			row["invocation_id"] = iCtx.InvocationID()
 		}
 
-		isTruncated := false
-		if c, ok := content.(*genai.Content); ok {
-			row["content_parts"] = FormatContentParts(c, config.MaxContentLen)
-			truncContent, truncated, _ := SmartTruncate(content, config.MaxContentLen)
-			row["content"] = string(truncContent)
-			isTruncated = isTruncated || truncated
-		} else if content != nil {
-			truncContent, truncated, _ := SmartTruncate(content, config.MaxContentLen)
-			row["content"] = string(truncContent)
-			isTruncated = isTruncated || truncated
-		}
+		// Store raw content and extra attributes to be parsed asynchronously in the background!
+		row["_raw_content"] = content
 
-		attrs := make(map[string]any)
-		for k, v := range config.CustomTags {
-			attrs[k] = v
-		}
+		attrsCloned := make(map[string]any, len(extraAttrs))
 		for k, v := range extraAttrs {
-			switch k {
-			case "error_message", "status":
-				if strVal, ok := v.(string); ok {
-					if len(strVal) > config.MaxContentLen {
-						row[k] = strVal[:config.MaxContentLen]
-						isTruncated = true
-					} else {
-						row[k] = strVal
-					}
-				} else {
-					// If not a string, fallback to SmartTruncate (which will JSON encode)
-					truncVal, truncated, _ := SmartTruncate(v, config.MaxContentLen)
-					row[k] = string(truncVal)
-					isTruncated = isTruncated || truncated
-				}
-			case "latency_ms":
-				// latency_ms is typically numeric, SmartTruncate is fine here.
-				truncVal, truncated, _ := SmartTruncate(v, config.MaxContentLen)
-				row[k] = string(truncVal)
-				isTruncated = isTruncated || truncated
-			default:
-				attrs[k] = v
-			}
+			attrsCloned[k] = v
 		}
-
-		if len(attrs) > 0 {
-			truncAttrs, truncated, _ := SmartTruncate(attrs, config.MaxContentLen)
-			row["attributes"] = string(truncAttrs)
-			isTruncated = isTruncated || truncated
-		}
-		row["is_truncated"] = isTruncated
+		row["_extra_attrs"] = attrsCloned
+		row["is_truncated"] = false
 
 		// Add trace info dynamically resolving the context span
 		spanCtx := trace.SpanContextFromContext(ctx)
@@ -294,9 +275,244 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			if err := writeClient.Close(); err != nil {
 				return fmt.Errorf("failed to close BigQuery write client: %w", err)
 			}
+			if offloader != nil {
+				_ = offloader.close()
+			}
 			return nil
 		},
 	}
 
 	return baseplugin.New(cfg)
+}
+
+type gcsOffloader struct {
+	client *gcs.Client
+	bucket *gcs.BucketHandle
+}
+
+func newGCSOffloader(ctx context.Context, projectID, bucketName string, opts ...option.ClientOption) (*gcsOffloader, error) {
+	client, err := gcs.NewClient(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &gcsOffloader{
+		client: client,
+		bucket: client.Bucket(bucketName),
+	}, nil
+}
+
+func (o *gcsOffloader) uploadContent(ctx context.Context, data []byte, contentType, path string) (string, error) {
+	obj := o.bucket.Object(path)
+	w := obj.NewWriter(ctx)
+	w.ContentType = contentType
+
+	if _, err := w.Write(data); err != nil {
+		_ = w.Close()
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("gs://%s/%s", o.bucket.BucketName(), path), nil
+}
+
+func (o *gcsOffloader) close() error {
+	if o.client != nil {
+		return o.client.Close()
+	}
+	return nil
+}
+
+type hybridContentParser struct {
+	offloader       *gcsOffloader
+	connectionID    string
+	maxLen          int
+	inlineTextLimit int
+}
+
+func newHybridContentParser(offloader *gcsOffloader, connectionID string, maxLen int) *hybridContentParser {
+	return &hybridContentParser{
+		offloader:       offloader,
+		connectionID:    connectionID,
+		maxLen:          maxLen,
+		inlineTextLimit: 32 * 1024,
+	}
+}
+
+func (p *hybridContentParser) parseContentObject(ctx context.Context, content *genai.Content, traceID, spanID string) (string, []map[string]any, bool) {
+	if content == nil || len(content.Parts) == 0 {
+		return "", nil, false
+	}
+
+	var contentParts []map[string]any
+	var summaryText []string
+	isTruncated := false
+
+	for idx, part := range content.Parts {
+		partData := map[string]any{
+			"part_index":      int64(idx),
+			"mime_type":       "text/plain",
+			"uri":             nil,
+			"text":            nil,
+			"part_attributes": "{}",
+			"storage_mode":    "INLINE",
+			"object_ref":      nil,
+		}
+
+		if part.FileData != nil {
+			partData["storage_mode"] = "EXTERNAL_URI"
+			partData["uri"] = part.FileData.FileURI
+			partData["mime_type"] = part.FileData.MIMEType
+		} else if part.InlineData != nil {
+			if p.offloader != nil {
+				ext := ".bin"
+				switch part.InlineData.MIMEType {
+				case "image/png":
+					ext = ".png"
+				case "image/jpeg":
+					ext = ".jpg"
+				}
+
+				path := fmt.Sprintf("%s/%s/%s_p%d%s", time.Now().Format("2006-01-02"), traceID, spanID, idx, ext)
+				uri, err := p.offloader.uploadContent(ctx, part.InlineData.Data, part.InlineData.MIMEType, path)
+				if err == nil {
+					partData["storage_mode"] = "GCS_REFERENCE"
+					partData["uri"] = uri
+					partData["text"] = "[MEDIA OFFLOADED]"
+					partData["mime_type"] = part.InlineData.MIMEType
+
+					detailsMap := map[string]any{
+						"gcs_metadata": map[string]any{"content_type": part.InlineData.MIMEType},
+					}
+					detailsRaw, _, _ := SmartTruncate(detailsMap, p.maxLen)
+
+					objectRef := map[string]any{
+						"uri":        uri,
+						"version":    nil,
+						"authorizer": p.connectionID,
+						"details":    string(detailsRaw),
+					}
+					partData["object_ref"] = objectRef
+				} else {
+					partData["text"] = "[UPLOAD FAILED]"
+				}
+			} else {
+				partData["text"] = "[BINARY DATA]"
+			}
+		} else if part.Text != "" {
+			textLen := len([]byte(part.Text))
+			threshold := p.inlineTextLimit
+			if p.maxLen != -1 && p.maxLen < threshold {
+				threshold = p.maxLen
+			}
+
+			if p.offloader != nil && textLen > threshold {
+				path := fmt.Sprintf("%s/%s/%s_p%d.txt", time.Now().Format("2006-01-02"), traceID, spanID, idx)
+				uri, err := p.offloader.uploadContent(ctx, []byte(part.Text), "text/plain", path)
+				if err == nil {
+					partData["storage_mode"] = "GCS_REFERENCE"
+					partData["uri"] = uri
+					partData["mime_type"] = "text/plain"
+
+					truncatedText, _ := truncateString(part.Text, 200)
+					partData["text"] = truncatedText + "... [OFFLOADED]"
+
+					detailsMap := map[string]any{
+						"gcs_metadata": map[string]any{"content_type": "text/plain"},
+					}
+					detailsRaw, _, _ := SmartTruncate(detailsMap, p.maxLen)
+
+					objectRef := map[string]any{
+						"uri":        uri,
+						"version":    nil,
+						"authorizer": p.connectionID,
+						"details":    string(detailsRaw),
+					}
+					partData["object_ref"] = objectRef
+				} else {
+					cleanText, trunc := truncateString(part.Text, p.maxLen)
+					isTruncated = isTruncated || trunc
+					partData["text"] = cleanText
+					summaryText = append(summaryText, cleanText)
+				}
+			} else {
+				cleanText, trunc := truncateString(part.Text, p.maxLen)
+				isTruncated = isTruncated || trunc
+				partData["text"] = cleanText
+				summaryText = append(summaryText, cleanText)
+			}
+		} else if part.FunctionCall != nil {
+			partData["mime_type"] = "application/json"
+			partData["text"] = fmt.Sprintf("Function: %s", part.FunctionCall.Name)
+			attrsMap := map[string]any{"function_name": part.FunctionCall.Name}
+			attrsRaw, _, _ := SmartTruncate(attrsMap, p.maxLen)
+			partData["part_attributes"] = string(attrsRaw)
+		}
+
+		contentParts = append(contentParts, partData)
+	}
+
+	summaryStr, trunc := truncateString(strings.Join(summaryText, " | "), p.maxLen)
+	isTruncated = isTruncated || trunc
+
+	return summaryStr, contentParts, isTruncated
+}
+
+func (p *hybridContentParser) parse(ctx context.Context, content any, traceID, spanID string) (any, []map[string]any, bool) {
+	if content == nil {
+		return nil, nil, false
+	}
+
+	if c, ok := content.(*genai.Content); ok {
+		summary, parts, trunc := p.parseContentObject(ctx, c, traceID, spanID)
+		return map[string]any{"text_summary": summary}, parts, trunc
+	}
+
+	if req, ok := content.(*model.LLMRequest); ok {
+		var contentParts []map[string]any
+		var messages []map[string]any
+		isTruncated := false
+
+		for _, c := range req.Contents {
+			role := c.Role
+			if role == "" {
+				role = "unknown"
+			}
+			summary, parts, trunc := p.parseContentObject(ctx, c, traceID, spanID)
+			isTruncated = isTruncated || trunc
+			contentParts = append(contentParts, parts...)
+			messages = append(messages, map[string]any{"role": role, "content": summary})
+		}
+
+		jsonPayload := make(map[string]any)
+		if len(messages) > 0 {
+			jsonPayload["prompt"] = messages
+		}
+
+		if req.Config != nil && req.Config.SystemInstruction != nil {
+			si := req.Config.SystemInstruction
+			summary, parts, trunc := p.parseContentObject(ctx, si, traceID, spanID)
+			isTruncated = isTruncated || trunc
+			contentParts = append(contentParts, parts...)
+			jsonPayload["system_prompt"] = summary
+		}
+
+		return jsonPayload, contentParts, isTruncated
+	}
+
+	if res, ok := content.(*model.LLMResponse); ok {
+		if res.Content != nil {
+			summary, parts, trunc := p.parseContentObject(ctx, res.Content, traceID, spanID)
+			return map[string]any{"text_summary": summary}, parts, trunc
+		}
+		return nil, nil, false
+	}
+
+	if str, ok := content.(string); ok {
+		truncated, trunc := truncateString(str, p.maxLen)
+		return truncated, nil, trunc
+	}
+
+	truncObj, truncated, _ := recursiveSmartTruncate(content, p.maxLen)
+	return truncObj, nil, truncated
 }
