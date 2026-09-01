@@ -857,7 +857,11 @@ func (m *countingModel) GenerateContent(context.Context, *model.LLMRequest, bool
 // test above deterministic is the barrier, and that is unavailable here.
 //
 // It earns its place as a probabilistic backstop on a variant nothing else
-// covers. The deterministic guarantee lives in the test above.
+// covers at run time. The deterministic guarantee is split: the barrier in the
+// test above covers the seam below sweep, and
+// TestSweepPassesThePerReviewFactoryToReviewAll in composition_test.go covers
+// the wiring inside sweep by reading it, killing the two hoist mutants this
+// test catches 3 of 5 and 0 of 5 times.
 func TestSweepGivesEachConcurrentReviewItsOwnRunner(t *testing.T) {
 	const issues = 32
 
