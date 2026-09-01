@@ -297,7 +297,7 @@ func TestE2EPromptMutations(t *testing.T) {
 	// against want.filed: a scenario the intact prompt already gets wrong says
 	// nothing about the section under test.
 	baseline := measure(t, m, scenarios)
-	t.Logf("baseline: %s", summarize(scenarios, baseline, nil))
+	t.Logf("baseline: %s", summarize(scenarios, baseline))
 
 	// The positive control, on the two scenarios that most cheaply show a
 	// change: one the intact prompt declines, and one it files. Under "flag
@@ -419,7 +419,7 @@ func measure(t *testing.T, m model.LLM, scenarios []scenario) []outcome {
 	return out
 }
 
-func summarize(scenarios []scenario, got []outcome, _ []outcome) string {
+func summarize(scenarios []scenario, got []outcome) string {
 	var agree, unknown int
 	var wrong []string
 	for i, sc := range scenarios {
