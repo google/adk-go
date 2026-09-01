@@ -299,7 +299,7 @@ func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*response
 		return nil, fmt.Errorf("openai: marshal function response: %w", err)
 	}
 	return &responses.ResponseInputItemFunctionCallOutputParam{
-		CallID: callID,
+		CallID: param.NewOpt(callID),
 		Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 			OfString: param.NewOpt(string(payload)),
 		},
