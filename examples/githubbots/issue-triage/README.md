@@ -193,7 +193,7 @@ and then once against a single issue for real.
 
 ## Tests
 
-Eleven files, all against the real functions rather than copies of them:
+Twelve files, all against the real functions rather than copies of them:
 
 | file | what it covers |
 | --- | --- |
@@ -209,6 +209,9 @@ Eleven files, all against the real functions rather than copies of them:
 Most non-trivial tests name, in a comment, the one-line mutation to production
 code that makes them fail.
 
+| `retry_test.go` | The bounded retry for transient model failures: which statuses are retried, that a permanent one is not, that the attempts are bounded, and that a stream which already delivered is never restarted. |
+| `e2e_test.go` | Behind `-tags=e2e`. Drives the real model. |
+
 Two of these read files outside the module — `workflow_test.go` reads the
 workflow, and it and `chokepoint_test.go` shell out to `bash`. Both skip rather
 than fail when what they need is absent, so a copy of this directory taken out
@@ -219,10 +222,37 @@ log records 0 skipped.
 go test ./...
 ```
 
+### End-to-end, against a real model
+
+`e2e_test.go` drives the whole bot with a **real Gemini model** and a stubbed
+GitHub, so nothing it does can reach a repository. It is behind a build tag
+rather than an environment skip, deliberately: a test that skips itself when a
+key is absent still counts as a case in a green suite, which is how coverage
+quietly disappears. It does not compile into the default suite at all.
+
+```bash
+GEMINI_API_KEY=... go test -tags=e2e -run TestE2E -v ./...
+```
+
+Fifteen cases: classification of four representative issues, five
+prompt-injection attempts, no-overwrite of a human-set field, dry-run,
+the single-issue path, an already-triaged issue, and an oversized body. The
+injection cases assert **authority, not classification** — whether the model
+picks Bug or Task for a hostile issue is uninteresting, whether it can be
+talked into touching another issue is the whole question — and those
+assertions run whether or not the model answered.
+
+Measured over four full runs: 4/4 green, and the retry recovered 7 transient
+`503 UNAVAILABLE` responses from the provider. A case that cannot reach the
+model after all four attempts is skipped with an explicit reason rather than
+reported as a pass or a failure, because that is the provider being down and
+not the bot being wrong.
+
 ## Notes
 
-- **Issue types** must be enabled at the organization level (they are for the
-  `google` org: Bug/Feature/Task). Setting a type — and adding a label — requires
+- **Issue types** must be enabled at the organization level. Verified against
+  the live API for the `google` org, whose configured types are exactly
+  `Bug`, `Feature` and `Task` — the bot's allow-list. Setting a type — and adding a label — requires
   a token with **push access**; without it GitHub returns success but silently
   drops the change. The bot reads back each write and **fails the run** if the
   type/label was not actually applied, so a permissions gap surfaces loudly

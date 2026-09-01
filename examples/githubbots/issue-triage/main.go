@@ -103,6 +103,9 @@ func run(ctx context.Context, log *slog.Logger, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
+	// The provider sheds load under contention, and a shed request must not cost
+	// an issue its triage or turn a scheduled run red. See retryingModel.
+	mdl = newRetryingModel(mdl, log)
 
 	triageAgent, err := llmagent.New(llmagent.Config{
 		Name:        "adk_triage_assistant",

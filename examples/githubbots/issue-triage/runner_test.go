@@ -97,10 +97,37 @@ type githubStub struct {
 	reads int
 	// slowMutation delays every mutating response.
 	slowMutation time.Duration
+	// title and body are what both reads report for the issue, and existingType
+	// and existingLabels what it already carries. The e2e tests drive real
+	// classification through these; the unit tests leave them at newStub's
+	// defaults.
+	title, body    string
+	existingType   string
+	existingLabels []string
 }
 
 func newStub(untriaged int) *githubStub {
-	return &githubStub{patched: map[int]string{}, labelled: map[int]string{}, untriaged: untriaged}
+	return &githubStub{
+		patched: map[int]string{}, labelled: map[int]string{}, untriaged: untriaged,
+		title: "crash on nil", body: "boom",
+	}
+}
+
+// issueJSON renders the stub's issue as a GraphQL node.
+func (g *githubStub) issueJSON(number int) string {
+	typ := "null"
+	if g.existingType != "" {
+		typ = `{"name":` + strconv.Quote(g.existingType) + `}`
+	}
+	labels := make([]string, 0, len(g.existingLabels))
+	for _, l := range g.existingLabels {
+		labels = append(labels, `{"name":`+strconv.Quote(l)+`}`)
+	}
+	return `{"number":` + strconv.Itoa(number) +
+		`,"title":` + strconv.Quote(g.title) +
+		`,"body":` + strconv.Quote(g.body) +
+		`,"issueType":` + typ +
+		`,"labels":{"nodes":[` + strings.Join(labels, ",") + `]}}`
 }
 
 func (g *githubStub) handler(t *testing.T) http.Handler {
@@ -116,8 +143,7 @@ func (g *githubStub) handler(t *testing.T) http.Handler {
 			// The search carries "q"; the by-number read carries "number".
 			if _, isSearch := req.Variables["q"]; isSearch {
 				_, _ = w.Write([]byte(`{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":""},
-					"nodes":[{"number":` + strconv.Itoa(g.untriaged) + `,"title":"crash on nil","body":"boom",
-					"issueType":null,"labels":{"nodes":[]}}]}}}`))
+					"nodes":[` + g.issueJSON(g.untriaged) + `]}}}`))
 				return
 			}
 			g.mu.Lock()
@@ -130,8 +156,7 @@ func (g *githubStub) handler(t *testing.T) http.Handler {
 				return
 			}
 			num, _ := req.Variables["number"].(float64)
-			_, _ = w.Write([]byte(`{"data":{"repository":{"issue":{"number":` + strconv.Itoa(int(num)) +
-				`,"title":"crash on nil","body":"boom","issueType":null,"labels":{"nodes":[]}}}}}`))
+			_, _ = w.Write([]byte(`{"data":{"repository":{"issue":` + g.issueJSON(int(num)) + `}}}`))
 			return
 		}
 
