@@ -189,6 +189,15 @@ discards a passing package's output. A rate over a denominator the run did not
 fill is not a measurement. `SPAM_BOT_E2E_FORCE_UNAVAILABLE=1` sheds every call
 on demand so that guard can be verified in seconds.
 
+**This bot publishes model-authored prose, and it is the only one of the ADK
+GitHub bots that does.** The sibling bots either choose from fixed sentences by
+allow-listed key or write no prose at all, so their public output cannot carry
+attacker text by construction. This one asks the model to explain, in its own
+words, why an issue was flagged, and then posts that under the project's
+identity. That is a deliberate trade — a maintainer reading the alert wants
+the reason, not a fixed sentence — and it is why the rest of this section
+exists.
+
 **The alert comment is treated as hostile output, and the measurement says it
 has to be.** The bot writes one thing to a public place under the project's
 identity, and the only variable part of it is the model's `detection_reason` —
