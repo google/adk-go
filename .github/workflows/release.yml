@@ -34,24 +34,40 @@ jobs:
     permissions:
       contents: write        # create the release branch, the tag and the release
       pull-requests: write   # open and update the release PR
+    env:
+      # The secrets context is not available to `if:`; mirror the token to branch on it.
+      RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
     steps:
+      # workflow_dispatch accepts any ref, so fail closed off the release lines.
       - name: Select the config for this release line
         id: line
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "$BRANCH" = "v1" ]; then
-            echo "config=.github/release-please-config-v1.json" >> "$GITHUB_OUTPUT"
-            echo "manifest=.github/.release-please-manifest-v1.json" >> "$GITHUB_OUTPUT"
+          if [ "$BRANCH" = "main" ]; then
+            config=.github/release-please-config.json
+            manifest=.github/.release-please-manifest.json
+          elif [ "$BRANCH" = "v1" ]; then
+            config=.github/release-please-config-v1.json
+            manifest=.github/.release-please-manifest-v1.json
           else
-            echo "config=.github/release-please-config.json" >> "$GITHUB_OUTPUT"
-            echo "manifest=.github/.release-please-manifest.json" >> "$GITHUB_OUTPUT"
+            echo "::error title=Not a release line::No release configuration for branch '$BRANCH'."
+            exit 1
           fi
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4
+      # An unset secret does not fall back to github.token; it is passed as an
+      # empty input and the action rejects it. Skip rather than fail the run.
+      - name: Check for the release token
+        if: env.RELEASE_PAT == ''
+        run: echo "::warning title=Release skipped::RELEASE_PAT is not configured, so no release PR was created or updated."
+
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+        if: env.RELEASE_PAT != ''
         with:
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ env.RELEASE_PAT }}
           config-file: ${{ steps.line.outputs.config }}
           manifest-file: ${{ steps.line.outputs.manifest }}
           target-branch: ${{ github.ref_name }}
