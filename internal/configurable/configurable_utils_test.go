@@ -17,6 +17,7 @@ package configurable
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -269,24 +270,198 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 	}
 }
 
-// TestResolveConfigReferenceRejectsVolumeQualifiedRefs covers references that
-// carry a volume name. On Windows a drive-relative reference such as
-// `C:node.yaml` is not absolute yet still escapes the parent directory, by
-// resolving against the current directory of that drive; filepath.IsLocal is
-// what rules it out. VolumeName is empty on Unix, where these three are
-// ordinary (if odd) relative file names and are correctly accepted, so the
-// assertion only applies where the platform gives them a volume.
-func TestResolveConfigReferenceRejectsVolumeQualifiedRefs(t *testing.T) {
+// TestResolveConfigReferenceVolumeQualifiedRefs covers references that carry a
+// volume name. On Windows a drive-relative reference such as `C:node.yaml` is
+// not absolute yet still escapes the parent directory, by resolving against the
+// current directory of that drive, and filepath.IsLocal is what rules it out.
+//
+// The expectation is platform-dependent rather than skipped, so that the test
+// asserts something everywhere: on Unix these are ordinary, if odd, relative
+// file names, and refusing them would be over-rejection.
+func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 	_, parentPath := newAgentDir(t)
 
 	for _, refPath := range []string{`C:node.yaml`, `D:\escaped.yaml`, `\\host\share\escaped.yaml`} {
-		_, err := resolveConfigReference(parentPath, refPath)
-		if filepath.VolumeName(refPath) == "" {
-			// Not volume-qualified on this platform; nothing to assert.
-			continue
+		t.Run(refPath, func(t *testing.T) {
+			// Volume-qualified on this platform means the reference escapes and must
+			// be refused; otherwise it is a legal file name and must be accepted.
+			wantRejected := filepath.VolumeName(refPath) != ""
+
+			_, err := resolveConfigReference(parentPath, refPath)
+			if gotRejected := err != nil; gotRejected != wantRejected {
+				t.Errorf("resolveConfigReference(%q, %q) rejected = %v (%v), want rejected = %v",
+					parentPath, refPath, gotRejected, err, wantRejected)
+			}
+		})
+	}
+}
+
+// TestResolveConfigReferenceRefusesLinksThatStayInside pins the one behaviour
+// this check deliberately chose: a link is refused for being a link, not for
+// where it points, so a link wholly inside the config directory is refused too.
+//
+// Without this, an implementation that went back to resolving links and
+// refusing only those that leave the directory would pass the rest of the suite
+// unchanged — and it would carry the hole that motivated refusing them, since a
+// link pointing outside at a target that does not exist yet resolves to nothing
+// and passes containment.
+//
+// The projected-volume case is the cost of that choice, and it is the reason
+// this is a trade rather than a free win: the kubelet materialises a Kubernetes
+// ConfigMap as a `..data` symlink to a timestamped directory plus one symlink
+// per key, so every reference in such a mount is refused. Bazel runfiles
+// forests and Nix store paths have the same shape.
+func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
+	const nodeYAML = "name: join_node\nagent_class: JoinNode\n"
+
+	for _, tc := range []struct {
+		name string
+		// layout populates dir and returns the reference to resolve against
+		// dir/root_agent.yaml.
+		layout func(t *testing.T, dir string) string
+	}{
+		{
+			name: "alias to a sibling in the same directory",
+			layout: func(t *testing.T, dir string) string {
+				target := filepath.Join(dir, "nodes", "join.yaml")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatalf("MkdirAll(%q) failed: %v", filepath.Dir(target), err)
+				}
+				if err := os.WriteFile(target, []byte(nodeYAML), 0o644); err != nil {
+					t.Fatalf("WriteFile(%q) failed: %v", target, err)
+				}
+				if err := os.Symlink(target, filepath.Join(dir, "alias.yaml")); err != nil {
+					t.Skipf("symlinks are not supported in this environment: %v", err)
+				}
+				return "alias.yaml"
+			},
+		},
+		{
+			name: "kubernetes projected volume layout",
+			layout: func(t *testing.T, dir string) string {
+				data := filepath.Join(dir, "..2026_09_01_10_00_00.123456")
+				if err := os.MkdirAll(data, 0o755); err != nil {
+					t.Fatalf("MkdirAll(%q) failed: %v", data, err)
+				}
+				if err := os.WriteFile(filepath.Join(data, "join.yaml"), []byte(nodeYAML), 0o644); err != nil {
+					t.Fatalf("WriteFile(join.yaml) failed: %v", err)
+				}
+				if err := os.Symlink(data, filepath.Join(dir, "..data")); err != nil {
+					t.Skipf("symlinks are not supported in this environment: %v", err)
+				}
+				if err := os.Symlink(filepath.Join("..data", "join.yaml"), filepath.Join(dir, "join.yaml")); err != nil {
+					t.Skipf("symlinks are not supported in this environment: %v", err)
+				}
+				return "join.yaml"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			refPath := tc.layout(t, dir)
+
+			parentPath := filepath.Join(dir, "root_agent.yaml")
+			if _, err := resolveConfigReference(parentPath, refPath); !errors.Is(err, errConfigReferenceSymlink) {
+				t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a link inside the directory is refused for being a link",
+					parentPath, refPath, err, errConfigReferenceSymlink)
+			}
+		})
+	}
+}
+
+// TestResolveConfigReferenceCanonicalizesRegistryKey pins the EvalSymlinks call
+// on the parent directory. That call is not what makes the containment check
+// correct — the component walk uses os.Lstat, which follows every component but
+// the last, so removing it changes no verdict. What it does is canonicalise the
+// path returned from here, which callers use as the agentRegistry and
+// nodeRegistry key. Without it, a directory and a symlink to that directory get
+// separate cache entries and each builds its own copy of the same agent.
+func TestResolveConfigReferenceCanonicalizesRegistryKey(t *testing.T) {
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) failed: %v", realDir, err)
+	}
+	for _, name := range []string{"root_agent.yaml", "sub_agent.yaml"} {
+		cfg := fmt.Sprintf("name: %s\nagent_class: LlmAgent\nmodel: gemini-2.0-flash\n", strings.TrimSuffix(name, ".yaml"))
+		if err := os.WriteFile(filepath.Join(realDir, name), []byte(cfg), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) failed: %v", name, err)
 		}
-		if err == nil {
-			t.Errorf("resolveConfigReference(%q, %q) succeeded, want rejection", parentPath, refPath)
+	}
+
+	aliasDir := filepath.Join(base, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks are not supported in this environment: %v", err)
+	}
+
+	realKey, err := resolveConfigReference(filepath.Join(realDir, "root_agent.yaml"), "sub_agent.yaml")
+	if err != nil {
+		t.Fatalf("resolveConfigReference through the real directory failed: %v", err)
+	}
+	aliasKey, err := resolveConfigReference(filepath.Join(aliasDir, "root_agent.yaml"), "sub_agent.yaml")
+	if err != nil {
+		t.Fatalf("resolveConfigReference through the symlinked directory failed: %v", err)
+	}
+	if realKey != aliasKey {
+		t.Errorf("resolveConfigReference returned %q through the real directory and %q through a symlink to it, want one key",
+			realKey, aliasKey)
+	}
+
+	// The consequence the key exists for: resolving through both spellings must
+	// leave one registry entry, not one per spelling.
+	for _, parentDir := range []string{realDir, aliasDir} {
+		if _, err := ResolveAgentReference(context.Background(), filepath.Join(parentDir, "root_agent.yaml"), "sub_agent.yaml"); err != nil {
+			t.Fatalf("ResolveAgentReference through %q failed: %v", parentDir, err)
 		}
+	}
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	if _, ok := agentRegistry[filepath.Join(aliasDir, "sub_agent.yaml")]; ok {
+		t.Errorf("agentRegistry holds a separate entry keyed by the symlinked spelling %q, want only %q",
+			filepath.Join(aliasDir, "sub_agent.yaml"), realKey)
+	}
+	if _, ok := agentRegistry[realKey]; !ok {
+		t.Errorf("agentRegistry has no entry keyed by the canonical path %q", realKey)
+	}
+}
+
+// TestResolveConfigReferenceBelowNonDirectory covers a reference whose
+// intermediate component is a regular file. Nothing can exist below it, so
+// there is no link to find and no reason to report an inspection failure: the
+// reference is simply not there, and the caller's own read says so. Reporting
+// it separately would give callers a third class of error to distinguish from
+// "refused" and "loaded".
+func TestResolveConfigReferenceBelowNonDirectory(t *testing.T) {
+	_, parentPath := newAgentDir(t)
+
+	// sub_agent.yaml is a regular file, so sub_agent.yaml/nested.yaml cannot exist.
+	refPath := filepath.Join("sub_agent.yaml", "nested.yaml")
+	if _, err := resolveConfigReference(parentPath, refPath); err != nil {
+		t.Errorf("resolveConfigReference(%q, %q) = %v, want no error: the reference cannot exist, which is the caller's read to report",
+			parentPath, refPath, err)
+	}
+}
+
+// TestResolveConfigReferenceEmptyRef covers the empty reference, which is
+// usually an unfilled template rather than an attempt to escape. IsLocal
+// rejects it along with the escaping spellings, so it needs its own message to
+// avoid rendering as a bare "config reference must be ...: " with nothing after
+// the colon.
+func TestResolveConfigReferenceEmptyRef(t *testing.T) {
+	_, parentPath := newAgentDir(t)
+
+	_, err := resolveConfigReference(parentPath, "")
+	if !errors.Is(err, errConfigReferenceNotLocal) {
+		t.Fatalf("resolveConfigReference(%q, \"\") = %v, want %v", parentPath, err, errConfigReferenceNotLocal)
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("resolveConfigReference(%q, \"\") = %q, want the message to name the reference as empty", parentPath, err)
 	}
 }
