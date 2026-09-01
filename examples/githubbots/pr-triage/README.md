@@ -120,6 +120,36 @@ while the `PR_TRIAGE_OWNER_MAP` repository variable is unset, so the bot is
 inert until a maintainer configures it rather than putting a red check on a
 contributor's pull request.
 
+## Testing
+
+`go test ./...` is the whole suite CI runs. It needs no credentials and no
+network: GitHub is always an `httptest` server, and the model is a stub.
+
+There is a second suite behind the `e2e` build tag that runs the real agent
+against a **real Gemini model**, to answer the question the stubbed tests
+cannot — does the thing actually work?
+
+```sh
+GEMINI_API_KEY=... go test -tags=e2e -v -timeout 30m ./...
+```
+
+GitHub is still an `httptest` server there. No code path in that suite can reach
+a real repository, and every scenario asserts the exact set of calls the bot
+made, so an escape would fail the test rather than mutate anything.
+
+It splits its assertions deliberately. The invariants Go enforces — never acting
+on another pull request, never assigning a login outside the map, never posting
+a word the bot did not author, never writing under dry-run — are hard failures.
+The model's *judgement* (which component, whether to ask for context) is
+reported as counts, with a floor on routing accuracy, because a single sample of
+a model's opinion is not a pass/fail signal and treating it as one makes the
+suite flaky and its failures uninformative.
+
+Last measured run against `gemini-flash-latest`: routing 4/4 on clear-cut cases,
+the unroutable pull request correctly left alone, and 0 of 7 injection attempts
+steered the model — with the Go bounds holding in all of them, which is what the
+design actually rests on.
+
 ## Deliberately out of scope
 
 - **Labeling.** adk-python removed pull-request auto-labeling on 2026-08-13 and
