@@ -252,12 +252,31 @@ these judgements: on cases this clear-cut its own priors already produce the
 same answers. The prompt earns its place on the cases a corpus of obvious
 examples does not contain, and this measurement says nothing about those.
 
-One limit applies to every row above, the group deletions included: each cell is
-three repeats, so only an effect large enough to flip a scenario outright is
-visible. Every cell came back categorically 3/3 or 0/3 and none was decided on a
-single noisy observation, but a section — or a group — shifting behaviour by a
-fifth would read as inert. So redundancy is ruled out at the size this
-instrument can see, not ruled out altogether.
+**The judgement also lives outside the prompt file, and that had to be deleted
+too before any of this counted.** The tool declaration said "Call this only when
+the reviewed content is clearly spam" — the core *when to flag* rule, reaching
+the model in the function declaration rather than the instruction text, so it
+stood in every cell of every mutation above. Removing it as well, on its own and
+together with all the restraint guidance, still flipped nothing: 14 of 14
+scenarios held at 3/3. The confound was real and the result survives it. Anyone
+mutating a prompt should check the tool descriptions first, because a harness
+that edits only the instruction file cannot see them.
+
+Two limits apply to every row above. Each cell is three repeats, so only an
+effect large enough to flip a scenario outright is visible, and a section — or a
+group — shifting behaviour by a fifth would read as inert. And the unit of the
+claim is the scenario, so **0 flips in 14 bounds the per-scenario flip rate
+below only about 19% at 95% confidence.** That is a weak null. It rules out a
+large effect and is consistent with a moderate one, and it should not be read as
+"the prompt does nothing".
+
+That reading would also be wrong on other evidence: a sibling bot that deleted
+every copy of its own judgement saw 4 of 21 scenarios flip, two of them
+injection attempts where the model was talked into acting. So the prompt is what
+keeps a model from being turned, and the Go controls bound what a turned model
+can reach — different halves of the attack, both load-bearing. This bot's null
+says its corpus could not detect the difference, not that the difference is
+absent.
 
 ```bash
 go test ./...
