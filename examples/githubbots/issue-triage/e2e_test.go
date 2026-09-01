@@ -38,6 +38,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"log/slog"
 	"net/http/httptest"
 	"net/url"
@@ -46,6 +47,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 )
@@ -74,38 +77,121 @@ func e2eRecord(ran bool) {
 	e2eSkipped++
 }
 
+// TestMain turns a mostly-skipped e2e run into a non-zero exit.
+//
+// The exit code is the point. Printing was the first attempt and it does not
+// work: without -v, `go test` discards a passing package's output entirely, so
+// the warning was invisible in exactly the invocation CI and most people use.
+// Measured -- the summary appeared under `go test -v` and vanished under
+// `go test`. An exit code is the only channel that survives both.
+//
+// This does NOT contradict skipping the individual cases. A case that cannot
+// reach the model is not a defect in the bot and must not be reported as one,
+// so it skips. But the RUN did not measure what it was asked to measure, and
+// reporting that as success is how a suite comes to mean nothing. Both are
+// true at once: the cases skip, the run fails, and the message says which.
+//
+// Silent when the suite was never enabled: those skips are the CI default, not
+// an outage.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	e2eMu.Lock()
 	ran, skipped := e2eRan, e2eSkipped
 	e2eMu.Unlock()
-	if ran+skipped == 0 {
-		os.Exit(code) // the e2e cases were not selected at all
-	}
+
 	total := ran + skipped
-	switch {
-	case ran == 0:
-		fmt.Fprintf(os.Stderr, "\nE2E SUMMARY: 0 of %d cases ran. This run proves NOTHING about the model.\n", total)
-	case skipped > 0:
-		fmt.Fprintf(os.Stderr, "\nE2E SUMMARY: %d of %d cases ran, %d skipped (model unreachable). "+
-			"A run with skips is NOT a pass -- rerun when the provider is healthy.\n", ran, total, skipped)
-	default:
+	if total == 0 {
+		os.Exit(code) // the e2e cases were not selected, or not enabled
+	}
+	if skipped == 0 {
 		fmt.Fprintf(os.Stderr, "\nE2E SUMMARY: all %d cases ran.\n", total)
+		os.Exit(code)
+	}
+	fmt.Fprintf(os.Stderr,
+		"\nE2E SUMMARY: %d of %d cases ran, %d skipped because the model was unreachable.\n"+
+			"This is NOT a failure of the bot, and it is NOT a passing run either -- nothing was\n"+
+			"measured for the skipped cases. Rerun against a healthy model/backend pairing.\n",
+		ran, total, skipped)
+	if code == 0 {
+		code = 1 // do not let a run that measured nothing exit 0
 	}
 	os.Exit(code)
 }
 
-// requireE2E enforces both gates. It is the first statement of every e2e test.
-func requireE2E(t *testing.T) string {
+// e2eForceUnavailable makes every model call fail with a retryable error, so
+// the skip accounting and the non-zero exit above can be proven deterministically
+// instead of waiting for a real outage. A real outage is slow and intermittent,
+// which is exactly why the guard went unverified long enough to ship broken.
+const e2eForceUnavailable = "ISSUE_TRIAGE_E2E_FORCE_UNAVAILABLE"
+
+// unavailableModel stands in for a provider that is shedding every request.
+type unavailableModel struct{}
+
+func (unavailableModel) Name() string { return "unavailable" }
+
+func (unavailableModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(nil, fmt.Errorf("failed to call model: %w", genai.APIError{
+			Code: 503, Status: "UNAVAILABLE", Message: "forced by " + e2eForceUnavailable,
+		}))
+	}
+}
+
+// e2eBackend is how these tests reach a model: which environment the bot's own
+// newModel should see. Nothing about the bot changes -- it already supports both
+// backends, and validate() already accepts Vertex in place of a key.
+type e2eBackend struct {
+	name string
+	env  map[string]string
+}
+
+// requireE2E enforces the opt-in gate and picks a backend. First statement of
+// every e2e test.
+//
+// Vertex is preferred when a project is configured, because the two paths to
+// the same model do not have the same availability. Measured within an hour of
+// each other on gemini-flash-latest: the Generative Language endpoint with the
+// local API key returned 503 UNAVAILABLE on 16 of 16 probe calls, while Vertex
+// on this project at location global returned 200 on 3 of 3. An earlier run
+// through the key path lost 12 of 16 e2e cases to that shedding. The key path
+// is kept as a fallback rather than deleted, because it is what a reader
+// without a cloud project will have.
+//
+// Location matters and is not a free choice: the same model 404s at
+// us-central1 on this project, so global is the default when none is set.
+func requireE2E(t *testing.T) e2eBackend {
 	t.Helper()
 	if os.Getenv(e2eEnabled) == "" {
 		t.Skipf("%s is not set; these call a paid API and are opt-in", e2eEnabled)
 	}
-	key := os.Getenv("GEMINI_API_KEY")
-	if key == "" {
-		t.Skipf("%s is set but GEMINI_API_KEY is not", e2eEnabled)
+	if project := os.Getenv("GOOGLE_CLOUD_PROJECT"); project != "" {
+		location := os.Getenv("GOOGLE_CLOUD_LOCATION")
+		if location == "" {
+			location = "global"
+		}
+		return e2eBackend{
+			name: "vertex " + project + "/" + location,
+			env: map[string]string{
+				"GOOGLE_GENAI_USE_VERTEXAI": "true",
+				"GOOGLE_CLOUD_PROJECT":      project,
+				"GOOGLE_CLOUD_LOCATION":     location,
+				"GEMINI_API_KEY":            "",
+				"GOOGLE_API_KEY":            "",
+			},
+		}
 	}
-	return key
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		return e2eBackend{
+			name: "generative language api (key)",
+			env: map[string]string{
+				"GEMINI_API_KEY":            key,
+				"GOOGLE_API_KEY":            "",
+				"GOOGLE_GENAI_USE_VERTEXAI": "",
+			},
+		}
+	}
+	t.Skipf("%s is set but no model backend is configured: set GOOGLE_CLOUD_PROJECT for Vertex, or GEMINI_API_KEY", e2eEnabled)
+	return e2eBackend{}
 }
 
 // e2eResult is what one real run did to the (stubbed) repository.
@@ -186,7 +272,7 @@ type e2eOpts struct {
 // GitHub carrying the given issue.
 func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	t.Helper()
-	key := requireE2E(t)
+	backend := requireE2E(t)
 
 	srv := httptest.NewServer(stub.handler(t))
 	t.Cleanup(srv.Close)
@@ -196,9 +282,9 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	}
 
 	t.Setenv("GITHUB_TOKEN", "stub-token")
-	t.Setenv("GEMINI_API_KEY", key)
-	t.Setenv("GOOGLE_API_KEY", "")
-	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "")
+	for k, v := range backend.env {
+		t.Setenv(k, v)
+	}
 	t.Setenv("OWNER", "google")
 	t.Setenv("REPO", "adk-go")
 	t.Setenv("ALLOWED_LABELS", "")
@@ -214,6 +300,17 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 
 	// Only the GitHub client is substituted. newModelFn is left alone, so this
 	// builds a real Gemini client from GEMINI_API_KEY.
+	if os.Getenv(e2eForceUnavailable) != "" {
+		origModel := newModelFn
+		// One attempt, so the forced outage does not sit through the backoff.
+		newModelFn = func(context.Context, *Config) (model.LLM, error) {
+			m := newRetryingModel(unavailableModel{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+			m.attempts = 1
+			return m, nil
+		}
+		t.Cleanup(func() { newModelFn = origModel })
+	}
+
 	origClient := newClientFn
 	newClientFn = func(cfg *Config, log *slog.Logger) *Client {
 		c := NewClient(cfg, log)
@@ -222,6 +319,7 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	}
 	t.Cleanup(func() { newClientFn = origClient })
 
+	t.Logf("model backend: %s", backend.name)
 	var retries int
 	log := slog.New(retryCountingHandler{
 		Handler: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}),

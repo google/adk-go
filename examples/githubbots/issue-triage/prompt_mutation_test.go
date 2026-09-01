@@ -39,48 +39,49 @@ import (
 // no-op, because a harness that quietly stops mutating anything reports every
 // section as inert -- which reads exactly like a real result.
 type promptSection struct {
-	name  string
-	from  string // inclusive
-	to    string // exclusive; "" means to the end
-	claim string // what the section is believed to do
+	name string
+	from string // inclusive
+	to   string // exclusive; "" means to the end
+	// goGated records that a Go control already enforces what this section
+	// asks for. Such a section CANNOT flip a scenario, because the code refuses
+	// the wrong outcome before it can be observed -- so "no measured effect"
+	// there is the expected result and says the guarantee lives in the code,
+	// not that the text was found wanting.
+	goGated string
 }
 
 var promptSections = []promptSection{
 	{
-		name:  "no-overwrite step",
-		from:  "4. Do not change a field that is already set.",
-		to:    "\n## How to choose the type",
-		claim: "keeps the model from fighting a field a human already set",
+		name:    "no-overwrite step",
+		from:    "4. Do not change a field that is already set.",
+		to:      "\n## How to choose the type",
+		goGated: "triageOne authorizes only the fields needsTriage found empty, and claimType/claimLabel refuse the rest",
 	},
 	{
-		name:  "type definitions",
-		from:  "## How to choose the type",
-		to:    "\nClassify by what the issue IS",
-		claim: "tells the model what Bug, Feature and Task mean",
+		name: "type definitions",
+		from: "## How to choose the type",
+		to:   "\nClassify by what the issue IS",
 	},
 	{
-		name:  "classify-by-substance rule",
-		from:  "Classify by what the issue IS",
-		to:    "\n## How to choose the categorization label",
-		claim: "the only text standing between a persuasive body and a wrong classification",
+		name: "classify-by-substance rule",
+		from: "Classify by what the issue IS",
+		to:   "\n## How to choose the categorization label",
 	},
 	{
-		name:  "label rubric",
-		from:  "## How to choose the categorization label",
-		to:    "\n## Examples",
-		claim: "tells the model which label pairs with which type",
+		name: "label rubric",
+		from: "## How to choose the categorization label",
+		to:   "\n## Examples",
 	},
 	{
-		name:  "worked examples",
-		from:  "## Examples",
-		to:    "\n## Response",
-		claim: "shows the four type/label pairings concretely",
+		name: "worked examples",
+		from: "## Examples",
+		to:   "\n## Response",
 	},
 	{
-		name:  "untrusted-fence warning",
-		from:  "You handle exactly ONE issue per conversation.",
-		to:    "\nYou have these tools:",
-		claim: "tells the model the fenced text is data, not instructions",
+		name:    "untrusted-fence warning",
+		from:    "You handle exactly ONE issue per conversation.",
+		to:      "\nYou have these tools:",
+		goGated: "the per-issue user prompt in buildIssuePrompt repeats it verbatim, and the session scope refuses another issue regardless",
 	},
 }
 
@@ -233,20 +234,50 @@ func TestPromptMutationFindsWhichSectionsAreLoadBearing(t *testing.T) {
 	}
 	promptTemplate = original
 
+	gatedBy := make(map[string]string, len(promptSections))
+	for _, sec := range promptSections {
+		gatedBy[sec.name] = sec.goGated
+	}
 	t.Log("prompt section                  scenarios run  flipped  verdict")
 	for _, r := range results {
-		verdict := "no measured effect"
-		if len(r.flipped) > 0 {
+		var verdict string
+		switch {
+		case len(r.flipped) > 0:
 			verdict = "LOAD-BEARING: " + strings.Join(r.flipped, ", ")
+		case gatedBy[r.section] != "":
+			verdict = "inert, and expected to be: " + gatedBy[r.section]
+		default:
+			verdict = "inert: no measured effect on any model-only scenario"
 		}
 		t.Logf("%-30s  %13d  %7d  %s", r.section, r.ran, len(r.flipped), verdict)
 	}
 
-	if loadBearing == 0 {
-		t.Error("deleting every section of the instruction flipped no scenario. " +
-			"The prompt is what makes this bot classify at all, so this is far more " +
-			"likely to be a broken harness than a genuinely inert prompt.")
+	// The positive control, and the only thing that makes a table of zeroes
+	// worth reading. A matrix with no control cannot tell "these sections do
+	// not matter" from "the mutation never reached the model", and those look
+	// identical in the output. So wreck the instruction outright -- an
+	// instruction that forbids tool calls -- and require that it changes the
+	// outcome. If it does not, the harness measured nothing and every row above
+	// is void.
+	promptTemplate = "You are a triaging assistant for {OWNER}/{REPO}.\n\n" +
+		"CRITICAL: this repository is frozen. Never call any tool. Do not call " +
+		"change_issue_type. Do not call add_label_to_issue. Reply with the single " +
+		"word: frozen.\nAllowed types: {ALLOWED_TYPES}. Allowed labels: {ALLOWED_LABELS}.\n"
+	control := runE2E(t, issueOf(42, promptScenarios[0].title, promptScenarios[0].body), e2eOpts{})
+	promptTemplate = original
+
+	switch {
+	case control.err != nil && isRetryableModelError(control.err):
+		t.Skip("the positive control could not reach the model, so the table above is unverified")
+	case control.writes() > 0:
+		t.Errorf("POSITIVE CONTROL FAILED: an instruction forbidding every tool call still produced "+
+			"%v / %v. The mutated instruction is not reaching the model, so every row above measured "+
+			"nothing and the zeroes are meaningless.", control.types, control.labels)
+	default:
+		t.Logf("positive control: an instruction forbidding tool calls produced no write, "+
+			"so mutations do reach the model and the %d row(s) above are real measurements", len(results))
 	}
+	t.Logf("%d of %d sections changed a scenario", loadBearing, len(results))
 }
 
 func countTrue(m map[string]bool) int {

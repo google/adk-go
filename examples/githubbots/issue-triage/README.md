@@ -228,8 +228,15 @@ go test ./...
 GitHub, so nothing it does can reach a repository.
 
 ```bash
+# Vertex, which is what the published numbers were measured against:
+ISSUE_TRIAGE_E2E=1 GOOGLE_CLOUD_PROJECT=... GOOGLE_CLOUD_LOCATION=global go test -run TestE2E -v ./...
+
+# or the Gemini API key path:
 ISSUE_TRIAGE_E2E=1 GEMINI_API_KEY=... go test -run TestE2E -v ./...
 ```
+
+Vertex is preferred when `GOOGLE_CLOUD_PROJECT` is set. See "Which model" below
+for why that is not a neutral choice.
 
 Two gates, both required, so a CI runner that happens to carry a Gemini key in
 its environment still spends nothing. It is **not** behind a build tag: a tag
@@ -250,8 +257,43 @@ talked into touching another issue is the whole question — and those
 assertions run whether or not the model answered.
 
 A case that cannot reach the model after all four retry attempts is skipped with
-an explicit reason rather than reported as a pass or a failure, because that is
-the provider being down and not the bot being wrong.
+an explicit reason, because that is the provider being down rather than the bot
+being wrong. The **run** still fails: `TestMain` exits non-zero when any case
+skipped, because a run that measured nothing is not a passing run. Both are true
+at once and the message says which. The exit code carries it rather than the
+printed summary, because `go test` without `-v` discards a passing package's
+output — measured, and the reason the first version of this guard was invisible
+in exactly the invocation CI uses. `ISSUE_TRIAGE_E2E_FORCE_UNAVAILABLE=1` forces
+every model call to fail so the guard can be verified in seconds instead of
+waiting for a real outage.
+
+**Measured**: 17 of 17 cases ran, 0 skipped, 0 failed, on two consecutive full
+runs against `gemini-flash-latest` on Vertex (`global`).
+
+### Which model, and a warning about the default
+
+The bot defaults to `gemini-flash-latest`, a **floating alias**, and the workflow
+does not override it. Two paths reach that model and they do not behave the
+same. Measured on one afternoon, three calls per cell:
+
+| model | Gemini API key | Vertex (`global`) |
+| --- | --- | --- |
+| `gemini-flash-latest` | **0/3** — 503 `UNAVAILABLE` | 3/3 |
+| `gemini-3.6-flash` | 3/3 | 3/3 |
+
+The failing cell is the pairing, not the model and not the transport — and it is
+**the configuration a scheduled run uses**, since the workflow supplies
+`GEMINI_API_KEY` and does not set `LLM_MODEL_NAME`. During that window an e2e
+run through the key path lost 12 of 16 cases; the same suite on Vertex lost
+none. The retry added for transient shedding recovered 7 such responses in an
+earlier, healthier window, but it cannot carry a sustained one.
+
+Two things follow, and neither is decided here. A floating alias can be
+repointed with no change to this repository, so this class of failure arrives as
+a production incident rather than as a broken build — pinning `LLM_MODEL_NAME`
+to an explicit version in the workflow would make the model a reviewable choice.
+And whichever model is chosen, the deployed pairing should be one that has
+actually been exercised.
 
 ### Mutation-testing the prompt
 
