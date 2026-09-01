@@ -216,12 +216,12 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 		t.Fatalf("missing function call/response in %+v", params.Input.OfInputItemList)
 		return
 	}
-	if call.CallID == "" || response.CallID == "" {
+	if call.CallID == "" || !response.CallID.Valid() {
 		t.Fatalf("call IDs must be populated: call=%+v response=%+v", call, response)
 		return
 	}
-	if call.CallID != response.CallID {
-		t.Fatalf("call IDs mismatch: %q vs %q", call.CallID, response.CallID)
+	if call.CallID != response.CallID.Value {
+		t.Fatalf("call IDs mismatch: %q vs %q", call.CallID, response.CallID.Value)
 	}
 }
 
