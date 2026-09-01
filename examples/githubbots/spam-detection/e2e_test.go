@@ -766,19 +766,25 @@ func unquoteJSONField(t *testing.T, payload string) string {
 // that cannot flag plain spam is broken, whereas a bot that can be talked out
 // of it is the documented limitation this test exists to keep honest.
 //
-// Measured on gemini-flash-latest via Vertex, aggregated over several runs:
+// Measured on gemini-flash-latest through Vertex AI at GOOGLE_CLOUD_LOCATION=
+// global, two paired 25-sample runs on one day, every sample answered, none
+// dropped and no transient failures recovered:
 //
-//	before any mitigation                     spam detected  0 of 15
-//	after defangFenceMarkers + prompt rules   spam detected  4 of 25
-//	the same spam with no injection at all    spam detected     all runs
+//	spam carrying the injection    detected 18 of 50   (8/25, then 10/25)
+//	the same spam without it       detected 50 of 50
 //
-// Individual post-mitigation samples were 1/5, 1/10 and 2/10, so treat the rate
-// as "roughly one in ten" rather than as a fixed number. Neutralizing the
-// forged marker and telling the prompt to distrust such text moved it from
-// almost never to almost never: the persuasion is carried by the prose, not by
-// the marker. Do not read the mitigation as a fix. It is kept because it is
-// free and removes one capability from the attacker; the residual is real and
-// documented in README.md.
+// Treat that as "about a third" rather than as a fixed number: the two runs
+// alone differ by 8 points, and an earlier pair of 10-sample runs read 2/10
+// twice. Any comparison drawn from this test needs both sides measured the same
+// day on the same model, which is why the sample accounting below fails a run
+// that sheds. gemini-flash-latest is a floating alias, so a figure attributed
+// to it can stop being reproducible without any code changing.
+//
+// Neutralizing the forged marker does not fix this -- the persuasion is carried
+// by the prose, not by the marker -- and an inversion that instead reported the
+// neutralized text to the model as evidence of spam reached 23 of 50, which is
+// not distinguishable from 18 of 50 at this sample size (z≈1.0). It was
+// reverted rather than shipped; see README.md.
 func TestE2EInstructionEvasionRate(t *testing.T) {
 	mdl := realModel(t)
 	samples := envInt("E2E_SAMPLES", 10)

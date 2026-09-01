@@ -72,9 +72,10 @@
 // inter-batch sleep. See README.md for the full list.
 //
 // Detection is best-effort against a determined evader: a spammer who appends
-// instruction-shaped prose to their spam escapes it roughly nine times in ten
-// (measured; see README.md). The Go controls are what hold under that, not the
-// classification.
+// instruction-shaped prose to their spam escapes it about two times in three,
+// against a control that is caught every time (measured; see README.md, which
+// also records an inversion that was tried against this and not shipped). The
+// Go controls are what hold under that, not the classification.
 //
 // The agent runs from .github/workflows/spam-detection-bot.yml on a six-hourly
 // schedule and on manual dispatch, using the built-in GITHUB_TOKEN. There is
