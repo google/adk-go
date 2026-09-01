@@ -43,6 +43,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,9 @@ var (
 	e2eMu      sync.Mutex
 	e2eRan     int
 	e2eSkipped int
+	// e2eExercised names the model and backend the run actually drove, so the
+	// summary reports what was measured and not only how much of it.
+	e2eExercised string
 )
 
 func e2eRecord(ran bool) {
@@ -96,26 +100,96 @@ func e2eRecord(ran bool) {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	e2eMu.Lock()
-	ran, skipped := e2eRan, e2eSkipped
+	ran, skipped, exercised := e2eRan, e2eSkipped, e2eExercised
 	e2eMu.Unlock()
+	if exercised == "" {
+		exercised = "no model"
+	}
 
 	total := ran + skipped
 	if total == 0 {
 		os.Exit(code) // the e2e cases were not selected, or not enabled
 	}
 	if skipped == 0 {
-		fmt.Fprintf(os.Stderr, "\nE2E SUMMARY: all %d cases ran.\n", total)
+		fmt.Fprintf(os.Stderr, "\nE2E SUMMARY: all %d cases ran, against %s.\n", total, exercised)
 		os.Exit(code)
 	}
 	fmt.Fprintf(os.Stderr,
-		"\nE2E SUMMARY: %d of %d cases ran, %d skipped because the model was unreachable.\n"+
+		"\nE2E SUMMARY: %d of %d cases ran against %s, %d skipped because the model was unreachable.\n"+
 			"This is NOT a failure of the bot, and it is NOT a passing run either -- nothing was\n"+
 			"measured for the skipped cases. Rerun against a healthy model/backend pairing.\n",
-		ran, total, skipped)
+		ran, total, exercised, skipped)
 	if code == 0 {
 		code = 1 // do not let a run that measured nothing exit 0
 	}
 	os.Exit(code)
+}
+
+// e2eModelEnv overrides the model this suite exercises. Unset, the suite runs
+// the Go default, which is not what the workflow deploys.
+const e2eModelEnv = "ISSUE_TRIAGE_E2E_MODEL"
+
+// e2eModel is the model this suite will actually drive.
+func e2eModel() string {
+	if m := os.Getenv(e2eModelEnv); m != "" {
+		return m
+	}
+	return defaultModel
+}
+
+// A green suite is not evidence about production unless it ran production's
+// pairing.
+//
+// This suite picks its backend from whatever credentials are present and its
+// model from the Go default, and neither has to match the workflow. Both
+// diverged here at once: the suite was running gemini-flash-latest on Vertex
+// and passing 16 of 16, while the workflow deployed the same alias over the
+// API key -- a pairing measured at 0 of 3, so every scheduled run would have
+// failed. The suite could not have detected that, because it never touched the
+// pairing that was broken, and the retry decorator would have absorbed the odd
+// 503 rather than reporting an unserviceable endpoint.
+//
+// So the mismatch is asserted rather than logged. A log does not survive `go
+// test` without -v, which is the invocation that matters, and a warning nobody
+// sees is how this went unnoticed in the first place. Point the suite at the
+// deployed pairing with ISSUE_TRIAGE_E2E_MODEL and the matching credentials.
+//
+// Killing mutation, verified: remove LLM_MODEL_NAME from the workflow env.
+func TestE2EExercisesTheDeployedPairing(t *testing.T) {
+	if os.Getenv(e2eEnabled) == "" {
+		t.Skipf("%s is not set, so this suite exercised no pairing at all", e2eEnabled)
+	}
+	raw := readWorkflow(t)
+
+	m := regexp.MustCompile(`(?m)^\s*LLM_MODEL_NAME:\s*(\S+)\s*$`).FindStringSubmatch(raw)
+	if m == nil {
+		t.Fatalf("%s sets no LLM_MODEL_NAME, so it deploys whatever the floating alias %q resolves "+
+			"to on the day. Pin it, or this suite cannot know what it should be measuring.",
+			workflowPath, defaultModel)
+	}
+	wantModel := strings.Trim(m[1], `"'`)
+	if got := e2eModel(); got != wantModel {
+		t.Errorf("this suite is measuring %q but the workflow deploys %q, so a green run here says "+
+			"nothing about the scheduled job. Re-run with %s=%s.", got, wantModel, e2eModelEnv, wantModel)
+	}
+
+	// The credential path is the other half, and it is not interchangeable:
+	// the same model name can be served by one and shed by the other.
+	workflowUsesVertex := regexp.MustCompile(`(?m)^\s*GOOGLE_GENAI_USE_VERTEXAI:\s*['"]?(true|1)`).MatchString(raw)
+	backend := requireE2E(t)
+	suiteUsesVertex := backend.env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
+	if workflowUsesVertex != suiteUsesVertex {
+		t.Errorf("this suite reached the model through %s, and the workflow uses %s. Availability "+
+			"differs between the two paths for the same model, so this run is not evidence about "+
+			"the deployed configuration.", backendName(suiteUsesVertex), backendName(workflowUsesVertex))
+	}
+}
+
+func backendName(vertex bool) string {
+	if vertex {
+		return "Vertex"
+	}
+	return "the generative language API key"
 }
 
 // e2eForceUnavailable makes every model call fail with a retryable error, so
@@ -303,7 +377,9 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	t.Setenv("OWNER", "google")
 	t.Setenv("REPO", "adk-go")
 	t.Setenv("ALLOWED_LABELS", "")
-	t.Setenv("LLM_MODEL_NAME", "")
+	// Empty means the Go default. Set e2eModelEnv to measure the model the
+	// workflow deploys instead -- see TestE2EExercisesTheDeployedPairing.
+	t.Setenv("LLM_MODEL_NAME", os.Getenv(e2eModelEnv))
 	t.Setenv("FRESHNESS_WINDOW_DAYS", "")
 	t.Setenv("DRY_RUN", strconv.FormatBool(opts.dryRun))
 	t.Setenv("ISSUE_COUNT", "1")
@@ -344,7 +420,10 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	}
 	t.Cleanup(func() { newClientFn = origClient })
 
-	t.Logf("model backend: %s", backend.name)
+	t.Logf("model backend: %s, model: %s", backend.name, e2eModel())
+	e2eMu.Lock()
+	e2eExercised = e2eModel() + " via " + backend.name
+	e2eMu.Unlock()
 	var retries int
 	log := slog.New(retryCountingHandler{
 		Handler: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}),

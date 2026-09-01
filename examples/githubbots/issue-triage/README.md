@@ -306,33 +306,48 @@ in exactly the invocation CI uses. `ISSUE_TRIAGE_E2E_FORCE_UNAVAILABLE=1` forces
 every model call to fail so the guard can be verified in seconds instead of
 waiting for a real outage.
 
-**Measured**: 17 of 17 cases ran, 0 skipped, 0 failed, on two consecutive full
-runs against `gemini-flash-latest` on Vertex (`global`).
+**Measured**: 17 of 17 cases ran, 0 skipped, 0 failed, against the pairing the
+workflow deploys — `gemini-3.6-flash` through the generative language API key —
+with no retry needed. Two earlier consecutive full runs were also 17 of 17
+against `gemini-flash-latest` on Vertex (`global`), which is the pairing that
+did *not* correspond to production; see below for why that distinction cost
+more than it sounds like.
 
-### Which model, and a warning about the default
+### Which model, and why the workflow pins one
 
-The bot defaults to `gemini-flash-latest`, a **floating alias**, and the workflow
-does not override it. Two paths reach that model and they do not behave the
-same. Measured on one afternoon, three calls per cell:
+The workflow sets `LLM_MODEL_NAME: gemini-3.6-flash`. The Go default stays
+`gemini-flash-latest` so the example runs unset when you copy it, but a
+scheduled job does not get to inherit a **floating alias** — an alias can be
+repointed with no change to this repository, so this class of failure arrives as
+a production incident rather than as a broken build.
+
+That is not hypothetical here. Two paths reach the model and they do not behave
+the same. Measured on one afternoon, three calls per cell:
 
 | model | Gemini API key | Vertex (`global`) |
 | --- | --- | --- |
 | `gemini-flash-latest` | **0/3** — 503 `UNAVAILABLE` | 3/3 |
 | `gemini-3.6-flash` | 3/3 | 3/3 |
 
-The failing cell is the pairing, not the model and not the transport — and it is
-**the configuration a scheduled run uses**, since the workflow supplies
-`GEMINI_API_KEY` and does not set `LLM_MODEL_NAME`. During that window an e2e
-run through the key path lost 12 of 16 cases; the same suite on Vertex lost
-none. The retry added for transient shedding recovered 7 such responses in an
-earlier, healthier window, but it cannot carry a sustained one.
+The failing cell is the pairing, not the model and not the transport. It was
+also **the configuration a scheduled run used** before the pin, since the
+workflow supplies `GEMINI_API_KEY`: every triggered run and every six-hourly
+sweep would have failed. Two independent checks measured the same alias on the
+same path at 0 of 6 and 1 of 6. During that window an e2e run through the key
+path lost 12 of 16 cases while the same suite on Vertex lost none. The retry
+added for transient shedding recovered 7 such responses in a healthier window,
+but it cannot carry a sustained one, and nothing it does turns 0 of 6 into a
+result.
 
-Two things follow, and neither is decided here. A floating alias can be
-repointed with no change to this repository, so this class of failure arrives as
-a production incident rather than as a broken build — pinning `LLM_MODEL_NAME`
-to an explicit version in the workflow would make the model a reviewable choice.
-And whichever model is chosen, the deployed pairing should be one that has
-actually been exercised.
+The way that stayed hidden is worth more than the fix. The suite was green at 16
+of 16 throughout, because it ran a different pairing — Vertex, and the Go
+default — than the workflow deployed. A green suite is only evidence about
+production when it exercised production's pairing, so
+`TestE2EExercisesTheDeployedPairing` now fails when the model or the credential
+path differs from the workflow's, and `ISSUE_TRIAGE_E2E_MODEL` points the suite
+at the deployed one. It is an assertion rather than a warning because `go test`
+without `-v` discards a passing package's output, which is the invocation that
+matters.
 
 ### Mutation-testing the prompt
 

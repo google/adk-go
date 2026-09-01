@@ -74,6 +74,16 @@ jobs:
           # The default job token, scoped by the permissions block above.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Pinned rather than left to the code's default, which is a floating
+          # alias. An alias makes the deployed model an invisible choice that
+          # can change under a scheduled job nobody is watching, and here it
+          # was already broken: on this key path gemini-flash-latest returned
+          # 503 on 3 of 3 calls measured for this repository, and on 6 of 6 and
+          # 5 of 6 in two independent checks, while gemini-3.6-flash answered
+          # every time on both this path and Vertex. The sibling adk-python and
+          # adk-java bots pin too. Changing this line is a reviewable diff.
+          # The Go default stays as it is, so the example still runs unset.
+          LLM_MODEL_NAME: gemini-3.6-flash
           GH_REPOSITORY: ${{ github.repository }}
           # Reaches the script only as an environment variable, never
           # interpolated into the script text, and validated below before use.

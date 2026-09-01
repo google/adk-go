@@ -33,6 +33,14 @@ var defaultAllowedLabels = []string{"bug", "enhancement", "documentation", "ques
 // enabled at the organization level.
 var allowedTypes = []string{"Bug", "Feature", "Task"}
 
+// defaultModel is used when LLM_MODEL_NAME is unset, which is how this example
+// runs when copied and tried out. It is a floating alias: what it resolves to
+// changes without any change here, which is fine for a run you are watching and
+// not for a scheduled job. The workflow therefore sets LLM_MODEL_NAME
+// explicitly, and TestE2EExercisesTheDeployedPairing fails when the e2e suite
+// measures a different model or backend than the one the workflow deploys.
+const defaultModel = "gemini-flash-latest"
+
 // Config holds all runtime configuration. It is parsed once and injected; there
 // is no package-level mutable state.
 type Config struct {
@@ -114,7 +122,7 @@ func loadConfig(args []string) (*Config, error) {
 		Repo:            os.Getenv("REPO"),
 		GitHubToken:     os.Getenv("GITHUB_TOKEN"),
 		GeminiAPIKey:    firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
-		Model:           envString("LLM_MODEL_NAME", "gemini-flash-latest"),
+		Model:           envString("LLM_MODEL_NAME", defaultModel),
 		AllowedLabels:   splitList(envString("ALLOWED_LABELS", strings.Join(defaultAllowedLabels, ","))),
 		IssueCount:      env.integer("ISSUE_COUNT", 3),
 		FreshnessWindow: env.days("FRESHNESS_WINDOW_DAYS", 0),
