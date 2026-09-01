@@ -237,9 +237,9 @@ model's own priors on content this obvious, and that a corpus of clear-cut cases
 cannot tell a redundant instruction from an unnecessary one.
 
 The obvious explanation is internal redundancy — sections deleted one at a time
-would each read as inert while jointly carrying real weight. **That was tested
-and it is wrong here.** Deleting whole groups that cover the same ground changed
-nothing either: removing the third-party rule, "What is NOT spam" and every
+would each read as inert while jointly carrying real weight. **That was tested,
+and it predicts a flip that does not happen.** Deleting whole groups covering
+the same ground changed nothing either: removing the third-party rule, "What is NOT spam" and every
 worked example together, 36 of the prompt's 92 lines and all of its restraint
 guidance, left all 14 scenarios at 3/3. Removing the definition of spam and the
 examples together did the same.
@@ -252,10 +252,12 @@ these judgements: on cases this clear-cut its own priors already produce the
 same answers. The prompt earns its place on the cases a corpus of obvious
 examples does not contain, and this measurement says nothing about those.
 
-One limit remains on all of the above: each cell is three repeats, so only an
-effect large enough to flip a scenario outright is visible. Every cell came back
-categorically 3/3 or 0/3 and none was decided on a single noisy observation, but
-a section shifting behaviour by a fifth would read as inert.
+One limit applies to every row above, the group deletions included: each cell is
+three repeats, so only an effect large enough to flip a scenario outright is
+visible. Every cell came back categorically 3/3 or 0/3 and none was decided on a
+single noisy observation, but a section — or a group — shifting behaviour by a
+fifth would read as inert. So redundancy is ruled out at the size this
+instrument can see, not ruled out altogether.
 
 ```bash
 go test ./...
