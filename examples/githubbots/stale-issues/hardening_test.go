@@ -431,3 +431,183 @@ func TestNoToolAcceptsFreeTextForAPublishedBody(t *testing.T) {
 		t.Fatal("no tool parameters were inspected, so this test proved nothing: ADK has moved the schema again and the check needs re-pointing, not deleting")
 	}
 }
+
+// --- MAINTAINERS written the way people actually write logins ----------------
+
+// "@alice, @bob" is the habitual way to name GitHub users, and it passed every
+// guard while breaking the bot completely.
+//
+// The workflow rejects a MAINTAINERS value with no alphanumeric in it, because
+// an empty maintainer set means no comment can put the ball in the author's
+// court and nothing is ever marked stale. "@alice" has alphanumerics, so it
+// passed — and then matched nothing, because the API returns "alice". The bot
+// swept, audited every candidate, wrote nothing and exited 0.
+//
+// A silent no-op is the worst shape this failure can take: a loud one gets
+// fixed the first morning, this one looks like a quiet backlog.
+func TestMaintainersMayBeWrittenWithAtSigns(t *testing.T) {
+	for _, in := range []string{"@alice, @bob", "alice, @bob", " @alice ,bob "} {
+		t.Run(in, func(t *testing.T) {
+			got := splitList(in)
+			for _, login := range got {
+				if strings.HasPrefix(login, "@") {
+					t.Fatalf("splitList(%q) = %q: a leading @ survives, so no API login will ever match and the bot silently marks nothing", in, got)
+				}
+			}
+
+			cfg := e2eCfg()
+			cfg.Maintainers = got
+			// alice asked for a repro 30 days ago and nobody answered: the
+			// shape that must be recognized as maintainer-blocked.
+			raw := newIssue(120).comment("alice", 30, "Could you share a repro?").build()
+			st := computeIssueState(raw, e2eSelf, cfg.Maintainers, cfg.StaleLabel, cfg.StaleAfter, cfg.CloseAfter, timeNowUTC())
+			if st.LastActionRole != string(roleMaintainer) {
+				t.Errorf("last_action_role = %q with MAINTAINERS=%q, want %q: the configured maintainer was not recognized, so this bot can never mark anything stale", st.LastActionRole, in, roleMaintainer)
+			}
+			if _, ok := stalePredicate(7)(st); !ok {
+				t.Error("stalePredicate refuses an issue that is squarely maintainer-blocked: the bot is a silent no-op on this configuration")
+			}
+		})
+	}
+}
+
+// The same normalization has to hold at the other entry point. computeIssueState
+// takes the maintainer slice directly, so a caller that builds it without going
+// through splitList — a test, or anyone copying this example — must not get a
+// silently broken maintainer set.
+func TestMaintainerSetNormalizesAtSignsToo(t *testing.T) {
+	cfg := e2eCfg()
+	raw := newIssue(120).comment("alice", 30, "Could you share a repro?").build()
+	st := computeIssueState(raw, e2eSelf, []string{"@Alice"}, cfg.StaleLabel, cfg.StaleAfter, cfg.CloseAfter, timeNowUTC())
+	if st.LastActionRole != string(roleMaintainer) {
+		t.Errorf("last_action_role = %q for maintainer %q, want %q: toSet must strip the @ as well as fold case", st.LastActionRole, "@Alice", roleMaintainer)
+	}
+}
+
+// Every login comparison in state.go folds case; this one did not. No input has
+// been observed that reaches it — GitHub emits "[bot]" lowercase and actorLogin
+// appends it lowercase — so this pins consistency in code people copy rather
+// than a demonstrated failure, and is labelled as such.
+func TestBotSuffixIsRecognizedRegardlessOfCasing(t *testing.T) {
+	for _, login := range []string{"dependabot[bot]", "dependabot[Bot]", "dependabot[BOT]"} {
+		if !isIgnoredActor(login, e2eSelf) {
+			t.Errorf("isIgnoredActor(%q) = false: a bot account would be counted as human activity, which resets the staleness clock", login)
+		}
+	}
+}
+
+// --- What the bot PUBLISHES must be true, not merely safe --------------------
+
+// Every gate in this program asks what an attacker can make the bot DO. None of
+// them asks whether what it SAYS is true. A comment can be correctly fenced,
+// carry no link and violate no scope, and still tell a stranger something false
+// under the company's name.
+//
+// These assert the PROPERTY rather than the sentence, so the prose can be
+// improved without breaking them, but a claim the Go layer does not establish
+// cannot come back.
+func TestPublishedCommentsClaimOnlyWhatTheGateEstablishes(t *testing.T) {
+	// Captured from the fake server, not from the body helper. Asserting on
+	// staleCommentBody(c) directly would keep passing after doMarkStale stopped
+	// calling it — measured: a mutant that inlines a different string in
+	// doMarkStale survives that version of this test. Same defect as a race pin
+	// that drives a rebuilt closure instead of production's.
+	stale := postedBody(t, func(c *GitHubClient, ctx context.Context) error {
+		c.recordObservation(7, staleReady())
+		_, err := c.doMarkStale(ctx, 7)
+		return err
+	})
+	closed := postedBody(t, func(c *GitHubClient, ctx context.Context) error {
+		st := staleReady()
+		st.IsStale = true
+		st.DaysSinceStaleLabel = 30
+		st.DaysSinceLastActorAction = 40
+		st.DaysSinceAuthorAction = 50
+		c.recordObservation(7, st)
+		_, err := c.doClose(ctx, 7)
+		return err
+	})
+
+	for _, tc := range []struct{ name, body string }{{"stale warning", stale}, {"closing notice", closed}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Nothing may characterize what the maintainer's comment SAID. That
+			// is the model's judgement and no predicate checks it, so asserting
+			// it in public is asserting something we cannot know.
+			for _, claim := range []string{
+				"requested clarification", "request clarification",
+				"asked", "requested more information", "asked for",
+			} {
+				if strings.Contains(strings.ToLower(tc.body), claim) {
+					t.Errorf("the published body claims %q, which no gate establishes: whether the maintainer's comment asked the author for anything is decided by the model alone\nbody: %q", claim, tc.body)
+				}
+			}
+			if strings.Contains(tc.body, "0.0") || strings.Contains(tc.body, " 0 days") {
+				t.Errorf("a threshold rendered as zero in published text: %q", tc.body)
+			}
+		})
+	}
+
+	cfg := baseCfg()
+	for _, want := range []string{humanDays(cfg.StaleAfter), humanDays(cfg.CloseAfter)} {
+		if !strings.Contains(stale, want) {
+			t.Errorf("the stale warning does not state %q; it threatens a close without saying by when: %q", want, stale)
+		}
+	}
+}
+
+// postedBody runs one destructive tool against a fake GitHub and returns the
+// single comment body that reached it.
+func postedBody(t *testing.T, run func(*GitHubClient, context.Context) error) string {
+	t.Helper()
+	var bodies []string
+	c := testClient(t, baseCfg(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			var body struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode comment body: %v", err)
+			}
+			bodies = append(bodies, body.Body)
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/labels") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	if err := run(c, withAuditedIssue(context.Background(), 7)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("posted %d comments, want exactly 1", len(bodies))
+	}
+	return bodies[0]
+}
+
+// A sub-day threshold is accepted by validate(), so it can reach a published
+// comment. It must not render as "0.0 days".
+func TestSubDayThresholdsRenderHonestly(t *testing.T) {
+	for _, tc := range []struct {
+		in   time.Duration
+		want string
+	}{
+		{30 * time.Minute, "less than a day"},
+		{23 * time.Hour, "less than a day"},
+		{24 * time.Hour, "1 day"},
+		{14 * 24 * time.Hour, "14 days"},
+	} {
+		if got := humanDays(tc.in); got != tc.want {
+			t.Errorf("humanDays(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	cfg := baseCfg()
+	cfg.CloseAfter = time.Hour
+	body := closeCommentBody(&GitHubClient{cfg: cfg, log: discardLogger()})
+	if strings.Contains(body, "0.0") {
+		t.Errorf("an hour-scale threshold published as %q: readers see broken software over the company's name", body)
+	}
+}

@@ -253,11 +253,28 @@ func firstNonEmpty(vals ...string) string {
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
-		if p := strings.TrimSpace(part); p != "" {
+		if p := normalizeLogin(part); p != "" {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// normalizeLogin turns one MAINTAINERS entry into the login the GitHub API
+// returns: trimmed, and without a leading "@".
+//
+// The "@" matters more than it looks. Writing "@alice, @bob" is how people
+// habitually name GitHub users, and the workflow's guard passes it, because it
+// tests for an alphanumeric and "@alice" has plenty. But the API returns
+// "alice", so every comparison misses, nobody is classified as a maintainer,
+// and no comment can put the ball in the author's court — which makes the bot a
+// SILENT no-op. It sweeps, audits every candidate, writes nothing and exits 0.
+//
+// That is the exact failure the empty-list guard exists to prevent, reached
+// through a different door. Accepting the "@" form is better than rejecting it:
+// there is only one thing the user can mean by it.
+func normalizeLogin(s string) string {
+	return strings.TrimPrefix(strings.TrimSpace(s), "@")
 }
 
 // envErrors reads typed values from the environment, collecting parse failures

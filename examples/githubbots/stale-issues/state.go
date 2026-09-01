@@ -180,7 +180,12 @@ func sameLabel(a, b string) bool { return strings.EqualFold(a, b) }
 // isIgnoredActor reports whether events from this login should be ignored:
 // empty actors, any "[bot]" account, and the bot's own identity.
 func isIgnoredActor(login, selfLogin string) bool {
-	return login == "" || strings.HasSuffix(login, "[bot]") ||
+	// The suffix test folds case like every other login comparison here,
+	// including the one in the next clause. GitHub emits the "[bot]" suffix
+	// lowercase and actorLogin appends it lowercase, so no case-varying suffix
+	// has been observed reaching this — the fold is for consistency in code
+	// people copy, not for a demonstrated input.
+	return login == "" || strings.HasSuffix(strings.ToLower(login), "[bot]") ||
 		(selfLogin != "" && strings.EqualFold(login, selfLogin))
 }
 
@@ -518,7 +523,10 @@ func actorLogin(a *rawActor) string {
 func toSet(xs []string) map[string]bool {
 	m := make(map[string]bool, len(xs))
 	for _, x := range xs {
-		if x = strings.ToLower(strings.TrimSpace(x)); x != "" {
+		// normalizeLogin, not just TrimSpace: a maintainer list may reach here
+		// without passing through splitList — computeIssueState takes the slice
+		// directly, and anyone copying this example may build it themselves.
+		if x = strings.ToLower(normalizeLogin(x)); x != "" {
 			m[x] = true
 		}
 	}

@@ -382,6 +382,27 @@ func (c *GitHubClient) doRemoveLabel(ctx context.Context, number int, label stri
 	return okResult, nil
 }
 
+// staleCommentBody and closeCommentBody build the two bodies this bot publishes.
+// They are named functions so a test asserts on the text production actually
+// posts rather than on a copy of it, which would keep passing after this one
+// changed.
+func staleCommentBody(c *GitHubClient) string {
+	return fmt.Sprintf(
+		"This issue has been marked as stale: a maintainer commented more than %s ago "+
+			"and there has been no reply since. It will be closed if there is no "+
+			"further activity in the next %s.",
+		humanDays(c.cfg.StaleAfter), humanDays(c.cfg.CloseAfter),
+	)
+}
+
+func closeCommentBody(c *GitHubClient) string {
+	return fmt.Sprintf(
+		"This has been closed automatically: it was marked as stale more than %s ago "+
+			"and there has been no activity since.",
+		humanDays(c.cfg.CloseAfter),
+	)
+}
+
 func (c *GitHubClient) doMarkStale(ctx context.Context, number int) (actionResult, error) {
 	if msg, ok := authorizeIssue(ctx, number); !ok {
 		return errResult("%s", msg), nil
@@ -389,12 +410,19 @@ func (c *GitHubClient) doMarkStale(ctx context.Context, number int) (actionResul
 	if msg, ok := c.claimAction(number, actionMarkStale, stalePredicate(number)); !ok {
 		return errResult("%s", msg), nil
 	}
-	comment := fmt.Sprintf(
-		"This issue has been automatically marked as stale because it has not had recent "+
-			"activity for %s days after a maintainer requested clarification. It will be "+
-			"closed if no further activity occurs within %s days.",
-		formatDays(c.cfg.StaleAfter), formatDays(c.cfg.CloseAfter),
-	)
+	// Every claim in this sentence is one the Go gate above established.
+	//
+	// It used to say "after a maintainer requested clarification". Nothing
+	// verifies that. stalePredicate checks that the last actor was a maintainer
+	// and that they left a comment, but whether that comment ASKED the author
+	// for anything is the model's judgement alone — the one decision in this
+	// program no gate can make. Publishing it as fact meant that whenever the
+	// model was wrong, the bot told a stranger, in public and under the company's
+	// name, that a maintainer had asked them something that was never asked.
+	//
+	// What is left is what the predicate proves: a maintainer commented, it was
+	// longer ago than the threshold, and the author has not acted since.
+	comment := staleCommentBody(c)
 	if err := c.MarkStale(ctx, number, comment); err != nil {
 		c.recordToolError()
 		return actionResult{}, err
@@ -428,10 +456,7 @@ func (c *GitHubClient) doClose(ctx context.Context, number int) (actionResult, e
 	if msg, ok := c.claimAction(number, actionClose, closePredicate(number)); !ok {
 		return errResult("%s", msg), nil
 	}
-	comment := fmt.Sprintf(
-		"This has been automatically closed because it has been marked as stale for over %s days.",
-		formatDays(c.cfg.CloseAfter),
-	)
+	comment := closeCommentBody(c)
 	if err := c.CloseAsStale(ctx, number, comment); err != nil {
 		c.recordToolError()
 		return actionResult{}, err

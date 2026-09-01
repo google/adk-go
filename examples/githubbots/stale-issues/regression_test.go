@@ -1396,14 +1396,22 @@ func TestPostedCommentBodiesCarryTheRightThresholds(t *testing.T) {
 		if len(bodies) != 1 {
 			t.Fatalf("posted %d comments, want 1", len(bodies))
 		}
-		// "…not had recent activity for 14 days after a maintainer requested
-		// clarification. It will be closed if no further activity occurs within
-		// 7 days."
-		if !strings.Contains(bodies[0], "for 14 days after a maintainer") {
-			t.Errorf("stale warning = %q, want the STALE threshold (14) as the waiting period", bodies[0])
+		// The property is the ORDER, not the prose: the stale threshold is how
+		// long they have already been silent and the close threshold is how long
+		// they have left, so swapping the two arguments inverts the meaning while
+		// leaving a sentence that reads perfectly well. Matched by position
+		// rather than by phrase so the wording can be improved without this
+		// test having to be rewritten — which is how it would come to be deleted.
+		elapsed := strings.Index(bodies[0], "14 days")
+		grace := strings.Index(bodies[0], "7 days")
+		if elapsed < 0 {
+			t.Errorf("stale warning = %q, want the STALE threshold (14 days) stated as the period already elapsed", bodies[0])
 		}
-		if !strings.Contains(bodies[0], "within 7 days") {
-			t.Errorf("stale warning = %q, want the CLOSE threshold (7) as the grace period", bodies[0])
+		if grace < 0 {
+			t.Errorf("stale warning = %q, want the CLOSE threshold (7 days) stated as the grace period", bodies[0])
+		}
+		if elapsed >= 0 && grace >= 0 && elapsed > grace {
+			t.Errorf("stale warning = %q: the thresholds are the wrong way round, so it tells the author they have already waited the grace period and have the stale period left", bodies[0])
 		}
 	})
 
@@ -1424,8 +1432,8 @@ func TestPostedCommentBodiesCarryTheRightThresholds(t *testing.T) {
 		if len(bodies) != 1 {
 			t.Fatalf("posted %d comments, want 1", len(bodies))
 		}
-		if !strings.Contains(bodies[0], "over 7 days") {
-			t.Errorf("closing notice = %q, want the CLOSE threshold (7)", bodies[0])
+		if !strings.Contains(bodies[0], "7 days") {
+			t.Errorf("closing notice = %q, want the CLOSE threshold (7 days)", bodies[0])
 		}
 	})
 }

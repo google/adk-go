@@ -56,6 +56,25 @@ func stripBraces(s string) string { return braceStripper.Replace(s) }
 
 // formatDays renders a duration as a clean day count: whole numbers without a
 // decimal (e.g. "7"), fractional values with one decimal place (e.g. "0.5").
+// humanDays renders a threshold for a comment the bot PUBLISHES, as opposed to
+// formatDays which renders it for the prompt.
+//
+// The difference is the sub-day case. formatDays prints one decimal, so a
+// threshold under about twelve hours renders as "0.0" and the published sentence
+// reads "closed if no further activity occurs within 0.0 days". validate() only
+// requires the thresholds to be positive, so an hour-scale value is accepted and
+// that text reaches a stranger's issue under the company's name.
+func humanDays(d time.Duration) string {
+	switch days := d.Hours() / 24; {
+	case days < 1:
+		return "less than a day"
+	case days == 1:
+		return "1 day"
+	default:
+		return formatDays(d) + " days"
+	}
+}
+
 func formatDays(d time.Duration) string {
 	days := d.Hours() / 24
 	if days == math.Trunc(days) {
