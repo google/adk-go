@@ -411,9 +411,10 @@ func (c *GitHubClient) doAlertEdit(ctx context.Context, number int) (actionResul
 	if msg, ok := c.claimAction(number, actionAlertEdit, alertPredicate(number)); !ok {
 		return errResult("%s", msg), nil
 	}
-	// The body must start with botAlertSignature so the bot recognizes its own
-	// alert on future runs and avoids spamming.
-	if err := c.Comment(ctx, number, botAlertSignature+". Maintainers, please review."); err != nil {
+	// botAlertBody is the exact string the recognition in buildTimeline matches,
+	// so the two cannot drift: an alert written in any other shape would not be
+	// recognized on the next run and would be posted again on every sweep.
+	if err := c.Comment(ctx, number, botAlertBody); err != nil {
 		c.recordToolError()
 		return actionResult{}, err
 	}

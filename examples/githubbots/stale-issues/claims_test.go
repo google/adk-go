@@ -284,6 +284,7 @@ func TestValidateRejectsCollidingLabelNames(t *testing.T) {
 	cfg := &Config{
 		GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
 		StaleAfter: 336, CloseAfter: 168, IssueTimeout: 1, RunBudget: 1, Concurrency: 1,
+		MaxIssues: 100, MaxDestructiveActions: 20,
 		StaleLabel: "stale", RequestClarificationLabel: "Stale",
 	}
 	err := cfg.validate()

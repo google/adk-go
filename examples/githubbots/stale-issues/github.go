@@ -53,6 +53,10 @@ type GitHubClient struct {
 	// writes are idempotent; the comments that accompany them are not.
 	claimed map[claimKey]bool
 
+	// destructive counts the mark-stale and close actions claimed this run, so
+	// MaxDestructiveActions can bound them. Guarded by mu.
+	destructive int
+
 	// observed is the IssueState get_issue_state last computed for each issue,
 	// keyed by issue number. The destructive tools re-check their mechanical
 	// preconditions against it, so those preconditions hold even if the model is
@@ -122,11 +126,36 @@ func (c *GitHubClient) claimAction(number int, act action, pred func(IssueState)
 	if msg, ok := pred(st); !ok {
 		return msg, false
 	}
+	// The per-run ceiling on harm. Counted here because this is the one place
+	// every destructive write already funnels through, and counted only for the
+	// two actions that damage an issue: marking stale posts a public warning and
+	// starts the close clock, and closing is the only irreversible thing this bot
+	// does. Removing a label and alerting a maintainer are corrective, so a run
+	// that has hit the ceiling must still be able to perform them.
+	//
+	// The count is incremented under the same lock as the claim, so it cannot be
+	// raced past by concurrent audits.
+	if act == actionMarkStale || act == actionClose {
+		if c.destructive >= c.cfg.MaxDestructiveActions {
+			return fmt.Sprintf("refusing %s for issue #%d: this run has already performed %d destructive actions, which is the MAX_DESTRUCTIVE_ACTIONS ceiling", act, number, c.destructive), false
+		}
+		c.destructive++
+	}
 	if c.claimed == nil {
 		c.claimed = make(map[claimKey]bool)
 	}
 	c.claimed[key] = true
 	return "", true
+}
+
+// hitDestructiveCeiling reports whether this run stopped short of what it judged
+// necessary. A run that refused a write it wanted to make has not done its job,
+// and saying so in the exit code is the difference between a human investigating
+// and nobody noticing.
+func (c *GitHubClient) hitDestructiveCeiling() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.destructive >= c.cfg.MaxDestructiveActions
 }
 
 // recordToolError flags that a tool hit an infrastructure error this run.
@@ -297,6 +326,18 @@ func (c *GitHubClient) SearchOldOpenIssues(ctx context.Context) ([]int, error) {
 			}
 			seen[n] = true
 			numbers = append(numbers, n)
+		}
+		// Stop at the cap rather than paginating to exhaustion. An uncapped sweep
+		// makes the size of a run a property of the backlog, and every issue in
+		// it is a candidate for the two writes this bot can make. The remainder
+		// is not lost: it is older than the cutoff on the next run too, and the
+		// search is ordered by creation date ascending, so the oldest candidates
+		// are always the ones taken first.
+		if len(numbers) >= c.cfg.MaxIssues {
+			numbers = numbers[:c.cfg.MaxIssues]
+			c.log.Warn("candidate list truncated at MAX_ISSUES; the remainder will be picked up by the next run",
+				"cap", c.cfg.MaxIssues)
+			break
 		}
 		if resp.NextPage == 0 {
 			break

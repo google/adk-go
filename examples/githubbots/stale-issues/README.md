@@ -149,6 +149,8 @@ go run .
 | `STALE_LABEL_NAME` | `stale` | Label applied when marking stale. |
 | `REQUEST_CLARIFICATION_LABEL` | `request clarification` | Label that flags "waiting on author". |
 | `CONCURRENCY_LIMIT` | `3` | Max issues audited in parallel. |
+| `MAX_ISSUES` | `100` | Max candidates one sweep may audit. The search is ordered oldest-first, so the remainder is picked up by the next run. |
+| `MAX_DESTRUCTIVE_ACTIONS` | `20` | Max issues one run may mark stale or close. Corrective actions (removing a label, alerting a maintainer) are never blocked by it. Hitting the ceiling fails the run. |
 | `ISSUE_TIMEOUT` | `5m` | Bounds a single issue's audit. |
 | `RUN_BUDGET` | `30m` | Bounds the whole run. Keep it below the workflow's `timeout-minutes`. |
 | `-dry-run` / `DRY_RUN` | `false` | Log intended actions without mutating. |

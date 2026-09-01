@@ -1505,6 +1505,7 @@ func TestValidateCoercesNonPositiveConcurrency(t *testing.T) {
 		cfg := &Config{
 			GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
 			StaleAfter: 336, CloseAfter: 168, IssueTimeout: 1, RunBudget: 1,
+			MaxIssues: 100, MaxDestructiveActions: 20,
 			Concurrency: in,
 		}
 		if err := cfg.validate(); err != nil {
@@ -1580,6 +1581,7 @@ func TestValidateRejectsABotLoginThatNamesAMaintainer(t *testing.T) {
 		return &Config{
 			GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
 			StaleAfter: 336, CloseAfter: 168, IssueTimeout: 1, RunBudget: 1, Concurrency: 1,
+			MaxIssues: 100, MaxDestructiveActions: 20,
 			StaleLabel: "stale", RequestClarificationLabel: "request clarification",
 			Maintainers: []string{"maintainerA", "MaintainerB"},
 		}
@@ -1611,8 +1613,8 @@ func TestSelfRecognitionFoldsCase(t *testing.T) {
 	if !isIgnoredActor("Adk-Stale-Bot", "adk-stale-bot") {
 		t.Error("isIgnoredActor did not recognize its own login in a different casing")
 	}
-	if !isBotActor("Adk-Stale-Bot", "adk-stale-bot") {
-		t.Error("isBotActor did not recognize its own login in a different casing")
+	if !isSelfActor("Adk-Stale-Bot", "adk-stale-bot") {
+		t.Error("isSelfActor did not recognize its own login in a different casing")
 	}
 	if isIgnoredActor("someone-else", "adk-stale-bot") {
 		t.Error("isIgnoredActor dropped an unrelated human")

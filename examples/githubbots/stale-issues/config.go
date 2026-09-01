@@ -74,6 +74,23 @@ type Config struct {
 	// Concurrency bounds how many issues are audited in parallel.
 	Concurrency int
 
+	// MaxIssues caps how many candidates one sweep may audit. The search
+	// paginated to exhaustion before this existed, so the size of a run was
+	// whatever the backlog happened to be — up to the GitHub Search API's own
+	// ~1000-result ceiling, which is a bound from their side, not ours. Every
+	// sibling bot caps its candidate list; this one now does too.
+	MaxIssues int
+
+	// MaxDestructiveActions caps how many issues one run may mark stale or
+	// close. It is deliberately separate from MaxIssues: that one bounds how
+	// much work a run does, this one bounds how much harm it can do if the
+	// judgement behind those writes goes wrong at scale. Closing is the only
+	// irreversible action this bot has, and the "is this comment actually a
+	// request?" half of the decision to mark stale is the model's, so a ceiling
+	// here turns a bad run into a number a human notices rather than the whole
+	// backlog. Hitting it fails the run loudly.
+	MaxDestructiveActions int
+
 	// IssueTimeout bounds how long a single issue audit may take.
 	IssueTimeout time.Duration
 
@@ -135,6 +152,8 @@ func loadConfig(args []string) (*Config, error) {
 		BotLogin:                  strings.TrimSpace(os.Getenv("BOT_LOGIN")),
 		Maintainers:               splitList(os.Getenv("MAINTAINERS")),
 		Concurrency:               e.integer("CONCURRENCY_LIMIT", 3),
+		MaxIssues:                 e.integer("MAX_ISSUES", 100),
+		MaxDestructiveActions:     e.integer("MAX_DESTRUCTIVE_ACTIONS", 20),
 		IssueTimeout:              e.duration("ISSUE_TIMEOUT", 5*time.Minute),
 		RunBudget:                 e.duration("RUN_BUDGET", 30*time.Minute),
 		UseVertexAI:               e.boolean("GOOGLE_GENAI_USE_VERTEXAI", false),
@@ -202,6 +221,12 @@ func (c *Config) validate() error {
 	}
 	if c.StaleLabel != "" && sameLabel(c.StaleLabel, c.RequestClarificationLabel) {
 		return fmt.Errorf("STALE_LABEL_NAME (%q) and REQUEST_CLARIFICATION_LABEL (%q) must differ; GitHub label names are case-insensitively unique, so a collision would route clarification-label writes through the staleness gate", c.StaleLabel, c.RequestClarificationLabel)
+	}
+	if c.MaxIssues < 1 {
+		return fmt.Errorf("MAX_ISSUES must be positive, got %d", c.MaxIssues)
+	}
+	if c.MaxDestructiveActions < 1 {
+		return fmt.Errorf("MAX_DESTRUCTIVE_ACTIONS must be positive, got %d", c.MaxDestructiveActions)
 	}
 	if c.Concurrency < 1 {
 		c.Concurrency = 1

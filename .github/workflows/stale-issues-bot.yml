@@ -85,11 +85,30 @@ jobs:
           BOT_LOGIN: 'github-actions[bot]'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Pin the model here rather than in Go. The code default stays a
+          # floating alias because that is the right thing for an example
+          # someone copies, and the wrong thing for a scheduled job: pinning in
+          # the workflow makes the deployed model a reviewable line in a diff.
+          #
+          # The alias is not merely untidy, it is unserviceable on this path.
+          # Measured against the generativelanguage endpoint this job
+          # authenticates to, gemini-flash-latest answered 1 of 6 requests —
+          # three 503s and two connection failures — while gemini-3.6-flash
+          # answered 6 of 6. On the alias a six-hourly sweep fails most times it
+          # runs. adk-python and adk-java pin a concrete model in their own
+          # issue-maintenance workflows for the same reason.
+          LLM_MODEL_NAME: gemini-3.6-flash
           # Below the job's timeout-minutes, so the process diagnoses its own
           # overrun instead of being killed.
           RUN_BUDGET: 30m
           ISSUE_TIMEOUT: 5m
           CONCURRENCY_LIMIT: '3'
+          # Ceilings on one run. MAX_ISSUES bounds how much work a sweep does;
+          # MAX_DESTRUCTIVE_ACTIONS bounds how much harm it can do if the
+          # judgement behind those writes goes wrong at scale. Hitting either
+          # is reported in the exit code.
+          MAX_ISSUES: '100'
+          MAX_DESTRUCTIVE_ACTIONS: '20'
         run: |
           set -euo pipefail
 

@@ -31,6 +31,24 @@ import (
 // one person did something another person did.
 const botAlertSignature = "**Notification:** The issue description was edited without a comment"
 
+// botAlertBody is the COMPLETE body doAlertEdit posts, and the exact string the
+// recognition below matches against.
+//
+// Matching the whole body rather than the signature prefix narrows the one route
+// the identity check cannot close. Identity is shared: every ADK bot in this
+// repository posts as github-actions[bot], so a sibling workflow's comment
+// satisfies isSelfActor exactly as this bot's own does. Under a prefix match, a
+// sibling that echoes user-supplied text at the START of a comment would carry
+// whatever a commenter chose to put there — including this signature — and
+// suppress a genuine alert. An exact match requires the sibling's entire comment
+// to be this alert verbatim, which an echo of user text is not.
+//
+// This narrows the route rather than closing it. Closing it needs a marker a
+// sibling cannot reproduce, and the per-issue nonce used for truncation cannot
+// serve: recognition happens on a LATER run, and that nonce is not stable across
+// runs. Recorded as a known residual rather than claimed as a fix.
+const botAlertBody = botAlertSignature + ". Maintainers, please review."
+
 // Role classifies the last human actor on an issue.
 type Role string
 
@@ -166,17 +184,29 @@ func isIgnoredActor(login, selfLogin string) bool {
 		(selfLogin != "" && strings.EqualFold(login, selfLogin))
 }
 
-// isBotActor reports whether a login belongs to the bot itself (its resolved
-// identity or any "[bot]" account). Used to authenticate the bot's own alert
-// comments so a regular user cannot spoof them.
-// The self-login comparison folds case for the same reason every other login
-// comparison in this program does: GitHub logins are case-insensitively unique
-// and the API returns them in their registered casing, so a byte-exact match
-// would let the bot fail to recognize its own comments and clear a label it had
-// just applied.
-func isBotActor(login, selfLogin string) bool {
-	return login != "" && (strings.HasSuffix(login, "[bot]") ||
-		(selfLogin != "" && strings.EqualFold(login, selfLogin)))
+// isSelfActor reports whether a login is THIS bot's own resolved identity.
+//
+// It deliberately does not accept any "[bot]" login, which is what it used to
+// do. The alert-suppression branch treats a matching comment as one this bot
+// already posted, and botAlertSignature is a fixed literal in a public
+// repository, so it is not a secret — identity is the only half of that pair
+// an outsider cannot write. Admitting every bot account meant any GitHub App
+// installed on the repository could permanently silence a genuine silent-edit
+// alert by opening a comment with the signature. The route is not hypothetical
+// here: all five ADK bots post as github-actions[bot], so a sibling workflow
+// echoing user text that happened to start with the signature would suppress
+// this bot's alert.
+//
+// The case fold stays: GitHub logins are case-insensitively unique and the API
+// returns them in their registered casing, so a byte-exact match would let the
+// bot fail to recognize its own comment.
+//
+// With no resolved identity the bot cannot tell its own comment from anyone
+// else's, so it recognizes nothing and may repeat an alert. That is the safe
+// direction to fail: a duplicate alert is noise, a suppressed one is the bot
+// silenced on that issue for good.
+func isSelfActor(login, selfLogin string) bool {
+	return login != "" && selfLogin != "" && strings.EqualFold(login, selfLogin)
 }
 
 // buildTimeline normalizes the raw GraphQL data into a chronologically sorted
@@ -193,12 +223,14 @@ func buildTimeline(raw *rawIssue, selfLogin, staleLabel string) (events []histor
 	for _, c := range raw.Comments.Nodes {
 		actor := actorLogin(c.Author)
 		// Track the bot's own silent-edit alerts; never add them to history. The
-		// author check stops a regular user from spoofing the signature to
-		// suppress future genuine alerts.
-		// HasPrefix, not Contains: doAlertEdit writes the signature at the start,
-		// and matching anywhere let a second [bot] account quoting the alert
-		// suppress the next genuine one.
-		if isBotActor(actor, selfLogin) && strings.HasPrefix(c.Body, botAlertSignature) {
+		// identity check stops anyone else — a user, another GitHub App, or a
+		// sibling workflow sharing this bot's login — from spoofing the
+		// signature to suppress future genuine alerts.
+		// An exact match on the whole body, not a prefix and not Contains: a
+		// comment that merely quotes or begins with the alert must not suppress
+		// the next genuine one. See botAlertBody for the shared-identity route
+		// this narrows and the residual it leaves.
+		if isSelfActor(actor, selfLogin) && c.Body == botAlertBody {
 			if lastBotAlert.IsZero() || c.CreatedAt.After(lastBotAlert) {
 				lastBotAlert = c.CreatedAt
 			}

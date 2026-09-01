@@ -28,7 +28,13 @@ import (
 // focused on the authority gate itself.
 func newTestClient(t *testing.T) *GitHubClient {
 	t.Helper()
-	return &GitHubClient{cfg: &Config{StaleLabel: "stale"}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	// MaxDestructiveActions mirrors the production default. At zero every
+	// destructive claim is refused by the ceiling, so these tests would pass for
+	// the wrong reason: the gate under test would never be reached.
+	return &GitHubClient{
+		cfg: &Config{StaleLabel: "stale", MaxIssues: 100, MaxDestructiveActions: 20},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }
 
 // okState is an issue a maintainer asked something on 30 days ago and nobody
@@ -231,6 +237,7 @@ func TestValidateRejectsNonPositiveDurations(t *testing.T) {
 		return &Config{
 			GitHubToken: "t", GeminiAPIKey: "k", Owner: "o", Repo: "r",
 			StaleAfter: 336, CloseAfter: 168, IssueTimeout: 1, RunBudget: 1, Concurrency: 1,
+			MaxIssues: 100, MaxDestructiveActions: 20,
 		}
 	}
 	for _, tc := range []struct {

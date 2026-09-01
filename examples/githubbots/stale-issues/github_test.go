@@ -61,6 +61,12 @@ func baseCfg() *Config {
 		// arguments in a posted comment body reads the same either way.
 		StaleAfter: 336 * time.Hour, // 14 days
 		CloseAfter: 168 * time.Hour, // 7 days
+		// Mirror the production defaults. These are safety ceilings, so a zero
+		// value here would silently disable the sweep (MaxIssues) or every
+		// destructive action (MaxDestructiveActions) and the tests would be
+		// asserting against a bot that cannot act.
+		MaxIssues:             100,
+		MaxDestructiveActions: 20,
 	}
 }
 

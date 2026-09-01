@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -154,6 +155,13 @@ func audit(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	if gh.hadToolError() {
 		return errors.New("one or more tool calls failed; see logs above")
 	}
+	// A run that refused a write it had judged necessary has not finished its
+	// work, and the ceiling exists precisely for the case where that judgement
+	// was going wrong at scale. Either way a human needs to look, so it goes in
+	// the exit code rather than only in a log line nobody reads.
+	if gh.hitDestructiveCeiling() {
+		return fmt.Errorf("this run hit the MAX_DESTRUCTIVE_ACTIONS ceiling of %d; some issues were left unactioned and the run needs review", cfg.MaxDestructiveActions)
+	}
 	return nil
 }
 
@@ -269,7 +277,20 @@ func auditAll(ctx context.Context, cfg *Config, log *slog.Logger, issues []int, 
 	g := new(errgroup.Group)
 	g.SetLimit(cfg.Concurrency)
 	for _, n := range issues {
-		g.Go(func() error {
+		g.Go(func() (err error) {
+			// One malformed model response must not kill the sweep. Without this
+			// a panic in any goroutine takes the process down, and MarkStale is a
+			// two-write sequence (label, then comment) whose rollback cannot run
+			// if the process is gone — leaving an issue labelled stale with no
+			// warning comment, which the next run refuses to re-mark and closes
+			// on schedule having warned nobody. Convert it into this issue's
+			// error so the run still fails loudly and the other issues finish.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("panic during audit", "issue", n, "panic", r, "stack", string(debug.Stack()))
+					err = fmt.Errorf("issue #%d: panic during audit: %v", n, r)
+				}
+			}()
 			return auditIssue(ctx, cfg, n, func(ictx context.Context) error {
 				return runFn(ictx, n)
 			})
@@ -336,6 +357,14 @@ func runAudit(ictx context.Context, r *runner.Runner, ss session.Service, log *s
 		}
 		var b strings.Builder
 		for _, p := range event.Content.Parts {
+			// Parts is []*Part and the element is not guaranteed non-nil. A nil
+			// here panics inside an errgroup goroutine, which takes the whole
+			// process down mid-sweep — including, if the timing is unlucky,
+			// between MarkStale's label write and its comment write, whose
+			// compensating rollback then never runs.
+			if p == nil {
+				continue
+			}
 			b.WriteString(p.Text)
 		}
 		if text := b.String(); text != "" {
