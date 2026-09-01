@@ -219,29 +219,73 @@ already has an issue reaches neither the diff nor a write.
 
 ### End-to-end tests against a real model
 
-`e2e_test.go` drives the bot against a **real Gemini model**. It is behind the
-`e2e` build tag, because CI discovers every `go.mod` and runs `go test ./...`
-with no API key — an untagged test there would fail every job for this module.
+`e2e_test.go` drives the bot against a **real Gemini model**, through
+production's own `runWith` with only `newModel` substituted — so tag resolution,
+grouping, the per-group session scoping, sanitization, issue assembly and the
+filing chokepoint are all the real ones. Only GitHub is faked, with `httptest`.
+
+It carries **no build tag**, deliberately. A tagged file is invisible to `go vet`
+and `go test`, so it rots silently: the version behind a tag had already drifted
+from the code it tested. Untagged, CI compiles it on every change and the suite
+skips at runtime unless you opt in twice:
 
 ```bash
-export GEMINI_API_KEY=...          # required; the suite skips without it
-export GITHUB_TOKEN=$(gh auth token)   # only for the two live-API tests
-go test -tags=e2e -count=1 -timeout=25m ./...
+export GEMINI_API_KEY=...              # without it, the model tests skip
+export GITHUB_TOKEN=$(gh auth token)   # without it, the two live tests skip
+RELEASE_DOCS_E2E=1 go test -count=1 -timeout=40m ./...
 ```
 
-Nothing can create an issue: five tests fake GitHub with `httptest` and fail if a
-write arrives, and the two live tests read the public API in dry run and assert
-zero writes. The suite covers the golden path, prompt injection delivered through
-a file name, a diff body and a commit message at once, whether model output can
-escape the issue fence, a documentation-neutral release filing nothing, multi-
-group ordering, live tag resolution, and a live release end to end.
+`TestE2EFixtures` is the exception and needs neither. It is deterministic and
+offline, so it runs in CI for free, and it checks every scenario's diff still
+decodes, survives the caps whole and lands in one group. That is what stops a
+fixture rotting while the paid half sits skipped — a scenario that has quietly
+stopped testing what it claims fails loudly, rather than months later on
+someone's API bill.
+
+**The assertions are structural.** This bot's output is mostly English, and
+English is not the contract. What the 18 scenarios assert is whether an issue is
+filed at all, which allow-listed `kind` is assigned, and whether every file a
+finding names actually appears in the diff. No assertion reads wording. Seven
+scenarios must produce a finding (new exported API, CLI flag, environment
+variable, removal, deprecation, changed default, a signature change that breaks
+an example), seven must not (internal refactor, test-only, formatting,
+dependency bump, generated code, typo fix, a patch of invisible characters),
+three deliver prompt injection through a commit message, a file name and a diff
+body, and one replays the fence-escape defect through the real model.
+
+Nothing can create an issue: the fake GitHub fails the test if any write arrives
+that is not the single expected issue, and the two live tests read the public API
+in dry run and assert zero writes.
 
 Two things worth knowing before running it. The suite pins `gemini-3.6-flash`
 rather than the production default: `gemini-flash-latest` measured 503
 "experiencing high demand" on roughly a third of calls, which is a property of
 the endpoint and would make the suite flake for a reason that says nothing about
-this code. Set `E2E_MODEL` to check the production default deliberately. And each
-run costs real model calls — the live test at the production file cap makes eight.
+this code. Set `LLM_MODEL_NAME` to check the production default deliberately. And
+each run costs real model calls — 18 for the scenarios, 8 more for the live test
+at the production file cap.
+
+### Mutation testing the prompt
+
+The suite above proves the bot behaves with the prompt it has. It cannot say
+which parts of that prompt are doing the work, and inert text in a prompt is not
+free: it is tokens on every call, and a future editor will preserve it carefully
+because it looks deliberate.
+
+`prompt_mutation_test.go` deletes one section of `prompt_instruction.txt` at a
+time, re-runs every scenario, and reports which decisions flipped. A section no
+scenario misses is a finding.
+
+```bash
+RELEASE_DOCS_E2E=1 RELEASE_DOCS_PROMPT_MUTATIONS=1 \
+  go test -run TestE2EPromptMutations -timeout 90m -v .
+```
+
+Gated separately because it costs one model call per scenario per mutation.
+`TestPromptMutationsApply` is the ungated half and matters more than it looks: it
+asserts every mutation actually changes the prompt. A mutation whose string match
+silently failed is a no-op, and a no-op reports "no scenario flipped" — which
+reads exactly like the finding that a section is inert.
 
 ## Known limitations
 
