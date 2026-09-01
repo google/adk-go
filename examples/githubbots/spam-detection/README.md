@@ -8,15 +8,72 @@ solicitation. When the model judges an issue's content to be spam it:
 1. **Applies the spam label** (`spam` by default), and
 2. **Posts one comment** alerting the maintainers, with a short reason.
 
-Several invariants are enforced **in Go**, not merely requested in the prompt:
-**only the issue's own title and body are ever sent to the model**, so no
-stranger's comment can get somebody else's issue labelled; the bot never reviews
-an issue opened by a configured maintainer; it never re-processes an issue it
-has already labeled or alerted (idempotency);
-the model may only flag the single issue its session is scoped to, so injected
-instructions in the (untrusted) issue text cannot redirect it to another
-issue; and the one value the model writes into a GitHub comment is truncated in
-Go before it is posted.
+Two things are worth knowing before anything else:
+
+- **The model only ever sees the issue's own title and body.** Comments are
+  never shown to it. That is what stops a stranger leaving one promotional
+  comment on your bug report and getting *your* issue labelled as spam.
+- **The alert comment contains text the model wrote.** Its one-sentence reason
+  is model-authored, which is unusual — the sibling ADK bots publish only labels
+  and fixed sentences. It is confined to a fenced code block, so it cannot
+  produce a clickable link, render an image, or notify anyone by `@mention`.
+
+## What happens to an issue
+
+Suppose you open an issue on this repository tomorrow morning.
+
+1. **Nothing happens immediately.** There is no trigger on issues being opened
+   or commented on. The bot wakes on a schedule, every six hours, and that is
+   deliberate: an event trigger would let any passer-by start a model run
+   holding a token that can write to your issues.
+2. **The sweep picks candidates.** It asks GitHub's search for open issues
+   updated in the last day, excluding any already labelled `spam`, and takes at
+   most 30 — most recently updated first.
+3. **Your issue is fetched**, along with its labels and up to 100 of its
+   comments.
+4. **Cheap checks run first, and most issues stop here.** The bot skips your
+   issue if it already carries the spam label, if the bot has already commented
+   on it, or if you are listed as a maintainer. If it stops here, no model is
+   called and nothing is spent.
+5. **The text for review is assembled — your title and your body, and nothing
+   else.** The comments fetched in step 3 are used only to check whether the bot
+   already alerted on the thread; they are not shown to the model. Your title
+   and body are each truncated to about 1500 characters, wrapped in a marker
+   carrying a random number so that text inside cannot pretend the marker has
+   ended, and labelled with your GitHub author association (whether you are a
+   first-time contributor, a member, and so on) as a hint rather than a verdict.
+6. **The model is asked one question: is this spam?** It gets its own private
+   session for your issue alone, and its only available action is "flag this
+   issue".
+7. **If it says no, the run ends.** Nothing is written. Your issue may be
+   reviewed again on a later sweep if it is updated.
+8. **If it says yes, Go checks the answer before acting.** The flag is rejected
+   unless it names your issue and no other; a second flag on the same issue in
+   the same run is ignored; and in dry-run mode every write is logged instead of
+   sent.
+9. **Two things are written, in this order:** a comment saying the issue's title
+   and body were flagged, quoting the model's reason inside a code block, and
+   then the `spam` label. The comment goes first deliberately — if only one of
+   the two can succeed, a notified maintainer is worth more than a label.
+10. **The run stops on its own budget.** A single issue gets one minute, the
+    whole sweep fifteen, and an overrun exits non-zero so a stuck run is visible
+    rather than silently truncated.
+
+Nothing here deletes, hides, edits or closes anything. The bot labels and
+comments, and a human decides what to do next.
+
+### What is guaranteed by code rather than asked of the model
+
+Steps 5 and 8 are the load-bearing ones, and they are enforced in Go because a
+prompt can be argued with by the text it is reading:
+
+- Only the issue's own title and body reach the model (step 5).
+- The model may flag only the issue its session is scoped to, so injected
+  instructions cannot redirect it at a different issue (step 8).
+- An issue already labelled or already alerted is never re-processed (step 4).
+- An issue opened by a configured maintainer is never reviewed (step 4).
+- The model's reason is stripped of invisible characters, truncated, and fenced
+  before it is posted (step 9).
 
 ## What it demonstrates
 
@@ -37,9 +94,10 @@ Go before it is posted.
 - Calling the GitHub REST API (`go-github`) and GraphQL API (a raw POST through
   the same authenticated client) from code.
 
-## The agent loop
+## The same sequence in ADK terms
 
-If you are new to ADK, this is the core flow (`main.go`):
+The walkthrough above is what a maintainer sees. This is the same run described
+in the framework's vocabulary, for anyone reading the code (`main.go`):
 
 1. Code selects the candidate issues (a sweep via the Search API, or a single
    `-issue`).
