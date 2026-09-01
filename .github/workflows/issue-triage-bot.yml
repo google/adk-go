@@ -28,11 +28,10 @@ on:
         required: false
         default: true
 
-# The agent sets an issue type and adds a label; contents:read is what checkout
-# needs and nothing else is granted.
-permissions:
-  contents: read
-  issues: write
+# Nothing at workflow level, so a job added later starts with no token scopes
+# and has to ask. Granting issues:write here instead would be equivalent today,
+# with one job, and would silently widen the moment there are two.
+permissions: {}
 
 # Constant on purpose, NOT keyed on the issue number. Keying it on the number
 # would put a scheduled sweep in a different group from an event run for an
@@ -48,6 +47,11 @@ jobs:
     # A fork inherits the schedule, and its token cannot write here anyway.
     if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
+    # The agent sets an issue type and adds a label; contents:read is what
+    # checkout needs and nothing else is granted.
+    permissions:
+      contents: read
+      issues: write
     # Must stay above SWEEP_TIMEOUT below, with room for the cold `go run`
     # compile that precedes it. Hitting this limit kills the process without a
     # word; the process-side budget is what makes an overrun report instead.

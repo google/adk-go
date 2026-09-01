@@ -334,14 +334,18 @@ func (n issueNode) toIssue() Issue {
 	if n.IssueType != nil {
 		typeName = n.IssueType.Name
 	}
+	// Truncate here so long bodies never bloat the prompt, and never sit in
+	// memory for the whole sweep, whether the issue arrives via the batch sweep
+	// or a single-issue fetch. The fact travels with the text so that
+	// buildIssuePrompt can disclose it outside the untrusted fence.
+	body, bodyCut := truncate(n.Body, maxBodyRunes)
 	return Issue{
-		Number: n.Number,
-		Title:  n.Title,
-		// Truncate here so long bodies never bloat the prompt, whether the
-		// issue arrives via the batch sweep or a single-issue fetch.
-		Body:   truncate(n.Body, maxBodyRunes),
-		Labels: labels,
-		Type:   typeName,
+		Number:        n.Number,
+		Title:         n.Title,
+		Body:          body,
+		BodyTruncated: bodyCut,
+		Labels:        labels,
+		Type:          typeName,
 	}
 }
 

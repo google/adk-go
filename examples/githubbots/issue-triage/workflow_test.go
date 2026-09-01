@@ -50,6 +50,49 @@ func readWorkflow(t *testing.T) string {
 // suite never looks at it.
 const workflowPath = "../../../.github/workflows/issue-triage-bot.yml"
 
+// The write scope belongs to the job that writes, not to the workflow.
+//
+// Permissions declared at workflow level apply to every job in it, so granting
+// issues:write there hands the token to any job added later -- a reporting step,
+// a notifier -- that has no business writing to the tracker. With one job the two
+// placements behave identically, which is exactly why this drifts: nothing fails
+// when the grant is in the wrong place, right up until the second job exists.
+//
+// Both halves are asserted. The deny-all at workflow level matters on its own:
+// without it a new job falls back to the repository's default token scopes
+// rather than to nothing, and that default is a repository setting this file
+// cannot see or control.
+func TestWorkflowGrantsWriteOnlyToTheJobThatWrites(t *testing.T) {
+	raw := readWorkflow(t)
+
+	if !regexp.MustCompile(`(?m)^permissions: \{\}\s*$`).MatchString(raw) {
+		t.Errorf("%s does not declare `permissions: {}` at workflow level. Without it a job added "+
+			"later inherits the repository default token scopes instead of nothing.", workflowPath)
+	}
+	// A workflow-level block with entries under it is the failure this guards.
+	if m := regexp.MustCompile(`(?m)^permissions:[ \t]*\n((?:[ \t]+\S+:.*\n)+)`).FindStringSubmatch(raw); m != nil {
+		t.Errorf("%s grants token scopes at workflow level:\n%s"+
+			"Every job in the workflow inherits these, including ones added later. Move them onto "+
+			"the job that needs them.", workflowPath, m[1])
+	}
+
+	_, jobs, found := strings.Cut(raw, "\njobs:\n")
+	if !found {
+		t.Fatalf("no jobs: block in %s; this guard no longer knows where to look", workflowPath)
+	}
+	// Four spaces is job level, six is a scope under it.
+	if !regexp.MustCompile(`(?m)^    permissions:[ \t]*$`).MatchString(jobs) {
+		t.Errorf("the job in %s declares no permissions: block of its own, so its token scopes are "+
+			"whatever it inherits.", workflowPath)
+	}
+	for _, want := range []string{"issues: write", "contents: read"} {
+		if !regexp.MustCompile(`(?m)^      ` + regexp.QuoteMeta(want) + `[ \t]*$`).MatchString(jobs) {
+			t.Errorf("the job in %s does not grant %q itself. It sets an issue type and adds a label, "+
+				"and checkout needs to read, so both belong on the job.", workflowPath, want)
+		}
+	}
+}
+
 // literalEnv matches the `KEY: value` lines of the workflow's env block that
 // carry a literal, ignoring the ones whose value is a ${{ }} expression or a
 // secret -- those are supplied by the runner and cannot be replayed here.

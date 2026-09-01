@@ -26,6 +26,11 @@ type Issue struct {
 	Title  string   `json:"title"`
 	Body   string   `json:"body"`
 	Labels []string `json:"labels"`
+	// BodyTruncated records that Body was shortened when the issue was read,
+	// so the prompt can say so outside the untrusted fence. Carrying the fact
+	// rather than a marker in the text is what makes the disclosure
+	// unforgeable: an author can write "[truncated]", not set this.
+	BodyTruncated bool `json:"bodyTruncated"`
 	// Type is the GitHub issue type name (e.g. "Bug"), or "" when unset.
 	Type string `json:"type"`
 }
@@ -89,16 +94,23 @@ func canonicalType(t string) (string, bool) {
 	return "", false
 }
 
-// truncate shortens s to at most n runes, appending an ellipsis marker when it
-// trims. Keeps very long issue bodies from bloating the prompt. A non-positive
-// n truncates to nothing rather than panicking on the slice.
-func truncate(s string, n int) string {
+// truncate shortens s to at most n runes and reports whether it had to. Keeps
+// very long issue bodies from bloating the prompt. A non-positive n truncates
+// to nothing rather than panicking on the slice.
+//
+// It appends no marker, deliberately. What it returns is quoted inside the
+// untrusted fence, so a notice added here would sit among the author's own
+// words -- where the author can type the same thing. A real truncation and a
+// forged one would be identical bytes, and the model would have no way to tell
+// "we cut this" from "the reporter wrote that we cut this". The caller states
+// the fact outside the fence instead, where nothing an author writes reaches.
+func truncate(s string, n int) (string, bool) {
 	if n <= 0 {
-		return "\n…[truncated]"
+		return "", s != ""
 	}
 	r := []rune(s)
 	if len(r) <= n {
-		return s
+		return s, false
 	}
-	return string(r[:n]) + "\n…[truncated]"
+	return string(r[:n]), true
 }

@@ -46,6 +46,45 @@ whatever an attacker asks, and read what the Go code still refuses:
   default — which is "act for real".
 - **A pinned tool inventory.** A test asserts the exact tool set, so an ungated
   tool reaching the same state cannot be added silently.
+- **A cap on tool calls per issue and field.** `maxAttemptsPerIssue` allows 8
+  calls per `(issue, field)`; a well-behaved run makes one. Nothing in the agent
+  loop bounds how many calls a model emits in a turn, and each one that clears
+  the allow-list would otherwise spend a GitHub read, so the budget is a count
+  and not only wall clock.
+
+### The bot writes no free text at all
+
+Worth stating on its own, because it is the strongest security property here and
+it is easy to miss among the gates above. A bot posting under an official
+identity on a public repository carries a reputational risk distinct from
+misclassification: that an attacker gets **their** words published as **ours** —
+a link, a mention that pings an uninvolved stranger, an image whose address
+carries data, an accusation.
+
+This bot cannot do that, whatever the model decides. Its entire write surface to
+GitHub is two calls:
+
+| Write | What is sent |
+| --- | --- |
+| `SetType` | one of `Bug`, `Feature`, `Task` |
+| `AddLabel` | one of the configured labels, by default `bug`, `enhancement`, `documentation`, `question` |
+
+No comment, no review, no title or body edit — so there is no field free text
+could be routed into even if the model were fully complying with an injected
+instruction. The guarantee is structural rather than behavioural, and it does
+not depend on the model resisting anything.
+
+Two tests hold it in place, with `TestEveryPathToGitHubPassesTheDryRunChokepoint`
+failing if a third write path is added at all.
+`TestHostileValuesReachNeitherGitHubNorTheAllowlist` drives both tool entry
+points with a URL, a mention, a markdown image carrying data, a homoglyph of an
+allowed label, a right-to-left override, a zero-width space inside an allowed
+label and an allowed label with text appended, and requires that each is refused
+with **zero** HTTP calls — a refusal issued after the request would already have
+published it. `TestAnAcceptedValueIsWrittenInTheAllowlistsOwnSpelling` covers the
+other half: `canonicalLabel` returns the allowlist's entry rather than the string
+it was handed, so even an accepted value is written in our spelling and no byte
+of it originates with the model.
 
 ## What it demonstrates
 
@@ -301,7 +340,7 @@ The Go gates bound what a bad decision can do; they cannot make the decision
 good. Which type and which label an issue gets is decided entirely by
 `prompt_instruction.txt`, and a prompt nobody has mutation-tested is text that
 is assumed to work. `prompt_mutation_test.go` deletes each section of the
-instruction in turn and re-runs seven classification scenarios — the four honest
+instruction in turn and re-runs eight classification scenarios — five honest
 ones plus three where the issue body argues for a different, **allow-listed**
 answer — reporting which sections change behaviour and which do not.
 
@@ -310,13 +349,69 @@ ISSUE_TRIAGE_E2E=1 ISSUE_TRIAGE_PROMPT_MUTATION=1 GEMINI_API_KEY=... \
   go test -run TestPromptMutation -v -timeout 90m ./...
 ```
 
-The scenarios are chosen so no Go gate decides them: `TestPromptScenariosAreModelOnly`
-asserts that every expected value, and every value an injection pushes toward,
-is on the allow-list — otherwise the code would refuse the wrong answer and the
-scenario would measure the gate rather than the prompt. The mutator itself is
-checked without the model by `TestPromptSectionsAreDeletable`, because a
-deletion that silently stopped deleting would report every section as inert,
-which reads exactly like a real result.
+A section that flips nothing gets one of three verdicts, because a bare zero is
+ambiguous in a way that flatters the prompt:
+
+- **no change, and expected** — a Go control already refuses the wrong outcome,
+  so the text could not have been observed either way. The section names that
+  control in `goGated`.
+- **INERT** — a scenario that ran does read what the section governs, and the
+  model reached the right answer without it.
+- **UNMEASURED** — nothing that ran reads what the section governs, so the zero
+  says nothing about the prompt at all. That is a hole in the suite, and
+  reporting it as inert is the false-clean result this exercise exists to avoid.
+
+`TestPromptSectionsDeclareHowTheyAreJudged` stops the third verdict being
+produced by accident: every section must name either the Go control that makes
+it unobservable or the scenarios that watch it, and every named scenario must
+exist.
+
+The distinction is not academic, and the label rubric is the case that shows it.
+It measured as inert until a scenario existed that read its "a pure chore may
+have no categorization label if none fits" clause. With one, deleting the rubric
+makes the model mislabel a dependency bump **8 times in 10** (measured: correct
+2/10 without the section against 10/10 with it), and it is the one section of
+the instruction currently shown to be load-bearing. Two things had been hiding
+that: no scenario expected an empty label, and the allow-list was swallowing the
+evidence — every one of those 8 wrong labels was refused by `canonicalLabel`,
+leaving a repository that looked exactly like a correct decline.
+
+Each cell runs several times, three by default, and flips are reported as rates.
+A section is called load-bearing only on a majority. That threshold is measured
+rather than chosen: one cell flipped 1 of 3 runs and then 0 of 10 when re-run,
+while the real effect above shows 8 times in 10. Raise
+`ISSUE_TRIAGE_PROMPT_REPEATS` to settle anything the report calls inconclusive.
+
+**Every rate on this page was measured on `gemini-flash-latest` through Vertex
+at location `global`.** They are properties of that model, not of the bot, so
+re-take them after changing `LLM_MODEL_NAME` rather than carrying them over — a
+prompt section that is load-bearing for one model need not be for the next. The
+guarantees in [Authority limits](#authority-limits) are the opposite: they hold
+in Go whatever the model does, which is why the security claims sit there and
+not here.
+
+Three further guards keep the measurement honest:
+
+- **The scenarios must not be the instruction's own worked examples.** If they
+  are, deleting a rubric leaves the model a solved copy of the very issue it is
+  about to be asked about, so it answers by copying and the section measures
+  inert whether it is or not. The first version of the list did exactly that —
+  two of four titles were the examples almost word for word — and byte equality
+  would not have caught it, so `TestPromptScenariosAreNotTheWorkedExamples`
+  compares word overlap.
+- **No Go gate may decide a scenario.** `TestPromptScenariosAreModelOnly`
+  asserts that every expected value, and every value an injection pushes toward,
+  is on the allow-list, otherwise the code refuses the wrong answer and the
+  scenario measures the gate. The scenario expecting **no** label is the awkward
+  case: `doAddLabel` discards a label outside the allow-list with no log line
+  and leaves an identical repository behind, so a model that guessed
+  `dependencies` and a model that correctly declined are indistinguishable from
+  the writes alone. That scenario therefore also requires that the model made no
+  label call at all, which the per-field attempt counters report.
+- **The mutator itself is checked without the model** by
+  `TestPromptSectionsAreDeletable`, because a deletion that silently stopped
+  deleting would report every section as inert, which reads exactly like a real
+  result.
 
 ## Notes
 

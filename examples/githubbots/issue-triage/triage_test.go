@@ -14,7 +14,10 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNeedsTriage(t *testing.T) {
 	allowed := []string{"bug", "enhancement", "documentation", "question"}
@@ -125,25 +128,37 @@ func TestTruncateNonPositiveBound(t *testing.T) {
 	// Unreachable from either call site today -- both bounds are positive
 	// constants -- but the helper is package-visible and r[:n] would panic.
 	for _, n := range []int{0, -1} {
-		if got := truncate("abc", n); got != "\n…[truncated]" {
-			t.Errorf("truncate(%q, %d) = %q, want the truncation marker alone", "abc", n, got)
+		got, cut := truncate("abc", n)
+		if got != "" || !cut {
+			t.Errorf("truncate(%q, %d) = (%q, %t), want (\"\", true)", "abc", n, got, cut)
 		}
+	}
+	// Nothing in, nothing cut: reporting a truncation here would put a false
+	// statement in the trusted half of the prompt.
+	if got, cut := truncate("", 0); got != "" || cut {
+		t.Errorf("truncate(\"\", 0) = (%q, %t), want (\"\", false)", got, cut)
 	}
 }
 
 func TestTruncate(t *testing.T) {
-	if got := truncate("hello", 10); got != "hello" {
-		t.Errorf("truncate short string changed it: %q", got)
+	if got, cut := truncate("hello", 10); got != "hello" || cut {
+		t.Errorf("truncate(%q, 10) = (%q, %t), want it unchanged and uncut", "hello", got, cut)
 	}
-	got := truncate("hello world", 5)
-	if got == "hello world" {
-		t.Errorf("truncate did not shorten: %q", got)
+	got, cut := truncate("hello world", 5)
+	if !cut {
+		t.Errorf("truncate(%q, 5) reported no cut", "hello world")
 	}
-	if len([]rune(got)) <= 5 {
-		t.Errorf("truncate produced no marker: %q", got)
+	if got != "hello" {
+		t.Errorf("truncate(%q, 5) = %q, want %q", "hello world", got, "hello")
+	}
+	// No marker may be appended: the text goes inside the untrusted fence, and
+	// a marker there is one the reporter could have typed. The disclosure is
+	// the bool, which buildIssuePrompt states outside the fence.
+	if strings.Contains(got, "truncated") || strings.Contains(got, "…") {
+		t.Errorf("truncate(%q, 5) = %q, which carries a notice inside the quoted text", "hello world", got)
 	}
 	// Multi-byte runes must not be split mid-character.
-	if got := truncate("héllo wörld", 4); []rune(got)[3] != 'l' {
+	if got, _ := truncate("héllo wörld", 4); []rune(got)[3] != 'l' {
 		t.Errorf("truncate split a rune boundary: %q", got)
 	}
 }
