@@ -161,13 +161,14 @@ func TestE2EExercisesTheDeployedPairing(t *testing.T) {
 	}
 	raw := readWorkflow(t)
 
-	m := regexp.MustCompile(`(?m)^\s*LLM_MODEL_NAME:\s*(\S+)\s*$`).FindStringSubmatch(raw)
-	if m == nil {
-		t.Fatalf("%s sets no LLM_MODEL_NAME, so it deploys whatever the floating alias %q resolves "+
-			"to on the day. Pin it, or this suite cannot know what it should be measuring.",
-			workflowPath, defaultModel)
+	// Whether a pin exists at all is TestWorkflowPinsANonFloatingModel's job,
+	// and that one runs without credentials so it fires in CI. This needs only
+	// its value.
+	wantModel, ok := workflowModel(raw)
+	if !ok {
+		t.Skipf("%s pins no model, so there is nothing here to compare against; "+
+			"TestWorkflowPinsANonFloatingModel is the failure that matters", workflowPath)
 	}
-	wantModel := strings.Trim(m[1], `"'`)
 	if got := e2eModel(); got != wantModel {
 		t.Errorf("this suite is measuring %q but the workflow deploys %q, so a green run here says "+
 			"nothing about the scheduled job. Re-run with %s=%s.", got, wantModel, e2eModelEnv, wantModel)

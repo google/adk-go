@@ -349,6 +349,14 @@ at the deployed one. It is an assertion rather than a warning because `go test`
 without `-v` discards a passing package's output, which is the invocation that
 matters.
 
+The half of that check which needs no credentials — that the workflow pins a
+model at all, and pins a version rather than another floating alias — lives in
+`TestWorkflowPinsANonFloatingModel` and runs on every push. It reads the
+workflow and compares against a constant, so leaving it behind the paid opt-in
+would have meant it never ran in CI, which is precisely where the drift it
+detects shows up. A guard nobody runs decays into the thing it was written to
+prevent.
+
 ### Mutation-testing the prompt
 
 The Go gates bound what a bad decision can do; they cannot make the decision

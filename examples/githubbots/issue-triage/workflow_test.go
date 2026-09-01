@@ -50,6 +50,53 @@ func readWorkflow(t *testing.T) string {
 // suite never looks at it.
 const workflowPath = "../../../.github/workflows/issue-triage-bot.yml"
 
+// workflowModel returns the model the workflow pins, if it pins one.
+func workflowModel(raw string) (string, bool) {
+	m := regexp.MustCompile(`(?m)^\s*LLM_MODEL_NAME:\s*(\S+)\s*$`).FindStringSubmatch(raw)
+	if m == nil {
+		return "", false
+	}
+	return strings.Trim(m[1], `"'`), true
+}
+
+// The workflow must pin the model, and this must be checkable for free.
+//
+// A pin is the difference between a scheduled job whose model is a reviewable
+// line in a diff and one that inherits whatever a floating alias resolves to
+// that morning. Not hypothetical here: the alias this bot defaults to was
+// measured returning 503 on every call over the credential path the workflow
+// uses, so before the pin every triggered run and every six-hourly sweep would
+// have failed.
+//
+// This began inside the e2e suite and does not belong there. It makes no model
+// call -- it reads the workflow and compares against a constant -- so gating it
+// behind the paid opt-in meant it never ran in CI, which is exactly where the
+// drift it detects would appear. A guard nobody runs decays into the thing it
+// was written to prevent. The half that genuinely needs a configured backend,
+// comparing what the suite actually drove against this, stays gated.
+//
+// The specific model is deliberately not asserted: naming it here would make
+// every model change a two-file edit and buy nothing. What must hold is that
+// SOME explicit, non-floating version is chosen.
+//
+// Killing mutations, both verified: delete LLM_MODEL_NAME from the workflow;
+// set it back to a *-latest alias.
+func TestWorkflowPinsANonFloatingModel(t *testing.T) {
+	raw := readWorkflow(t)
+
+	model, ok := workflowModel(raw)
+	if !ok {
+		t.Fatalf("%s sets no LLM_MODEL_NAME, so the scheduled job runs whatever the code default "+
+			"%q resolves to on the day, and a model change reaches production without a diff.",
+			workflowPath, defaultModel)
+	}
+	if model == defaultModel || strings.HasSuffix(model, "-latest") {
+		t.Errorf("%s pins LLM_MODEL_NAME to %q, which is a floating alias rather than a version. "+
+			"It can be repointed with no change to this repository, so a model regression arrives "+
+			"as a production incident and not as a broken build.", workflowPath, model)
+	}
+}
+
 // The write scope belongs to the job that writes, not to the workflow.
 //
 // Permissions declared at workflow level apply to every job in it, so granting
