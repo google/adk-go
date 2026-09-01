@@ -179,6 +179,24 @@ claim and the pinned tool set have their own suites (`authority_test.go`,
 go test -race -count=1 -shuffle=on ./...
 ```
 
+### End-to-end tests
+
+`e2e_test.go` drives the real Gemini model, the real prompt and the real tools
+against a fake GitHub, and asserts on the writes that actually reach it. It
+covers every branch of the decision tree plus two prompt-injection attempts.
+
+It is opt-in twice over. The file always compiles, so it cannot rot, but it
+never calls a paid API unless you ask it to:
+
+```bash
+STALE_BOT_E2E=1 GEMINI_API_KEY=... go test -run TestE2E -timeout 30m .
+```
+
+Each scenario first asserts that its fixture produces the `IssueState` the
+branch is about, so a drifted fixture reports itself as a fixture bug rather
+than as a model failure. A scenario whose model call keeps returning 503 is
+reported as skipped, not failed: an unavailable model proves nothing either way.
+
 ## Notes
 
 - The `MAINTAINERS` list must be supplied explicitly — the repo-scoped
