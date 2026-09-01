@@ -225,14 +225,21 @@ go test ./...
 ### End-to-end, against a real model
 
 `e2e_test.go` drives the whole bot with a **real Gemini model** and a stubbed
-GitHub, so nothing it does can reach a repository. It is behind a build tag
-rather than an environment skip, deliberately: a test that skips itself when a
-key is absent still counts as a case in a green suite, which is how coverage
-quietly disappears. It does not compile into the default suite at all.
+GitHub, so nothing it does can reach a repository.
 
 ```bash
-GEMINI_API_KEY=... go test -tags=e2e -run TestE2E -v ./...
+ISSUE_TRIAGE_E2E=1 GEMINI_API_KEY=... go test -run TestE2E -v ./...
 ```
+
+Two gates, both required, so a CI runner that happens to carry a Gemini key in
+its environment still spends nothing. It is **not** behind a build tag: a tag
+keeps the file out of the default suite but also out of the compiler, and
+measured on this module, an undefined symbol in a tag-gated test file passes
+both `go vet ./...` and `go test -race ./...`. A suite whose value is being
+runnable later must not be invisible to every gate. The cost of that choice —
+that a skipped case still counts toward a green suite — is answered by `TestMain`,
+which prints how many cases actually ran and says plainly that a run with skips
+is not a pass.
 
 Fifteen cases: classification of four representative issues, five
 prompt-injection attempts, no-overwrite of a human-set field, dry-run,
@@ -242,11 +249,32 @@ picks Bug or Task for a hostile issue is uninteresting, whether it can be
 talked into touching another issue is the whole question — and those
 assertions run whether or not the model answered.
 
-Measured over four full runs: 4/4 green, and the retry recovered 7 transient
-`503 UNAVAILABLE` responses from the provider. A case that cannot reach the
-model after all four attempts is skipped with an explicit reason rather than
-reported as a pass or a failure, because that is the provider being down and
-not the bot being wrong.
+A case that cannot reach the model after all four retry attempts is skipped with
+an explicit reason rather than reported as a pass or a failure, because that is
+the provider being down and not the bot being wrong.
+
+### Mutation-testing the prompt
+
+The Go gates bound what a bad decision can do; they cannot make the decision
+good. Which type and which label an issue gets is decided entirely by
+`prompt_instruction.txt`, and a prompt nobody has mutation-tested is text that
+is assumed to work. `prompt_mutation_test.go` deletes each section of the
+instruction in turn and re-runs seven classification scenarios — the four honest
+ones plus three where the issue body argues for a different, **allow-listed**
+answer — reporting which sections change behaviour and which do not.
+
+```bash
+ISSUE_TRIAGE_E2E=1 ISSUE_TRIAGE_PROMPT_MUTATION=1 GEMINI_API_KEY=... \
+  go test -run TestPromptMutation -v -timeout 90m ./...
+```
+
+The scenarios are chosen so no Go gate decides them: `TestPromptScenariosAreModelOnly`
+asserts that every expected value, and every value an injection pushes toward,
+is on the allow-list — otherwise the code would refuse the wrong answer and the
+scenario would measure the gate rather than the prompt. The mutator itself is
+checked without the model by `TestPromptSectionsAreDeletable`, because a
+deletion that silently stopped deleting would report every section as inert,
+which reads exactly like a real result.
 
 ## Notes
 
