@@ -168,10 +168,15 @@ which is what the design actually rests on.
 
 The scenario suite is itself mutation-tested: each section of
 `prompt_instruction.txt` is deleted or rewritten and the scenarios re-run, to
-find out which text carries behavior. One section is load-bearing — removing
-"leaving the pull request unassigned is the correct outcome" makes the model
-assign an owner to a pull request no component fits, reproduced 3 of 3. The
-other eight edits changed no decision.
+find out which text carries behavior.
+
+**What the prompt buys is the willingness to do nothing.** The one section that
+reliably carries behavior is the decline instruction — remove "leaving the pull
+request unassigned is the correct outcome" and the model assigns an owner to a
+pull request no component fits, reproduced 4 of 4. That is not an accident of
+which sentence was tested. The Go layer bounds *who* may be assigned and has no
+way to express *whether anyone should be*, so that judgement has nowhere to live
+except the prompt. It is the one decision here that no allow-list could make.
 
 That negative result is only meaningful because of a positive control: replacing
 the routing rule with "always choose documentation" moves routing from 4/4 to
@@ -179,18 +184,23 @@ the routing rule with "always choose documentation" moves routing from 4/4 to
 control, "nothing changed" would be as consistent with weak scenarios as with
 robust guidance.
 
-Four of the eight are inert for a *structural* reason, which is worth more than
-the zero: a Go control already enforces what the text asks for. The model cannot
-name a person because the tool takes a component; it cannot act twice because
-the claim is spent; forged scaffolding stays inside the fence whatever the
-warning says. For those, the mutation measures the prompt's contribution **on
-top of** the Go control, not the control itself — so an inert result there is
-the design working as intended rather than dead text.
+Two further sections are inert in outcome because a Go control already enforces
+what they ask for: the model cannot name a person, because the tool takes a
+component, and it cannot act twice, because the claim is spent. That masking
+used to make them unmeasurable — a refused request and a correct decline leave
+GitHub in the same state. The suite now records the tool calls the model
+*attempts*, separately from what Go allowed through, and with either section
+removed the model still named no login and still asked once. They are inert as
+measured, not merely hidden.
 
-The remaining inert sections are a genuine open question. These scenarios are
-deliberately unambiguous, so they cannot distinguish guidance that only matters
-in borderline cases, and there is no scenario here where the model *would* have
-been steered without the security text.
+The rest are a genuine open question, and one measurement caveat matters more
+than the list. The injection marker is a *rate*, not a state: the unmutated
+prompt steered 0 of 6 on 8 consecutive runs, and two sections showed a single
+steered case on one run each. Repeated five times, one produced a second event
+and the other produced none. A one-event difference is one sample, so the
+battery now re-runs any rate-only flip before calling a section load-bearing.
+These scenarios are also deliberately unambiguous, so they cannot distinguish
+guidance that only matters in borderline cases.
 
 ## Deliberately out of scope
 
