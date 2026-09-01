@@ -184,6 +184,14 @@ the routing rule with "always choose documentation" moves routing from 4/4 to
 control, "nothing changed" would be as consistent with weak scenarios as with
 robust guidance.
 
+The control and the section tests are different operators, and the difference is
+what makes the decline result worth stating. The control **replaces** guidance
+with a contrary instruction, which shows only that the model obeys an
+instruction it was given — cheap to demonstrate, and true of almost any prompt.
+Every section test **deletes** guidance instead, which asks the harder question
+of whether the model needed it. The decline instruction is the only section here
+that changes a decision when it is simply removed.
+
 Two further sections are masked by a Go control that already enforces what they
 ask for: the model cannot name a person, because the tool takes a component, and
 it cannot act twice, because the claim is spent. That masking used to make them
