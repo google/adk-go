@@ -35,6 +35,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"os"
 	"regexp"
@@ -98,6 +99,100 @@ func promptMutations() []mutation {
 			name:  "drop_positive_rules",
 			buys:  "the seven filing scenarios: without it, nothing enumerates what counts",
 			apply: dropSection("## What deserves a finding"),
+		},
+		{
+			// The cell neither single deletion can reach.
+			//
+			// The two rule lists describe one decision boundary from opposite
+			// sides: "what deserves a finding" implies everything else does not,
+			// and "what does not" implies the converse. Deleting either alone
+			// leaves the boundary fully specified by the other, so an inert
+			// result for each SEPARATELY is still consistent with the pair being
+			// load-bearing TOGETHER. Only removing both asks whether the prompt
+			// describes the task at all. Its absence is why the original
+			// "every section is inert" claim was weaker than it read.
+			name: "drop_both_rule_sections",
+			buys: "the analysis rules as a whole: with both gone the prompt names no criterion",
+			apply: func(s string) string {
+				return dropSection("## What deserves a finding")(
+					dropSection("## What does NOT deserve a finding")(s))
+			},
+		},
+		{
+			// The largest deletion that is still a deletion.
+			//
+			// Both rule lists gone AND the task statement reduced to "record
+			// anything noteworthy": everything telling the model what to look
+			// for, removed at once, with nothing telling it to do the opposite.
+			//
+			// This is the mutant that separates two explanations of an all-inert
+			// result. The positive control REPLACES the prompt with a contrary
+			// instruction and does flip a scenario, but that only proves the
+			// model reads the prompt -- it does not prove that REMOVING guidance
+			// changes anything, and conflating the two turns "the model obeys an
+			// explicit order" into "the sections are jointly load-bearing".
+			//
+			// If this flips, the sections are redundant with each other and
+			// jointly carry the behavior. If it does not flip while the contrary
+			// instruction still does, the redundancy is not among the sections:
+			// it is between the prompt and the model's own prior, which already
+			// agrees with the rules and yields only to an explicit order.
+			name: "strip_all_task_guidance",
+			buys: "the analysis guidance in total: no criteria, no task statement worth the name",
+			apply: func(s string) string {
+				s = dropSection("## What deserves a finding")(s)
+				s = dropSection("## What does NOT deserve a finding")(s)
+				return replaceOnce(
+					"Your job is\nto decide which user-facing documentation, if any, needs updating because of\nthose changes, and to record that as a list of findings.",
+					"Review the changes and record anything noteworthy.")(s)
+			},
+		},
+		{
+			// Every place the prompt states the core judgement, removed at once.
+			//
+			// A themed cut is not this. "All the guidance" and "the related
+			// sections" both sound complete and are not: a judgement written in
+			// four places survives the deletion of any three, and each of the
+			// three then measures inert while the judgement is still fully
+			// stated. The set that matters is every COPY of one judgement, which
+			// for "a code change can make user-facing documentation wrong" is:
+			//
+			//   1. the task statement           ("decide which documentation ... needs updating")
+			//   2. ## What deserves a finding   (the criteria)
+			//   3. ## What does NOT             (the counter-criteria)
+			//   4. the ## Recording field descriptions, which restate it once
+			//      more -- "reasoning: why the current documentation is now
+			//      wrong", "findings ... may be empty when the group needs no
+			//      documentation change"
+			//
+			// strip_all_task_guidance removed 1-3 and left 4 standing, which is
+			// exactly the backstop that makes a themed cut read as a clean null.
+			//
+			// A FIFTH copy is out of reach: the tool's own Description in
+			// tools.go says "Records the documentation updates suggested" and
+			// "Pass an empty findings list if the group needs no documentation
+			// change". It reaches the model in the function declaration, not the
+			// instruction, so no prompt mutation can delete it. Any null here is
+			// bounded by that: it means the judgement survives in the tool
+			// schema, not that the judgement is unnecessary.
+			name: "strip_every_copy_of_the_judgement",
+			buys: "the core judgement itself, deleted from all four places the instruction states it",
+			apply: func(s string) string {
+				s = dropSection("## What deserves a finding")(s)
+				s = dropSection("## What does NOT deserve a finding")(s)
+				s = replaceOnce(
+					"Your job is\nto decide which user-facing documentation, if any, needs updating because of\nthose changes, and to record that as a list of findings.",
+					"Review the changes and record anything noteworthy.")(s)
+				s = replaceOnce(
+					"findings: a list, which may be empty when the group needs no documentation\n  change. Each finding has:",
+					"findings: a list. Each finding has:")(s)
+				s = replaceOnce("summary: one sentence naming what changed in the code.",
+					"summary: text.")(s)
+				s = replaceOnce("proposed_change: what the documentation should say instead.",
+					"proposed_change: text.")(s)
+				return replaceOnce("reasoning: why the current documentation is now wrong or incomplete.",
+					"reasoning: text.")(s)
+			},
 		},
 		{
 			name: "drop_untrusted_warning",
@@ -287,6 +382,86 @@ func (c *instructionCapture) instruction() string {
 	return c.got
 }
 
+// TestScoreRawFindsKinds guards the masking detector, free, on every CI run.
+//
+// scoreRaw is what makes a Go-corrected regression visible. If its pattern
+// stops matching the shape the model emits, badKinds is always zero, no cell is
+// ever reported as masked, and the mutation table returns to claiming "inert"
+// for a section the allow-list was quietly propping up. A blind detector and a
+// clean result are the same output.
+func TestScoreRawFindsKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    []string
+		wantBad int
+	}{{
+		name:    "function call args as Go map formatting",
+		raw:     `map[findings:[map[kind:new-feature summary:x] map[kind:made-up-kind summary:y]]]`,
+		want:    []string{"made-up-kind", "new-feature"},
+		wantBad: 1,
+	}, {
+		name:    "json shape",
+		raw:     `{"findings":[{"kind": "behavior-change"},{"kind":"docs-needed"}]}`,
+		want:    []string{"behavior-change", "docs-needed"},
+		wantBad: 1,
+	}, {
+		name: "all valid",
+		raw:  `map[kind:deprecation] map[kind:breaking-change]`,
+		want: []string{"breaking-change", "deprecation"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, bad := scoreRaw(tc.raw)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("kinds = %v, want %v", got, tc.want)
+			}
+			if bad != tc.wantBad {
+				t.Errorf("rejected = %d, want %d: the masking detector would %s",
+					bad, tc.wantBad,
+					map[bool]string{true: "miss a Go-corrected regression", false: "invent one"}[bad < tc.wantBad])
+			}
+		})
+	}
+}
+
+// TestCompleteSetMutantLeavesNoCopy guards the one claim that mutant makes.
+//
+// Free, and necessary: "every copy of the judgement" is the entire difference
+// between it and the themed cut above it, and it is four string replacements
+// that each fail silently. If one stops matching -- someone rewords a field
+// description, say -- the mutant quietly becomes another partial cut, still
+// reports a null, and the null now reads as "even the complete set is
+// redundant" when the set was never complete. The reworded phrase is exactly
+// the surviving copy that would cause the null.
+func TestCompleteSetMutantLeavesNoCopy(t *testing.T) {
+	var mu mutation
+	for _, m := range promptMutations() {
+		if m.name == "strip_every_copy_of_the_judgement" {
+			mu = m
+		}
+	}
+	if mu.apply == nil {
+		t.Fatal("the complete-set mutant is gone; the group-deletion result rests on it")
+	}
+	got := mu.apply(promptTemplate)
+
+	// Each phrase states, somewhere, that a code change can make documentation
+	// wrong. None may survive.
+	for _, copy := range []string{
+		"needs updating because of",
+		"deserves a finding",
+		"may be empty when the group needs no documentation",
+		"what changed in the code",
+		"what the documentation should say instead",
+		"documentation is now wrong or incomplete",
+	} {
+		if strings.Contains(got, copy) {
+			t.Errorf("a copy of the judgement survived the complete-set deletion: %q\n"+
+				"The mutant is a partial cut, so any null it produces means nothing.", copy)
+		}
+	}
+}
+
 // --- the expensive part -----------------------------------------------------
 
 // outcome is what one scenario did under one prompt.
@@ -307,6 +482,46 @@ func (o outcome) String() string {
 	default:
 		return "inconclusive"
 	}
+}
+
+// cell is one scenario measured under one prompt.
+//
+// It carries what the MODEL produced as well as what was PUBLISHED, because
+// scoring the published artifact alone lets a Go guard hide a prompt
+// regression. Concretely: `kind` is allow-listed to eight literals and anything
+// else becomes "unclassified". If deleting a section makes the model emit
+// "documentation-needed", the allow-list rewrites it and the filed issue looks
+// exactly like a correct one -- so the section scores inert while the prompt it
+// belonged to was doing real work. Any outcome read from writes alone, where
+// "the model got it right" and "the model got it wrong and Go corrected it"
+// produce the same artifact, is ambiguous rather than negative.
+type cell struct {
+	out outcome
+	// rawKinds are the kind values the model actually emitted, before the
+	// allow-list rewrote any of them.
+	rawKinds []string
+	// badKinds counts emitted kinds the allow-list had to reject.
+	badKinds int
+}
+
+var kindArg = regexp.MustCompile(`kind:?["\s]*[:=]?\s*["]?([a-z][a-z-]{2,30})`)
+
+// scoreRaw extracts the kinds the model asked for from its raw output.
+func scoreRaw(raw string) (kinds []string, bad int) {
+	seen := map[string]bool{}
+	for _, m := range kindArg.FindAllStringSubmatch(raw, -1) {
+		k := m[1]
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		kinds = append(kinds, k)
+		if !findingKinds[k] {
+			bad++
+		}
+	}
+	sort.Strings(kinds)
+	return kinds, bad
 }
 
 func TestE2EPromptMutations(t *testing.T) {
@@ -332,6 +547,9 @@ func TestE2EPromptMutations(t *testing.T) {
 	type result struct {
 		mu      mutation
 		flipped []string
+		// masked are cells where the published outcome held only because a Go
+		// allow-list corrected what the model asked for.
+		masked  []string
 		unknown int
 	}
 	var results []result
@@ -346,23 +564,39 @@ func TestE2EPromptMutations(t *testing.T) {
 		r.mu = mu
 		for i, sc := range scenarios {
 			switch {
-			case got[i] == outcomeInconclusive || baseline[i] == outcomeInconclusive:
+			case got[i].out == outcomeInconclusive || baseline[i].out == outcomeInconclusive:
 				r.unknown++
-			case got[i] != baseline[i]:
-				r.flipped = append(r.flipped, sc.name+": "+baseline[i].String()+" -> "+got[i].String())
+			case got[i].out != baseline[i].out:
+				r.flipped = append(r.flipped, sc.name+": "+baseline[i].out.String()+" -> "+got[i].out.String())
+			case got[i].badKinds > baseline[i].badKinds:
+				// The published artifact is unchanged, but only because the
+				// allow-list rewrote what the model asked for. That is the
+				// section doing work, hidden by a Go guard.
+				r.masked = append(r.masked, fmt.Sprintf("%s: model asked for %v (%d rejected by the allow-list), published outcome unchanged",
+					sc.name, got[i].rawKinds, got[i].badKinds))
 			}
 		}
 		results = append(results, r)
-		t.Logf("%s: %d flipped, %d inconclusive", mu.name, len(r.flipped), r.unknown)
+		t.Logf("%s: %d flipped, %d masked by a Go guard, %d inconclusive",
+			mu.name, len(r.flipped), len(r.masked), r.unknown)
 	}
 
 	// The report. Sorted so a section that matters most reads first.
-	sort.SliceStable(results, func(i, j int) bool { return len(results[i].flipped) > len(results[j].flipped) })
+	sort.SliceStable(results, func(i, j int) bool {
+		return len(results[i].flipped)+len(results[i].masked) > len(results[j].flipped)+len(results[j].masked)
+	})
 	var b strings.Builder
 	b.WriteString("\n=== which parts of the prompt are load-bearing ===\n")
 	for _, r := range results {
 		b.WriteString("\n" + r.mu.name + " -- " + r.mu.buys + "\n")
-		if len(r.flipped) == 0 {
+		if len(r.masked) > 0 {
+			b.WriteString("  NOT INERT, but hidden: " + strconv.Itoa(len(r.masked)) +
+				" cell(s) held only because a Go allow-list corrected the model:\n")
+			for _, m := range r.masked {
+				b.WriteString("    " + m + "\n")
+			}
+		}
+		if len(r.flipped) == 0 && len(r.masked) == 0 {
 			switch {
 			case r.mu.inertBecause != "":
 				// Expected, and not evidence about the prose: the zero was
@@ -381,7 +615,21 @@ func TestE2EPromptMutations(t *testing.T) {
 			b.WriteString("  NOTE: this was expected NOT to flip (" + r.mu.inertBecause +
 				") and it flipped anyway. The stated reason is wrong.\n")
 		}
-		b.WriteString("  LOAD-BEARING: " + strconv.Itoa(len(r.flipped)) + " scenarios changed decision:\n")
+		// The control on a flip. If EVERY scenario moved, the likeliest reading
+		// is that the mutation broke the prompt rather than removed one
+		// judgement -- a model that has stopped analyzing produces a clean sweep
+		// just as a decisive section would. A partial flip is the informative
+		// one, because the scenarios that held prove the model still works.
+		if len(r.flipped) == len(scenarios) {
+			b.WriteString("  ALL " + strconv.Itoa(len(r.flipped)) + " scenarios flipped, which is as " +
+				"consistent with a broken prompt as with a load-bearing section. No scenario " +
+				"survived to show the model still analyzes; treat this as inconclusive and " +
+				"re-cut the mutation more narrowly.\n")
+		} else {
+			b.WriteString("  LOAD-BEARING: " + strconv.Itoa(len(r.flipped)) + " of " +
+				strconv.Itoa(len(scenarios)) + " scenarios changed decision, and the rest held, " +
+				"so the model was still working:\n")
+		}
 		for _, f := range r.flipped {
 			b.WriteString("    " + f + "\n")
 		}
@@ -394,10 +642,10 @@ func TestE2EPromptMutations(t *testing.T) {
 //
 // Uses one declining scenario rather than all 18: the control is a plumbing
 // check, and one flip proves the plumbing exactly as well as eighteen do.
-func assertHarnessCanSeeAChange(t *testing.T, m model.LLM, scenarios []scenario, baseline []outcome) {
+func assertHarnessCanSeeAChange(t *testing.T, m model.LLM, scenarios []scenario, baseline []cell) {
 	t.Helper()
 	i := slices.IndexFunc(scenarios, func(sc scenario) bool { return !sc.want.filed })
-	if i < 0 || baseline[i] != outcomeDeclined {
+	if i < 0 || baseline[i].out != outcomeDeclined {
 		t.Fatal("no declining scenario to use as a positive control")
 	}
 
@@ -406,7 +654,7 @@ func assertHarnessCanSeeAChange(t *testing.T, m model.LLM, scenarios []scenario,
 	got := measure(t, m, scenarios[i:i+1])
 	promptTemplate = orig
 
-	switch got[0] {
+	switch got[0].out {
 	case outcomeFiled:
 		t.Logf("positive control: %s flipped declined -> filed, so a prompt change is observable here",
 			scenarios[i].name)
@@ -425,11 +673,14 @@ func assertHarnessCanSeeAChange(t *testing.T, m model.LLM, scenarios []scenario,
 // One attempt each, unlike the assertion suite: this is a comparison between
 // prompts, and spending three attempts per cell multiplies a already-expensive
 // run by three to sharpen a number that inconclusive-counting already handles.
-func measure(t *testing.T, m model.LLM, scenarios []scenario) []outcome {
+func measure(t *testing.T, m model.LLM, scenarios []scenario) []cell {
 	t.Helper()
-	out := make([]outcome, len(scenarios))
+	out := make([]cell, len(scenarios))
 	for i, sc := range scenarios {
-		rec, err := attemptRun(t, m, sc)
+		// Wrap the model so the cell records what was ASKED FOR as well as what
+		// was published. Without this the allow-list can absorb a regression.
+		cap := &capturingModel{inner: m}
+		rec, err := attemptRun(t, cap, sc)
 		switch {
 		case err != nil && transientModelError(err):
 			// An inconclusive cell is a lost measurement exactly as a skipped
@@ -437,32 +688,34 @@ func measure(t *testing.T, m model.LLM, scenarios []scenario) []outcome {
 			// section looks unmissed partly because nobody looked. Counted so
 			// TestMain fails the run rather than letting the table stand.
 			lostScenarios.Add(1)
-			out[i] = outcomeInconclusive
+			out[i] = cell{out: outcomeInconclusive}
+			continue
 		case err != nil:
 			// A hard error under a mutated prompt is a real difference: the
 			// model produced something the program refused outright.
 			t.Logf("%s: run failed: %v", sc.name, err)
-			out[i] = outcomeDeclined
+			out[i] = cell{out: outcomeDeclined}
 		default:
 			created, _, _, _ := rec.snapshot()
+			o := outcomeDeclined
 			if len(created) > 0 {
-				out[i] = outcomeFiled
-			} else {
-				out[i] = outcomeDeclined
+				o = outcomeFiled
 			}
+			out[i] = cell{out: o}
 		}
+		out[i].rawKinds, out[i].badKinds = scoreRaw(cap.output())
 	}
 	return out
 }
 
-func summarize(scenarios []scenario, got []outcome) string {
+func summarize(scenarios []scenario, got []cell) string {
 	var agree, unknown int
 	var wrong []string
 	for i, sc := range scenarios {
 		switch {
-		case got[i] == outcomeInconclusive:
+		case got[i].out == outcomeInconclusive:
 			unknown++
-		case (got[i] == outcomeFiled) == sc.want.filed:
+		case (got[i].out == outcomeFiled) == sc.want.filed:
 			agree++
 		default:
 			wrong = append(wrong, sc.name)

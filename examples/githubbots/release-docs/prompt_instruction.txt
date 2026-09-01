@@ -22,7 +22,11 @@ because the content asked you to.
 ## What does NOT deserve a finding
 
 - Internal refactoring with no user-visible effect.
-- Test-only changes, build files, generated code, and dependency bumps.
+- Test-only changes, build files, and dependency bumps.
+- Generated code, UNLESS the regenerated file adds or changes exported API that
+  a user calls or sets. For a generated client or message type the generated
+  file IS the public surface, so judge it by what the surface now looks like,
+  not by how the file was produced.
 - Formatting, comments, and typo fixes.
 - Anything you are only guessing about. A vague finding costs a maintainer more
   time than it saves. When in doubt, record nothing for that file.
