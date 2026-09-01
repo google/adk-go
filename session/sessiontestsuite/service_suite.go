@@ -17,6 +17,7 @@
 package sessiontestsuite
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,6 +382,11 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 		})
 		if err == nil {
 			t.Errorf("Expected error when getting deleted session")
+		} else if !errors.Is(err, session.ErrNotFound) {
+			// A Service that reports a missing session as a plain error leaves
+			// callers unable to tell it from a storage failure, so the REST
+			// layer answers 500 where it owes the client a 404.
+			t.Errorf("Get(deleted session) error = %v, want an error wrapping session.ErrNotFound", err)
 		}
 
 		if opts.SupportsUserProvidedSessionID {
@@ -439,6 +445,41 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			err := s.AppendEvent(ctx, m, event)
 			if err == nil {
 				t.Errorf("AppendEvent() expected error for non-existent session, got nil")
+			}
+		})
+
+		t.Run("when_session_deleted_returns_ErrNotFound", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			if err := s.Delete(ctx, &session.DeleteRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			}); err != nil {
+				t.Fatalf("Setup: Delete failed: %v", err)
+			}
+
+			// Unlike the case above, this passes the service a session of its
+			// own type, so it reaches the storage lookup instead of stopping at
+			// a type check. A session can disappear between a caller reading it
+			// and appending to it — the REST UpdateSessionHandler does exactly
+			// that Get-then-append — and the handler owes the client a 404 for
+			// it, which it can only tell from a storage failure by the sentinel.
+			err = s.AppendEvent(ctx, created.Session, &session.Event{
+				ID:           "event1",
+				Author:       "user",
+				InvocationID: "inv1",
+			})
+			if err == nil {
+				t.Fatalf("AppendEvent(deleted session) error = nil, want an error wrapping session.ErrNotFound")
+			}
+			if !errors.Is(err, session.ErrNotFound) {
+				t.Errorf("AppendEvent(deleted session) error = %v, want an error wrapping session.ErrNotFound", err)
 			}
 		})
 
