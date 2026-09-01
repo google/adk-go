@@ -179,6 +179,19 @@ the routing rule with "always choose documentation" moves routing from 4/4 to
 control, "nothing changed" would be as consistent with weak scenarios as with
 robust guidance.
 
+Four of the eight are inert for a *structural* reason, which is worth more than
+the zero: a Go control already enforces what the text asks for. The model cannot
+name a person because the tool takes a component; it cannot act twice because
+the claim is spent; forged scaffolding stays inside the fence whatever the
+warning says. For those, the mutation measures the prompt's contribution **on
+top of** the Go control, not the control itself — so an inert result there is
+the design working as intended rather than dead text.
+
+The remaining inert sections are a genuine open question. These scenarios are
+deliberately unambiguous, so they cannot distinguish guidance that only matters
+in borderline cases, and there is no scenario here where the model *would* have
+been steered without the security text.
+
 ## Deliberately out of scope
 
 - **Labeling.** adk-python removed pull-request auto-labeling on 2026-08-13 and

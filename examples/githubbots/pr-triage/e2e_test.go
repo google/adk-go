@@ -50,8 +50,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +63,37 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/adk/v2/model"
 )
+
+// unavailableLLM stands in for a model that will not serve, so the skip
+// accounting below can be verified in seconds without waiting for a real
+// outage. Forcing it against a genuinely shedding endpoint is slow and
+// non-deterministic, which is exactly how a broken guard goes unnoticed.
+type unavailableLLM struct{}
+
+func (unavailableLLM) Name() string { return "unavailable-llm" }
+
+func (unavailableLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(nil, errors.New("Error 503, Message: This model is currently experiencing high demand, Status: UNAVAILABLE"))
+	}
+}
+
+func forcedUnavailable() bool {
+	return os.Getenv("PR_TRIAGE_E2E_FORCE_UNAVAILABLE") == "1"
+}
+
+// e2eNewModel builds the harness's model, or a permanently unavailable stub when
+// PR_TRIAGE_E2E_FORCE_UNAVAILABLE=1. The stub exists to test the TEST HARNESS --
+// specifically that a run which measures nothing cannot exit 0.
+func e2eNewModel(ctx context.Context, cfg *Config) (model.LLM, error) {
+	if forcedUnavailable() {
+		return unavailableLLM{}, nil
+	}
+	return newModel(ctx, cfg)
+}
 
 // e2eStats separates scenarios that actually measured something from ones the
 // provider took away.
@@ -96,8 +128,16 @@ func e2eRetried() {
 	e2eStats.retries++
 }
 
-// TestMain reports what the run actually measured, and fails a run that lost
+// TestMain reports what the run actually measured, and FAILS a run that lost
 // scenarios to the provider even though every test "passed".
+//
+// The signal is the EXIT CODE, not the message. `go test` without -v discards a
+// passing package's output entirely, so a guard that only prints is invisible in
+// the invocation everyone actually uses -- a sibling bot shipped exactly that
+// and its false-green guard was itself a false green. The message is for a human
+// reading -v output; the exit code is the contract.
+//
+// Verify it with PR_TRIAGE_E2E_FORCE_UNAVAILABLE=1 and no -v.
 func TestMain(m *testing.M) {
 	code := m.Run()
 
@@ -488,7 +528,12 @@ func assertFixturePrecondition(t *testing.T, cfg *Config, pr e2ePR) {
 func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 	t.Helper()
 	assertFixturePrecondition(t, cfg, pr)
-	const attempts = 6
+	attempts := 6
+	if forcedUnavailable() {
+		// Retrying a stub that can never succeed only makes verifying the guard
+		// slow, and a slow check is one nobody runs.
+		attempts = 1
+	}
 	var last e2eResult
 	var lastLog string
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -500,7 +545,7 @@ func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 		recLog := slog.New(slog.NewTextHandler(&lockedWriter{w: &logBuf, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 		client := newE2EClientWithLog(t, cfg, srv, recLog)
-		mdl, err := newModel(context.Background(), cfg)
+		mdl, err := e2eNewModel(context.Background(), cfg)
 		if err != nil {
 			t.Fatalf("newModel: %v", err)
 		}
@@ -527,7 +572,9 @@ func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 		e2eRetried()
 		t.Logf("attempt %d/%d recorded an error; retrying. Cause: %s",
 			attempt, attempts, summarizeLogError(lastLog))
-		time.Sleep(time.Duration(attempt*attempt*3) * time.Second)
+		if !forcedUnavailable() {
+			time.Sleep(time.Duration(attempt*attempt*3) * time.Second)
+		}
 	}
 	// Skip rather than fail: a model that will not serve is not evidence about
 	// the bot either way. TestMain counts this so the run cannot be read as a
@@ -1025,7 +1072,7 @@ func TestE2ENonAssignableOwnerEndsTheAttempt(t *testing.T) {
 	}
 	srv := httptestServer(t, gh)
 	client := newE2EClient(t, cfg, srv)
-	mdl, err := newModel(context.Background(), cfg)
+	mdl, err := e2eNewModel(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("newModel: %v", err)
 	}
