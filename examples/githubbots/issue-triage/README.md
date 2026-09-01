@@ -106,6 +106,18 @@ whatever an attacker asks, and read what the Go code still refuses:
   `crypto/rand` marker per field per issue, so a body cannot write its own
   closing marker and have the text after it read as instructions. A failure to
   draw the nonce aborts the issue rather than falling back to a fixed marker.
+  The **source** of that randomness is pinned by reading the code, not the
+  values, because no assertion on the output can tell the two apart: `math/rand`
+  yields hex markers that are unique, correctly distributed and the right
+  length, so every freshness and charset check here passes against a fully
+  predictable generator. Measured on this tree, the swap cleared `go build`,
+  `go vet`, `gofmt`, `go test -race -shuffle=on` **and** `golangci-lint run`.
+  `gosec` does catch it, and `gosec` is not one of the linters this
+  repository's CI runs — so `TestTheNonceIsDrawnFromCryptoRand` resolves the
+  call inside `newNonce` back to the package it came from. It is scoped to that
+  function on purpose: `retry.go` also draws from `crypto/rand`, for backoff
+  jitter and for an unrelated reason, and a file-level check would be satisfied
+  by that import while the nonce quietly used `math/rand`.
 - **One dry-run chokepoint that cannot fail open.** Every mutation passes
   through `shouldSkip`, so `-dry-run` cannot be forgotten on a new call site,
   and a malformed `DRY_RUN` aborts at startup rather than falling back to the
@@ -576,7 +588,20 @@ Three further guards keep the measurement honest:
 - **There is no per-actor rate limit.** Anyone can open issues, and each one
   costs a model call. The bounds that exist are the constant concurrency group
   (one run at a time) and `ISSUE_COUNT` per sweep, which cap the spend but do
-  not attribute it. A burst also pushes some event runs out of the queue.
+  not attribute it. A burst also pushes some event runs out of the queue. This
+  one is **unfixed rather than out of scope** — it is buildable here and nobody
+  has built it.
+
+A note on how to read the two lists above. They mix two different things, and a
+bullet makes them look identical: some entries cannot be closed from this
+repository, and some simply have not been. Only one entry is genuinely the
+former — no write has been made against a real repository, because doing so
+means mutating a real issue with a token this branch does not have. The rest,
+including the rate limit and the omitted component labels, are choices. Where
+the reason is "a rule in some other configuration would catch it", that is not
+out of scope either: the `crypto/rand` pin above exists precisely because a
+`gosec` rule this module does not own was the only thing standing behind a
+security property, and a module can close that locally.
 - **The sweep takes the newest issues first**, which is what makes it a backstop
   for dropped `issues: opened` events, and is also why it does not clear a
   backlog. An issue that keeps falling outside the newest `ISSUE_COUNT` is never
