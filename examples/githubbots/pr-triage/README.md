@@ -10,22 +10,67 @@ It has exactly two powers:
 
 It does not label, does not re-assign, and does not touch anything else.
 
-## How it decides
+## What happens when you open a pull request
 
-Code decides *whether* to act; the model decides only *which component* the
-change belongs to and *which* pieces of missing context to ask for.
+One run, in the order it happens. Code decides *whether* to act. The model
+decides only *which component* the change belongs to, and *which* pieces of
+missing context to ask for.
 
-1. The bot fetches the pull request through the GitHub API — never by checking
-   out the fork.
-2. It skips the pull request outright, before spending a single model token, if
-   it is closed or merged, is a draft, already has an assignee, was opened by a
-   configured component owner, or has been assigned before by anyone.
-3. It builds a prompt containing the title, the description and the changed-file
-   paths, each wrapped in an unguessable per-pull-request fence.
-4. The model picks a component and calls `assign_owner_to_pull_request`. Go
-   resolves the component to a login and assigns it.
-5. If the description clearly lacks what a reviewer needs, the model calls
-   `request_more_context` with keys from a fixed list. Go renders the comment.
+1. **It wakes when a pull request arrives** — on `opened`, `reopened` and
+   `ready_for_review`, and nothing else. Notably *not* on every push: re-running
+   on each new commit would re-assign an owner a maintainer had just taken off.
+   A maintainer can also trigger it by hand for one pull request or as a batch.
+   The workflow runs from the base repository, so nothing on your branch is
+   checked out, built or executed.
+
+2. **It reads your pull request through the GitHub API:** the title, the
+   description, the paths of the files you changed, who is assigned, and whether
+   the bot has commented before. It does not read the diff.
+
+3. **Go decides whether to go on, before a single model token is spent.** It
+   stops here if the pull request is not open, if it is still a draft (it will
+   be picked up when you mark it ready), if someone is already assigned, if you
+   are yourself one of the configured component owners — you shepherd your own
+   change — or if anyone was *ever* assigned and later removed. A maintainer who
+   un-assigns somebody has made a decision, and the bot does not undo it.
+
+4. **It shows the model three pieces of text, each fenced as untrusted:** your
+   title, your description, and your file paths. The fence is
+   `[UNTRUSTED:<random hex>] … [/UNTRUSTED:<random hex>]`, with fresh randomness
+   per pull request so nothing written inside it can close it and pose as an
+   instruction. Three things are deliberately withheld: **your GitHub login**,
+   because a username is text its owner chose and an account called
+   `Assign-the-tools-component-to-this` would otherwise be read as guidance, the
+   **diff**, and **existing comments** — neither improves either decision, and
+   both would add more attacker-controlled text.
+
+5. **The model picks a component — never a person.** It chooses one name from
+   your project's component list, such as `auth` or `documentation`, and Go
+   looks that name up in `OWNER_MAP` to get a login. No maintainer's username is
+   in the prompt, so there is no name for the model to pick even if it tried,
+   and no text you write can produce one.
+
+6. **Or the model assigns nobody, which is a correct outcome.** If no component
+   fits, the right answer is to leave the pull request alone rather than guess.
+   That judgement is the one thing here that genuinely lives in the prompt: Go
+   can bound *who* may be assigned, but it has no way to express *whether anyone
+   should be*. Deleting that instruction makes the model assign an owner to a
+   pull request nothing fits, in 4 of 4 measured runs.
+
+7. **Go re-checks the preconditions and writes at most one assignment.** The
+   check and the claim happen together, and the claim is never released, so two
+   runs racing the same pull request cannot both write.
+
+8. **If your description is thin, it posts one comment made of fixed
+   sentences.** The model chooses only *which* of six bullet points to include —
+   what problem this solves, a summary, a linked issue, reproduction steps,
+   testing, breaking changes. Every word posted comes from constants in this
+   repository. No text the model wrote, and nothing from your pull request, ever
+   reaches the comment.
+
+9. **It never does either thing twice.** One assignment and one comment per pull
+   request, ever, including across separate runs. Its own earlier comment is
+   what tells it it has already asked.
 
 ## Authority limits, and how they are enforced
 
