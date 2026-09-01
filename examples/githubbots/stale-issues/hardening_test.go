@@ -21,6 +21,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"iter"
 	"net/http"
@@ -624,5 +627,94 @@ func TestSubDayThresholdsRenderHonestly(t *testing.T) {
 	body := closeCommentBody(&GitHubClient{cfg: cfg, log: discardLogger()})
 	if strings.Contains(body, "0.0") {
 		t.Errorf("an hour-scale threshold published as %q: readers see broken software over the company's name", body)
+	}
+}
+
+// --- The nonce must come from a CSPRNG, and only the source can show that ----
+
+// newNonce draws the [UNTRUSTED:<hex>] fence marker, and the fence is what makes
+// every injection defence in this bot hold. A predictable nonce lets an attacker
+// pre-write the matching closing marker in their comment and escape the fence,
+// after which the model reads their text as instructions rather than as data.
+//
+// No test of the OUTPUT can catch a weak generator. math/rand yields hex tokens
+// that are unique, correctly distributed and exactly the right length, so
+// freshness, charset and length assertions all pass against it. Measured on this
+// tree: replacing the import with `rand "math/rand"` compiles cleanly and the
+// entire suite passes under -race. The property lives at the source, so it is
+// checked at the source.
+//
+// Written in the PRESENCE form — the draw inside newNonce must resolve to
+// crypto/rand — rather than as "math/rand is absent". An absence check is
+// satisfied vacuously by hoisting the draw into a helper elsewhere in the file.
+func TestTheNonceIsDrawnFromCryptoRand(t *testing.T) {
+	const wantPath = "crypto/rand"
+
+	file, err := parser.ParseFile(token.NewFileSet(), "github.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse github.go: %v", err)
+	}
+
+	// Local package name -> import path, so an ALIAS cannot hide the swap. A
+	// check for the literal string "crypto/rand" passes happily while
+	// `rand "math/rand"` sits two lines below it.
+	imports := map[string]string{}
+	for _, im := range file.Imports {
+		path := strings.Trim(im.Path.Value, `"`)
+		name := path
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			name = path[i+1:]
+		}
+		if im.Name != nil {
+			name = im.Name.Name
+		}
+		imports[name] = path
+	}
+
+	var body ast.Node
+	for _, d := range file.Decls {
+		gen, ok := d.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) == 0 || vs.Names[0].Name != "newNonce" || len(vs.Values) == 0 {
+				continue
+			}
+			body = vs.Values[0]
+		}
+	}
+	if body == nil {
+		t.Fatal("github.go has no newNonce value: the nonce draw moved, so re-point this pin at its new home rather than deleting it")
+	}
+
+	var draws []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Read" {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		draws = append(draws, imports[pkg.Name])
+		return true
+	})
+
+	// Presence, not absence: a newNonce that draws nothing has moved the draw
+	// somewhere this check cannot see, and that must fail rather than pass.
+	if len(draws) == 0 {
+		t.Fatal("newNonce contains no .Read call, so the nonce is drawn somewhere else: this pin cannot see the generator and must not report success")
+	}
+	for _, got := range draws {
+		if got != wantPath {
+			t.Errorf("the fence nonce is drawn from %q, want %q: a non-cryptographic generator produces tokens that are unique and the right length, so every output assertion still passes while an attacker can predict the closing marker and escape the fence", got, wantPath)
+		}
 	}
 }
