@@ -16,11 +16,14 @@ package main
 
 import (
 	"context"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +46,68 @@ func TestNewNonce(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("two nonces were identical (%q); the fence would be predictable", a)
+	}
+}
+
+// TestNonceIsDrawnFromACryptographicSource reads the package's own imports.
+//
+// The test above cannot do this job and no output-based check can. math/rand
+// yields unique, correctly distributed, right-length hex, so freshness, charset
+// and length assertions all pass against a generator whose next value an
+// attacker can infer from earlier ones. Measured on this package: swapping
+// crypto/rand for math/rand in main.go leaves the whole suite green, including
+// under -race. Only the source shows it.
+//
+// It matters here more than in most places. The [UNTRUSTED:<nonce>] fence is
+// the entire trust boundary between contributor-authored diff text and
+// instructions from us, so a predictable nonce lets an attacker write the
+// closing marker into a commit message and forge trusted context -- which is
+// the containment the adversarial suite's results rest on.
+//
+// Two assertions rather than one. The ABSENCE half catches an import of
+// math/rand anywhere, under any alias, because it resolves the import path and
+// not the local identifier. The PRESENCE half catches the evasion absence
+// cannot see: move the draw into a helper using some other weak source and
+// nothing imports math/rand, while crypto/rand quietly stops being used. A pin
+// written only in the absence form is satisfied vacuously the moment the code
+// it guards relocates.
+func TestNonceIsDrawnFromACryptographicSource(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parse the package: %v", err)
+	}
+
+	cryptoRand, files := false, 0
+	for _, pkg := range pkgs {
+		for name, f := range pkg.Files {
+			files++
+			for _, imp := range f.Imports {
+				path, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					t.Fatalf("%s: unquote import %s: %v", name, imp.Path.Value, err)
+				}
+				switch path {
+				case "crypto/rand":
+					cryptoRand = true
+				case "math/rand", "math/rand/v2":
+					t.Errorf("%s imports %q. The [UNTRUSTED:<nonce>] fence is unforgeable only "+
+						"while the nonce is unpredictable, and math/rand is not a cryptographic "+
+						"source: an attacker who can infer the nonce closes the fence from inside "+
+						"a commit message and forges trusted context.", name, path)
+				}
+			}
+		}
+	}
+	if files == 0 {
+		t.Fatal("parsed no non-test files, so this check proved nothing")
+	}
+	if !cryptoRand {
+		t.Errorf("no file in this package imports crypto/rand (parsed %d files). Either the nonce "+
+			"draw moved somewhere this check cannot see, or it stopped being cryptographic. The "+
+			"absence half above cannot tell those apart, which is why this half exists.", files)
 	}
 }
 

@@ -624,11 +624,14 @@ Making prose an allow-list would close that at a real cost to readability.
 - **The list probe is bounded** to the most recent 300 issues in the target
   repository. Beyond that, duplicate detection rests on the search probe alone,
   which is eventually consistent.
-- **Duplicate detection trusts an authored-by-a-GitHub-App fallback.** The
-  built-in Actions token cannot read its own user, so the bot cannot resolve its
-  own login and accepts any App-authored issue carrying the marker on line one.
-  An App installed on the target repository could therefore suppress one
-  release's issue. It cannot cause a wrong write.
+- **Duplicate detection widens to authored-by-any-GitHub-App when `BOT_LOGIN` is
+  unset.** The built-in Actions token cannot read its own user, so the bot
+  cannot discover its own login and has to be told it. With `BOT_LOGIN` set —
+  the workflow sets `github-actions[bot]` — an existing issue counts as the
+  bot's own only on an exact login match. Left unset, the check falls back to
+  "authored by some GitHub App", and an App installed on the target repository
+  could then suppress one release's issue. Neither case can cause a wrong
+  write.
 - **The comparison is fetched over a bounded number of pages.** A release larger
   than that reports its file and commit totals as lower bounds, and says so.
 - **A model can be steered into reporting nothing for a group.** Text in a commit
