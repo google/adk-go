@@ -710,3 +710,49 @@ func TestNormalizeKeepsTheClassifiableText(t *testing.T) {
 		})
 	}
 }
+
+// The alert's own sentence has to describe the decision the bot actually made.
+//
+// This is the one defect class that no security gate can reach. The wording
+// that shipped before this test said "a suspected spam comment was detected in
+// this thread", which was true until the review was narrowed to the issue's own
+// title and body, and then became a public statement -- under the project's
+// identity, on a stranger's issue -- sending maintainers to look for a comment
+// the bot never reads. Every invariant held throughout: the text was correctly
+// fenced, carried no live link, and broke no scoping rule. It was wrong only in
+// what it told a human, so only a human reading it as its audience found it.
+//
+// It also went uncaught because the only assertion on the wording lived in the
+// end-to-end suite, behind a paid opt-in. A check on what CI publishes must not
+// itself be gated on someone choosing to spend money, so this one is a plain
+// unit test with no model and no flag.
+//
+// It pins the PROPERTY rather than the sentence: reword freely, but the lead
+// must still say the issue's own title and body were judged, and must not tell
+// a maintainer a comment was involved.
+func TestAlertLeadDescribesWhatWasActuallyJudged(t *testing.T) {
+	const reason = "the issue body is an unrelated promotional link"
+	lead, _, ok := strings.Cut(buildAlertComment(reason), "\n\nReason:")
+	if !ok {
+		t.Fatalf("the alert no longer has a reason block, so its lead cannot be located:\n%s",
+			buildAlertComment(reason))
+	}
+	low := strings.ToLower(lead)
+
+	// What the bot actually reads, and therefore all it may claim to have judged.
+	for _, want := range []string{"title", "body"} {
+		if !strings.Contains(low, want) {
+			t.Errorf("the alert does not say the issue's %s was judged, so it does not tell a "+
+				"maintainer what was actually looked at:\n%s", want, lead)
+		}
+	}
+
+	// assembleSuspectText never puts a comment in front of the model, so the
+	// alert must not imply one was read. The lead is entirely bot-authored --
+	// the model's reason sits below the split -- so any mention here is ours.
+	if strings.Contains(low, "comment") {
+		t.Errorf("the alert's own sentence mentions a comment, but comments are never sent to "+
+			"the model (see assembleSuspectText). This sends maintainers looking for something "+
+			"the bot did not read:\n%s", lead)
+	}
+}
