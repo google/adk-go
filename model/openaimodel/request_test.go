@@ -746,3 +746,49 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestNewJSONSchemaFormatDoesNotMutateResponseJSONSchema(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"nested": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{"type": "string"},
+				},
+			},
+			"reference": map[string]any{
+				"$ref":        "#/$defs/item",
+				"description": "caller-owned metadata",
+			},
+		},
+		"$defs": map[string]any{
+			"item": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "integer"},
+				},
+			},
+		},
+	}
+	want, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("json.Marshal(schema) error = %v", err)
+	}
+
+	format, err := newJSONSchemaFormat(&genai.GenerateContentConfig{ResponseJsonSchema: schema})
+	if err != nil {
+		t.Fatalf("newJSONSchemaFormat() error = %v", err)
+	}
+	if got := format.Schema["additionalProperties"]; got != false {
+		t.Fatalf("newJSONSchemaFormat() additionalProperties = %v, want false", got)
+	}
+
+	got, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("json.Marshal(schema) after conversion error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("newJSONSchemaFormat() mutated ResponseJsonSchema: got %s, want %s", got, want)
+	}
+}

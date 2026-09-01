@@ -438,22 +438,18 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseF
 }
 
 func normalizeSchema(schema any) (map[string]any, error) {
-	switch s := schema.(type) {
-	case map[string]any:
-		return s, nil
-	case nil:
+	if schema == nil {
 		return nil, ErrEmptyJSONSchema
-	default:
-		bytes, err := json.Marshal(s)
-		if err != nil {
-			return nil, fmt.Errorf("openai: marshal json schema: %w", err)
-		}
-		var result map[string]any
-		if err := json.Unmarshal(bytes, &result); err != nil {
-			return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
-		}
-		return result, nil
 	}
+	bytes, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal json schema: %w", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
+	}
+	return result, nil
 }
 
 // enforceStrictOpenAISchema recursively walks the schema and enforces the rules
