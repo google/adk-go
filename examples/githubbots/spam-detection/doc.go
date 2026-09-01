@@ -71,11 +71,12 @@
 // rather than an @maintainers mention; and bounded concurrency replaces Python's
 // inter-batch sleep. See README.md for the full list.
 //
-// Detection is best-effort against a determined evader: a spammer who appends
-// instruction-shaped prose to their spam escapes it about two times in three,
-// against a control that is caught every time (measured; see README.md, which
-// also records an inversion that was tried against this and not shipped). The
-// Go controls are what hold under that, not the classification.
+// Detection quality is a property of the model, and the workflow pins one for
+// that reason. A spammer who appends instruction-shaped prose to their spam
+// escapes gemini-flash-latest about two times in three, and escaped the pinned
+// gemini-3.6-flash zero times in 50 (measured; see README.md, which also records
+// an inversion tried against this and not shipped). The Go controls hold either
+// way -- they are what bounds the damage when the classification is wrong.
 //
 // The agent runs from .github/workflows/spam-detection-bot.yml on a six-hourly
 // schedule and on manual dispatch, using the built-in GITHUB_TOKEN. There is

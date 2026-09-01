@@ -229,6 +229,28 @@ func (c *Config) validate() error {
 	if c.RunTimeout <= 0 {
 		c.RunTimeout = defaultRunTimeout
 	}
+	// The run budget has to be able to cover the work the run is told to do.
+	//
+	// The sweep processes IssueCount issues in waves of Concurrency, and each
+	// issue may take up to IssueTimeout, so the worst case is
+	// ceil(IssueCount/Concurrency) * IssueTimeout. Where that exceeds RunTimeout
+	// the configuration is unsatisfiable by arithmetic: the run cannot finish
+	// its own declared work set even when nothing goes wrong. Expiry is
+	// deliberately fail-loud, so every sweep that takes the slow path reports a
+	// failure that is not one -- and an attacker only has to open enough issues
+	// whose text keeps the model busy to make that the normal outcome, which
+	// trains maintainers to ignore the bot.
+	//
+	// Rejected at startup rather than clamped. Clamping would review fewer
+	// issues than the operator asked for without saying so, and quietly doing
+	// less moderation than configured is the worse failure of the two.
+	if waves := (c.IssueCount + c.Concurrency - 1) / c.Concurrency; c.IssueTimeout*time.Duration(waves) > c.RunTimeout {
+		return fmt.Errorf(
+			"RUN_TIMEOUT %s cannot cover the configured work: ISSUE_COUNT %d at CONCURRENCY_LIMIT %d is %d wave(s), "+
+				"and at ISSUE_TIMEOUT %s each that is %s in the worst case. Raise RUN_TIMEOUT, lower ISSUE_TIMEOUT "+
+				"or ISSUE_COUNT, or raise CONCURRENCY_LIMIT",
+			c.RunTimeout, c.IssueCount, c.Concurrency, waves, c.IssueTimeout, c.IssueTimeout*time.Duration(waves))
+	}
 	return nil
 }
 

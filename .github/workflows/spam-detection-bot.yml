@@ -107,6 +107,16 @@ jobs:
           # The built-in token, narrowed by the job's permissions block above.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # An explicit model version rather than the code's default, which is
+          # the floating `gemini-flash-latest` alias. The first reason is not
+          # stylistic: measured on the Gemini API path this workflow uses, that
+          # alias does not currently serve, so a sweep here would fail on every
+          # run. The second is that an alias can be repointed with no change to
+          # this repository, which silently invalidates the detection and
+          # evasion rates recorded in the module's README -- those are
+          # properties of a specific model as much as of the prompt. Pinning
+          # also matches adk-python and adk-java, which both name a version.
+          LLM_MODEL_NAME: gemini-3.6-flash
           # Both come from GITHUB_REPOSITORY, a default environment variable
           # present for every event. `github.event.repository` was used here
           # before, and the schedule event is documented as having no webhook
@@ -128,7 +138,18 @@ jobs:
           ISSUE_COUNT: '30'
           CONCURRENCY_LIMIT: '3'
           FRESHNESS_WINDOW_DAYS: '1'
-          ISSUE_TIMEOUT: 5m
+          # These four have to satisfy loadConfig's budget check, which refuses
+          # to start on a configuration that cannot cover its own work set:
+          # ceil(ISSUE_COUNT / CONCURRENCY_LIMIT) waves x ISSUE_TIMEOUT must fit
+          # inside RUN_TIMEOUT. Here that is 10 waves of 1m against 15m, leaving
+          # 5m for startup and the candidate search.
+          #
+          # A minute is generous for one review, not tight: a review is one model
+          # call and at most two REST writes, and the end-to-end suite measures
+          # them at 2-10 seconds. The previous 5m looked safer and was not -- 10
+          # waves of it is 50m against a 15m budget, so a sweep that ever took
+          # its worst case would report failure for a reason that is not one.
+          ISSUE_TIMEOUT: 1m
           # Below timeout-minutes so the bot reports the overrun and exits
           # non-zero instead of the runner killing it silently.
           RUN_TIMEOUT: 15m

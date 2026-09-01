@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -200,7 +201,13 @@ func newReviewer(cfg *Config, mdl model.LLM, tools []tool.Tool, instruction stri
 		// the result, so the model still sees the error and can react.
 		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
 			func(_ agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
-				log.Error("tool call failed", "tool", t.Name(), "args", args, "error", err)
+				// Argument NAMES only, never their values. The values are
+				// model-authored and so attacker-influenced, and detection_reason
+				// is unbounded at this point -- the 500-rune cap applies later, in
+				// buildAlertComment. Logging them would let an issue choose both
+				// the content and the volume of text written into a public Actions
+				// log. The names are enough to say which call failed.
+				log.Error("tool call failed", "tool", t.Name(), "args", argNames(args), "error", err)
 				return nil, nil
 			},
 		},
@@ -448,4 +455,16 @@ func summarize(s string) string {
 		return string(r[:maxRunes]) + "..."
 	}
 	return s
+}
+
+// argNames returns the sorted argument names of a tool call, for logging. The
+// values are deliberately dropped: they are model-authored, so an issue can
+// choose both their content and their length, and this log is public.
+func argNames(args map[string]any) []string {
+	names := make([]string, 0, len(args))
+	for k := range args {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }

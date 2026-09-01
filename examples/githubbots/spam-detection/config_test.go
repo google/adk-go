@@ -409,3 +409,67 @@ func TestLoadConfigAcceptsALegacyUnderscoreLogin(t *testing.T) {
 		t.Fatalf("a legacy login with an underscore was rejected: %v", err)
 	}
 }
+
+// A run budget that cannot cover the work the run is told to do is rejected at
+// startup rather than discovered at minute fifteen.
+//
+// The shipped workflow had exactly this shape: 30 issues, 3 at a time, a
+// 5-minute per-issue ceiling and a 15-minute run budget, which is 10 waves of
+// 5 minutes against 15. Nothing failed in practice only because a real review
+// takes seconds -- but expiry is fail-loud, so the first slow sweep would have
+// reported a failure that was not one, and an attacker who can keep the model
+// busy chooses when that happens.
+func TestValidateRejectsABudgetThatCannotCoverTheWork(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		issues, concurrency      int
+		issueTimeout, runTimeout time.Duration
+		wantErr                  bool
+	}{
+		{
+			name: "the shipped workflow's previous numbers", issues: 30, concurrency: 3,
+			issueTimeout: 5 * time.Minute, runTimeout: 15 * time.Minute, wantErr: true,
+		},
+		{
+			name: "the shipped workflow's current numbers", issues: 30, concurrency: 3,
+			issueTimeout: time.Minute, runTimeout: 15 * time.Minute,
+		},
+		{
+			name: "exactly on budget is allowed", issues: 30, concurrency: 3,
+			issueTimeout: 90 * time.Second, runTimeout: 15 * time.Minute,
+		},
+		{
+			name: "one second over is not", issues: 30, concurrency: 3,
+			issueTimeout: 91 * time.Second, runTimeout: 15 * time.Minute, wantErr: true,
+		},
+		{
+			// The wave count rounds UP: 4 issues at 3 at a time is two waves, not
+			// one. Rounding down would let a config through that overruns by a
+			// whole wave.
+			name: "a partial final wave counts", issues: 4, concurrency: 3,
+			issueTimeout: 6 * time.Minute, runTimeout: 10 * time.Minute, wantErr: true,
+		},
+		{
+			name: "the package defaults are satisfiable", issues: 3, concurrency: 3,
+			issueTimeout: defaultIssueTimeout, runTimeout: defaultRunTimeout,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			// The budget check is the last thing validate() does, so the earlier
+			// required-field checks have to be satisfied to reach it.
+			cfg.GitHubToken, cfg.GeminiAPIKey = "t", "k"
+			cfg.IssueCount, cfg.Concurrency = tc.issues, tc.concurrency
+			cfg.IssueTimeout, cfg.RunTimeout = tc.issueTimeout, tc.runTimeout
+
+			err := cfg.validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("validate() = nil, want an error: %d issues %d at a time at %s each is %s, against a %s budget",
+					tc.issues, tc.concurrency, tc.issueTimeout, tc.issueTimeout*time.Duration((tc.issues+tc.concurrency-1)/tc.concurrency), tc.runTimeout)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validate() = %v, want nil", err)
+			}
+		})
+	}
+}

@@ -216,7 +216,27 @@ func defangFenceMarkers(s string) string {
 // spam hidden inside a ``` fence would then never be reviewed. Keeping the text
 // and bounding it with truncation closes that bypass while still capping tokens.
 func clean(s string, maxRunes int) string {
-	return truncateRunes(defangFenceMarkers(strings.TrimSpace(s)), maxRunes)
+	return truncateRunes(defangFenceMarkers(normalize(s)), maxRunes)
+}
+
+// normalize trims a piece of user text and removes its invisible characters.
+//
+// The stripping happens BEFORE defangFenceMarkers, and that ordering is why
+// this exists as its own step. fenceMarkerPattern is a literal regex, so one
+// zero-width space inside the word -- "[/UNTRUSTED\u200b:" -- does not match
+// it, and the forged marker survives defanging intact while a model reads it as
+// a boundary exactly as it reads the plain one. Measured before this was added:
+// four of five zero-width variants passed through untouched, and the assembled
+// prompt then carried two live closing markers where it must carry one.
+// Stripping first means the matcher sees the same word the model does.
+//
+// The cost is that a legitimate zero-width joiner goes too, so a family emoji
+// reaches the model as its separate people and a Persian zero-width non-joiner
+// is lost. Neither changes a spam judgement, and this text is only ever
+// classified, never republished: the copy a human reads is the issue itself on
+// GitHub, untouched.
+func normalize(s string) string {
+	return stripInvisible(strings.TrimSpace(s))
 }
 
 // stripInvisible removes characters that occupy no width but change what a
@@ -224,7 +244,8 @@ func clean(s string, maxRunes int) string {
 // zero-width space and joiners) and control characters other than newline and
 // tab.
 //
-// This runs on text about to be posted publicly under the project's identity. A
+// This runs on BOTH sides: untrusted text on its way to the model (see
+// normalize) and model-authored text on its way to a public comment. A
 // fenced code block stops a URL being clickable and stops an @mention pinging
 // anyone, but it does NOT stop a bidirectional override reordering the rendered
 // line, so the fence alone would let a reason display something other than what
@@ -298,11 +319,11 @@ func assembleSuspectText(iss Issue, maintainers map[string]bool, maxRunes int, n
 
 	var content strings.Builder
 	cut := false
-	if title, trimmed := clean(iss.Title, maxRunes), strings.TrimSpace(iss.Title); title != "" {
+	if title, trimmed := clean(iss.Title, maxRunes), normalize(iss.Title); title != "" {
 		content.WriteString("Title: " + title)
 		cut = cut || len([]rune(trimmed)) > maxRunes
 	}
-	if body, trimmed := clean(iss.Body, maxRunes), strings.TrimSpace(iss.Body); body != "" {
+	if body, trimmed := clean(iss.Body, maxRunes), normalize(iss.Body); body != "" {
 		if content.Len() > 0 {
 			content.WriteString("\n")
 		}

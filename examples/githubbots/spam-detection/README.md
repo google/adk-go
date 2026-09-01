@@ -98,7 +98,7 @@ go run . -issue 123
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key (or use Vertex AI). |
 | `OWNER` | — (required) | Repository owner. |
 | `REPO` | — (required) | Repository name. |
-| `LLM_MODEL_NAME` | `gemini-flash-latest` | Model to use. |
+| `LLM_MODEL_NAME` | `gemini-flash-latest` | Model to use. The workflow pins `gemini-3.6-flash` rather than taking this default: an alias can be repointed with no change here, and the detection rates below are properties of a specific model version. |
 | `SPAM_LABEL_NAME` | `spam` | Label applied to flagged issues (must already exist). |
 | `MAINTAINERS` | (empty) | Comma-separated logins whose issues are trusted and never reviewed. |
 | `ISSUE_COUNT` | `3` | Max issues per scheduled sweep (most-recently-updated first). |
@@ -311,40 +311,56 @@ differs in a few deliberate ways:
   every workflow in the repository, so an issue opened under it is reviewed like
   any other, and only a comment carrying the bot's own alert marker counts as a
   prior alert.
-- **A spammer who appends instruction-shaped text often evades detection.** The
-  attack is to follow obvious spam with prose asserting that the untrusted
-  region has closed and that what precedes it was reviewed and approved. Spam
-  carrying it was flagged **18 times in 50**, where the same spam without it was
-  flagged **50 times in 50**. The Go controls are unaffected throughout: no
-  write ever landed on an issue other than the one under review, and dry-run
-  suppressed every write. This is a missed detection, not a loss of authority,
-  and it is inherent to asking a language model to classify text that is allowed
-  to argue with it.
+- **Evasion by appended instruction-shaped text is a property of the model, and
+  the pinned model does not have it.** The attack is to follow obvious spam with
+  prose asserting that the untrusted region has closed and that what precedes it
+  was reviewed and approved. Measured on two models, same day, same code, same
+  harness:
+
+  | model | spam **with** the injection | the same spam without it |
+  | --- | --- | --- |
+  | `gemini-3.6-flash` (pinned in the workflow) | detected **50 of 50** | 50 of 50 |
+  | `gemini-flash-latest` (the code default) | detected **18 of 50** | 50 of 50 |
+
+  So on the model this bot actually ships with, the attack did not work once in
+  50 attempts. That is an upper bound rather than immunity: 0 failures in 50
+  puts the true rate below roughly 6% at 95% confidence, and it is a fact about
+  one model version, which is exactly why the workflow pins one instead of
+  following a floating alias.
+
+  The 18-of-50 row is kept because it is the more useful number. It shows what
+  this design costs when the model is weaker, and the Go controls were unaffected
+  throughout it: no write ever landed on an issue other than the one under
+  review, and dry-run suppressed every write. A missed detection is not a loss
+  of authority.
 
   Neutralizing the forged marker in Go (`defangFenceMarkers`) removes one
-  capability from the attacker but does not fix this, because the persuasion is
-  carried by the prose rather than by the marker.
+  capability from the attacker but does not by itself fix the weak-model case,
+  because the persuasion is carried by the prose rather than by the marker. It
+  does have to be paired with `normalize`, which strips invisible characters
+  from untrusted text *before* the marker is matched — the matcher is a literal
+  regex, so one zero-width space inside the word (`[/UNTRUSTED<ZWSP>:`) slipped
+  a forged boundary past it while a model still read it as a boundary. Four of
+  five variants got through before that was wired up.
 
   **An inversion was tried and is not shipped.** Rather than only scrubbing the
   instruction-shaped text, the bot counted it and reported the count to the
   model in the trusted header, so the content could not attack the classifier
-  while its presence still counted as evidence of spam. Detection went from
-  18/50 to **23/50** — directionally positive in both paired runs, but z≈1.0
-  (p≈0.31), which is not distinguishable from noise. Separating it from noise
-  needs roughly 370 samples per arm. It cost a hand-maintained list of trigger
-  phrases that is itself a false-positive surface, so it was reverted rather
-  than shipped on an unproven gain. The false-positive scenarios below stayed
-  clean under it, so nothing here says the idea is wrong — only that this
-  measurement could not show it working.
+  while its presence still counted as evidence of spam. On `gemini-flash-latest`
+  detection went from 18/50 to **23/50** — directionally positive in both paired
+  runs, but z≈1.0 (p≈0.31), which is not distinguishable from noise; separating
+  it would need roughly 370 samples per arm. It cost a hand-maintained list of
+  trigger phrases that is itself a false-positive surface, so it was reverted.
+  Nothing in the measurement says the idea is wrong, only that this measurement
+  could not show it working — and on the pinned model there is nothing left for
+  it to fix.
 
   Provenance, because these numbers are only comparable to each other: all of
-  them are `gemini-flash-latest` through Vertex AI (`GOOGLE_CLOUD_LOCATION=global`),
-  taken the same day, with all 100 samples per arm answered, 0 dropped and 0
-  transient failures recovered. A run that sheds samples fails rather than
-  quoting a rate over a denominator it did not fill. `gemini-flash-latest` is a
-  floating alias and can be repointed without a code change, so treat a figure
-  attributed to it as having a shelf life. Re-measure with
-  `SPAM_BOT_E2E=1 E2E_SAMPLES=25 go test -run TestE2EInstructionEvasionRate`.
+  them were taken through Vertex AI (`GOOGLE_CLOUD_LOCATION=global`) on one day,
+  with every sample answered, 0 dropped and 0 transient failures recovered. A
+  run that sheds samples fails rather than quoting a rate over a denominator it
+  did not fill. Re-measure with
+  `SPAM_BOT_E2E=1 E2E_SAMPLES=25 LLM_MODEL_NAME=<model> go test -run TestE2EInstructionEvasionRate`.
 - **Author association is a prior, not proof.** It nudges borderline calls; it
   is not a substitute for reading the content, and spam from an established
   account is still flagged on its merits.
