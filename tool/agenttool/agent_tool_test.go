@@ -292,12 +292,8 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 				t.Fatalf("Run() failed unexpectedly: %v", err)
 			}
 
-			// SkipSummarization must never be propagated to the parent tool context.
-			// Doing so causes IsFinalResponse() to return true on the function response
-			// event, which terminates the parent agent loop before it can process the
-			// sub-agent result.
-			if toolCtx.Actions().SkipSummarization {
-				t.Errorf("SkipSummarization was propagated to parent tool context (skipSummarization=%v), want false", tt.skipSummarization)
+			if got := toolCtx.Actions().SkipSummarization; got != tt.skipSummarization {
+				t.Errorf("SkipSummarization propagated to parent tool context = %v, want %v", got, tt.skipSummarization)
 			}
 		})
 	}

@@ -433,6 +433,56 @@ func TestCallTool(t *testing.T) {
 	}
 }
 
+func TestDisplayableToolResultText(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   map[string]any
+		wantText string
+		wantOK   bool
+	}{
+		{
+			name:   "empty result is not displayable",
+			result: map[string]any{},
+			wantOK: false,
+		},
+		{
+			name:   "error result is not displayable",
+			result: map[string]any{"error": "boom"},
+			wantOK: false,
+		},
+		{
+			name:     "single plain-text result key is shown as-is",
+			result:   map[string]any{"result": "sub-agent output"},
+			wantText: "sub-agent output",
+			wantOK:   true,
+		},
+		{
+			name:     "non-string result key is rendered as JSON",
+			result:   map[string]any{"result": 42},
+			wantText: `{"result":42}`,
+			wantOK:   true,
+		},
+		{
+			name:     "structured result is rendered as JSON",
+			result:   map[string]any{"status": "ok", "count": 3},
+			wantText: `{"count":3,"status":"ok"}`,
+			wantOK:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotText, gotOK := displayableToolResultText(tc.result)
+			if gotOK != tc.wantOK {
+				t.Fatalf("displayableToolResultText(%v) ok = %v, want %v", tc.result, gotOK, tc.wantOK)
+			}
+			if gotOK && gotText != tc.wantText {
+				t.Errorf("displayableToolResultText(%v) = %q, want %q", tc.result, gotText, tc.wantText)
+			}
+		})
+	}
+}
+
 func TestMergeEventActions(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1096,6 +1097,32 @@ func (c *cancelledToolContext) Value(key any) any {
 	return c.cancelCtx.Value(key)
 }
 
+// displayableToolResultText renders a tool result as text for the case where
+// SkipSummarization suppresses the LLM's own summary of it. It returns
+// ok=false for results that carry nothing worth showing: error responses,
+// and empty results such as those from control-flow-only tools (e.g.
+// exitlooptool), which return no meaningful output of their own.
+//
+// Tools that wrap a single plain-text result under a "result" key (the
+// convention used by agenttool) are shown as-is; anything else is rendered
+// as JSON so structured results remain readable.
+func displayableToolResultText(result map[string]any) (string, bool) {
+	if len(result) == 0 {
+		return "", false
+	}
+	if _, isErr := result["error"]; isErr {
+		return "", false
+	}
+	if text, ok := result["result"].(string); ok && len(result) == 1 {
+		return text, true
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
@@ -1228,19 +1255,38 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
+			parts := []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       fnCall.ID,
+						Name:     fnCall.Name,
+						Response: result,
+					},
+				},
+			}
+			// SkipSummarization causes the parent agent loop to terminate on this
+			// event (see session.Event.IsFinalResponse) without the LLM ever
+			// seeing the function response. Since most UIs don't render function
+			// response parts, attach the result as a visible text part so it isn't
+			// silently dropped from the terminal event.
+			//
+			// Skip this when a tool confirmation was requested on the call: that
+			// path (agent.Context.RequestConfirmation) also sets SkipSummarization
+			// to stop the loop while the caller waits on the confirmation, but the
+			// pending result isn't a final answer meant for display - callers
+			// already key off RequestedToolConfirmations to drive their own UI
+			// for it.
+			if actions := toolCtx.Actions(); actions.SkipSummarization && len(actions.RequestedToolConfirmations) == 0 {
+				if text, ok := displayableToolResultText(result); ok {
+					parts = append(parts, &genai.Part{Text: text})
+				}
+			}
+
 			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
-					Role: "user",
-					Parts: []*genai.Part{
-						{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       fnCall.ID,
-								Name:     fnCall.Name,
-								Response: result,
-							},
-						},
-					},
+					Role:  "user",
+					Parts: parts,
 				},
 			}
 			ev.Author = ctx.Agent().Name()
