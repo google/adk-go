@@ -48,13 +48,16 @@ package main
 // The judgement this prompt encodes is written down THREE times: the GUIDING
 // PRINCIPLE at the top, clause (a) of STEP 3's rule, and the "Do NOT mark stale"
 // list with its worked examples. Deleting any one of them changes nothing,
-// because the other two still carry it. Deleting all three, on gemini-3.6-flash,
-// 2026-09-01:
+// because the other two still carry it. Deleting all three is what shows the
+// judgement was there all along. Each row is its own measurement, so each
+// carries its own model and denominator — the first was taken before the
+// workflow pinned a model and is the weakest of the four:
 //
-//	removed                                          scenarios flipped
-//	the "Do NOT" list only                                    0
-//	+ worked examples + clause (a)                       0 of 20
-//	+ GUIDING PRINCIPLE + its local restatements        15 of 15
+//	removed                                     model          date        flipped
+//	the "Do NOT" list only                      flash-latest   2026-09-01   0 of 4
+//	the "Do NOT" list + worked examples         3.6-flash      2026-09-01   0 of 20
+//	+ clause (a) of the STEP 3 rule             3.6-flash      2026-09-01   0 of 20
+//	+ GUIDING PRINCIPLE + local restatements    3.6-flash      2026-09-01  15 of 15
 //
 // At the third step every one of the three "must not mark stale" scenarios
 // posted a stale label, a clarification label and a public warning comment, five
