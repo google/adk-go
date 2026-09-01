@@ -107,7 +107,7 @@ func realModel(t *testing.T) model.LLM {
 		os.Getenv("GOOGLE_GENAI_USE_VERTEXAI") == "" {
 		t.Skip("no model credentials: set GEMINI_API_KEY, or GOOGLE_GENAI_USE_VERTEXAI=true with a project")
 	}
-	if os.Getenv("SPAM_BOT_E2E_FORCE_UNAVAILABLE") == "1" {
+	if forcedUnavailable() {
 		t.Log("SPAM_BOT_E2E_FORCE_UNAVAILABLE=1: every model call will shed, to exercise the skip accounting")
 		return unavailableModel{}
 	}
@@ -252,7 +252,7 @@ func runE2EStable(t *testing.T, mdl model.LLM, issueNumber int, issueJSON string
 			return last
 		}
 		t.Logf("attempt %d/%d hit a transient model failure, retrying: %v", attempt, e2eAttempts, last.err)
-		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		time.Sleep(retryBackoff(attempt))
 	}
 	// Reported as shed and RETURNED, never skipped from in here.
 	//
@@ -271,6 +271,26 @@ func runE2EStable(t *testing.T, mdl model.LLM, issueNumber int, issueJSON string
 		e2eAttempts, last.err)
 	last.shed = true
 	return last
+}
+
+// forcedUnavailable reports whether the suite is being run to exercise its own
+// shed accounting rather than to measure anything.
+func forcedUnavailable() bool { return os.Getenv("SPAM_BOT_E2E_FORCE_UNAVAILABLE") == "1" }
+
+// retryBackoff is the wait between attempts, and it is zero under the forced
+// outage.
+//
+// Against a real shedding backend the wait is the point: retrying instantly
+// just spends the same failure three times. Under the force flag there is no
+// backend to be polite to, and the wait is pure cost -- it took a full check of
+// the guard past fifteen minutes, which is long enough that nobody re-runs it,
+// and a guard nobody re-runs is the kind that rots. Zero here makes verifying
+// the accounting a seconds-long operation.
+func retryBackoff(attempt int) time.Duration {
+	if forcedUnavailable() {
+		return 0
+	}
+	return time.Duration(attempt) * 2 * time.Second
 }
 
 // unavailableModel fails every call the way a shedding backend does.

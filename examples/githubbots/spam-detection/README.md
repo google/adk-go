@@ -236,6 +236,17 @@ honest reading is that the sections are redundant with each other and with the
 model's own priors on content this obvious, and that a corpus of clear-cut cases
 cannot tell a redundant instruction from an unnecessary one.
 
+Two limits on that conclusion, both worth stating rather than leaving for a
+reader to find. Each cell is three repeats, so the measurement only detects an
+effect large enough to flip a scenario outright — every cell came back
+categorically 3/3 or 0/3, never partial, so nothing here was decided on a single
+noisy observation, but a section that shifted behaviour by a fifth would look
+identical to one that did nothing. And the sections were deleted one at a time,
+so a set of instructions that covers the same ground jointly would show every
+member as inert while the group carries real weight — which is the most likely
+explanation of a result where the whole prompt is load-bearing and no part of it
+is.
+
 ```bash
 go test ./...
 
