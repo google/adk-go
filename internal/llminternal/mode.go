@@ -24,23 +24,38 @@ import "context"
 // one agent instance serves many concurrent invocations, and the same instance
 // may sit at two different placements.
 //
-// Two kinds of reader deliberately stay on the declaration.
+// Three kinds of reader deliberately stay on the declaration.
 //
 // Those that only test for task mode — basic_processor, outputschema_processor,
-// installTaskTools, AgentNode's synthesizeMode, the runner's task-sub-agent
-// scan — have nothing to resolve, because no placement ever defaults to task.
+// AgentNode's synthesizeMode, the runner's task-sub-agent scan — have nothing to
+// resolve, because no placement ever defaults to task.
 //
 // isUntransferableMode asks about a PEER rather than the running agent, and a
 // binding only ever describes the agent being run, so there is no binding for
 // it to consult.
 //
+// installTaskTools runs at construction, where there is no invocation to
+// consult. It does branch on single_turn, but it is choosing which tool to give
+// a parent for a sub-agent, which is a property of the tree rather than of any
+// one run.
+//
 // Every other reader resolves. A reader that tests for single_turn and skips
 // the resolution disagrees with the request the flow actually builds.
 //
-// The binding names the agent it describes. A bare context value would be
-// inherited by every nested activation and would then govern an agent it was
-// never resolved for: a peer reached by transfer, or a child that declares its
-// own mode. Callers therefore bind per agent and read per agent.
+// The binding names the agent it describes, and the name is part of the context
+// KEY rather than of the value. Two properties follow, and both are needed.
+//
+// A binding never governs an agent it was not resolved for. A bare context value
+// would be inherited by every nested activation — a peer reached by transfer, a
+// child that declares its own mode — and would govern all of them.
+//
+// A binding also survives a nested activation that binds a different agent.
+// Storing one pair under one key gave only the first property: a single_turn
+// graph node that transferred to a chat peer had its slot overwritten, and when
+// the peer transferred back the node's own agent was re-entered on the peer's
+// context and fell back to chat, taking the identity preamble, the transfer
+// instructions and the whole conversation with it. Placements nest, so the
+// bindings have to nest too.
 
 // ResolveMode returns declared when set, else byPlacement.
 func ResolveMode(declared, byPlacement Mode) Mode {
@@ -50,16 +65,18 @@ func ResolveMode(declared, byPlacement Mode) Mode {
 	return declared
 }
 
-type boundModeKey struct{}
-
-type boundMode struct {
-	agent string
-	mode  Mode
-}
+// boundModeKey is the context key for one agent's binding. The agent name is
+// part of the key, so each agent gets its own slot and binding one cannot
+// disturb another's.
+type boundModeKey struct{ agent string }
 
 // WithBoundMode returns ctx carrying the mode the named agent runs under for
 // this invocation. Set by whatever places the agent: the runner for a root
 // agent, an AgentNode for a graph node.
+//
+// Binding an agent that already has one shadows it for the rest of that
+// context, which is what a re-entrant placement of the same agent should do.
+// Binding a different agent leaves the first alone.
 //
 // An empty agentName is bound like any other. Config.Name is documented as
 // required and nothing here can supply a missing one, but skipping the binding
@@ -71,7 +88,7 @@ func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Con
 	if mode == ModeUnset {
 		return ctx
 	}
-	return context.WithValue(ctx, boundModeKey{}, boundMode{agent: agentName, mode: mode})
+	return context.WithValue(ctx, boundModeKey{agent: agentName}, mode)
 }
 
 // BoundMode reports the mode this invocation bound to agentName, and whether it
@@ -81,11 +98,11 @@ func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Con
 // declared mode is deliberately not consulted. Callers wanting the mode an
 // agent actually runs under want [ModeFor].
 func BoundMode(ctx context.Context, agentName string) (Mode, bool) {
-	b, ok := ctx.Value(boundModeKey{}).(boundMode)
-	if !ok || b.agent != agentName {
+	mode, ok := ctx.Value(boundModeKey{agent: agentName}).(Mode)
+	if !ok {
 		return ModeUnset, false
 	}
-	return b.mode, true
+	return mode, true
 }
 
 // ModeFor returns the mode agentName runs under: the mode this invocation bound

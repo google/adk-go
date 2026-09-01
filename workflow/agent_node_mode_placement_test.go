@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
@@ -402,5 +403,150 @@ func TestAgentNode_UnnamedAgent_IsStillPlacedSingleTurn(t *testing.T) {
 				t.Errorf("nameless agent at a single_turn node saw conversation history; contents = %v", llm.got.Contents)
 			}
 		}
+	}
+}
+
+// roundTripLLM replies from a per-agent script, identifying the caller by the
+// marker its instruction plants in the system instruction, and records every
+// request it served.
+type roundTripLLM struct {
+	script map[string][]*genai.Content
+	seen   []string
+	si     []string
+	conts  [][]*genai.Content
+}
+
+func (*roundTripLLM) Name() string { return "scripted" }
+
+func (m *roundTripLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	var si strings.Builder
+	if r.Config != nil && r.Config.SystemInstruction != nil {
+		for _, p := range r.Config.SystemInstruction.Parts {
+			if p != nil {
+				si.WriteString(p.Text)
+			}
+		}
+	}
+	who := "worker"
+	if strings.Contains(si.String(), "MARKER_HELPER") {
+		who = "helper"
+	}
+	n := 0
+	for _, s := range m.seen {
+		if s == who {
+			n++
+		}
+	}
+	m.seen = append(m.seen, who)
+	m.si = append(m.si, si.String())
+	m.conts = append(m.conts, r.Contents)
+
+	out := &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "done"}}}
+	if replies := m.script[who]; n < len(replies) {
+		out = replies[n]
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: out}, nil)
+	}
+}
+
+func roundTripTransferTo(name string) *genai.Content {
+	return &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{Name: "transfer_to_agent", Args: map[string]any{"agent_name": name}},
+	}}}
+}
+
+// A single_turn graph node must stay single_turn for the whole activation,
+// including after an agent it transferred to transfers back. The return hop is
+// a fresh activation on the callee's context rather than a return to the outer
+// frame, so the node's binding has to still be findable there.
+//
+// Reported by karolpiotrowicz in review of #1267, with this reproduction.
+func TestAgentNode_PlacementSurvivesATransferRoundTrip(t *testing.T) {
+	m := &roundTripLLM{script: map[string][]*genai.Content{
+		"worker": {roundTripTransferTo("helper")},
+		"helper": {roundTripTransferTo("worker")},
+	}}
+
+	helper, err := llmagent.New(llmagent.Config{
+		Name: "helper", Description: "helps", Model: m, Instruction: "MARKER_HELPER",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+	// worker declares no mode, so the graph node decides it: single_turn.
+	worker, err := llmagent.New(llmagent.Config{
+		Name: "worker", Description: "works", Model: m, Instruction: "MARKER_WORKER",
+		SubAgents: []agent.Agent{helper},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(worker, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+	parents, err := parentmap.New(worker)
+	if err != nil {
+		t.Fatalf("parentmap.New: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	prior := &session.Event{
+		Author:      "user",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+	}
+	if err := svc.AppendEvent(t.Context(), resp.Session, prior); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	std := runconfig.ToContext(t.Context(), &runconfig.RunConfig{StreamingMode: runconfig.StreamingModeNone})
+	std = parentmap.ToContext(std, parents)
+	ic := icontext.NewInvocationContext(std, icontext.InvocationContextParams{
+		Agent: worker, Session: resp.Session,
+		UserContent:  genai.NewContentFromText("current question", "user"),
+		InvocationID: "inv-1",
+	})
+	for _, err := range wf.Run(agent.NewContext(ic)) {
+		if err != nil {
+			t.Fatalf("wf.Run: %v", err)
+		}
+	}
+
+	// Find worker's second request.
+	var idx []int
+	for i, who := range m.seen {
+		if who == "worker" {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) < 2 {
+		t.Fatalf("worker was called %d time(s), want 2; call order = %v", len(idx), m.seen)
+	}
+	i := idx[1]
+
+	identity := strings.Contains(m.si[i], "You are an agent. Your internal name is")
+	transfer := strings.Contains(m.si[i], "You have a list of other agents to transfer to")
+	history := false
+	for _, c := range m.conts[i] {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				history = true
+			}
+		}
+	}
+	if identity || transfer || history {
+		t.Errorf("after a transfer round trip the node's agent is no longer single_turn: "+
+			"identityPreamble=%v transferInstructions=%v sawHistory=%v, want all false",
+			identity, transfer, history)
 	}
 }
