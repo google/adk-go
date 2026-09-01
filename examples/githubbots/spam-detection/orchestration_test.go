@@ -24,6 +24,8 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1018,5 +1020,127 @@ func TestReviewStillJudgesTheIssueAuthorsOwnText(t *testing.T) {
 	}
 	if got := h.writes.recorded(); len(got) != 2 {
 		t.Errorf("writes = %v, want the alert comment and the label", got)
+	}
+}
+
+// flaggingModel flags whichever issue its prompt names, so N concurrent reviews
+// each dispatch the tool rather than replying with text. It reads the number out
+// of the prompt because the reviews run in parallel: a scripted model handing
+// out canned turns by index cannot tell which review is asking.
+type flaggingModel struct {
+	mu    sync.Mutex
+	turns map[int]int
+}
+
+func (m *flaggingModel) Name() string { return "flagging-test-model" }
+
+var promptIssuePattern = regexp.MustCompile(`Review issue #(\d+)`)
+
+func (m *flaggingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	var prompt strings.Builder
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p != nil {
+				prompt.WriteString(p.Text)
+			}
+		}
+	}
+	match := promptIssuePattern.FindStringSubmatch(prompt.String())
+	number := 0
+	if len(match) == 2 {
+		number, _ = strconv.Atoi(match[1])
+	}
+
+	m.mu.Lock()
+	if m.turns == nil {
+		m.turns = map[int]int{}
+	}
+	turn := m.turns[number]
+	m.turns[number]++
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		switch turn {
+		case 0:
+			// First, try to act on somebody else's issue. Under concurrency this
+			// is the call that matters: every review is simultaneously scoped to
+			// a DIFFERENT issue, so a scope check that reads process-wide state
+			// instead of the session's would let this through on whichever review
+			// happens to be in flight.
+			yield(flagCallTurn(number+foreignOffset, "promotional link"), nil)
+		case 1:
+			yield(flagCallTurn(number, "promotional link"), nil)
+		default:
+			yield(textTurn("Flagged."), nil)
+		}
+	}
+}
+
+// foreignOffset keeps the cross-issue attempts clear of the real issue numbers,
+// so a write to issue n+offset cannot be mistaken for a legitimate one.
+const foreignOffset = 1000
+
+// The per-issue session scope has to hold when eight reviews are in flight at
+// once, each scoped to a different issue.
+//
+// TestAgentLoopRefusesAToolCallForAnotherIssue pins the same refusal with one
+// review running. That cannot see a scope that is stored per process rather than
+// per session, because with a single review in flight the two are the same
+// thing. Here every in-flight review is scoped somewhere different, so a check
+// reading the wrong one lets a cross-issue write through.
+//
+// It also closes a plainer gap. Everything else exercising the tool concurrently
+// calls flagAsSpam directly, and everything running the real loop concurrently
+// used a model that only replies with text -- so the shared model and tool set
+// were read by several goroutines at once but never INVOKED at once, and ADK's
+// own dispatch was never exercised concurrently at all.
+//
+// The first version of this test had the model flag only its own issue, and both
+// the scope check and the at-most-once claim could be deleted with it still
+// green: it exercised the path without attacking anything. Making every review
+// attempt a foreign issue first is what turned it into a pin -- measured,
+// disabling authorizeIssue now fails it.
+//
+// It does NOT pin the at-most-once claim, and deleting that still leaves this
+// green, because each issue is only ever flagged once successfully here. That
+// invariant belongs to TestClaimAndRecordShareOneCriticalSection, which drives
+// eight callers at one issue through a barrier inside the critical section.
+//
+// Assertions are per-issue rather than on a total, because sixteen writes in
+// total also holds if one issue got eight and another none, which is what a
+// scoping bug under concurrency would actually produce.
+func TestConcurrentReviewsEachDriveTheToolOntoTheirOwnIssue(t *testing.T) {
+	const total = 8
+
+	issues := make([]int, 0, total)
+	for i := 1; i <= total; i++ {
+		issues = append(issues, i)
+	}
+	h := newHarnessWith(t, func(n int) string {
+		return issueWith(n, fmt.Sprintf("user%d", n), fmt.Sprintf("buy followers cheap %d", n), nil)
+	}, &flaggingModel{}, nil)
+	h.cfg.Concurrency = total
+
+	h.reviewAll(context.Background(), issues)
+
+	got := map[string]int{}
+	for _, w := range h.writes.recorded() {
+		got[w]++
+	}
+	for _, n := range issues {
+		comment := fmt.Sprintf("/repos/google/adk-go/issues/%d/comments", n)
+		label := fmt.Sprintf("/repos/google/adk-go/issues/%d/labels", n)
+		if got[comment] != 1 || got[label] != 1 {
+			t.Errorf("issue %d got %d comment(s) and %d label(s), want 1 each: %v",
+				n, got[comment], got[label], h.writes.recorded())
+		}
+		delete(got, comment)
+		delete(got, label)
+	}
+	// Anything left is a write to an issue no review was scoped to -- which for
+	// this model means a cross-issue attempt that was not refused.
+	for w, n := range got {
+		t.Errorf("a write landed on an issue no review was scoped to, so the session scope did "+
+			"not hold under concurrency: %s (%d times)", w, n)
 	}
 }
