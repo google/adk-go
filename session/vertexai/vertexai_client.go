@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,6 +170,16 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	}, nil
 }
 
+// quoteFilterLiteral quotes a value for safe use as a Google AIP-160 filter
+// string literal. Backslashes are escaped first, then double quotes, so that
+// caller-controlled input stays inside the quoted value and cannot inject
+// additional filter predicates. See https://google.aip.dev/160.
+func quoteFilterLiteral(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
 func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequest) ([]session.Session, error) {
 	sessions := make([]session.Session, 0)
 
@@ -187,7 +198,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
 	if req.UserID != "" {
-		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
+		rpcReq.Filter = "userId=" + quoteFilterLiteral(req.UserID)
 	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
 	for {
@@ -233,6 +244,17 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 	if err != nil {
 		return err
 	}
+	// Verify the session belongs to req.UserID before deleting (mirrors getSession).
+	if _, err := c.getSession(ctx, &session.GetRequest{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}); err != nil {
+		if isNotFoundError(err) {
+			return nil // A missing session is a no-op.
+		}
+		return err
+	}
 	lro, err := c.rpcClient.DeleteSession(ctx, &aiplatformpb.DeleteSessionRequest{
 		Name: sessionNameByID(req.SessionID, c, reasoningEngine),
 	})
@@ -253,14 +275,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 		return err
 	}
 
-	var eventState *aiplatformpb.EventActions
-	// Convert and set the initial state if provided
-	if len(event.Actions.StateDelta) > 0 {
-		sessionState, err := toStructPB(event.Actions.StateDelta)
-		if err != nil {
-			return fmt.Errorf("failed to convert state to structpb: %w", err)
-		}
-		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
+	eventActions, err := createAiplatformpbEventActions(event)
+	if err != nil {
+		return fmt.Errorf("failed to convert event actions: %w", err)
 	}
 
 	content, err := createAiplatformpbContent(event)
@@ -293,7 +310,7 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 			Author:        event.Author,
 			InvocationId:  event.InvocationID,
 			Content:       content,
-			Actions:       eventState,
+			Actions:       eventActions,
 			EventMetadata: metadata,
 			ErrorCode:     event.ErrorCode,
 			ErrorMessage:  event.ErrorMessage,
@@ -316,13 +333,26 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.NodeInfo != nil ||
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
-		len(event.Routes) > 0
+		len(event.Routes) > 0 ||
+		// A context-compaction summary lives entirely on Actions.Compaction:
+		// its Content is nil and it has no state or artifact delta, so without
+		// raw_event nothing about it reaches the backend. On reload the session
+		// would hold neither the summary nor any record that compaction ran,
+		// and the same range would be summarized again on every trigger.
+		event.Actions.Compaction != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
-// the SessionEvent.raw_event field. Uses Go's JSON encoding; not yet
-// byte-compatible with adk-python's camelCase dump (cross-runtime parity
-// is tracked separately).
+// the SessionEvent.raw_event field. session.Event is tagged camelCase, so the
+// keys match adk-python's dump; the timestamp is the remaining difference,
+// written here as an RFC 3339 string where adk-python writes epoch seconds.
+// Readers of raw_event take the timestamp from the SessionEvent envelope
+// rather than the blob, so that difference does not normally reach them. Note
+// the dependency is not unconditional on the adk-python side: it overrides
+// only `if timestamp_obj` (vertex_ai_session_service.py), so a raw_event whose
+// envelope carries no timestamp leaves the RFC 3339 string in place against a
+// float field and fails validation for the whole event. The service populates
+// the envelope, so this is a guard on an invariant rather than a live risk.
 //
 // Integers in the any-typed Output and StateDelta come back as float64
 // (structpb numbers and json.Unmarshal into any are both float64). This
@@ -405,9 +435,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions: session.EventActions{
-				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
-			},
+			Actions:      aiplatformToSessionEventActions(rpcResp.Actions),
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -434,6 +462,48 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		return events[len(events)-numRecentEvents:], nil
 	}
 	return events, nil
+}
+
+func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventActions, error) {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+		return nil, nil
+	}
+
+	actions := &aiplatformpb.EventActions{}
+	if len(event.Actions.StateDelta) > 0 {
+		sessionState, err := toStructPB(event.Actions.StateDelta)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
+		}
+		actions.StateDelta = sessionState
+	}
+	if len(event.Actions.ArtifactDelta) > 0 {
+		actions.ArtifactDelta = make(map[string]int32, len(event.Actions.ArtifactDelta))
+		for name, version := range event.Actions.ArtifactDelta {
+			if version > math.MaxInt32 || version < math.MinInt32 {
+				return nil, fmt.Errorf("artifact %q version %d does not fit in int32", name, version)
+			}
+			actions.ArtifactDelta[name] = int32(version)
+		}
+	}
+	return actions, nil
+}
+
+func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session.EventActions {
+	if actions == nil {
+		return session.EventActions{}
+	}
+
+	eventActions := session.EventActions{
+		StateDelta: filterNilValues(actions.StateDelta.AsMap()),
+	}
+	if len(actions.ArtifactDelta) > 0 {
+		eventActions.ArtifactDelta = make(map[string]int64, len(actions.ArtifactDelta))
+		for name, version := range actions.ArtifactDelta {
+			eventActions.ArtifactDelta[name] = int64(version)
+		}
+	}
+	return eventActions
 }
 
 func sessionIdBySessionName(sn string) (string, error) {
@@ -865,10 +935,18 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 // It uses JSON marshaling as an intermediary step to safely serialize
 // the input data before constructing the *structpb.Struct.
 // Returns an error if any part of the JSON round-trip or conversion fails.
+//
+// A nil value marshals to the JSON literal "null", which structpb rejects.
+// Such a value is treated as an empty Struct, matching structpb.NewStruct(nil)
+// and keeping callers that pass an absent map (for example a function call
+// that takes no arguments) from failing.
 func toStructPB(value any) (*structpb.Struct, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %w", err)
+	}
+	if string(data) == "null" {
+		return &structpb.Struct{}, nil
 	}
 	res := &structpb.Struct{}
 	if err := res.UnmarshalJSON(data); err != nil {

@@ -26,9 +26,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -636,5 +640,135 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 
 	if atomic.LoadInt32(&wrappedAttempts) != 2 {
 		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
+	}
+}
+
+// TestParallelWorker_PerItemSpans: each item runs in its own invoke_node
+// span (Error only on a genuine failure); a node that emits its own span
+// is not double-wrapped.
+func TestParallelWorker_PerItemSpans(t *testing.T) {
+	tests := []struct {
+		name         string
+		wrapped      Node
+		input        []any
+		wantSpanName string
+		wantCount    int
+		wantStatus   codes.Code
+	}{
+		{
+			name:         "one_span_per_item_on_success",
+			wrapped:      upperNode,
+			input:        []any{"a", "b", "c"},
+			wantSpanName: "invoke_node upper",
+			wantCount:    3,
+			wantStatus:   codes.Unset,
+		},
+		{
+			name:         "span_marked_error_on_failure",
+			wrapped:      newErrYieldNode("w", errors.New("boom")),
+			input:        []any{"x"},
+			wantSpanName: "invoke_node w",
+			wantCount:    1,
+			wantStatus:   codes.Error,
+		},
+		{
+			// Cancellation is control flow, not a failure: span stays Unset.
+			name:         "control_flow_error_not_marked",
+			wrapped:      newErrYieldNode("c", context.Canceled),
+			input:        []any{"x"},
+			wantSpanName: "invoke_node c",
+			wantCount:    1,
+			wantStatus:   codes.Unset,
+		},
+		{
+			name: "wrapped_emitting_own_span_is_not_double_wrapped",
+			wrapped: NewFunctionNode("agentish", func(ctx agent.Context, in string) (string, error) {
+				return in, nil
+			}, NodeConfig{EmitsOwnSpan: true}),
+			input:     []any{"a", "b"},
+			wantCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spanExp := tracetest.NewInMemoryExporter()
+			telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
+
+			pw, err := NewParallelWorker("parallel", tc.wrapped, 0, defaultNodeConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Drain; span outcomes asserted below.
+			for range pw.Run(agent.NewContext(newMockCtx(t)), tc.input) {
+			}
+
+			spans := spanExp.GetSpans()
+			if len(spans) != tc.wantCount {
+				t.Fatalf("got %d spans, want %d", len(spans), tc.wantCount)
+			}
+			for _, s := range spans {
+				if s.Name != tc.wantSpanName {
+					t.Errorf("span name = %q, want %q", s.Name, tc.wantSpanName)
+				}
+				if s.Status.Code != tc.wantStatus {
+					t.Errorf("span %q status = %v, want %v", s.Name, s.Status.Code, tc.wantStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestParallelWorker_RetryEmitsSpanPerAttempt verifies each retry attempt
+// gets its own span: a node that fails once then succeeds under
+// RetryConfig produces two spans — the failed attempt marked Error, the
+// successful retry Unset.
+func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
+	spanExp := tracetest.NewInMemoryExporter()
+	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
+
+	var attempts int32
+	wrapped := NewFunctionNode("flaky", func(ctx agent.Context, in string) (string, error) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			return "", errors.New("boom")
+		}
+		return in, nil
+	}, defaultNodeConfig)
+
+	rc := DefaultRetryConfig()
+	rc.MaxAttempts = 2
+	rc.InitialDelay = 0
+	rc.MaxDelay = 0
+	rc.Jitter = 0
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, NodeConfig{RetryConfig: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range pw.Run(agent.NewContext(newMockCtx(t)), []any{"x"}) {
+	}
+
+	spans := spanExp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2 (one per attempt)", len(spans))
+	}
+	// Same node both attempts; assert the status multiset: one failed
+	// (Error) + one successful retry (Unset).
+	var errCount, unsetCount int
+	for _, s := range spans {
+		if s.Name != "invoke_node flaky" {
+			t.Errorf("span name = %q, want %q", s.Name, "invoke_node flaky")
+		}
+		switch s.Status.Code {
+		case codes.Error:
+			errCount++
+		case codes.Unset:
+			unsetCount++
+		}
+	}
+	if errCount != 1 || unsetCount != 1 {
+		t.Errorf("status multiset = {Error:%d, Unset:%d}, want {Error:1, Unset:1}", errCount, unsetCount)
 	}
 }
