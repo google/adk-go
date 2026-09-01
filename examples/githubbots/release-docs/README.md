@@ -257,13 +257,48 @@ Nothing can create an issue: the fake GitHub fails the test if any write arrives
 that is not the single expected issue, and the two live tests read the public API
 in dry run and assert zero writes.
 
-Two things worth knowing before running it. The suite pins `gemini-3.6-flash`
-rather than the production default: `gemini-flash-latest` measured 503
-"experiencing high demand" on roughly a third of calls, which is a property of
-the endpoint and would make the suite flake for a reason that says nothing about
-this code. Set `LLM_MODEL_NAME` to check the production default deliberately. And
-each run costs real model calls — 18 for the scenarios, 8 more for the live test
+#### What the numbers below were measured against
+
+Every figure in this section was taken with **`gemini-3.6-flash`** over the
+**Generative Language API key** path, on 2026-09-01. That is not the bot's
+default, and the difference matters.
+
+The suite pins an explicit model version rather than the `gemini-flash-latest`
+alias it defaults to. An alias can be repointed at a different model without any
+change here, so a measurement attributed to one has a shorter shelf life than it
+looks. Set `LLM_MODEL_NAME` to run against something else.
+
+The reason for pinning is availability, and it is narrower than "the endpoint is
+flaky". Measured three calls per cell:
+
+| model | API key | Vertex ADC, location `global` |
+| --- | --- | --- |
+| `gemini-flash-latest` | **0/3** — HTTP 503, "high demand" | 3/3 |
+| `gemini-3.6-flash` | 3/3 | 3/3 |
+
+Three of the four combinations work. What fails is the specific pairing of the
+`gemini-flash-latest` alias with the API-key path — not the path, and not the
+model on its own. Either switching model or switching to Vertex avoids it.
+
+**The bot's own default is `gemini-flash-latest`** (`config.go`), which is that
+one failing cell whenever it runs with an API key rather than Vertex
+credentials. The suite does not exercise that combination, so nothing here
+should be read as evidence about it.
+
+Each run costs real model calls — 18 for the scenarios, 8 more for the live test
 at the production file cap.
+
+#### A run containing skips is not a pass
+
+A scenario abandoned because the model stayed unavailable proves nothing in
+either direction, but `go test` prints `PASS` for the parent and exits 0. A run
+that measured almost nothing then looks exactly like one that measured
+everything. `TestMain` closes that: it reports how many transient failures a
+retry recovered, and fails the run outright when any scenario was lost.
+
+Treat a run reporting `MEASUREMENT INCOMPLETE` as discarded rather than red. A
+climbing retry count is the early warning — the run is still green, but the
+endpoint is degrading.
 
 ### Mutation testing the prompt
 
@@ -282,10 +317,34 @@ RELEASE_DOCS_E2E=1 RELEASE_DOCS_PROMPT_MUTATIONS=1 \
 ```
 
 Gated separately because it costs one model call per scenario per mutation.
-`TestPromptMutationsApply` is the ungated half and matters more than it looks: it
-asserts every mutation actually changes the prompt. A mutation whose string match
-silently failed is a no-op, and a no-op reports "no scenario flipped" — which
-reads exactly like the finding that a section is inert.
+
+**The result, reproduced across two independent runs of 126 calls each: every
+section is inert.** Deleting the positive rules, the negative rules, the
+untrusted-content warning, the tool bound or the brevity line, or replacing the
+core task statement with a vague one, changed **zero of the 18 decisions**, with
+no inconclusive cells in either run.
+
+That is an argument from absence, so three guards attack it, two of them free on
+every CI run:
+
+- `TestPromptMutationsApply` asserts each mutation actually changes the prompt
+  text. A string match that silently failed is a no-op, and a no-op reports "no
+  scenario flipped" — which reads exactly like the finding that a section is
+  inert.
+- `TestPromptMutationsReachTheModel` asserts the changed text is what the agent
+  is built with, captured off the request the model receives. Without it, a
+  cached instruction would make the entire prompt look dead.
+- The positive control costs one call: it swaps the instruction for "record
+  every file" and requires a declining scenario to start filing. It flips, so a
+  prompt change is observable here.
+
+Both free guards were verified by breaking them on purpose.
+
+Read it as a statement about the scenarios as much as about the prompt. A set
+that only asks obvious questions cannot tell a good prompt from a bad one, and
+sharpening it is the follow-up this points to. The injection results in
+particular are carried by the nonce fence and the filing chokepoint, neither of
+which a prompt edit can reach.
 
 ## Known limitations
 
