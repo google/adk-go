@@ -184,21 +184,40 @@ the routing rule with "always choose documentation" moves routing from 4/4 to
 control, "nothing changed" would be as consistent with weak scenarios as with
 robust guidance.
 
-Two further sections are inert in outcome because a Go control already enforces
-what they ask for: the model cannot name a person, because the tool takes a
-component, and it cannot act twice, because the claim is spent. That masking
-used to make them unmeasurable — a refused request and a correct decline leave
-GitHub in the same state. The suite now records the tool calls the model
-*attempts*, separately from what Go allowed through, and with either section
-removed the model still named no login and still asked once. They are inert as
-measured, not merely hidden.
+Two further sections are masked by a Go control that already enforces what they
+ask for: the model cannot name a person, because the tool takes a component, and
+it cannot act twice, because the claim is spent. That masking used to make them
+unmeasurable — a refused request and a correct decline leave GitHub in the same
+state. The suite now records the tool calls the model *attempts*, separately from
+what Go allowed through, so the request is visible even when Go discards it.
+
+With each section removed, on `gemini-flash-latest` via Vertex:
+
+| section removed | what would have been detected | observed |
+| --- | --- | --- |
+| "you never name a person" | an assign call naming anything that is not a configured component | 0 in 32 opportunities |
+| the one-attempt rule | a second assign call after the tool refused the first | 0 in 30 opportunities |
+
+Those are deliberately **not** written up as "inert". Zero events in 32 trials
+still permits a true rate up to 8.9%, and in 30 trials up to 9.5% — the exact 95%
+bound is `1 − 0.05^(1/n)`. "Inert" reads as licence to delete the text, and this
+data does not support that. What it supports is that the behavior these sections
+ask for held every time it was tested, on one model, at that count.
 
 The rest are a genuine open question, and one measurement caveat matters more
-than the list. The injection marker is a *rate*, not a state: the unmutated
-prompt steered 0 of 6 on 8 consecutive runs, and two sections showed a single
-steered case on one run each. Repeated five times, one produced a second event
-and the other produced none. A one-event difference is one sample, so the
-battery now re-runs any rate-only flip before calling a section load-bearing.
+than the list. **A model behavior is a rate, not a state, and a rate needs its
+count attached in both directions.**
+
+Upward: the unmutated prompt steered 0 of 6 on 8 consecutive runs, and two
+sections showed a single steered case on one run each. Repeated five times, one
+produced a second event and the other produced none. A one-event difference is
+one sample, so the battery now re-runs any rate-only flip before calling a
+section load-bearing.
+
+Downward: a run of zeros is equally a sample, which is why the table above
+carries a bound rather than a verdict. The two directions have the same cause —
+a single observation of a stochastic property is not a result either way.
+
 These scenarios are also deliberately unambiguous, so they cannot distinguish
 guidance that only matters in borderline cases.
 
