@@ -202,6 +202,21 @@ type e2eResult struct {
 	// retries counts the transient model failures retryingModel recovered from
 	// or gave up on. It is how these tests tell a provider outage from a defect.
 	retries int
+	// attempts counts the mutating tool calls the model actually emitted, keyed
+	// by issue and field. Writes alone cannot tell why a field stayed empty:
+	// doAddLabel refuses a label outside the allowlist with a model-readable
+	// errResult, a nil Go error and no log line, so a model that asked for
+	// "dependencies" and a model that asked for nothing leave an identical
+	// repository behind. Those are opposite findings about the prompt, and a
+	// test that expects NO label needs to tell them apart. checkIssueArg counts
+	// the call before the allowlist sees it, so this counts intent.
+	attempts map[attemptKey]int
+}
+
+// attempted reports how many mutating tool calls the model made for one field
+// of one issue, whatever the gates then did with them.
+func (r e2eResult) attempted(number int, field string) int {
+	return r.attempts[attemptKey{number: number, field: field}]
 }
 
 // retryCountingHandler passes every record through and counts the retry
@@ -312,9 +327,19 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	}
 
 	origClient := newClientFn
+	// Every client the run builds is kept, so the attempt counters can be read
+	// back afterwards. run() owns the client's lifetime, so this is the only
+	// point a test can reach it.
+	var (
+		clientMu sync.Mutex
+		clients  []*Client
+	)
 	newClientFn = func(cfg *Config, log *slog.Logger) *Client {
 		c := NewClient(cfg, log)
 		c.rest.BaseURL = base
+		clientMu.Lock()
+		clients = append(clients, c)
+		clientMu.Unlock()
 		return c
 	}
 	t.Cleanup(func() { newClientFn = origClient })
@@ -337,7 +362,18 @@ func runE2E(t *testing.T, stub *githubStub, opts e2eOpts) e2eResult {
 	for k, v := range stub.labelled {
 		labels[k] = v
 	}
-	return e2eResult{types: types, labels: labels, err: runErr, retries: retries}
+
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	attempts := make(map[attemptKey]int)
+	for _, c := range clients {
+		c.mu.Lock()
+		for k, v := range c.attempts {
+			attempts[k] += v
+		}
+		c.mu.Unlock()
+	}
+	return e2eResult{types: types, labels: labels, err: runErr, retries: retries, attempts: attempts}
 }
 
 // issueOf builds a stub carrying one issue with the given text.
