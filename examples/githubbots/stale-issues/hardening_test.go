@@ -25,6 +25,7 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,8 +186,16 @@ func TestSearchStopsAtTheIssueCap(t *testing.T) {
 	// Always report another page, so only the cap can end the loop.
 	c := testClient(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
+		// t.Errorf, never t.Fatal: this runs on the httptest handler's goroutine,
+		// and Fatal calls runtime.Goexit on whichever goroutine invokes it. From
+		// here that kills the handler mid-response rather than the test, so the
+		// client sees a broken connection instead of a clean failure. Stop
+		// advertising a next page instead, which ends the loop and lets the
+		// assertion below report properly.
 		if pages > 50 {
-			t.Fatal("the search never stopped: MAX_ISSUES is not bounding the sweep")
+			t.Errorf("the search fetched %d pages: MAX_ISSUES is not bounding the sweep", pages)
+			_, _ = io.WriteString(w, `{"total_count":0,"incomplete_results":false,"items":[]}`)
+			return
 		}
 		w.Header().Set("Link", `<https://api.github.com/search/issues?page=99>; rel="next"`)
 		var b strings.Builder
@@ -286,12 +295,18 @@ func TestAPanicInOneAuditFailsTheRunInsteadOfKillingIt(t *testing.T) {
 	cfg.IssueTimeout = time.Minute
 	log := discardLogger()
 
-	var completed int32
+	// atomic, because this closure runs on the fan-out's goroutines. A plain
+	// increment here is a data race, and it is one the detector will not
+	// reliably show you: with three issues at Concurrency 2 the window is a few
+	// instructions wide, so it passed eight local -race runs and every -count=3
+	// -shuffle=on run before CI caught it first try. Widened to 20 issues at
+	// Concurrency 16 the same defect reproduces 10 times out of 10.
+	var completed atomic.Int64
 	err := auditAll(context.Background(), cfg, log, []int{1, 2, 3}, func(_ context.Context, n int) error {
 		if n == 2 {
 			panic("malformed model response")
 		}
-		completed++
+		completed.Add(1)
 		return nil
 	})
 	if err == nil {
@@ -300,8 +315,8 @@ func TestAPanicInOneAuditFailsTheRunInsteadOfKillingIt(t *testing.T) {
 	if !strings.Contains(err.Error(), "panic") || !strings.Contains(err.Error(), "#2") {
 		t.Errorf("auditAll error = %v, want it to name the panic and the issue it happened on", err)
 	}
-	if completed != 2 {
-		t.Errorf("%d of the 2 healthy issues finished, want both: one bad issue must not abort the others", completed)
+	if got := completed.Load(); got != 2 {
+		t.Errorf("%d of the 2 healthy issues finished, want both: one bad issue must not abort the others", got)
 	}
 }
 
