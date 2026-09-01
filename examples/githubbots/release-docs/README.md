@@ -7,25 +7,104 @@ It diffs a release tag against the one before it, analyzes the changed files in
 bounded groups, and files **one** GitHub issue listing the documentation updates
 the changes imply.
 
+## What happens when you publish a release
+
+A worked example, using the real `v2.2.0` → `v2.3.0` comparison on
+`google/adk-go`.
+
+**1. The workflow fires.** Publishing a release triggers it. Prereleases are
+skipped. You can also run it by hand and name the tags, which is how you
+backfill an older release or re-check one.
+
+**2. Go picks the two tags.** You published `v2.3.0`, so that is the head. The
+base is *not* the next entry in the release list — GitHub orders releases by
+commit date, and on this repository that list actually runs v2.3.0, v1.6.0,
+v2.2.0, …, so "the next one" would diff v2.3.0 against v1.6.0 and produce
+nonsense. Go instead picks the highest non-prerelease version strictly below the
+head that was published no later than it: `v2.2.0`. If that ever gives you a
+strange pair, pass the tags explicitly.
+
+**3. Go checks whether this release already has an issue.** It searches the
+target repository for one carrying the marker for exactly this tag pair. If it
+finds one, the run stops here — before spending a single model token. Re-running
+the workflow on the same release is therefore free and harmless.
+
+**4. Go fetches the comparison and bounds it.** For v2.2.0 → v2.3.0 that was 220
+changed files. Caps apply: at most `MAX_FILES` files, `MAX_PATCH_BYTES` per
+patch, `MAX_COMMITS` commit subjects. Whatever the caps drop is counted, not
+discarded silently — that count reappears in step 9.
+
+**5. Go splits the files into groups and shows each group to the model.** Each
+group is a separate model call with its own session, so one release does not
+have to fit in one context window. What the model sees is the file paths, the
+patch text and the commit subjects — every one of them wrapped in a fence marked
+with an unguessable per-run token, so a contributor cannot write text in a
+commit message that impersonates an instruction from us.
+
+**6. The model's only move is to record findings.** It has exactly one tool, and
+that tool appends to a map in memory. It holds no GitHub client. **The model
+cannot file an issue, choose the repository, choose the title, or decide that
+anything is filed at all.** Those are Go's, after the loop. A model completely
+talked over by a hostile commit message can change what an issue
+*says*; it cannot make one exist, or send one somewhere else.
+
+**7. Go checks every finding before any of it can appear.** A finding has six
+fields and they are not treated alike:
+
+| field | who writes it | what constrains it |
+| --- | --- | --- |
+| `kind` | model | must be one of eight literals, or it becomes `unclassified` |
+| `doc_file` | model | must match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$` — no `:`, `@`, backtick, `!`, `(` or `[`, so it cannot be a link or an image |
+| summary, proposed change, reasoning, reference | model | rendered inside a fenced code block, with control characters stripped and Markdown-escaping sequences neutralized |
+| title, marker, compare link, file counts | Go | not model-authored at all |
+
+The practical effect: model text that renders as Markdown cannot express a URL,
+an image or an `@mention`, and the model text that could express those things
+never renders.
+
+**8. Go assembles one issue and files it.** For v2.2.0 → v2.3.0 the run produced
+three suggestions, among them a new `AllowTransferToAgent` field on `A2AConfig`
+and `NewAgentCardProvider` starting to reject unsupported URL schemes. Each is
+rendered as a heading with the `kind`, then the model's prose in a fenced block.
+
+**9. If the analysis was incomplete, the issue says so.** The body carries a
+**"The analysis is partial"** section naming exactly what was missed — how many
+files the caps dropped, how many patches were truncated, how many groups never
+ran. In the v2.2.0 → v2.3.0 run that read *"160 of 220 changed files were not
+analyzed (file cap)"* and *"6 file diffs were truncated"*. **Read that section
+before trusting the issue to be exhaustive.**
+
+**10. What stops it.** A bad tag, an API failure, or every group failing fails
+the job. Running out of time budget does *not*: the run files what it has and
+names the groups it never reached, because a partial answer that says which
+parts are missing beats a red run that files nothing. See Known limitations.
+
+**One case to know about:** if the run finds nothing to suggest *and* coverage
+was incomplete, no issue is filed at all, and the coverage warning appears only
+as an annotation on the Actions run. If you expected an issue for a release and
+there is none, look at the workflow run rather than concluding there was nothing
+to document.
+
 ## The model has no authority to lose
 
 This runs on a public repository under the project's identity, and its input is
 attacker-reachable: anyone can open a pull request, and once it merges their
 file paths, patch text and commit subjects are the whole of what this bot reads.
 
-So the design does not ask the model to behave. **The model cannot file an
-issue, cannot choose the repository or the title, and cannot decide that
-anything is filed at all.** Its single tool appends findings to an in-memory
-map, and the collector holding that map has no GitHub client in it — there is
-no reference for a compromised model to reach through. Every write is made by
-Go after the analysis loop has finished, from values Go controls.
+So the design does not ask the model to behave. Step 6 above is the whole of
+it: the single tool appends to an in-memory map, and the collector holding that
+map has no GitHub client in it, so there is no reference for a compromised model
+to reach through. Every write is made by Go after the loop, from values Go
+controls.
 
 A fully steered model can therefore change what an issue *says*. It cannot
 change whether one exists, where it goes, or what it is called. That is a
-property of the wiring rather than of the prompt, which matters because prompt
-mutation testing on this bot found most of its prose changed no decision the
-bot makes — the prose was never what was holding. What the model writes is then
-confined by sanitization and fencing, covered under Authority limits below.
+property of the wiring, not of the prompt, and the distinction is load-bearing:
+the prompt does carry real weight — deleting every copy of its core judgement
+makes the model file on 2 of 3 injection scenarios — but the prompt is the layer
+an attacker gets to argue with, and the wiring is not. What the model writes is
+then confined by sanitization and fencing, covered under Authority limits
+below.
 
 ## What it demonstrates
 
@@ -38,20 +117,6 @@ confined by sanitization and fencing, covered under Authority limits below.
   the documentation wrong?"
 - Bounding an untrusted, unbounded input (a release diff) so it fits a context
   window and a budget, and saying in the output exactly what was left out.
-
-## The agent loop
-
-1. Code resolves the tag pair: explicit tags, or the newest release and the one
-   before it.
-2. Code checks whether an issue for that exact tag pair already exists. If so the
-   run stops here, before a single model token is spent.
-3. Code fetches the compare diff and applies the caps (`MAX_FILES`,
-   `MAX_PATCH_BYTES`, `MAX_COMMITS`), then splits the files into groups of
-   `FILES_PER_GROUP`.
-4. For each group, in its own session scoped to that `(release, group)` pair, the
-   agent analyzes the fenced diff and calls
-   `record_documentation_findings(release, group_index, findings)`.
-5. Code assembles the issue body from the recorded findings and files it.
 
 ## Authority limits, and how they are enforced
 
