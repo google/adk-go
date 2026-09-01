@@ -15,11 +15,16 @@
 package database
 
 import (
+	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 	"gorm.io/gorm"
 
 	"google.golang.org/adk/v2/platform"
@@ -210,6 +215,92 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 }
 
+func TestNewSessionServiceFromDB(t *testing.T) {
+	t.Run("nil db returns error", func(t *testing.T) {
+		_, err := NewSessionServiceFromDB(nil)
+		if err == nil {
+			t.Fatal("expected error for nil db, got nil")
+		}
+	})
+
+	t.Run("valid db creates service", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v, want nil", err)
+		}
+		if svc == nil {
+			t.Fatal("NewSessionServiceFromDB() returned nil service")
+		}
+	})
+
+	t.Run("shares db connection", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+		}
+		dbSvc, ok := svc.(*databaseService)
+		if !ok {
+			t.Fatalf("expected *databaseService, got %T", svc)
+		}
+		if dbSvc.db != db {
+			t.Error("NewSessionServiceFromDB() did not use the provided *gorm.DB")
+		}
+	})
+}
+
+func Test_databaseServiceFromDB(t *testing.T) {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+		return emptyServiceFromDB(t)
+	})
+}
+
+func emptyServiceFromDB(t *testing.T) *databaseService {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{PrepareStmt: true})
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	svc, err := NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("NewSessionServiceFromDB() failed: %v", err)
+	}
+	if err := AutoMigrate(svc); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	dbSvc := svc.(*databaseService)
+	t.Cleanup(func() {
+		modelsToDelete := []any{&storageEvent{}, &storageSession{}, &storageUserState{}, &storageAppState{}}
+		for _, model := range modelsToDelete {
+			stmt := &gorm.Statement{DB: dbSvc.db}
+			if err := stmt.Parse(model); err != nil {
+				t.Errorf("failed to parse model: %v", err)
+				continue
+			}
+			if err := dbSvc.db.Exec(`DELETE FROM ` + stmt.Table + ` WHERE true`).Error; err != nil {
+				t.Errorf("failed to delete from %s: %v", stmt.Table, err)
+			}
+		}
+		sqlDB, err := dbSvc.db.DB()
+		if err != nil {
+			t.Errorf("failed to get *sql.DB: %v", err)
+			return
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("failed to close *sql.DB: %v", err)
+		}
+	})
+	return dbSvc
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
@@ -318,5 +409,69 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestEventsSharingATimestampComeBackInAStableOrder pins that a tie does not
+// flip between reads.
+//
+// Timestamps are truncated to microseconds on write, so two events in one tick
+// are ordinary. The query fetches DESC so a limit takes the most recent and
+// then reverses, and without a tiebreak SQLite's stable sort hands ties back in
+// reverse insertion order, differently from how they went in. Compaction reads
+// this order to decide what a summary stands for, so a pair that swaps lets a
+// record cover an event nothing summarized.
+func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
+	// Not parallel: emptyService opens file::memory:?cache=shared, so every
+	// test in this package works against one database.
+
+	ctx := context.Background()
+	svc := emptyService(t)
+	const appName, userID = "app", "user"
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	sess := created.Session
+
+	// Six events on one instant, appended in a known order.
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var want []string
+	for i := range 6 {
+		ev := session.NewEvent(ctx, "inv1")
+		ev.Author = "author"
+		ev.Timestamp = ts
+		ev.LLMResponse.Content = genai.NewContentFromText(fmt.Sprintf("event %d", i), genai.RoleUser)
+		if err := svc.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+		want = append(want, ev.ID)
+	}
+
+	read := func() []string {
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: appName, UserID: userID, SessionID: sess.ID()})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		var ids []string
+		for ev := range got.Session.Events().All() {
+			ids = append(ids, ev.ID)
+		}
+		return ids
+	}
+
+	first := read()
+	// Stable across reads is the property compaction depends on.
+	for range 5 {
+		if diff := cmp.Diff(first, read()); diff != "" {
+			t.Fatalf("the order of tied events changed between reads (-first +later):\n%s", diff)
+		}
+	}
+	// And not the reverse of how they were appended, which is what the missing
+	// tiebreak produced.
+	reversed := slices.Clone(want)
+	slices.Reverse(reversed)
+	if cmp.Diff(reversed, first) == "" {
+		t.Errorf("tied events came back in reverse insertion order:\n%v", first)
 	}
 }

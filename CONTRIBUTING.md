@@ -18,6 +18,7 @@ We'd love to accept your patches and contributions to this project.
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
+-   [AI-assisted development](#ai-assisted-development)
 
 ## Branches
 
@@ -173,6 +174,18 @@ Depending on your change:
         runner setup.
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
+
+## AI-assisted development
+
+This repo ships skills for AI coding agents (Antigravity, Gemini CLI, Claude
+Code, and others) in `.agents/skills/`. Compatible tools load them on their own;
+otherwise read the relevant `SKILL.md` before starting that kind of work.
+
+-   **`adk-sample-creator`** — authoring or reworking a runnable example under
+    `examples/`: directory layout, `main.go` anatomy, the README template with
+    its diagram and transcript, and the checks to run before opening the PR.
+
+`AGENTS.md` carries the rest of the project context an agent needs.
 
 # ADK Web
 
