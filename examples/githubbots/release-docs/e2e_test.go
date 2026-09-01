@@ -38,8 +38,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -100,17 +102,47 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// forceUnavailable makes every model call fail retryably, so the accounting
+// above can be checked deterministically, offline and in seconds.
+//
+// The guard is the kind of code that is written once, believed, and never
+// exercised again -- and a broken false-green guard is worse than none, because
+// it is trusted. A standing flag means whoever next touches this can re-verify
+// it in one command instead of hand-forcing an outage:
+//
+//	RELEASE_DOCS_E2E=1 RELEASE_DOCS_E2E_FORCE_UNAVAILABLE=1 go test -run TestE2EAnalysisDecisions .
+//
+// That must exit non-zero. Run it WITHOUT -v: `go test` discards a passing
+// package's output, so a guard that only prints a warning is invisible in
+// exactly the invocation people use, and the exit code is the part that has to
+// carry the signal.
+func forceUnavailable() bool { return os.Getenv("RELEASE_DOCS_E2E_FORCE_UNAVAILABLE") == "1" }
+
 // requireE2E gates the suite on explicit opt-in and a key.
 func requireE2E(t *testing.T) string {
 	t.Helper()
 	if os.Getenv("RELEASE_DOCS_E2E") != "1" {
 		t.Skip("set RELEASE_DOCS_E2E=1 to run the end-to-end suite (it calls the real Gemini API)")
 	}
+	if forceUnavailable() {
+		return "no key needed; every call is forced to fail"
+	}
 	key := firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY"))
 	if key == "" {
 		t.Skip("GEMINI_API_KEY is not set")
 	}
 	return key
+}
+
+// unavailableModel yields the error the public endpoint returns when it sheds.
+type unavailableModel struct{}
+
+func (unavailableModel) Name() string { return "unavailable" }
+
+func (unavailableModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(nil, errors.New("Error 503, Message: This model is currently experiencing high demand"))
+	}
 }
 
 // e2eModelName is the model the suite runs against.
@@ -481,6 +513,9 @@ func TestE2EAnalysisDecisions(t *testing.T) {
 
 func e2eModel(t *testing.T, key string) model.LLM {
 	t.Helper()
+	if forceUnavailable() {
+		return unavailableModel{}
+	}
 	m, err := gemini.NewModel(context.Background(), e2eModelName(), &genai.ClientConfig{APIKey: key})
 	if err != nil {
 		t.Fatalf("create model %q: %v", e2eModelName(), err)
@@ -579,7 +614,9 @@ func attemptWithRetry(t *testing.T, m model.LLM, sc scenario, attempts int) *mut
 		}
 		modelRetries.Add(1)
 		t.Logf("attempt %d: transient model error, retrying: %v", attempt, err)
-		time.Sleep(time.Duration(attempt*attempt) * 2 * time.Second)
+		if !forceUnavailable() {
+			time.Sleep(time.Duration(attempt*attempt) * 2 * time.Second)
+		}
 	}
 }
 

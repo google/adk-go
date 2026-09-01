@@ -318,11 +318,27 @@ RELEASE_DOCS_E2E=1 RELEASE_DOCS_PROMPT_MUTATIONS=1 \
 
 Gated separately because it costs one model call per scenario per mutation.
 
-**The result, reproduced across two independent runs of 126 calls each: every
-section is inert.** Deleting the positive rules, the negative rules, the
-untrusted-content warning, the tool bound or the brevity line, or replacing the
-core task statement with a vague one, changed **zero of the 18 decisions**, with
-no inconclusive cells in either run.
+**The result, reproduced across two independent runs of 126 calls each: not one
+of the six deletions changed any of the 18 decisions**, with no inconclusive
+cells in either run.
+
+Reporting that as a single number would be misleading, because it conflates
+three different things:
+
+| Section deleted | Result | Why |
+| --- | --- | --- |
+| `## What deserves a finding` | inert | nothing structural stopped it flipping |
+| `## What does NOT deserve a finding` | inert | nothing structural stopped it flipping |
+| core task statement, made vague | inert | nothing structural stopped it flipping |
+| the CRITICAL untrusted-content paragraph | no change, expected | `renderGroupPrompt` repeats the warning in every group message, so this measures duplication |
+| `You have no other tools` | no change, expected | the agent is built with exactly one tool, so the sentence describes an inventory the model cannot exceed |
+| the brevity instruction | not measured | every assertion here is structural and none reads a field's length, so added verbosity cannot flip a scenario |
+
+Only the first three are findings about the prompt. The last one is the harness
+admitting a blind spot rather than reporting a result. Each mutation carries an
+`inertBecause` reason so a predictable zero and a real one cannot be read as the
+same number — which is how a suite talks itself into deleting something
+load-bearing.
 
 That is an argument from absence, so three guards attack it, two of them free on
 every CI run:
@@ -340,11 +356,11 @@ every CI run:
 
 Both free guards were verified by breaking them on purpose.
 
-Read it as a statement about the scenarios as much as about the prompt. A set
-that only asks obvious questions cannot tell a good prompt from a bad one, and
-sharpening it is the follow-up this points to. The injection results in
-particular are carried by the nonce fence and the filing chokepoint, neither of
-which a prompt edit can reach.
+Read the three real ones as a statement about the scenarios as much as about the
+prompt. A set that only asks obvious questions cannot tell a good prompt from a
+bad one, and sharpening it is the follow-up this points to. The injection
+results in particular are carried by the nonce fence and the filing chokepoint,
+neither of which a prompt edit can reach.
 
 ## Known limitations
 
