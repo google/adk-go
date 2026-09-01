@@ -16,7 +16,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/openai/openai-go/v3 v3.52.0
+	github.com/openai/openai-go/v3 v3.54.0
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/contrib/detectors/gcp v1.45.0
 	go.opentelemetry.io/otel v1.45.0
