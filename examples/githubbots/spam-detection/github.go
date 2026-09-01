@@ -410,6 +410,13 @@ type issueResponse struct {
 	} `json:"errors"`
 }
 
+// commentFetchLimit is how many of an issue's comments are read. It is named
+// rather than inlined because the README states it, and a number stated in prose
+// and written as a literal somewhere else drifts apart silently -- three sibling
+// bots shipped a PR description with a stale count for exactly that reason.
+// TestCommentFetchLimitIsWhatTheDocumentationSays pins the two together.
+const commentFetchLimit = 100
+
 // FetchIssue retrieves an issue and its recent comments in a single GraphQL
 // query, issued through the authenticated go-github client (no extra
 // dependency). It returns ErrIssueNotFound when the number does not exist or
@@ -427,7 +434,7 @@ func (c *GitHubClient) FetchIssue(ctx context.Context, number int) (Issue, error
 			// best-effort secondary signal, so on a thread with more than this
 			// many comments after the alert, hasBotAlert may miss it. That can
 			// cause a re-alert only if the label was also removed.
-			"commentLimit": 100,
+			"commentLimit": commentFetchLimit,
 		},
 	}
 	req, err := c.rest.NewRequest("POST", "graphql", body)

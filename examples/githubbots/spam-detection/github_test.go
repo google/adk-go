@@ -537,3 +537,23 @@ func TestNewGitHubClientStopsRetryingWhenTheContextIsDone(t *testing.T) {
 		t.Errorf("returned after %v, want under %v: the retry loop slept through its backoff", elapsed, budget)
 	}
 }
+
+// The README's walkthrough tells a reader the bot reads "up to 100" of an
+// issue's comments, and the known-limitations section explains what happens on a
+// thread longer than that: the bot may miss its own earlier alert. Both
+// statements are wrong the moment the constant moves, and nothing about editing
+// the constant would prompt anyone to reread the README.
+//
+// So the literal is pinned here rather than the constant compared with itself,
+// which is the form that catches the drift: a change to commentFetchLimit fails
+// this test and the failure names the document to update. Three sibling bots
+// shipped stale counts in their PR descriptions for want of this.
+func TestCommentFetchLimitIsWhatTheDocumentationSays(t *testing.T) {
+	const documented = 100
+	if commentFetchLimit != documented {
+		t.Errorf("commentFetchLimit = %d, but README.md tells readers the bot reads up to %d "+
+			"comments and explains the idempotency limit in those terms. Update the README's "+
+			"walkthrough and its known-limitations section, then change this literal",
+			commentFetchLimit, documented)
+	}
+}
