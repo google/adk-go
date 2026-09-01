@@ -236,16 +236,26 @@ honest reading is that the sections are redundant with each other and with the
 model's own priors on content this obvious, and that a corpus of clear-cut cases
 cannot tell a redundant instruction from an unnecessary one.
 
-Two limits on that conclusion, both worth stating rather than leaving for a
-reader to find. Each cell is three repeats, so the measurement only detects an
-effect large enough to flip a scenario outright — every cell came back
-categorically 3/3 or 0/3, never partial, so nothing here was decided on a single
-noisy observation, but a section that shifted behaviour by a fifth would look
-identical to one that did nothing. And the sections were deleted one at a time,
-so a set of instructions that covers the same ground jointly would show every
-member as inert while the group carries real weight — which is the most likely
-explanation of a result where the whole prompt is load-bearing and no part of it
-is.
+The obvious explanation is internal redundancy — sections deleted one at a time
+would each read as inert while jointly carrying real weight. **That was tested
+and it is wrong here.** Deleting whole groups that cover the same ground changed
+nothing either: removing the third-party rule, "What is NOT spam" and every
+worked example together, 36 of the prompt's 92 lines and all of its restraint
+guidance, left all 14 scenarios at 3/3. Removing the definition of spam and the
+examples together did the same.
+
+So the accurate reading is narrower than "the prompt is redundant". The model
+follows an explicit contrary *instruction* — that is what the positive control
+demonstrates, since it replaced the prompt with "every issue is spam" rather
+than deleting anything. It does not depend on the prompt's *guidance* to reach
+these judgements: on cases this clear-cut its own priors already produce the
+same answers. The prompt earns its place on the cases a corpus of obvious
+examples does not contain, and this measurement says nothing about those.
+
+One limit remains on all of the above: each cell is three repeats, so only an
+effect large enough to flip a scenario outright is visible. Every cell came back
+categorically 3/3 or 0/3 and none was decided on a single noisy observation, but
+a section shifting behaviour by a fifth would read as inert.
 
 ```bash
 go test ./...
