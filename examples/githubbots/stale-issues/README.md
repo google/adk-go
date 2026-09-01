@@ -9,6 +9,77 @@ candidate) and a maintainer **posting a status update** (still active).
 It runs in this repository from
 [`.github/workflows/stale-issues-bot.yml`](../../../.github/workflows/stale-issues-bot.yml).
 
+## What happens on a run
+
+Once a day at 07:00 UTC the bot sweeps the issue tracker. For each issue it
+looks at, this is the whole sequence.
+
+1. **It picks candidates.** A search for open issues created more than 14 days
+   ago, oldest first, capped at 100 per run. Anything past the cap waits for
+   tomorrow. Pull requests are excluded.
+
+2. **It reads the issue's history** — one GraphQL query per issue, fetching
+   comments, description edits, title renames, and label and reopen events.
+
+3. **It works out whose turn it is.** In Go, with no model involved: who acted
+   last and whether they were a maintainer, the author, or someone else; how
+   many days ago; whether the author has said anything since; whether the
+   `stale` label is on the issue and when it was applied. Anything posted by a
+   bot account is ignored, including the bot's own comments.
+
+4. **It asks the model one question.** The model is shown those computed facts
+   and the maintainer's most recent comment, and decides a single thing: *is
+   that comment asking the author for something specific — a reproduction,
+   a version, a yes or no — or is it a status update, an opinion, or the team
+   thinking out loud?* Nothing else about the decision is the model's.
+
+5. **Go re-checks everything mechanical** before any write happens, against the
+   state it computed in step 3 rather than anything the model reported.
+
+6. **It writes, or it does not.** Four outcomes:
+
+   - The author replied or edited the description after the label went on →
+     the `stale` label comes off.
+   - The maintainer's comment was a question, and 14 days have passed with no
+     reply → the issue gets the `stale` label, a `request clarification` label,
+     and a comment saying it will be closed in 7 days without further activity.
+   - It has carried the `stale` label for more than 7 days and nobody has
+     responded → closed as *not planned*, with a comment.
+   - Anything else, including any doubt → nothing is written.
+
+7. **It stops.** 5 minutes per issue, 30 minutes per run, and at most 20
+   issues marked stale or closed in a single run. Hitting any of those fails
+   the run so a human looks at it, rather than passing quietly.
+
+So if you open an issue tomorrow and a maintainer asks you for a reproduction,
+nothing happens for two weeks. On the first sweep after that you get one
+comment, telling you the issue will close in a week if nothing further happens.
+Replying at any point — or editing the description — takes the label back off.
+If you never reply, it closes a week after the warning. Both thresholds are
+configurable, and both comparisons are strict, so a write lands on the sweep
+after a threshold is passed rather than the one that reaches it.
+
+### What the model can and cannot get wrong
+
+This is the most useful thing to know about the bot, so it is worth stating
+plainly. The model decides **one** thing: whether a maintainer's comment was a
+question for the author. Everything else is Go.
+
+Go owns which issues are looked at, every date calculation, every threshold
+comparison, whether the author has replied since, which label names are
+written, whether an action is permitted at all, and how many writes one run may
+make. All of it is checked against data fetched from the GitHub API, never
+against anything the model says.
+
+So the worst a wrong model judgement can do is act on an issue where the
+thresholds were already met and the ball genuinely was in the author's court —
+posting a stale warning on a thread where the maintainer's last comment was a
+status update rather than a question. It cannot close something early, act on a
+different issue, write a label nobody configured, or put text of its own into a
+comment. Issue text is attacker-controlled, so the model is treated as
+attacker-controlled too; [Authority limits](#authority-limits) is the full list
+of what the Go layer still refuses.
+
 ## What it demonstrates
 
 - An `llmagent.New` agent driven by typed `functiontool.New[Args, Result]` tools.
@@ -21,7 +92,7 @@ It runs in this repository from
 - Giving an agent write authority over a public issue tracker **without**
   trusting the model — see [Authority limits](#authority-limits) below.
 
-## How it works
+## How it works, in code
 
 For each candidate issue the agent:
 
