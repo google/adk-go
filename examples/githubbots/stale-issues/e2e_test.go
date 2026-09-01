@@ -28,6 +28,27 @@ package main
 // still COMPILES in CI, so it cannot rot, but it never calls a paid API there.
 //
 //	STALE_BOT_E2E=1 GEMINI_API_KEY=... go test -run TestE2E -timeout 20m .
+//
+// # On what prompt-mutation results do and do not license
+//
+// Deleting STEP 3's "Do NOT mark stale" list and its worked examples changes no
+// outcome in these scenarios. An earlier commit message called that guidance
+// "belt-and-braces", and that phrasing was wrong in a way worth correcting here,
+// because it is the sentence that would justify deleting the section.
+//
+// The measurement is: no flip observed in 20 runs against the mutant, on
+// gemini-3.6-flash, 2026-09-01, with a same-day baseline of 15 of 15 correct on
+// the unmutated prompt. That is a RATE, so zero events in twenty bounds the flip
+// rate at roughly 14% with 95% confidence — an upper bound, not a property. It
+// does not establish that the section does nothing, and it does not license
+// removing it. The original claim rested on four runs on a different model
+// (gemini-flash-latest, before the workflow pinned one), which is weaker still.
+//
+// The general rule, since this suite invites the question every time a prompt
+// section looks removable: a result of the form "N of M" is a sample, not a
+// verdict. Quote the run count, the model and the date with it, and treat a
+// section as load-bearing until something shows otherwise rather than the
+// reverse. Prompt text is cheap; a wrong write on a public issue is not.
 
 import (
 	"context"
