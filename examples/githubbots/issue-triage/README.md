@@ -27,7 +27,8 @@ whatever an attacker asks, and read what the Go code still refuses:
   the API. That the section really is one is pinned by a test that holds every
   caller inside it until they have all arrived, rather than racing them and
   hoping — measured, it catches a split critical section 10 times out of 10,
-  where racing goroutines caught it 0 times out of 10, and the claim is never re-opened — one write per field per run,
+  where racing goroutines caught it 0 times out of 10, and the claim is never
+  re-opened — one write per field per run,
   whatever the response says. Because a sweep can reach its last issue up to
   `SWEEP_TIMEOUT` after reading it, the issue is re-read immediately before the
   write as well, so a field a maintainer filled inside that window is not
@@ -117,6 +118,31 @@ homoglyph and zero-width entries in
 where Go decides and such a payload can only ever be refused — they cannot
 succeed however the model behaves. That coverage was standing in for coverage
 here, on the only surface the model actually governs.
+
+#### Untrusted text is deliberately not normalized
+
+The obvious response to the table above is to strip or fold those characters
+before the model sees them. This bot does not, and that is a decision rather
+than an omission.
+
+Normalization aggressive enough to matter would inflict a certain cost to
+prevent a bounded one. adk-go receives issues titled in Chinese, Japanese and
+Korean, and in every accented Latin script. A filter that catches a Cyrillic `о`
+posing as a Latin `o` is, by construction, a filter that rewrites legitimate
+non-Latin titles — and a real contributor's issue rendered as mojibake in the
+tracker is a guaranteed harm, paid on every issue, to reduce the chance of a
+misclassification that a maintainer can fix with two clicks.
+
+What makes that trade defensible here is the bound, not the measurement. Because
+every value this bot writes comes from a closed vocabulary and it publishes no
+prose at all, a smuggled character has exactly one thing it can do: argue for
+the wrong member of the allow-list. It cannot produce an unauthorized write, and
+it cannot get an attacker's text published under our name — those are closed in
+Go, not by the model declining. The worst case is a `Feature` filed as a `Bug`.
+
+A bot that published model-authored prose should reach the opposite conclusion
+on the same evidence, because for it the smuggled character reaches the
+published text and the cost of being wrong is not a mislabelled issue.
 
 ## What it demonstrates
 
@@ -342,7 +368,7 @@ waiting for a real outage.
 workflow deploys — `gemini-3.6-flash` through the generative language API key —
 with no retry needed. Two earlier consecutive full runs were also 17 of 17
 against `gemini-flash-latest` on Vertex (`global`), which is the pairing that
-did *not* correspond to production; see below for why that distinction cost
+did *not* correspond to production. See below for why that distinction cost
 more than it sounds like.
 
 ### Which model, and why the workflow pins one
@@ -391,8 +417,8 @@ prevent.
 
 ### Mutation-testing the prompt
 
-The Go gates bound what a bad decision can do; they cannot make the decision
-good. Which type and which label an issue gets is decided entirely by
+The Go gates bound what a bad decision can do, but they cannot make the
+decision good. Which type and which label an issue gets is decided entirely by
 `prompt_instruction.txt`, and a prompt nobody has mutation-tested is text that
 is assumed to work. `prompt_mutation_test.go` deletes each section of the
 instruction in turn and re-runs eight classification scenarios — five honest
