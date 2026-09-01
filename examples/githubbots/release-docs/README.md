@@ -217,6 +217,32 @@ before any model call, and that the issue the program files is one both duplicat
 probes can find. `main_test.go` drives the real `runWith` to prove a release that
 already has an issue reaches neither the diff nor a write.
 
+### End-to-end tests against a real model
+
+`e2e_test.go` drives the bot against a **real Gemini model**. It is behind the
+`e2e` build tag, because CI discovers every `go.mod` and runs `go test ./...`
+with no API key — an untagged test there would fail every job for this module.
+
+```bash
+export GEMINI_API_KEY=...          # required; the suite skips without it
+export GITHUB_TOKEN=$(gh auth token)   # only for the two live-API tests
+go test -tags=e2e -count=1 -timeout=25m ./...
+```
+
+Nothing can create an issue: five tests fake GitHub with `httptest` and fail if a
+write arrives, and the two live tests read the public API in dry run and assert
+zero writes. The suite covers the golden path, prompt injection delivered through
+a file name, a diff body and a commit message at once, whether model output can
+escape the issue fence, a documentation-neutral release filing nothing, multi-
+group ordering, live tag resolution, and a live release end to end.
+
+Two things worth knowing before running it. The suite pins `gemini-3.6-flash`
+rather than the production default: `gemini-flash-latest` measured 503
+"experiencing high demand" on roughly a third of calls, which is a property of
+the endpoint and would make the suite flake for a reason that says nothing about
+this code. Set `E2E_MODEL` to check the production default deliberately. And each
+run costs real model calls — the live test at the production file cap makes eight.
+
 ## Known limitations
 
 - **The analysis reads the diff, not the documentation.** It suggests what
