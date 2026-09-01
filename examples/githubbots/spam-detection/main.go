@@ -419,6 +419,15 @@ func runReview(ctx context.Context, r *runner.Runner, ss session.Service, gh *Gi
 		}
 		var b strings.Builder
 		for _, p := range event.Content.Parts {
+			// UNMEASURED, and recorded as such rather than as a tested guard. No
+			// input has been constructed that reaches a nil part here, and ADK
+			// recovers a panic inside an agent node and surfaces it as a stream
+			// error, so the crash this would prevent may not be reachable at all.
+			// It costs one comparison and is kept on that basis alone.
+			//
+			// The recover in sweep's worker IS load-bearing by contrast: removing
+			// it turns a panic in a tool handler into a process crash with a raw
+			// errgroup trace. The two are easy to conflate; only one is pinned.
 			if p != nil {
 				b.WriteString(p.Text)
 			}
