@@ -199,18 +199,36 @@ unmeasurable — a refused request and a correct decline leave GitHub in the sam
 state. The suite now records the tool calls the model *attempts*, separately from
 what Go allowed through, so the request is visible even when Go discards it.
 
-With each section removed, on `gemini-flash-latest` via Vertex:
+**A rule can be written in more than one place, and deleting one copy measures
+nothing.** Three of these rules are also stated in the tool *declarations* —
+`"Call this exactly once"`, `"you do not choose the person, only the component"`,
+and `"only when the description genuinely lacks what a reviewer would need"` —
+which reach the model in the function schema rather than in the instruction
+text. The mutation battery edits `prompt_instruction.txt` and `prompt.go`, so it
+cannot touch them, and a cell can come back inert purely because the surviving
+copy did the work.
 
-| section removed | what would have been detected | observed |
+So these were re-run with **both** copies deleted, on `gemini-flash-latest` via
+Vertex:
+
+| rule removed from the prompt *and* the tool declaration | what would have been detected | observed |
 | --- | --- | --- |
 | "you never name a person" | an assign call naming anything that is not a configured component | 0 in 32 opportunities |
 | the one-attempt rule | a second assign call after the tool refused the first | 0 in 30 opportunities |
+| ask only when it genuinely helps | a context request on an obvious typo fix | 0 in 20 opportunities |
 
 Those are deliberately **not** written up as "inert". Zero events in 32 trials
-still permits a true rate up to 8.9%, and in 30 trials up to 9.5% — the exact 95%
-bound is `1 − 0.05^(1/n)`. "Inert" reads as licence to delete the text, and this
-data does not support that. What it supports is that the behavior these sections
-ask for held every time it was tested, on one model, at that count.
+still permits a true rate up to 8.9%, in 30 up to 9.5%, and in 20 up to 13.9% —
+the exact 95% bound is `1 − 0.05^(1/n)`. "Inert" reads as licence to delete the
+text, and this data does not support that. What it supports is that the behavior
+these rules ask for held every time it was tested, with the guidance gone from
+both places it is written, on one model, at that count.
+
+Note what it does *not* show. Holding without the text on one model says nothing
+about another, and it does not identify what is holding the behavior up instead.
+The tool schema accepts only a component, so naming a person is not expressible
+whatever any text says, and a spent claim returns an error the model can simply
+accept.
 
 The rest are a genuine open question, and one measurement caveat matters more
 than the list. **A model behavior is a rate, not a state, and a rate needs its
