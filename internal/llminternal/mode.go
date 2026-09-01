@@ -24,9 +24,18 @@ import "context"
 // one agent instance serves many concurrent invocations, and the same instance
 // may sit at two different placements.
 //
-// Readers that only test for task mode (basic_processor, outputschema_processor)
-// deliberately stay on the declaration: no placement ever defaults to task, so
-// there is nothing for them to resolve.
+// Two kinds of reader deliberately stay on the declaration.
+//
+// Those that only test for task mode — basic_processor, outputschema_processor,
+// installTaskTools, AgentNode's synthesizeMode, the runner's task-sub-agent
+// scan — have nothing to resolve, because no placement ever defaults to task.
+//
+// isUntransferableMode asks about a PEER rather than the running agent, and a
+// binding only ever describes the agent being run, so there is no binding for
+// it to consult.
+//
+// Every other reader resolves. A reader that tests for single_turn and skips
+// the resolution disagrees with the request the flow actually builds.
 //
 // The binding names the agent it describes. A bare context value would be
 // inherited by every nested activation and would then govern an agent it was

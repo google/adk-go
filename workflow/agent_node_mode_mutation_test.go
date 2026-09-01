@@ -16,6 +16,7 @@ package workflow_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"slices"
 	"sync"
@@ -87,22 +88,29 @@ func TestNewAgentNode_DoesNotMutateAgentMode(t *testing.T) {
 func TestLlmAgent_SubAgentModeResolution_IsConstructionOrderIndependent(t *testing.T) {
 	t.Parallel()
 
-	newWorker := func(t *testing.T) agent.Agent {
+	// Two sub-agents, because an all-undeclared coordinator installs no tools
+	// at all and "no tools" compares equal to "no tools" however the resolution
+	// went. The declared one gives the comparison something to be wrong about.
+	newSubAgents := func(t *testing.T) (undeclared, declared agent.Agent) {
 		t.Helper()
 		sub, err := llmagent.New(llmagent.Config{Name: "worker"})
 		if err != nil {
 			t.Fatalf("llmagent.New(worker): %v", err)
 		}
-		return sub
+		dec, err := llmagent.New(llmagent.Config{Name: "declared_worker", Mode: llmagent.ModeSingleTurn})
+		if err != nil {
+			t.Fatalf("llmagent.New(declared_worker): %v", err)
+		}
+		return sub, dec
 	}
 
 	// Order A: the coordinator is built first, then the same agent
 	// instance is also placed in a graph.
-	subA := newWorker(t)
+	subA, decA := newSubAgents(t)
 	coordA, err := llmagent.New(llmagent.Config{
 		Name:      "coordinator",
 		Mode:      llmagent.ModeChat,
-		SubAgents: []agent.Agent{subA},
+		SubAgents: []agent.Agent{subA, decA},
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New(coordinator): %v", err)
@@ -112,22 +120,23 @@ func TestLlmAgent_SubAgentModeResolution_IsConstructionOrderIndependent(t *testi
 	}
 
 	// Order B: the graph placement happens first.
-	subB := newWorker(t)
+	subB, decB := newSubAgents(t)
 	if _, err := workflow.NewAgentNode(subB, workflow.NodeConfig{}); err != nil {
 		t.Fatalf("NewAgentNode: %v", err)
 	}
 	coordB, err := llmagent.New(llmagent.Config{
 		Name:      "coordinator",
 		Mode:      llmagent.ModeChat,
-		SubAgents: []agent.Agent{subB},
+		SubAgents: []agent.Agent{subB, decB},
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New(coordinator): %v", err)
 	}
 
 	// An undeclared sub-agent is a chat peer in both orders, reached by
-	// transfer, so the coordinator installs no delegation tool for it.
-	var want []string
+	// transfer, so the coordinator installs no delegation tool for it. The
+	// declared single_turn one gets a tool in both orders.
+	want := []string{"declared_worker"}
 	gotA, gotB := coordinatorToolNames(t, coordA), coordinatorToolNames(t, coordB)
 	if !slices.Equal(gotA, gotB) {
 		t.Errorf("coordinator tools depend on construction order:\n  coordinator-first = %v\n  node-first        = %v", gotA, gotB)
@@ -135,6 +144,62 @@ func TestLlmAgent_SubAgentModeResolution_IsConstructionOrderIndependent(t *testi
 	if !slices.Equal(gotA, want) {
 		t.Errorf("coordinator tools = %v, want %v", gotA, want)
 	}
+}
+
+// The order test above can only see a difference BETWEEN the two orders, so it
+// cannot catch a write that both orders make. Building a coordinator must not
+// write a mode onto a sub-agent at all: the instance is shared, and a second
+// coordinator over the same sub-agent would race this write.
+func TestLlmAgent_New_DoesNotMutateSubAgentMode(t *testing.T) {
+	t.Parallel()
+
+	sub, err := llmagent.New(llmagent.Config{Name: "worker"})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+	if got := declaredMode(t, sub); got != llminternal.ModeUnset {
+		t.Fatalf("precondition: declared mode = %q, want unset", got)
+	}
+
+	if _, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{sub},
+	}); err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	if got := declaredMode(t, sub); got != llminternal.ModeUnset {
+		t.Errorf("declared mode after being adopted as a sub-agent = %q, want unset "+
+			"(building a coordinator must not write to the sub-agent)", got)
+	}
+}
+
+// The same shared-instance write, raced. Two coordinators built concurrently
+// over one sub-agent must not write to it. Run with -race.
+func TestLlmAgent_New_ConcurrentCoordinatorsOverOneSubAgent(t *testing.T) {
+	t.Parallel()
+
+	sub, err := llmagent.New(llmagent.Config{Name: "worker"})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := llmagent.New(llmagent.Config{
+				Name:      fmt.Sprintf("coordinator-%d", i),
+				Mode:      llmagent.ModeChat,
+				SubAgents: []agent.Agent{sub},
+			}); err != nil {
+				t.Errorf("llmagent.New(coordinator): %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // The same agent instance is documented to serve many concurrent

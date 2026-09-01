@@ -228,12 +228,16 @@ func promptTokenEstimator(ctx agent.InvocationContext) compactioninternal.TokenC
 			return 0
 		}
 		state := llmAgent.internal()
+		// Resolve the mode the same way the contents processor does. Reading
+		// the declaration instead would estimate a prompt without the
+		// single-turn nudge for an agent whose placement resolved single_turn,
+		// and the estimate decides when to compact.
 		contents, err := buildContentsDefault(
 			ctx.Agent().Name(),
 			ctx.Branch(),
 			ctx.IsolationScope(),
 			events,
-			state.Mode == ModeSingleTurn,
+			ModeFor(ctx, ctx.Agent().Name(), state.Mode) == ModeSingleTurn,
 			ctx.UserContent(),
 		)
 		if err != nil {

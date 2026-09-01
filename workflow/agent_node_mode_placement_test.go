@@ -178,11 +178,17 @@ func TestAgentNode_DeclaredChat_BeatsNodeDefault(t *testing.T) {
 		t.Fatalf("workflow.New: %v", err)
 	}
 
-	prior := &session.Event{
-		Author:      "user",
-		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+	// A chat agent is not seeded with a synthetic turn the way a single_turn
+	// one is, so the history has to supply the current turn itself. It also has
+	// to end on a user turn: the backward scan that isolates the current turn
+	// skips this agent's own events, so a history ending on one pivots at index
+	// 0 and returns everything whether or not history is being hidden.
+	prior := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")}},
+		{Author: "coordinator", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current question", "user")}},
 	}
-	ic := newModeTestCtx(t, coord, prior)
+	ic := newModeTestCtx(t, coord, prior...)
 	for _, err := range wf.Run(ic) {
 		if err != nil {
 			t.Fatalf("workflow.Run: %v", err)
