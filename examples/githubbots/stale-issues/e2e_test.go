@@ -44,11 +44,31 @@ package main
 // removing it. The original claim rested on four runs on a different model
 // (gemini-flash-latest, before the workflow pinned one), which is weaker still.
 //
-// The general rule, since this suite invites the question every time a prompt
-// section looks removable: a result of the form "N of M" is a sample, not a
-// verdict. Quote the run count, the model and the date with it, and treat a
-// section as load-bearing until something shows otherwise rather than the
-// reverse. Prompt text is cheap; a wrong write on a public issue is not.
+// And there is a stronger reason than caution not to delete it, now measured.
+// The judgement this prompt encodes is written down THREE times: the GUIDING
+// PRINCIPLE at the top, clause (a) of STEP 3's rule, and the "Do NOT mark stale"
+// list with its worked examples. Deleting any one of them changes nothing,
+// because the other two still carry it. Deleting all three, on gemini-3.6-flash,
+// 2026-09-01:
+//
+//	removed                                          scenarios flipped
+//	the "Do NOT" list only                                    0
+//	+ worked examples + clause (a)                       0 of 20
+//	+ GUIDING PRINCIPLE + its local restatements        15 of 15
+//
+// At the third step every one of the three "must not mark stale" scenarios
+// posted a stale label, a clarification label and a public warning comment, five
+// times out of five each — on a status update, on an opinion, and on an internal
+// note. The mark-stale scenario still passed 5 of 5 in the same run, so the model
+// was not disabled; it had specifically lost the ability to tell a request for
+// information from a remark.
+//
+// So the redundancy IS the mechanism, and single-section deletion cannot see it.
+// A result of the form "N of M" is a sample, not a verdict: quote the run count,
+// the model and the date with it. And treat a section that deletes cleanly as one
+// copy of something load-bearing rather than as decoration, because that is what
+// it measurably was here. Prompt text is cheap; a false stale warning published
+// on a stranger's issue under the company's name is not.
 
 import (
 	"context"
