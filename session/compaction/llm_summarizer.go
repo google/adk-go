@@ -304,7 +304,7 @@ func hasText(c *genai.Content) bool {
 // inside the transcript, and the summarizer has no way to tell a forged turn
 // from a real one. Escaping keeps every rendered line attributable to the
 // author the framework recorded.
-func (s *LLMSummarizer) formatEvents(events []*session.Event, cap int) string {
+func (s *LLMSummarizer) formatEvents(events []*session.Event, cap, summaryCap int) string {
 	var lines []string
 	for _, ev := range events {
 		content := utils.Content(ev)
@@ -340,11 +340,11 @@ func (s *LLMSummarizer) formatEvents(events []*session.Event, cap int) string {
 				// MaxTranscriptChars, which is the right backstop for text the
 				// framework generated. The per-item cap is for content it did
 				// not author.
-				text := p.Text
-				if !isCompaction {
-					text = s.truncateTo(text, cap)
+				limit := cap
+				if isCompaction {
+					limit = summaryCap
 				}
-				lines = append(lines, fmt.Sprintf("%s: %s", escapeLines(ev.Author), escapeLines(text)))
+				lines = append(lines, fmt.Sprintf("%s: %s", escapeLines(ev.Author), escapeLines(s.truncateTo(p.Text, limit))))
 			}
 			if p.FunctionCall != nil {
 				lines = append(lines, fmt.Sprintf("%s called tool: %s(%s)",
@@ -570,7 +570,9 @@ const truncationSuffixBudget = 32
 // covered, so dropping the oldest from the transcript while still deleting them
 // from history would lose them with nothing standing in their place.
 func (s *LLMSummarizer) renderTranscript(events []*session.Event) (string, error) {
-	transcript := s.formatEvents(events, s.maxToolContentChars)
+	// summaryCap is negative here, so a prior summary is not subject to the
+	// per-item cap. It is still subject to the rescue pass below.
+	transcript := s.formatEvents(events, s.maxToolContentChars, -1)
 	size := utf8.RuneCountInString(transcript)
 	if s.maxTranscriptChars < 0 || size <= s.maxTranscriptChars {
 		return transcript, nil
@@ -600,8 +602,23 @@ func (s *LLMSummarizer) renderTranscript(events []*session.Event) (string, error
 		// exactly the configuration that most needs it: the window was refused
 		// instead of shrunk, and since selection is size-capped the same window
 		// was refused on every later turn and compaction stopped for good.
-		if cap := s.maxTranscriptChars/parts - s.perPartOverhead(events); cap > 0 && (s.maxToolContentChars < 0 || cap < s.maxToolContentChars) {
-			if shrunk := s.formatEvents(events, cap); utf8.RuneCountInString(shrunk) < size {
+		// Attempted whenever the derived cap is positive, rather than only when
+		// it is tighter than the per-item cap. "Already tighter" implied "cannot
+		// help" only while every part was capped in the first pass, and a prior
+		// summary no longer is. A 6,000-character summary under a 5,000
+		// transcript budget derives a cap of about 2,500, which is not below the
+		// 2,000 default, so the guarded version skipped the pass and refused a
+		// window it could have shrunk -- permanently, since selection is
+		// size-capped and the same window comes back every turn.
+		//
+		// The cost of dropping the guard is one wasted render on a path that is
+		// already failing, because the result is adopted only if it is smaller.
+		if cap := s.maxTranscriptChars/parts - s.perPartOverhead(events); cap > 0 {
+			// The same cap for both, including a prior summary. The exemption
+			// above is from the tool-content limit, not from the budget: this
+			// pass is what stands between an oversized window and a permanent
+			// refusal, so nothing may be immune to it.
+			if shrunk := s.formatEvents(events, cap, cap); utf8.RuneCountInString(shrunk) < size {
 				transcript, size = shrunk, utf8.RuneCountInString(shrunk)
 			}
 		}
