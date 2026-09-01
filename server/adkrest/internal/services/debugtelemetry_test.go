@@ -16,6 +16,9 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -489,4 +492,250 @@ func compareDebugSpans(a, b DebugSpan) bool {
 		return a.Attributes[eventIDKey] < b.Attributes[eventIDKey]
 	}
 	return a.Attributes["genai.operation.name"] < b.Attributes["genai.operation.name"]
+}
+
+// TestConvertRecordsBuildsEmptyContainersNotNil asserts on the raw serialised bytes.
+//
+// A Go nil slice marshals to JSON null and a nil map to null too. The ADK web UI
+// validates the trace response against array and object schemas, so a null makes it
+// discard the response and render an empty Traces panel. Decoding into Go values
+// hides exactly that difference, so the check is on the JSON bytes.
+func TestConvertRecordsBuildsEmptyContainersNotNil(t *testing.T) {
+	validContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x01},
+		SpanID:  trace.SpanID{0x02},
+	})
+
+	tests := []struct {
+		name    string
+		records []*spanRecord
+		want    string
+	}{
+		{
+			name: "record with nil logs and nil attributes",
+			records: []*spanRecord{
+				{Name: "span", Context: validContext},
+			},
+			want: `[{"name":"span","start_time":-6795364578871345152,"end_time":-6795364578871345152,"span_id":"0200000000000000","trace_id":"01000000000000000000000000000000","parent_span_id":"0000000000000000","attributes":{},"logs":[]}]`,
+		},
+		{
+			name:    "no records",
+			records: nil,
+			want:    `[]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(convertRecords(tt.records))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("convertRecords JSON =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+// emitSpanWithLog records a span for sessionID carrying one log record with the
+// given event name and body.
+func emitSpanWithLog(ctx context.Context, spanName, sessionID, eventName string, body attribute.Value, tp *sdktrace.TracerProvider, lp *sdklog.LoggerProvider) {
+	ctx, span := tp.Tracer("test-tracer").Start(ctx, spanName, trace.WithAttributes(
+		semconv.GenAIConversationID(sessionID),
+	))
+	var r log.Record
+	r.SetEventName(eventName)
+	r.SetBody(body)
+	r.SetTimestamp(time.Now())
+	r.SetObservedTimestamp(time.Now())
+	lp.Logger("test-logger").Emit(ctx, r)
+	span.End()
+}
+
+// mapValue builds a log body map, the shape the gen_ai log records use.
+func mapValue(kvs ...attribute.KeyValue) attribute.Value {
+	return attribute.MapValue(kvs...)
+}
+
+// TestMessageLogBodySerializesContentAsObject asserts on the raw serialised bytes.
+//
+// With OpenTelemetry content capture off — the default — the server records
+// body.content as the string "<elided>". The ADK web UI requires an object with
+// a "parts" array for gen_ai.user.message and gen_ai.choice records, rejects the
+// whole span array when one record fails, and so renders an empty Traces panel.
+// Decoding into Go values hides a string that should be an object, so the checks
+// read the JSON bytes. Note that encoding/json escapes "<" and ">", hence the
+// \u003c and \u003e in the wanted bytes.
+func TestMessageLogBodySerializesContentAsObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventName string
+		body      attribute.Value
+		want      string
+	}{
+		{
+			name:      "elided user message content becomes an object",
+			eventName: "gen_ai.user.message",
+			body:      mapValue(attribute.String("content", "<elided>")),
+			want:      `"body":{"content":{"parts":[{"text":"\u003celided\u003e"}],"role":"user"}}`,
+		},
+		{
+			name:      "elided choice content becomes an object and keeps its other fields",
+			eventName: "gen_ai.choice",
+			body: mapValue(
+				attribute.String("content", "<elided>"),
+				attribute.Int("index", 0),
+				attribute.String("finish_reason", "STOP"),
+			),
+			want: `"body":{"content":{"parts":[{"text":"\u003celided\u003e"}],"role":"model"},"finish_reason":"STOP","index":0}`,
+		},
+		{
+			name:      "captured user message content is unchanged",
+			eventName: "gen_ai.user.message",
+			body: mapValue(attribute.KeyValue{Key: "content", Value: mapValue(
+				attribute.KeyValue{Key: "parts", Value: attribute.SliceValue(
+					mapValue(attribute.String("text", "hello")),
+				)},
+				attribute.String("role", "user"),
+			)}),
+			want: `"body":{"content":{"parts":[{"text":"hello"}],"role":"user"}}`,
+		},
+		{
+			name:      "elided system message keeps its string content",
+			eventName: "gen_ai.system.message",
+			body:      mapValue(attribute.String("content", "<elided>")),
+			want:      `"body":{"content":"\u003celided\u003e"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const sessionID = "session-1"
+			debugTelemetry, tp, lp := setup(t)
+			emitSpanWithLog(t.Context(), "span", sessionID, tt.eventName, tt.body, tp, lp)
+
+			got, err := json.Marshal(debugTelemetry.GetSpansBySessionID(sessionID))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(got), tt.want) {
+				t.Errorf("spans JSON does not contain\n%s\ngot\n%s", tt.want, got)
+			}
+		})
+	}
+}
+
+// TestUnrepresentableLogBodyDoesNotPoisonOtherSpans asserts on the raw serialised
+// bytes.
+//
+// The handler encodes every span of a session in a single call, so a body that
+// encoding/json refuses — a NaN float, for instance — truncates the response and
+// empties the Traces panel for every trace, not just its own row. The bad body is
+// repaired into a placeholder instead.
+func TestUnrepresentableLogBodyDoesNotPoisonOtherSpans(t *testing.T) {
+	// Guard: the test is only meaningful while this body really is unmarshalable.
+	if _, err := json.Marshal(math.NaN()); err == nil {
+		t.Fatal("json.Marshal(NaN) succeeded, pick another unrepresentable body")
+	}
+
+	tests := []struct {
+		name      string
+		eventName string
+		body      attribute.Value
+		want      string
+	}{
+		{
+			name:      "message record with an unmarshalable field",
+			eventName: "gen_ai.choice",
+			body: mapValue(
+				attribute.String("content", "<elided>"),
+				attribute.Float64("index", math.NaN()),
+			),
+			want: `"body":{"content":{"parts":[{"text":"\u003cunrepresentable\u003e"}],"role":"model"}}`,
+		},
+		{
+			name:      "other record with an unmarshalable body",
+			eventName: "gen_ai.system.message",
+			body:      attribute.Float64Value(math.NaN()),
+			want:      `"body":{"content":"\u003cunrepresentable\u003e"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const sessionID = "session-1"
+			debugTelemetry, tp, lp := setup(t)
+			ctx := t.Context()
+			emitSpanWithLog(ctx, "good-span", sessionID, "gen_ai.user.message",
+				mapValue(attribute.String("content", "<elided>")), tp, lp)
+			emitSpanWithLog(ctx, "bad-span", sessionID, tt.eventName, tt.body, tp, lp)
+
+			got, err := json.Marshal(debugTelemetry.GetSpansBySessionID(sessionID))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			raw := string(got)
+
+			wantGood := `"body":{"content":{"parts":[{"text":"\u003celided\u003e"}],"role":"user"}}`
+			if !strings.Contains(raw, wantGood) {
+				t.Errorf("the good span lost its body: want\n%s\ngot\n%s", wantGood, raw)
+			}
+			if !strings.Contains(raw, tt.want) {
+				t.Errorf("the bad span was not repaired: want\n%s\ngot\n%s", tt.want, raw)
+			}
+			for _, name := range []string{`"name":"good-span"`, `"name":"bad-span"`} {
+				if !strings.Contains(raw, name) {
+					t.Errorf("spans JSON is missing %s:\n%s", name, raw)
+				}
+			}
+		})
+	}
+}
+
+// TestConvertRecordsSynthesizesEventIDForFailedGenerateContent pins the
+// event-id stand-in. Without it the UI's schema rejects the whole span array
+// and the Traces panel is blank for exactly the turn that failed.
+func TestConvertRecordsSynthesizesEventIDForFailedGenerateContent(t *testing.T) {
+	spanContext := func(b byte) trace.SpanContext {
+		return trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: trace.TraceID{b},
+			SpanID:  trace.SpanID{b},
+		})
+	}
+
+	t.Run("failed generate_content keeps its span and gains an event id", func(t *testing.T) {
+		records := []*spanRecord{{Name: "generate_content gemini", Context: spanContext(0x02)}}
+		got := convertRecords(records)
+		if len(got) != 1 {
+			t.Fatalf("convertRecords returned %d spans, want 1: the span must be kept, not dropped", len(got))
+		}
+		if id := got[0].Attributes[eventIDAttribute]; id != got[0].SpanID {
+			t.Errorf("%s = %q, want the span id %q", eventIDAttribute, id, got[0].SpanID)
+		}
+		// The stored record must not be touched: it is shared with the store.
+		if _, ok := records[0].Attributes[eventIDAttribute]; ok {
+			t.Errorf("the stored record gained %s; convertRecords must not write to shared records", eventIDAttribute)
+		}
+	})
+
+	t.Run("a real event id is left alone", func(t *testing.T) {
+		records := []*spanRecord{{
+			Name:       "generate_content gemini",
+			Context:    spanContext(0x03),
+			Attributes: map[string]string{eventIDAttribute: "event-1"},
+		}}
+		got := convertRecords(records)
+		if id := got[0].Attributes[eventIDAttribute]; id != "event-1" {
+			t.Errorf("%s = %q, want it unchanged as %q", eventIDAttribute, id, "event-1")
+		}
+	})
+
+	t.Run("other spans do not gain the attribute", func(t *testing.T) {
+		records := []*spanRecord{{Name: "invoke_agent weather", Context: spanContext(0x04)}}
+		got := convertRecords(records)
+		if _, ok := got[0].Attributes[eventIDAttribute]; ok {
+			t.Errorf("invoke_agent gained %s; the UI only requires it on generate_content", eventIDAttribute)
+		}
+	})
 }
