@@ -77,7 +77,7 @@
 // so roughly 250 to 1,000 tokens, and the fact-retention instruction puts them
 // at the upper end. A threshold in the low thousands of tokens is therefore
 // close enough to the summary size to re-trigger constantly; at 700 the
-// measurement compacted more than once per turn. Something in the tens of
+// measurement compacted on roughly nine turns in ten. Something in the tens of
 // thousands leaves room for the tail to be what crosses the line, which is the
 // case the strategy is for.
 //

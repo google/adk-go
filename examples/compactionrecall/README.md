@@ -144,8 +144,14 @@ In the run that partly survived, the three lost values are the three stated
 *earliest*. They had been through the most passes, which is the ratchet doing
 exactly what the mechanism predicts.
 
-A note on this particular configuration: 35–38 compactions across 32 turns is
-more than one per turn, which means `-threshold=700` is small enough that the
-summary alone exceeds it and compaction re-triggers constantly. It is fine for
-comparing two prompts, since both arms run identically, but do not read a cost
-figure off it. The package documentation covers choosing a threshold.
+A note on this particular configuration: 35–38 compactions across the run's 40
+turns is nearly one per turn, which means `-threshold=700` is small enough that
+the summary alone exceeds it and compaction re-triggers on almost every turn. It
+is fine for comparing two prompts, since both arms run the identical
+conversation, but do not read a cost figure off it. The package documentation
+covers choosing a threshold.
+
+The turn count differs between the two styles, so do not compare compaction
+counts across them either. `incidental` interleaves the fact-bearing turns with
+a pass of filler before the main filler block, so at `-fillerx=1` it runs 40
+turns against `flagged`'s 32.
