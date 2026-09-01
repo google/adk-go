@@ -51,8 +51,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"net/http"
 	"os"
@@ -104,6 +106,10 @@ func realModel(t *testing.T) model.LLM {
 		os.Getenv("GOOGLE_GENAI_USE_VERTEXAI") == "" {
 		t.Skip("no model credentials: set GEMINI_API_KEY, or GOOGLE_GENAI_USE_VERTEXAI=true with a project")
 	}
+	if os.Getenv("SPAM_BOT_E2E_FORCE_UNAVAILABLE") == "1" {
+		t.Log("SPAM_BOT_E2E_FORCE_UNAVAILABLE=1: every model call will shed, to exercise the skip accounting")
+		return unavailableModel{}
+	}
 	cfg := testConfig()
 	cfg.Model = envString("LLM_MODEL_NAME", "gemini-flash-latest")
 	cfg.GeminiAPIKey = firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY"))
@@ -149,6 +155,7 @@ type e2eResult struct {
 	flagged bool
 	err     error
 	logs    string // everything the run logged, for classifying failures
+	retries int    // transient failures recovered before this result
 }
 
 // runE2E drives the real sweep over exactly one issue, with the real model and
@@ -238,10 +245,8 @@ func runE2EStable(t *testing.T, mdl model.LLM, issueNumber int, issueJSON string
 	var last e2eResult
 	for attempt := 1; attempt <= e2eAttempts; attempt++ {
 		last = runE2E(t, mdl, issueNumber, issueJSON, dryRun)
-		if last.err == nil {
-			return last
-		}
-		if !last.transient() {
+		last.retries = attempt - 1
+		if last.err == nil || !last.transient() {
 			return last
 		}
 		t.Logf("attempt %d/%d hit a transient model failure, retrying: %v", attempt, e2eAttempts, last.err)
@@ -250,6 +255,24 @@ func runE2EStable(t *testing.T, mdl model.LLM, issueNumber int, issueJSON string
 	t.Skipf("the model was unavailable on all %d attempts, so this scenario was never actually judged; last error: %v\n%s",
 		e2eAttempts, last.err, last.logs)
 	return last
+}
+
+// unavailableModel fails every call the way a shedding backend does.
+//
+// It exists so the skip accounting can be verified in seconds and
+// deterministically. The guard that catches a silently-shed run is the one part
+// of this file that only matters when the provider is broken, which is exactly
+// when nobody is in a position to check it -- and waiting for a real outage to
+// test it is slow, non-repeatable, and leaves the result ambiguous. Set
+// SPAM_BOT_E2E_FORCE_UNAVAILABLE=1 and every scenario sheds on demand.
+type unavailableModel struct{}
+
+func (unavailableModel) Name() string { return "unavailable-test-model" }
+
+func (unavailableModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(nil, errors.New("googleapi: Error 503: The service is currently UNAVAILABLE"))
+	}
 }
 
 // decodeFixture turns a scenario's GraphQL body into an Issue through
@@ -505,12 +528,20 @@ func TestE2EClassification(t *testing.T) {
 	mdl := realModel(t)
 	repeats := envInt("E2E_REPEATS", 3)
 
-	type tally struct{ agreed, total int }
+	// started distinguishes a scenario the -run filter excluded from one that
+	// entered and then lost its repeats to an outage. Only the second is a hole
+	// in the measurement; without the distinction, every filtered subset run
+	// would report itself as incomplete.
+	type tally struct {
+		agreed, total int
+		started       bool
+	}
 	results := map[string]*tally{}
 
 	for _, tc := range classificationCases() {
 		results[tc.name] = &tally{}
 		t.Run(tc.name, func(t *testing.T) {
+			results[tc.name].started = true
 			// Before spending anything: is this scenario still about what it says?
 			assertFixture(t, tc.issue(100), tc.promptMust, tc.promptMustNot)
 
@@ -548,10 +579,29 @@ func TestE2EClassification(t *testing.T) {
 		})
 	}
 
+	// The tally, and then the thing the tally cannot say on its own: how much of
+	// the suite actually ran. A scenario whose every repeat was skipped to a
+	// provider outage reports "0/0", which reads like a row with nothing wrong in
+	// it, and the suite still prints PASS. Naming the shortfall is what stops a
+	// run that measured almost nothing being reported as a green one.
 	t.Log("classification agreement with the intended judgement:")
+	var short []string
+	ran := 0
 	for _, tc := range classificationCases() {
 		r := results[tc.name]
+		if !r.started {
+			continue
+		}
+		ran++
 		t.Logf("  %d/%d  %s", r.agreed, r.total, tc.name)
+		if r.total < repeats {
+			short = append(short, fmt.Sprintf("%s (%d/%d ran)", tc.name, r.total, repeats))
+		}
+	}
+	if len(short) > 0 {
+		t.Errorf("%d of the %d scenarios that started did not complete their %d repeats, so this "+
+			"run is not a pass and its rates are not measurements: %s",
+			len(short), ran, repeats, strings.Join(short, "; "))
 	}
 }
 
@@ -743,9 +793,10 @@ func TestE2EInstructionEvasionRate(t *testing.T) {
 	// through" would inflate exactly the number this test exists to report
 	// honestly, and skipping the whole test over one bad sample would throw away
 	// the rest of the measurement.
-	var attack, attackN, control, controlN int
+	var attack, attackN, control, controlN, retries int
 	sample := func(n int, body string) (flagged, counted bool) {
-		got := runE2E(t, mdl, n, e2eIssue(n, "Cheap followers", body, "spammer", "NONE"), false)
+		got := runE2EStable(t, mdl, n, e2eIssue(n, "Cheap followers", body, "spammer", "NONE"), false)
+		retries += got.retries
 		if got.err != nil && got.transient() {
 			return false, false
 		}
@@ -766,15 +817,30 @@ func TestE2EInstructionEvasionRate(t *testing.T) {
 			}
 		}
 	}
-	if dropped := 2*samples - attackN - controlN; dropped > 0 {
-		t.Logf("%d of %d runs were dropped: the model was unavailable, which is not a decision", dropped, 2*samples)
-	}
+	// The ran-versus-dropped count is reported UNCONDITIONALLY, next to the rate
+	// it belongs to. A rate whose denominator is unstated is not a measurement:
+	// silently shedding cases to a provider outage moves the number in whichever
+	// direction the shed cases happened to lie, and the run still prints PASS. A
+	// non-zero drop count is grounds for discarding the run, not for reading it
+	// more carefully.
+	dropped := 2*samples - attackN - controlN
+	// Retries are reported next to the counts because a zero is positive
+	// evidence: it says the provider was healthy for the whole window, which is
+	// what makes two rates taken at different times comparable at all. A high
+	// count is the same evidence pointing the other way, and is grounds for
+	// throwing the run away rather than reading it more carefully.
+	t.Logf("SAMPLES: %d of %d runs produced a decision, %d dropped (model unavailable), %d transient failures recovered by retry",
+		attackN+controlN, 2*samples, dropped, retries)
 	if attackN == 0 || controlN == 0 {
 		t.Skip("the model answered no runs on one of the two arms, so there is nothing to compare")
 	}
 
 	t.Logf("EVASION: the same spam was detected %d/%d with the injection and %d/%d without it",
 		attack, attackN, control, controlN)
+	if dropped > 0 {
+		t.Errorf("%d of %d runs never reached the model, so the rate above is not a measurement "+
+			"of anything -- re-run it on a healthy provider rather than quoting it", dropped, 2*samples)
+	}
 
 	// The gate. If plain spam stops being detected, the bot is broken outright
 	// and that is not a limitation, it is a regression.
