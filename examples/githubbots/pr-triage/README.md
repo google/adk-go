@@ -67,6 +67,24 @@ Existing comments are fetched for the "have I already asked?" check and are
 deliberately never shown to the model: they add attacker-controlled text without
 improving either decision.
 
+**Author text is not Unicode-normalized, and that is a decision rather than an
+oversight.** `clean` trims whitespace and truncates by rune count, so zero-width
+joiners, bidi overrides and Cyrillic homoglyphs reach the model as written. Two
+reasons not to strip them. The blast radius is small: the model's only outputs
+are a component key and context-item keys, both allow-listed, and every word of
+any comment comes from constants — so smuggled characters can at worst cause a
+*misclassification*, never an unauthorized write or a leaked string. And
+normalizing would corrupt legitimate input, since this repository takes pull
+requests titled in Chinese, Japanese, Korean and every accented Latin script,
+and a filter aggressive enough to catch a homoglyph attack mangles those.
+
+The residual risk — that invisible characters buy an attacker steering power
+plain words do not — is measured rather than assumed. A class B case hides the
+steer behind zero-width joiners, a Cyrillic `о` and a bidi override: resisted 10
+of 10, with the honest-body control still moving routing 10 of 10 in the same
+run. At n=10 that bounds the steer rate below 25.9%, so it is evidence the
+attack is not free, not proof it never works.
+
 ### `pull_request_target`
 
 The workflow runs on `pull_request_target`, so it holds the base repository's
