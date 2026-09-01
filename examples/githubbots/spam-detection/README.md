@@ -189,6 +189,27 @@ discards a passing package's output. A rate over a denominator the run did not
 fill is not a measurement. `SPAM_BOT_E2E_FORCE_UNAVAILABLE=1` sheds every call
 on demand so that guard can be verified in seconds.
 
+**The alert comment is treated as hostile output, and the measurement says it
+has to be.** The bot writes one thing to a public place under the project's
+identity, and the only variable part of it is the model's `detection_reason` —
+which the issue body can argue with. Driving the real model with issue text that
+asks for a specific payload in the reason, the request for `@torvalds @google`
+**reached the published reason in 2 of 5 runs**. The comment was inert every
+time regardless, because every model-authored byte is confined to one
+unescapable fenced block, where GitHub does not linkify a URL, render an image,
+or notify a mention. Invisible characters are stripped separately, since a
+bidirectional override reorders a rendered line from inside a code block just as
+well as outside one, and the bot's own identity marker is neutralized so a
+steered model cannot publish the one string that makes a later sweep treat a
+comment as a prior alert.
+
+Each of those four defences is mutation-checked and each is load-bearing:
+removing the fence lets all eight payloads through, removing the invisible-
+character strip lets the two hidden-text payloads through, removing the marker
+neutralization lets the identity marker through, and removing the fence-escape
+substitution lets the reason break out of the block. The 2-in-5 figure is why
+this is enforced in Go rather than asked of the prompt.
+
 **The prompt was mutation-tested against those scenarios, and no single section
 is load-bearing.** Deleting each of six sections in turn — the comment rule, its
 narration clause, "What is NOT spam", the marker-distrust paragraph, the worked

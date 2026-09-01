@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // botAlertSignature is the leading text of the comment the bot posts when it
@@ -218,6 +219,30 @@ func clean(s string, maxRunes int) string {
 	return truncateRunes(defangFenceMarkers(strings.TrimSpace(s)), maxRunes)
 }
 
+// stripInvisible removes characters that occupy no width but change what a
+// reader sees: Unicode format characters (the bidirectional overrides, the
+// zero-width space and joiners) and control characters other than newline and
+// tab.
+//
+// This runs on text about to be posted publicly under the project's identity. A
+// fenced code block stops a URL being clickable and stops an @mention pinging
+// anyone, but it does NOT stop a bidirectional override reordering the rendered
+// line, so the fence alone would let a reason display something other than what
+// it says. Tab and newline are kept because they are the only invisible
+// characters with a legitimate use in a reason.
+func stripInvisible(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case unicode.Is(unicode.Cf, r) || unicode.IsControl(r):
+			return -1
+		default:
+			return r
+		}
+	}, s)
+}
+
 // truncateRunes shortens s to at most n runes, appending a marker when it trims.
 // A non-positive n yields the empty string rather than panicking on the slice.
 func truncateRunes(s string, n int) string {
@@ -326,11 +351,26 @@ func assocNote(association string) string {
 // alerts) and embeds the model's reason as an inert fenced block so the reason
 // text cannot break the comment's Markdown.
 func buildAlertComment(reason string) string {
-	// The reason is model-authored, so it is attacker-influenced. Bound it
-	// before anything else: GitHub rejects a comment body over 65536 characters,
-	// and a rejected comment leaves the issue unlabeled and un-alerted, which at
+	// The reason is model-authored, so it is attacker-influenced, and this is the
+	// bot's only channel for putting text into a public place under the
+	// project's identity. Everything below treats it as hostile.
+	//
+	// Strip invisible characters FIRST, before anything measures or matches on
+	// the text. A bidirectional override reorders what a human sees without
+	// changing what the bytes say, and a zero-width space splits a word so it
+	// reads normally but matches nothing -- both survive inside a code block,
+	// which is why the fence below is not sufficient on its own.
+	safe := stripInvisible(strings.TrimSpace(reason))
+	// Then neutralize the bot's own identity marker. A model talked into emitting
+	// it would otherwise publish, under the shared github-actions[bot] identity,
+	// a comment carrying the one string that makes this bot treat a comment as
+	// its own prior alert. Doing this before the truncation below means a cut
+	// cannot reassemble a marker out of a partial one.
+	safe = strings.ReplaceAll(safe, botAlertMarker, "(marker removed)")
+	// Bound the length: GitHub rejects a comment body over 65536 characters, and
+	// a rejected comment leaves the issue unlabeled and un-alerted, which at
 	// temperature 0 the next sweep would reproduce exactly.
-	safe := truncateRunes(strings.TrimSpace(reason), maxReasonRunes)
+	safe = truncateRunes(safe, maxReasonRunes)
 	// Neutralize any fences in it so it cannot escape the code block below.
 	safe = strings.ReplaceAll(safe, "```", "'''")
 	if safe == "" {
