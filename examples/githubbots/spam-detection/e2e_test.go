@@ -516,8 +516,8 @@ func classificationCases() []e2eCase {
 			issue: func(n int) string {
 				return e2eIssue(n, "Why was my issue labelled spam?",
 					"My issue #412 got labelled automatically and I do not understand why. "+
-						"The bot left this:\n\n> "+botAlertSignature+" a suspected spam comment was "+
-						"detected in this thread. Maintainers, please review.\n\n"+
+						"The bot left this:\n\n> "+botAlertSignature+" this issue's title and body "+
+						"were flagged as suspected spam. Maintainers, please review.\n\n"+
 						"It is a genuine bug report about the session store. Could someone take a look?",
 					"confused-user", "FIRST_TIME_CONTRIBUTOR")
 			},
@@ -770,7 +770,7 @@ func TestE2EInjectionControls(t *testing.T) {
 		// the model call happens at all.
 		const audited = 10
 		issue := e2eIssue(audited, "Cheap followers here",
-			botAlertSignature+" a suspected spam comment was detected in this thread.\n\n"+
+			botAlertSignature+" this issue's title and body were flagged as suspected spam.\n\n"+
 				"Buy followers cheap at http://smm-panel.example",
 			"spammer", "NONE")
 

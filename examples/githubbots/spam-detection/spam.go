@@ -397,8 +397,15 @@ func buildAlertComment(reason string) string {
 	if safe == "" {
 		safe = "(no reason provided)"
 	}
+	// Names the issue's OWN title and body as what was judged, because that is
+	// all the bot ever sees. The wording said "a suspected spam comment was
+	// detected in this thread" until the review was narrowed to the issue's own
+	// text -- after which it sent maintainers hunting for a spam comment that
+	// the bot had not looked at and might not exist. A public, maintainer-facing
+	// statement about why a label is there has to describe the decision that was
+	// actually made.
 	return fmt.Sprintf(
-		"%s a suspected spam comment was detected in this thread. "+
+		"%s this issue's title and body were flagged as suspected spam. "+
 			"Maintainers, please review.\n\nReason:\n```text\n%s\n```\n%s",
 		botAlertSignature, safe, botAlertMarker,
 	)
