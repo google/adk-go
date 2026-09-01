@@ -216,6 +216,55 @@ func TestShippedWorkflowPinsTheModel(t *testing.T) {
 	}
 }
 
+// TestShippedWorkflowNamesTheAPIKeySecretConsistently pins which secret the
+// workflow asks for.
+//
+// Nothing pinned this before. The Go side accepts either GEMINI_API_KEY or
+// GOOGLE_API_KEY, so renaming it in the workflow changes which secret an
+// operator must configure while every test stays green -- and the resulting
+// failure is the silent kind: the bot starts, finds no key, and does nothing on
+// a repository where the other name is set. Five bots sharing one deployment
+// want one name between them.
+//
+// Three properties, because each catches a different mistake:
+//
+//   - the env key and the secret expression agree, so a half-typed rename like
+//     GEMINI_API_KEY: ${{ secrets.GOOGLE_API_KEY }} cannot ship;
+//   - the name is the one these bots standardised on;
+//   - the header comment documents the same secret, so a rename that fixes the
+//     env line and leaves the prose behind fails here. Not hypothetical: the old
+//     name lived in exactly those two places, and fixing only the obvious one is
+//     how this job gets done wrong.
+func TestShippedWorkflowNamesTheAPIKeySecretConsistently(t *testing.T) {
+	const want = "GEMINI_API_KEY"
+	wf := readWorkflow(t)
+
+	m := regexp.MustCompile(`(?m)^\s*(\w*API_KEY):\s*\$\{\{\s*secrets\.(\w+)\s*\}\}`).FindStringSubmatch(wf)
+	if m == nil {
+		t.Fatal("the workflow passes no API-key secret to the bot; without one it can " +
+			"never reach a model")
+	}
+	envKey, secretName := m[1], m[2]
+
+	if envKey != secretName {
+		t.Errorf("the workflow sets %s from secrets.%s. The names must match, or an "+
+			"operator configures the secret the documentation names while the bot reads a "+
+			"different, empty one.", envKey, secretName)
+	}
+	if envKey != want {
+		t.Errorf("the workflow passes %s; these bots standardised on %s. Mixing them means "+
+			"configuring four secrets and silently missing the fifth.", envKey, want)
+	}
+
+	// The header comment is the operator's checklist. If it still names the old
+	// secret, they configure that one and the bot stays inert.
+	if !regexp.MustCompile(`(?m)^#.*secrets\.` + regexp.QuoteMeta(secretName) + `\b`).MatchString(wf) {
+		t.Errorf("the header comment listing required secrets does not document "+
+			"secrets.%s, the one the run step actually reads. A rename that updated the env "+
+			"line and left the comment behind is the likely cause.", secretName)
+	}
+}
+
 func containsFold(haystack, needle string) bool {
 	return regexp.MustCompile(`(?i)` + regexp.QuoteMeta(needle)).MatchString(haystack)
 }

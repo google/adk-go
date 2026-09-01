@@ -36,7 +36,7 @@
 #   - vars.PR_TRIAGE_DRY_RUN    optional kill switch: set to "true" to log
 #                               intended actions without performing any. It can
 #                               force a dry run but never force a live one.
-#   - secrets.GOOGLE_API_KEY    required: Gemini API key.
+#   - secrets.GEMINI_API_KEY    required: Gemini API key.
 name: PR Triage Bot
 
 # zizmor rates pull_request_target High on the grounds that it is "almost always
@@ -165,7 +165,7 @@ jobs:
         env:
           # The built-in token, scoped by the permissions block above.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           # The complete set of logins this bot may ever assign.
