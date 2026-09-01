@@ -88,7 +88,7 @@ to be fully attacker-controlled.
 | Acts only on a pull request Go cleared | A mutation is authorized only after `skipReason` returned "" and `markEligible` ran. The claim re-checks it. |
 | Never assigns a second time, ever | The bot reads the pull request's assignment timeline. *Any* prior assignment stops it, its own or a maintainer's — so an owner a maintainer removed stays removed, including on the manual batch path, whose search is exactly `no:assignee`. |
 | Never asks for context twice | The bot's own earlier comment spends the claim. A thread longer than the fetched window, or an unresolved bot identity, both count as spent rather than as "never asked". |
-| Never assigns twice across two processes | The claim is per process, and a manual batch run cannot share a concurrency group with an event-driven run. So the preconditions are re-read immediately before the write. That narrows the window rather than closing it, which is why batch mode does not comment at all. |
+| Never assigns twice across two processes | The workflow puts every run — event-driven and manual batch alike — in one constant concurrency group, so two runs never overlap. The claim itself is only per process, so the preconditions are also re-read immediately before the write. That is defence in depth for what the group does not cover: a run started outside the workflow, or a future edit to the group. |
 | Never mutates under dry run | Every mutation passes through one `shouldSkip` chokepoint. |
 | Cannot grow a new ungated tool | A test pins the exact tool inventory, in both configurations. |
 
@@ -317,9 +317,11 @@ guidance that only matters in borderline cases.
 - **Re-assignment.** `synchronize` is not a trigger and there is no periodic
   backfill, so an owner a maintainer removed stays removed. The timeline check
   enforces the same thing for the paths that remain (a reopen, or a manual batch).
-- **Commenting in batch mode.** A manual batch only assigns. It runs in its own
-  concurrency group, so allowing it to comment as well would be the one remaining
-  way two comments could land on one pull request.
+- **Commenting in batch mode.** A manual batch only assigns. Asking the author
+  of a months-old pull request to improve its description is noise, and a sweep
+  that comments turns one operator action into a burst of notifications to
+  people who did not ask for them. Assignment does not have that problem: it
+  notifies one person, and it is the point of the sweep.
 - **Reading the diff.** Only the changed-file *paths* reach the model. They carry
   the routing signal at a fraction of the tokens, and the diff would be a large
   additional block of attacker-controlled text for no gain.

@@ -258,12 +258,18 @@ func (c *Config) validate() error {
 // context on this run.
 //
 // It is off in batch mode even when REQUEST_CONTEXT is set. Batch mode is a
-// manual sweep over a backlog: asking the author of a months-old pull request
-// for a better description is noise, and more importantly a batch run and a
-// per-pull-request run are in different concurrency groups, so allowing both to
-// comment is the one remaining way two comments could land on one pull request.
-// Assignment is safe to overlap -- it is idempotent server-side and separately
-// guarded by the assignee and timeline checks.
+// manual sweep over a backlog, and asking the author of a months-old pull
+// request for a better description is noise: one operator action becomes a
+// burst of notifications to people who did not ask for them. Assignment does
+// not have that problem -- it notifies one person, and it is the point of the
+// sweep.
+//
+// This carried a second reason until the workflow changed: that a batch run and
+// a per-pull-request run sat in DIFFERENT concurrency groups, so letting both
+// comment was a way two comments could reach one pull request. That is no
+// longer true. Every run now shares one constant group, so they serialize and
+// cannot overlap. The noise argument is the one that survives, and it is
+// sufficient by itself.
 func (c *Config) contextRequestsEnabled() bool {
 	return c.RequestContext && c.SinglePR != 0
 }

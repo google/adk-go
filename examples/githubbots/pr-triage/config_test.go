@@ -260,11 +260,14 @@ func TestLoadConfigValidatesBotLogin(t *testing.T) {
 	}
 }
 
-// The context-request tool must not exist in batch mode. A batch dispatch and a
-// per-pull-request run are in different concurrency groups, so letting both
-// comment is the remaining way two comments could land on one pull request —
-// and asking the author of a months-old pull request for a better description
-// is noise anyway.
+// The context-request tool must not exist in batch mode. A sweep that comments
+// turns one operator action into a burst of notifications to authors who did
+// not ask for them, and asking someone to improve the description of a
+// months-old pull request is noise. Assignment does not have that problem: it
+// notifies one person, and it is the point of the sweep.
+//
+// The tool is absent rather than merely unused, so there is nothing for the
+// model to call however it is prompted.
 func TestContextRequestsAreOffInBatchMode(t *testing.T) {
 	cfg := testConfig()
 	cfg.RequestContext = true
