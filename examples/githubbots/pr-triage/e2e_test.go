@@ -90,6 +90,7 @@ func forcedUnavailable() bool {
 // specifically that a run which measures nothing cannot exit 0.
 func e2eNewModel(ctx context.Context, cfg *Config) (model.LLM, error) {
 	if forcedUnavailable() {
+		e2eBackend("FORCED-UNAVAILABLE stub (guard verification, no real model)")
 		return unavailableLLM{}, nil
 	}
 	return newModel(ctx, cfg)
@@ -108,6 +109,14 @@ var e2eStats struct {
 	ran             int
 	providerSkipped int
 	retries         int
+	// backend records the model and transport the numbers were taken through.
+	backend string
+}
+
+func e2eBackend(desc string) {
+	e2eStats.mu.Lock()
+	defer e2eStats.mu.Unlock()
+	e2eStats.backend = desc
 }
 
 func e2eRan() {
@@ -143,6 +152,7 @@ func TestMain(m *testing.M) {
 
 	e2eStats.mu.Lock()
 	ran, skipped, retries := e2eStats.ran, e2eStats.providerSkipped, e2eStats.retries
+	backend := e2eStats.backend
 	e2eStats.mu.Unlock()
 
 	if ran == 0 && skipped == 0 {
@@ -150,6 +160,9 @@ func TestMain(m *testing.M) {
 	}
 	fmt.Printf("\ne2e accounting: %d scenario(s) measured, %d lost to the provider, %d transient retries\n",
 		ran, skipped, retries)
+	// Without this the numbers are not self-describing: "which pairing produced
+	// these" is otherwise unknowable from the invocation.
+	fmt.Printf("e2e backend:    %s\n", backend)
 	if skipped > 0 {
 		fmt.Printf("E2E RESULT IS NOT A PASS: %d scenario(s) never reached a verdict. "+
 			"Do not report this run's numbers.\n", skipped)
@@ -280,13 +293,23 @@ func e2eConfig(t *testing.T) *Config {
 		t.Setenv("GOOGLE_CLOUD_PROJECT", project)
 		t.Setenv("GOOGLE_CLOUD_LOCATION", vertexLocation())
 		cfg.UseVertexAI = true
-		t.Logf("e2e model backend: Vertex ADC, project %s, location %s", project, vertexLocation())
+		desc := fmt.Sprintf("%s via Vertex ADC (project %s, location %s)",
+			cfg.Model, project, vertexLocation())
+		e2eBackend(desc)
+		t.Logf("e2e model backend: %s", desc)
 		return cfg
 	}
 
 	cfg.GeminiAPIKey = requireAPIKey(t)
-	t.Log("e2e model backend: Generative Language API key. NOTE: this path was measured " +
-		"at 0/5 success during a shedding window; prefer Vertex ADC if the run is noisy.")
+	// Clear the ambient Vertex switches, or the genai client resolves to Vertex
+	// off inherited environment and the run silently uses a backend the operator
+	// did not choose -- making "which pairing produced these numbers"
+	// unanswerable from the command line.
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	desc := cfg.Model + " via the Generative Language API key"
+	e2eBackend(desc)
+	t.Logf("e2e model backend: %s", desc)
 	return cfg
 }
 
