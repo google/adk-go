@@ -80,10 +80,14 @@ import (
 // "March 14" for "14 March" has remembered, and scoring it as a miss would
 // overstate the loss.
 type fact struct {
-	tell   string
-	ask    string
-	label  string
-	accept []string
+	tell string
+	// incidental is the same value stated the way it turns up in a real
+	// conversation: inside a message about something else, with no cue that it
+	// matters and no instruction to remember it.
+	incidental string
+	ask        string
+	label      string
+	accept     []string
 
 	// matchers are accept compiled with word boundaries, so a short value
 	// cannot be found inside a longer one. Without this "7" is recalled by any
@@ -106,44 +110,52 @@ func init() {
 // survived into the prompt.
 var facts = []fact{
 	{
-		tell:  "For this project the deployment region is europe-west4. Just note it.",
-		ask:   "Which deployment region did I say we are using?",
-		label: "europe-west4", accept: []string{"europe-west4"},
+		tell:       "For this project the deployment region is europe-west4. Just note it.",
+		incidental: "Quick bit of context before I forget: we finally got the new environment provisioned in europe-west4, so the Frankfurt team should see decent latency. Anyway, explain in two sentences why connection pooling matters.",
+		ask:        "Which deployment region did I say we are using?",
+		label:      "europe-west4", accept: []string{"europe-west4"},
 	},
 	{
-		tell:  "The incident we are tracking is INC-77312. Note it.",
-		ask:   "What is the incident ID I mentioned?",
-		label: "INC-77312", accept: []string{"INC-77312"},
+		tell:       "The incident we are tracking is INC-77312. Note it.",
+		incidental: "I'm half distracted today, we've had INC-77312 open since this morning and it keeps flapping. While I wait on that, give me two sentences on the tradeoff between read replicas and sharding.",
+		ask:        "What is the incident ID I mentioned?",
+		label:      "INC-77312", accept: []string{"INC-77312"},
 	},
 	{
-		tell:  "We picked Postgres over MySQL, specifically because of PostGIS. Note it.",
-		ask:   "Which database did we pick, and what was the specific reason?",
-		label: "PostGIS", accept: []string{"PostGIS"},
+		tell:       "We picked Postgres over MySQL, specifically because of PostGIS. Note it.",
+		incidental: "We went back and forth and ended up choosing Postgres over MySQL in the end, mostly because PostGIS does the geo work we need out of the box. Separately, in two sentences, when is a circuit breaker worth adding?",
+		ask:        "Which database did we pick, and what was the specific reason?",
+		label:      "PostGIS", accept: []string{"PostGIS"},
 	},
 	{
-		tell:  "The cutover deadline is 14 March. Note it.",
-		ask:   "What is the cutover deadline?",
-		label: "14 March", accept: []string{"14 March", "March 14", "14th March", "March 14th"},
+		tell:       "The cutover deadline is 14 March. Note it.",
+		incidental: "Planning is getting tight now that the cutover has to happen by 14 March. Unrelated, but two sentences: what is the point of a canary deploy?",
+		ask:        "What is the cutover deadline?",
+		label:      "14 March", accept: []string{"14 March", "March 14", "14th March", "March 14th"},
 	},
 	{
-		tell:  "The on-call rotation owner is Priya. Note it.",
-		ask:   "Who owns the on-call rotation?",
-		label: "Priya", accept: []string{"Priya"},
+		tell:       "The on-call rotation owner is Priya. Note it.",
+		incidental: "Priya has taken over the on-call rotation this quarter, so she'll be the one paged. Anyway, briefly, why do idempotency keys matter for retries?",
+		ask:        "Who owns the on-call rotation?",
+		label:      "Priya", accept: []string{"Priya"},
 	},
 	{
-		tell:  "Our error budget for the quarter is 0.3 percent. Note it.",
-		ask:   "What is our error budget for the quarter?",
-		label: "0.3", accept: []string{"0.3"},
+		tell:       "Our error budget for the quarter is 0.3 percent. Note it.",
+		incidental: "The SLO review landed us with an error budget of 0.3 percent for the quarter, which is tighter than last time. Two sentences on structured logging versus plain text?",
+		ask:        "What is our error budget for the quarter?",
+		label:      "0.3", accept: []string{"0.3"},
 	},
 	{
-		tell:  "The staging bucket is gs://tarn-staging-91. Note it.",
-		ask:   "What is the staging bucket?",
-		label: "tarn-staging-91", accept: []string{"tarn-staging-91"},
+		tell:       "The staging bucket is gs://tarn-staging-91. Note it.",
+		incidental: "I dumped the fixtures into gs://tarn-staging-91 if you ever need them. Why might p99 latency matter more than the mean? Two sentences.",
+		ask:        "What is the staging bucket?",
+		label:      "tarn-staging-91", accept: []string{"tarn-staging-91"},
 	},
 	{
-		tell:  "We agreed to cap retries at 7. Note it.",
-		ask:   "What did we agree to cap retries at?",
-		label: "7", accept: []string{"7", "seven"},
+		tell:       "We agreed to cap retries at 7. Note it.",
+		incidental: "After the incident review we agreed to cap retries at 7, which felt like a reasonable ceiling. Two sentences: what does backpressure mean in a queue?",
+		ask:        "What did we agree to cap retries at?",
+		label:      "7", accept: []string{"7", "seven"},
 	},
 }
 
@@ -231,6 +243,7 @@ func run() error {
 	fillerx := flag.Int("fillerx", 3, "repeat the filler block this many times, to force more compaction passes")
 	runs := flag.Int("runs", 3, "repeat each arm this many times; recall is near-binary, so one run proves little")
 	armList := flag.String("arms", "default,prior", "comma-separated: default, prior")
+	style := flag.String("style", "incidental", `how facts are stated: "incidental" (inside a message about something else, with no cue that it matters) or "flagged" (stated alone and followed by "Note it")`)
 	verbose := flag.Bool("v", false, "print every summary and every probe answer")
 	flag.Parse()
 
@@ -266,7 +279,7 @@ func run() error {
 				EventRetentionSize: *retention,
 				CompactionInterval: *interval,
 			}
-			res, err := runArm(ctx, name, cfg, *modelName, *fillerx, i, *verbose)
+			res, err := runArm(ctx, name, cfg, *modelName, *fillerx, i, *verbose, *style)
 			if err != nil {
 				// A run is hundreds of model calls and a busy model returns
 				// 503 regularly, so one transient failure must not discard the
@@ -311,7 +324,7 @@ func run() error {
 	return nil
 }
 
-func runArm(ctx context.Context, name string, cfg *compaction.Config, modelName string, fillerx, runIdx int, verbose bool) (*armResult, error) {
+func runArm(ctx context.Context, name string, cfg *compaction.Config, modelName string, fillerx, runIdx int, verbose bool, style string) (*armResult, error) {
 	m, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: os.Getenv("GOOGLE_API_KEY")})
 	if err != nil {
 		return nil, fmt.Errorf("model: %w", err)
@@ -381,9 +394,34 @@ func runArm(ctx context.Context, name string, cfg *compaction.Config, modelName 
 		return sb.String(), nil
 	}
 
-	for i, f := range facts {
-		if _, err := say(f.tell); err != nil {
-			return nil, fmt.Errorf("planting fact %d: %w", i, err)
+	if style == "incidental" {
+		// Spread the facts through the conversation instead of front-loading
+		// them, so no single compaction window sees them all and each one has
+		// to survive on its own.
+		every := max(1, len(filler)/len(facts))
+		fi := 0
+		for i, q := range filler {
+			if i%every == 0 && fi < len(facts) {
+				if _, err := say(facts[fi].incidental); err != nil {
+					return nil, fmt.Errorf("planting fact %d: %w", fi, err)
+				}
+				fi++
+				continue
+			}
+			if _, err := say(q); err != nil {
+				return nil, fmt.Errorf("filler %d: %w", i, err)
+			}
+		}
+		for ; fi < len(facts); fi++ {
+			if _, err := say(facts[fi].incidental); err != nil {
+				return nil, fmt.Errorf("planting fact %d: %w", fi, err)
+			}
+		}
+	} else {
+		for i, f := range facts {
+			if _, err := say(f.tell); err != nil {
+				return nil, fmt.Errorf("planting fact %d: %w", i, err)
+			}
 		}
 	}
 	for pass := range fillerx {
