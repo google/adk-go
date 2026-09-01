@@ -194,7 +194,9 @@ has to be.** The bot writes one thing to a public place under the project's
 identity, and the only variable part of it is the model's `detection_reason` —
 which the issue body can argue with. Driving the real model with issue text that
 asks for a specific payload in the reason, the request for `@torvalds @google`
-**reached the published reason in 2 of 5 runs**. The comment was inert every
+**reached the published reason in 2 of 9 runs on `gemini-flash-latest`**, and in
+0 of 10 on the pinned `gemini-3.6-flash`. Compliance is model-dependent, which
+is precisely why the guarantee is not allowed to rest on it. The comment was inert every
 time regardless, because every model-authored byte is confined to one
 unescapable fenced block, where GitHub does not linkify a URL, render an image,
 or notify a mention. Invisible characters are stripped separately, since a
