@@ -15,10 +15,12 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -1010,6 +1012,7 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 		modelResponses    []*model.LLMResponse
 		requestProcessors []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
 		wantTexts         []string
+		wantLogAuthor     string
 	}{
 		{
 			name: "single partial response completes without error",
@@ -1019,7 +1022,8 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 					Partial: true,
 				},
 			},
-			wantTexts: []string{"Hello"},
+			wantTexts:     []string{"Hello"},
+			wantLogAuthor: "test-agent",
 		},
 		{
 			name: "multiple partial responses complete without error",
@@ -1033,7 +1037,8 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 					Partial: true,
 				},
 			},
-			wantTexts: []string{"Hello", " World"},
+			wantTexts:     []string{"Hello", " World"},
+			wantLogAuthor: "test-agent",
 		},
 		{
 			name: "trailing partial from sub-agent completes without error",
@@ -1050,7 +1055,8 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 					}
 				},
 			},
-			wantTexts: []string{"I am a sub-agent"},
+			wantTexts:     []string{"I am a sub-agent"},
+			wantLogAuthor: "sub-agent",
 		},
 	}
 
@@ -1092,23 +1098,26 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 			// Bound the consumer so a regression fails the test instead of hanging it.
 			const safetyLimit = 50
 			eventsCount := 0
-			for ev, err := range f.Run(invCtx) {
-				if err != nil {
-					gotErr = err
-					break
-				}
-				eventsCount++
-				if eventsCount > safetyLimit {
-					t.Fatalf("Flow.Run() did not terminate: yielded >%d events", safetyLimit)
-				}
-				if ev != nil && ev.Content != nil {
-					for _, p := range ev.Content.Parts {
-						if p.Text != "" {
-							gotTexts = append(gotTexts, p.Text)
+
+			logOutput := captureLog(t, func() {
+				for ev, err := range f.Run(invCtx) {
+					if err != nil {
+						gotErr = err
+						break
+					}
+					eventsCount++
+					if eventsCount > safetyLimit {
+						t.Fatalf("Flow.Run() did not terminate: yielded >%d events", safetyLimit)
+					}
+					if ev != nil && ev.Content != nil {
+						for _, p := range ev.Content.Parts {
+							if p.Text != "" {
+								gotTexts = append(gotTexts, p.Text)
+							}
 						}
 					}
 				}
-			}
+			})
 
 			if gotErr != nil {
 				t.Errorf("Flow.Run() returned unexpected error: %v", gotErr)
@@ -1117,6 +1126,34 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 			if diff := cmp.Diff(tc.wantTexts, gotTexts); diff != "" {
 				t.Errorf("Flow.Run() text mismatch (-want +got):\n%s", diff)
 			}
+
+			wantLog := fmt.Sprintf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history\n",
+				invCtx.Agent().Name(), invCtx.InvocationID(), tc.wantLogAuthor)
+			if logOutput != wantLog {
+				t.Errorf("Flow.Run() log mismatch:\nwant: %q\ngot:  %q", wantLog, logOutput)
+			}
 		})
 	}
+}
+
+// captureLog redirects the output of the default [log.Logger] for the
+// duration of fn and returns everything that was written to it.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	origPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	// Reset flags/prefix so the captured output is deterministic and easy to
+	// assert against.
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+		log.SetPrefix(origPrefix)
+	})
+	fn()
+	return buf.String()
 }
