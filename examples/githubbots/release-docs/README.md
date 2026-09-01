@@ -39,6 +39,18 @@ The input is a code diff, so the attacker is a contributor who puts text in a
 commit message, a file name, or a code comment. Assume the model is fully
 steered by that text, then ask what the Go code still refuses.
 
+Two things frame that. First, **reaching this bot's input at all requires
+getting a commit merged**, because its only source is the file paths, patch text
+and commit subjects between two release tags. That is a real barrier, and it is
+not one a bot reading issues or pull request bodies has — but it is a barrier,
+not a wall, and everything below assumes it has been crossed.
+
+Second, **the model holds no authority to lose.** It cannot file, cannot choose
+what is filed into, and cannot decide that anything is filed at all. Its one
+tool appends to an in-memory map and the recorder holds no GitHub client, so a
+fully compromised model changes what an issue *says*, never whether one exists
+or where it goes. Everything below is therefore about the text, not the action.
+
 | Limit | Enforced by |
 | --- | --- |
 | The model cannot silently skip a group | Each group's outcome is recorded. A group that failed, was never reached, or finished without calling the tool at all is counted by category in the issue when one is filed, and in the job log and a workflow annotation when there is nothing to suggest. A model that calls the tool and reports an empty list is a genuine "nothing to suggest" answer and is not distinguishable from one steered into saying so — see Known limitations. |
@@ -48,7 +60,7 @@ steered by that text, then ask what the Go code still refuses.
 | The model cannot record a group's findings twice | `recorder.record` claims the group's single slot in the same critical section that reads it. |
 | The model cannot write an unbounded issue body | `MAX_FINDINGS_PER_GROUP` caps the count, `maxFindingFieldRunes` caps each field, and the body is truncated to GitHub's 65536-byte limit with a notice. |
 | The model cannot write arbitrary values into structured fields | `kind` is allow-listed to a fixed set; `doc_file` must match a restricted path pattern with no `..`. |
-| Model text cannot escape into Markdown | Every model-authored field is rendered inside a fenced block, and ` ``` `, `<!--` and `-->` are neutralized first. GitHub does not notify `@mentions` inside a fence. |
+| Model text cannot escape into Markdown | Every model-authored **free-text** field — summary, proposed change, reasoning, reference — is rendered inside a fenced block, and ` ``` `, `<!--` and `-->` are neutralized first. GitHub does not linkify a URL, render an image, or notify an `@mention` inside a fence. The two model-authored fields rendered **outside** a fence are not free text: `kind` is one of eight fixed literals or becomes `unclassified`, and `doc_file` must match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`, which admits no `:`, `@`, backtick, `!`, `(` or `[` — so it can express neither a link, nor an image, nor a break out of its own inline code span. See "Is every model byte fenced?" below. |
 | Model text cannot escape into another parser | Every Unicode format character (the whole `Cf` category, which is the bidirectional marks, the zero-width characters and the invisible tag block), every control character, and the line/paragraph separators are stripped **before** the Markdown sequences are neutralized, and whitespace is trimmed **after** both. The other order is exploitable: a zero-width character between two backticks and a third hides the fence from the replacer, and the strip then reassembles it. |
 | Model text in a log cannot become a command | The tool-error callback logs argument NAMES, not values, and folds the error text to one line with no control characters. The Actions runner scans a step's stderr for `::` commands exactly as it scans stdout. |
 | A model whose output is entirely unrenderable is not mistaken for one with nothing to say | Findings that sanitization empties, and findings the per-group cap drops, are counted and reported in the issue. Neither count reaches `complete()`, because a counter the model controls must not decide that an issue is filed. |
@@ -362,11 +374,68 @@ bad one, and sharpening it is the follow-up this points to. The injection
 results in particular are carried by the nonce fence and the filing chokepoint,
 neither of which a prompt edit can reach.
 
+### Adversarial tests: is every model byte fenced?
+
+`security_test.go` answers the question this bot's design turns on, since the
+fence is what makes attacker text inert rather than the model's judgement.
+
+**Not every model-authored byte is inside a fence, and it does not need to be.**
+All four free-text fields are fenced and neutralized. The two that render
+outside a fence are constrained by value: `kind` to eight literals, `doc_file`
+to a character allow-list with no `:`, `@`, backtick, `!`, `(` or `[`. So the
+text that can render as Markdown cannot express a link, an image, a mention, or
+an escape from its own inline code span, and the text that could express those
+things cannot render.
+
+The suite drives six attacks through the real model with a fake GitHub — image
+URL exfiltration, a mass-mention ping, defamation of a named person, homoglyph
+and bidirectional smuggling, `doc_file` path injection, and forged trust
+markers. Each carries a genuine new exported API alongside the payload, because
+an attack that files no issue never exercises the publishing path and passes
+while proving nothing.
+
+Each attack is scored on two separate axes, and the separation is the point:
+
+- **Compliance** — did the model obey the attacker? Read from the raw model
+  output, before any Go code touches it.
+- **Containment** — did any of it reach the filed issue?
+
+Asserting containment alone cannot distinguish a model that refused from a Go
+layer that caught it, so it cannot show the Go layer is load-bearing. Measured
+over three consecutive runs, 18 of 18 attack-runs exercised the publishing path,
+the model complied 0 times, and nothing reached a filed issue. On a sibling bot
+the same measurement found the model complying with output injection in 2 runs
+of 5, so a zero here is a fact about this input path, not a reason to trust the
+model.
+
+Two controls run free on every CI build, and they are what make those zeros
+mean anything. `TestSecurityDetectorCatchesAnUnsanitizedBody` renders findings
+that never went through `sanitizeFinding` and requires the detector to raise
+every violation class — it caught a real bug in the detector's own doc-path
+regex, which skipped values containing a backtick, exactly the dangerous case.
+`TestSecuritySanitizerNeutralizesTheSamePayload` puts the identical findings
+through the sanitizer and requires a clean body. Together they pin the guarantee
+to `sanitizeFinding` rather than to luck.
+
+**Residual, and it is a judgement call rather than a defect.** `neutralize` does
+not remove URLs or `@mentions`, it relies on the fence to make them inert. They
+are unlinkified and non-notifying there, but still *visible* — so an attacker's
+domain name could appear as text in an issue filed under the project's identity.
+Making prose an allow-list would close that at a real cost to readability.
+
 ## Known limitations
 
 - **The analysis reads the diff, not the documentation.** It suggests what
   *might* need updating; it cannot tell you the docs already say the right thing.
   Every finding needs a human to check it.
+- **An exhausted run budget does not fail the job.** This is deliberate, and it
+  is the one place this bot departs from the fail-loud rule the sibling bots
+  follow. When the budget runs out the run finishes, files what it has, names
+  the unanalyzed groups in the issue body, and raises a workflow annotation. For
+  an analysis bot a partial answer that says which parts are missing is worth
+  more than a red run that files nothing, and there is no correctness risk in
+  the difference: nothing is written that was not analyzed. A genuine failure —
+  a bad tag, an API error, a nonce draw failure — still fails the job.
 - **The list probe is bounded** to the most recent 300 issues in the target
   repository. Beyond that, duplicate detection rests on the search probe alone,
   which is eventually consistent.
