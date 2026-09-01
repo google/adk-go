@@ -18,6 +18,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -190,4 +191,101 @@ func renderArgs(args []ast.Expr) string {
 		out += "<expr>"
 	}
 	return out + ")"
+}
+
+// The nonce is what makes the untrusted fence unforgeable. Every injection
+// defence in this bot rests on an attacker being unable to write the closing
+// marker themselves, and that holds only while the nonce is unguessable.
+//
+// Nothing else in the suite notices if it stops being. Measured: swapping
+// crypto/rand for math/rand in newNonce compiles and the entire suite passes,
+// `-race` included. A predictable nonce cannot be detected from its output --
+// math/rand produces values that are unique, well-distributed, and hex-shaped
+// exactly like the real ones -- so no test of the returned string can catch
+// this. The source is the only place the property is visible.
+//
+// The repository-wide lint rule that would also catch it lives in the root
+// golangci config, which this module does not own, so the check lives here.
+//
+// Written in the presence form for the reason recorded above: asserting the
+// absence of math/rand would pass if nonce generation moved somewhere this test
+// does not look. Requiring the call to be inside newNonce fails closed instead.
+func TestNonceIsDrawnFromACSPRNG(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing main.go: %v", err)
+	}
+
+	// Resolve local package names to import paths, so an alias cannot disguise
+	// which rand is in use: `mrand "math/rand"` and a plain `"crypto/rand"` both
+	// present a selector, and only the path distinguishes them.
+	paths := map[string]string{}
+	for _, imp := range file.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		name := path[strings.LastIndex(path, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		paths[name] = path
+	}
+
+	body := funcLitFor(file, "newNonce")
+	if body == nil {
+		t.Fatal("main.go has no newNonce function literal. If nonce generation moved, " +
+			"re-point this test at it: an unguessable nonce is what stops attacker text " +
+			"closing the untrusted fence, and nothing else in this suite can see it")
+	}
+
+	found := ""
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if p := paths[pkg.Name]; p != "" && strings.HasSuffix(p, "rand") {
+			found = p
+		}
+		return true
+	})
+
+	switch found {
+	case "crypto/rand": // as required
+	case "":
+		t.Error("newNonce draws from no rand package at all, so the fence marker may be " +
+			"predictable. It must call crypto/rand.Read")
+	default:
+		t.Errorf("newNonce draws from %q, not crypto/rand. A predictable nonce lets an "+
+			"attacker pre-write the closing marker in their own issue text and escape the "+
+			"untrusted fence, which every injection defence here depends on", found)
+	}
+}
+
+// funcLitFor returns the body of a package-level `var name = func(...) {...}`,
+// or nil. newNonce is declared that way so tests can replace it.
+func funcLitFor(file *ast.File, name string) *ast.BlockStmt {
+	for _, d := range file.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 || vs.Names[0].Name != name {
+				continue
+			}
+			if lit, ok := vs.Values[0].(*ast.FuncLit); ok {
+				return lit.Body
+			}
+		}
+	}
+	return nil
 }

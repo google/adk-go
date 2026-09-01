@@ -472,6 +472,12 @@ differs in a few deliberate ways:
   run that sheds samples fails rather than quoting a rate over a denominator it
   did not fill. Re-measure with
   `SPAM_BOT_E2E=1 E2E_SAMPLES=25 LLM_MODEL_NAME=<model> go test -run TestE2EInstructionEvasionRate`.
+- **The nonce is pinned to a CSPRNG by reading the source, not the output.** A
+  predictable fence marker would let an attacker pre-write the closing marker
+  and escape the fence, and no test of the returned value can detect that —
+  `math/rand` produces hex tokens that are unique and well-distributed exactly
+  like the real ones. Swapping it in compiles and passes everything else,
+  `-race` included, so the check parses `main.go` instead.
 - **Author association is a prior, not proof.** It nudges borderline calls; it
   is not a substitute for reading the content, and spam from an established
   account is still flagged on its merits.
