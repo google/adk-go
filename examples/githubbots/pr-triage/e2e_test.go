@@ -12,14 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build e2e
-
 // End-to-end tests against a REAL Gemini model.
 //
-// They are behind the `e2e` build tag, so `go test ./...` -- what CI runs --
-// does not compile them. Run them deliberately:
+// This file is deliberately NOT behind a build tag. CI compiles it, so a
+// refactor that breaks it fails a gate. A build tag was measured to hide that
+// completely: with an undefined symbol inside a tagged file, `go build ./...`,
+// `go vet ./...`, `go test -race ./...` and `golangci-lint run` all passed, and
+// only `go vet -tags=e2e` caught it -- which nothing in CI runs.
 //
-//	GEMINI_API_KEY=... go test -tags=e2e -v -timeout 20m ./...
+// It is gated at RUN time instead, twice, so CI compiles it and never spends:
+//
+//	PR_TRIAGE_E2E=1 GEMINI_API_KEY=... go test -v -timeout 45m -run E2E ./...
+//
+// Both gates are required. GEMINI_API_KEY alone is not enough, because a
+// developer with a key in their environment would otherwise pay for a full
+// model run every time they typed `go test ./...`.
 //
 // GitHub is always an httptest server. Nothing here can reach a real
 // repository: every scenario asserts the exact set of HTTP calls the bot made,
@@ -56,6 +63,67 @@ import (
 	"time"
 )
 
+// e2eStats separates scenarios that actually measured something from ones the
+// provider took away.
+//
+// This exists because "skip" and "pass" are indistinguishable in a test
+// runner's exit code, and a shed provider turns a whole suite into skips while
+// still printing PASS. A sibling session reported "2 of 2 green" for two runs
+// that had skipped 12 and 13 of 16 cases to an outage. TestMain below refuses
+// to let that happen quietly.
+var e2eStats struct {
+	mu              sync.Mutex
+	ran             int
+	providerSkipped int
+	retries         int
+}
+
+func e2eRan() {
+	e2eStats.mu.Lock()
+	defer e2eStats.mu.Unlock()
+	e2eStats.ran++
+}
+
+func e2eProviderSkipped() {
+	e2eStats.mu.Lock()
+	defer e2eStats.mu.Unlock()
+	e2eStats.providerSkipped++
+}
+
+func e2eRetried() {
+	e2eStats.mu.Lock()
+	defer e2eStats.mu.Unlock()
+	e2eStats.retries++
+}
+
+// TestMain reports what the run actually measured, and fails a run that lost
+// scenarios to the provider even though every test "passed".
+func TestMain(m *testing.M) {
+	code := m.Run()
+
+	e2eStats.mu.Lock()
+	ran, skipped, retries := e2eStats.ran, e2eStats.providerSkipped, e2eStats.retries
+	e2eStats.mu.Unlock()
+
+	if ran == 0 && skipped == 0 {
+		os.Exit(code) // the e2e suite did not run at all; nothing to report
+	}
+	fmt.Printf("\ne2e accounting: %d scenario(s) measured, %d lost to the provider, %d transient retries\n",
+		ran, skipped, retries)
+	if skipped > 0 {
+		fmt.Printf("E2E RESULT IS NOT A PASS: %d scenario(s) never reached a verdict. "+
+			"Do not report this run's numbers.\n", skipped)
+		if code == 0 {
+			code = 1
+		}
+	}
+	if retries > 3*max(ran, 1) {
+		fmt.Printf("WARNING: %d retries across %d measured scenario(s). That ratio means the "+
+			"provider is unhealthy; treat these numbers as suspect.\n", retries, ran)
+	}
+	os.Exit(code)
+}
+
 // e2eOwnerMap is a realistic component map. The logins are deliberately
 // implausible strings so a test can prove an assignee came from THIS map and
 // not from anything the model invented or read in a pull request.
@@ -67,11 +135,33 @@ var e2eOwnerMap = map[string]string{
 	"tools":         "e2e-owner-tools",
 }
 
+// e2eModel picks the model for the harness.
+//
+// Measured on 2026-09-01, three cells of four work and the failure is a
+// specific PAIRING rather than a bad model or a bad transport:
+//
+//	                        API key      Vertex `global`
+//	gemini-flash-latest     0/5          5/5
+//	gemini-3.6-flash        3/3          3/3
+//
+// So the harness uses the bot's own default when it can reach Vertex, and
+// switches to gemini-3.6-flash on the API-key fallback, where that default was
+// shedding completely. Without this, a developer without ADC lands on the one
+// combination that does not work and concludes the harness is broken.
+//
+// The outage looked transient rather than permanent -- an earlier run in this
+// same session completed cleanly on gemini-flash-latest through the API key --
+// so this is about not depending on a cell that has been observed failing, not
+// a claim that it is dead. E2E_MODEL overrides either way, and the BOT's
+// production default is untouched.
 func e2eModel() string {
 	if m := os.Getenv("E2E_MODEL"); m != "" {
 		return m
 	}
-	return "gemini-flash-latest"
+	if vertexProject() != "" {
+		return "gemini-flash-latest"
+	}
+	return "gemini-3.6-flash"
 }
 
 // httptestServer starts the fake GitHub and tears it down with the test.
@@ -115,31 +205,88 @@ func newE2EClientWithLog(t *testing.T, cfg *Config, srv *httptest.Server, log *s
 }
 
 // e2eConfig is the shipped configuration, pointed at a real model.
+//
+// It prefers VERTEX via ADC over the API key, and that is not a style choice.
+// Measured back to back on the same model within one minute: Vertex at location
+// `global` answered 5 of 5, while the Generative Language API key path answered
+// 0 of 5 (503 UNAVAILABLE and connection timeouts). A harness on the shed path
+// produces a suite of skips that still prints PASS, or worse, numbers taken
+// through a degraded endpoint. Location `global` is required -- the same model
+// is 404 in us-central1, so the location is not a free choice.
+//
+// The API key remains the fallback, and the BOT's own default is untouched:
+// this only decides how the test harness authenticates.
 func e2eConfig(t *testing.T) *Config {
 	t.Helper()
-	key := requireAPIKey(t)
-	return &Config{
+	requireE2EEnabled(t)
+
+	cfg := &Config{
 		Owner: "google", Repo: "adk-go",
-		GitHubToken: "e2e-token", GeminiAPIKey: key,
-		Model:    e2eModel(),
-		OwnerMap: e2eOwnerMap,
-		BotLogin: "github-actions[bot]",
+		GitHubToken: "e2e-token",
+		Model:       e2eModel(),
+		OwnerMap:    e2eOwnerMap,
+		BotLogin:    "github-actions[bot]",
 		// Single-pull-request mode, as the pull_request_target path runs, so the
 		// context-request tool is registered.
 		SinglePR: 1, RequestContext: true,
 		PRCount: 1, MaxFiles: 50, Concurrency: 1,
 		PRTimeout: 3 * time.Minute, RunBudget: 5 * time.Minute,
 	}
+
+	if project := vertexProject(); project != "" {
+		// newModel leaves the backend to the genai SDK when no API key is set,
+		// and the SDK reads these three from the environment.
+		t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+		t.Setenv("GOOGLE_CLOUD_PROJECT", project)
+		t.Setenv("GOOGLE_CLOUD_LOCATION", vertexLocation())
+		cfg.UseVertexAI = true
+		t.Logf("e2e model backend: Vertex ADC, project %s, location %s", project, vertexLocation())
+		return cfg
+	}
+
+	cfg.GeminiAPIKey = requireAPIKey(t)
+	t.Log("e2e model backend: Generative Language API key. NOTE: this path was measured " +
+		"at 0/5 success during a shedding window; prefer Vertex ADC if the run is noisy.")
+	return cfg
+}
+
+// vertexProject returns the project to use for Vertex, or "" to fall back to
+// the API key. E2E_VERTEX_PROJECT="" explicitly forces the fallback.
+func vertexProject() string {
+	if v, ok := os.LookupEnv("E2E_VERTEX_PROJECT"); ok {
+		return v
+	}
+	if v := os.Getenv("GOOGLE_CLOUD_PROJECT"); v != "" {
+		return v
+	}
+	return "cloud-ai-agentic-coding"
+}
+
+func vertexLocation() string {
+	if v := os.Getenv("E2E_VERTEX_LOCATION"); v != "" {
+		return v
+	}
+	// `global` is required: gemini-flash-latest is 404 in us-central1.
+	return "global"
+}
+
+// requireE2EEnabled applies the two run-time gates.
+func requireE2EEnabled(t *testing.T) {
+	t.Helper()
+	if os.Getenv("PR_TRIAGE_E2E") != "1" {
+		t.Skip("set PR_TRIAGE_E2E=1 to run the live-model e2e suite (it calls a paid API)")
+	}
 }
 
 func requireAPIKey(t *testing.T) string {
 	t.Helper()
+	requireE2EEnabled(t)
 	for _, k := range []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"} {
 		if v := os.Getenv(k); v != "" {
 			return v
 		}
 	}
-	t.Skip("no GEMINI_API_KEY or GOOGLE_API_KEY; skipping the live-model e2e suite")
+	t.Skip("PR_TRIAGE_E2E=1 but no GEMINI_API_KEY or GOOGLE_API_KEY; skipping")
 	return ""
 }
 
@@ -154,6 +301,11 @@ type e2ePR struct {
 	state     string
 	draft     bool
 	comments  []Comment
+	// wantIneligible marks a scenario that is ABOUT an ineligible pull request.
+	// The harness asserts the fixture really produces the state the scenario
+	// claims, so a drifted fixture reports itself instead of looking like the
+	// model misbehaving.
+	wantIneligible bool
 }
 
 func (p e2ePR) graphQL() string {
@@ -161,33 +313,35 @@ func (p e2ePR) graphQL() string {
 	if state == "" {
 		state = "OPEN"
 	}
-	files := make([]any, 0, len(p.files))
+	// Built from rawPullRequest -- the struct FetchPullRequest decodes into --
+	// rather than a hand-written map, so a change to the query or the decoder
+	// breaks this fixture at compile time instead of leaving it quietly
+	// describing a response the bot no longer asks for.
+	var raw rawPullRequest
+	raw.Number, raw.Title, raw.Body = p.number, p.title, p.body
+	raw.State, raw.IsDraft = state, p.draft
+	raw.Author = &ghActor{Login: "e2e-contributor", Typename: "User"}
+	raw.Assignees.TotalCount = p.assignees
+	raw.TimelineItems.TotalCount = p.priorAss
+	raw.Files.TotalCount = len(p.files)
 	for _, f := range p.files {
-		files = append(files, map[string]any{"path": f})
+		raw.Files.Nodes = append(raw.Files.Nodes, struct {
+			Path string `json:"path"`
+		}{Path: f})
 	}
-	comments := make([]any, 0, len(p.comments))
+	raw.Comments.TotalCount = len(p.comments)
 	for _, c := range p.comments {
-		comments = append(comments, map[string]any{
-			"author": map[string]any{"login": c.Author, "__typename": "User"},
-			"body":   c.Body,
+		raw.Comments.Nodes = append(raw.Comments.Nodes, ghComment{
+			Author: &ghActor{Login: c.Author, Typename: "User"},
+			Body:   c.Body,
 		})
 	}
-	pullRequest := map[string]any{
-		"number": p.number, "title": p.title, "body": p.body,
-		"state": state, "isDraft": p.draft,
-		"author":        map[string]any{"login": "e2e-contributor", "__typename": "User"},
-		"assignees":     map[string]any{"totalCount": p.assignees},
-		"files":         map[string]any{"totalCount": len(p.files), "nodes": files},
-		"comments":      map[string]any{"totalCount": len(p.comments), "nodes": comments},
-		"timelineItems": map[string]any{"totalCount": p.priorAss},
-	}
-	repository := map[string]any{"pullRequest": pullRequest}
-	doc := map[string]any{"data": map[string]any{"repository": repository}}
-	b, err := json.Marshal(doc)
+	node, err := json.Marshal(raw)
 	if err != nil {
 		panic(err)
 	}
-	return string(b)
+	// The envelope is three fixed keys; everything that can drift is above.
+	return `{"data":{"repository":{"pullRequest":` + string(node) + `}}}`
 }
 
 // e2eGitHub is a fake GitHub that serves one pull request and records every
@@ -296,6 +450,35 @@ func (r e2eResult) assignedTo(n int) string {
 	return ""
 }
 
+// assertFixturePrecondition proves the fixture produces the state the scenario
+// is about, BEFORE any model is involved.
+//
+// Without this a drifted fixture is indistinguishable from a misbehaving model,
+// and the natural response is to go hunting in the prompt for a bug that is not
+// there. It decodes through the production fetch and gate, so it also catches a
+// fixture that no longer matches the query.
+func assertFixturePrecondition(t *testing.T, cfg *Config, pr e2ePR) {
+	t.Helper()
+	gh := &e2eGitHub{pr: pr, assigned: map[int][]string{}, commented: map[int][]string{}}
+	srv := httptestServer(t, gh)
+	client := newE2EClient(t, cfg, srv)
+
+	got, err := client.FetchPullRequest(context.Background(), pr.number)
+	if err != nil {
+		t.Fatalf("FIXTURE IS WRONG, not the model: the production fetch could not decode "+
+			"the scenario's own GraphQL fixture: %v", err)
+	}
+	reason := skipReason(got, cfg.OwnerMap)
+	switch {
+	case pr.wantIneligible && reason == "":
+		t.Fatalf("FIXTURE IS WRONG, not the model: this scenario is about an INELIGIBLE " +
+			"pull request, but the fixture produces an eligible one")
+	case !pr.wantIneligible && reason != "":
+		t.Fatalf("FIXTURE IS WRONG, not the model: this scenario needs an eligible pull "+
+			"request, but the fixture is skipped as %q. The model was never asked.", reason)
+	}
+}
+
 // runE2E drives the REAL production pipeline -- real Gemini, real agent, real
 // runner, real tools -- against the fake GitHub, and returns what it did.
 //
@@ -304,6 +487,7 @@ func (r e2eResult) assignedTo(n int) string {
 // failing that way is reported, never silently skipped.
 func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 	t.Helper()
+	assertFixturePrecondition(t, cfg, pr)
 	const attempts = 6
 	var last e2eResult
 	var lastLog string
@@ -337,13 +521,20 @@ func runE2E(t *testing.T, cfg *Config, pr e2ePR) e2eResult {
 		logMu.Unlock()
 		last = e2eResult{assigned: a, commented: c, paths: p, hadError: client.hadError()}
 		if !last.hadError {
+			e2eRan()
 			return last
 		}
+		e2eRetried()
 		t.Logf("attempt %d/%d recorded an error; retrying. Cause: %s",
 			attempt, attempts, summarizeLogError(lastLog))
 		time.Sleep(time.Duration(attempt*attempt*3) * time.Second)
 	}
-	t.Errorf("all %d attempts recorded an error. Last cause: %s", attempts, summarizeLogError(lastLog))
+	// Skip rather than fail: a model that will not serve is not evidence about
+	// the bot either way. TestMain counts this so the run cannot be read as a
+	// pass -- a skip that silently counts as green is worse than a red.
+	e2eProviderSkipped()
+	t.Skipf("skipping: all %d attempts hit a transient model error. Last cause: %s",
+		attempts, summarizeLogError(lastLog))
 	return last
 }
 
@@ -793,12 +984,13 @@ func TestE2EIneligiblePullRequestNeverReachesTheModel(t *testing.T) {
 	cfg := e2eConfig(t)
 
 	res := runE2E(t, cfg, e2ePR{
-		number:    500,
-		title:     "feat: something",
-		body:      "A change.",
-		files:     []string{"core/thing.go"},
-		assignees: 1, // a human already took it
-		priorAss:  1,
+		number:         500,
+		title:          "feat: something",
+		body:           "A change.",
+		files:          []string{"core/thing.go"},
+		assignees:      1, // a human already took it
+		priorAss:       1,
+		wantIneligible: true,
 	})
 
 	if len(res.assigned) != 0 || len(res.commented) != 0 {

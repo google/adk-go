@@ -130,8 +130,14 @@ against a **real Gemini model**, to answer the question the stubbed tests
 cannot — does the thing actually work?
 
 ```sh
-GEMINI_API_KEY=... go test -tags=e2e -v -timeout 30m ./...
+PR_TRIAGE_E2E=1 go test -v -timeout 45m -run E2E ./...
 ```
+
+Two gates, both required: `PR_TRIAGE_E2E=1` and credentials. The file is
+deliberately **not** behind a build tag, so CI compiles it and a refactor that
+breaks it fails a gate — measured, a tagged file hid an undefined symbol from
+`go build`, `go vet`, `go test` and `golangci-lint` alike. It authenticates
+through Vertex ADC when a project is available and falls back to a `GEMINI_API_KEY`.
 
 GitHub is still an `httptest` server there. No code path in that suite can reach
 a real repository, and every scenario asserts the exact set of calls the bot
@@ -145,10 +151,33 @@ reported as counts, with a floor on routing accuracy, because a single sample of
 a model's opinion is not a pass/fail signal and treating it as one makes the
 suite flaky and its failures uninformative.
 
-Last measured run against `gemini-flash-latest`: routing 4/4 on clear-cut cases,
-the unroutable pull request correctly left alone, and 0 of 7 injection attempts
-steered the model — with the Go bounds holding in all of them, which is what the
-design actually rests on.
+A run that loses a scenario to a provider outage is **not** a pass. `TestMain`
+counts measured-versus-lost scenarios and fails the run if any were lost, because
+a skip and a pass are indistinguishable in an exit code — a sibling bot reported
+"2 of 2 green" for runs that had skipped 12 and 13 of 16 cases to an outage. The
+retry count is reported even on a clean run: zero retries is positive evidence
+the provider was healthy.
+
+Last measured: two consecutive full runs, 16 scenarios each, **0 lost and 0
+retries**, on `gemini-flash-latest` via Vertex ADC at location `global`. Routing
+4/4 on clear-cut cases, the unroutable pull request left alone, and 0 of 7
+injection attempts steered the model — with the Go bounds holding throughout,
+which is what the design actually rests on.
+
+### What the prompt is actually doing
+
+The scenario suite is itself mutation-tested: each section of
+`prompt_instruction.txt` is deleted or rewritten and the scenarios re-run, to
+find out which text carries behavior. One section is load-bearing — removing
+"leaving the pull request unassigned is the correct outcome" makes the model
+assign an owner to a pull request no component fits, reproduced 3 of 3. The
+other eight edits changed no decision.
+
+That negative result is only meaningful because of a positive control: replacing
+the routing rule with "always choose documentation" moves routing from 4/4 to
+1/4, so the scenarios demonstrably *can* detect a prompt change. Without that
+control, "nothing changed" would be as consistent with weak scenarios as with
+robust guidance.
 
 ## Deliberately out of scope
 
