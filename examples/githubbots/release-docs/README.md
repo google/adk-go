@@ -7,6 +7,26 @@ It diffs a release tag against the one before it, analyzes the changed files in
 bounded groups, and files **one** GitHub issue listing the documentation updates
 the changes imply.
 
+## The model has no authority to lose
+
+This runs on a public repository under the project's identity, and its input is
+attacker-reachable: anyone can open a pull request, and once it merges their
+file paths, patch text and commit subjects are the whole of what this bot reads.
+
+So the design does not ask the model to behave. **The model cannot file an
+issue, cannot choose the repository or the title, and cannot decide that
+anything is filed at all.** Its single tool appends findings to an in-memory
+map, and the collector holding that map has no GitHub client in it — there is
+no reference for a compromised model to reach through. Every write is made by
+Go after the analysis loop has finished, from values Go controls.
+
+A fully steered model can therefore change what an issue *says*. It cannot
+change whether one exists, where it goes, or what it is called. That is a
+property of the wiring rather than of the prompt, which matters because prompt
+mutation testing on this bot found most of its prose changed no decision the
+bot makes — the prose was never what was holding. What the model writes is then
+confined by sanitization and fencing, covered under Authority limits below.
+
 ## What it demonstrates
 
 - An `llmagent.New` agent whose only tool **mutates nothing**. The model records
