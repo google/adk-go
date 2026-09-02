@@ -39,6 +39,9 @@ type gcsObject interface {
 	newReader(ctx context.Context) (io.ReadCloser, error)
 	delete(ctx context.Context) error
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
+	// ifNotExist returns a handle whose write succeeds only if the object does
+	// not already exist; writing over an existing object fails with HTTP 412.
+	ifNotExist() gcsObject
 }
 
 // gcsObjectIterator
@@ -95,6 +98,11 @@ type gcsObjectWrapper struct {
 // NewWriter implements the gcsObject interface for gcsObjectWrapper.
 func (w *gcsObjectWrapper) newWriter(ctx context.Context) gcsWriter {
 	return &gcsWriterWrapper{w: w.object.NewWriter(ctx)}
+}
+
+// ifNotExist implements the gcsObject interface for gcsObjectWrapper.
+func (w *gcsObjectWrapper) ifNotExist() gcsObject {
+	return &gcsObjectWrapper{object: w.object.If(storage.Conditions{DoesNotExist: true})}
 }
 
 // NewReader implements the gcsObject interface for gcsObjectWrapper.

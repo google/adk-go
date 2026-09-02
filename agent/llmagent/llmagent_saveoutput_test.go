@@ -83,9 +83,36 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			wantStateDelta: map[string]any{},
 		},
 		{
+			name:        "skips function call events",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event:       createTestEvent("test_agent", "", true),
+			customEventParts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "read_state"}},
+			},
+			wantStateDelta: map[string]any{},
+		},
+		{
+			name:        "skips function response events",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event:       createTestEvent("test_agent", "", true),
+			customEventParts: []*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{Name: "read_state", Response: map[string]any{"result": "SECRET_42"}}},
+			},
+			wantStateDelta: map[string]any{},
+		},
+		{
 			name:           "skips when event has no content text",
 			agentConfig:    Config{Name: "test_agent", OutputKey: "result"},
 			event:          createTestEvent("test_agent", "", true),
+			wantStateDelta: map[string]any{},
+		},
+		{
+			name:        "skips thought-only text",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event:       createTestEvent("test_agent", "", true),
+			customEventParts: []*genai.Part{
+				{Text: "hidden thought", Thought: true},
+			},
 			wantStateDelta: map[string]any{},
 		},
 		{

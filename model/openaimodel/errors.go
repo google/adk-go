@@ -50,6 +50,8 @@ var (
 	ErrUnsupportedMessageContentType = errors.New("openai: unsupported message content type")
 	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
 	ErrUnsupportedOutputItemType = errors.New("openai: unsupported output item type")
+	// ErrFunctionCallArgs is returned when a function call's arguments are not a decodable JSON object.
+	ErrFunctionCallArgs = errors.New("openai: parse function call args")
 	// ErrNoTextOrToolContent is returned when the response output does not contain text or tool content.
 	ErrNoTextOrToolContent = errors.New("openai: response output did not contain text or tool content")
 )

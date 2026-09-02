@@ -6,8 +6,16 @@ on:
 
   workflow_dispatch:
 
+# Every job here only reads the repository: it checks out, tests and runs
+# govulncheck. Declaring that once at the top keeps each job from inheriting the
+# broader default token, which on a scheduled run is write-capable.
+permissions:
+  contents: read
+
 jobs:
   discover:
+    # Don't run scheduled builds on forks.
+    if: github.event_name != 'schedule' || github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
@@ -27,7 +35,7 @@ jobs:
         module: ${{ fromJson(needs.discover.outputs.modules) }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    
+
     - name: Setup
       uses: ./.github/actions/setup
 

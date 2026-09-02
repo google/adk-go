@@ -66,15 +66,17 @@ func newAgentNode(a agent.Agent) workflow.Node {
 func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 	return func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
 		// On resume, input is the ORIGINAL user text; re-feeding it would
-		// loop (model calls the long-running tool again). So pass no
-		// input on resume and let the agent continue from history.
-		resolved := answeredOpenInterrupts(ctx.Session())
+		// loop (model calls the long-running tool again). Detect resume
+		// from the current turn's FunctionResponse, not session history,
+		// so that a fresh text turn following a completed resume is not
+		// misclassified and still reaches the agent.
+		resolved := answeredInterrupts(ctx.Session(), ctx.UserContent())
 		isResume := len(resolved) > 0
 
 		if isLlmAgent(a) {
 			return runLlmAgentBody(a, ctx, input, isResume, emit)
 		}
-		return runGenericAgentBody(a, ctx, input, isResume, emit)
+		return runGenericAgentBody(a, ctx, input, resolved, emit)
 	}
 }
 
@@ -134,11 +136,13 @@ func runGenericAgentBody(
 	a agent.Agent,
 	ctx agent.Context,
 	input any,
-	isResume bool,
+	resolved map[string]bool,
 	emit func(*session.Event) error,
 ) (any, error) {
 	var userContent *genai.Content
-	if !isResume {
+	if len(resolved) > 0 {
+		userContent = resumeUserContent(ctx.UserContent(), resolved)
+	} else {
 		userContent = inputToUserContent(input) // fresh turn
 	}
 	agentCtx := newAgentContext(ctx, a, userContent)
@@ -161,31 +165,64 @@ func runGenericAgentBody(
 	return nil, nil
 }
 
-// answeredOpenInterrupts returns the long-running interrupt IDs that a
-// FunctionResponse in history answers. Non-empty means this turn is a
-// HITL resume (continue from history, don't re-process the user text).
-func answeredOpenInterrupts(sess session.Session) map[string]bool {
+// answeredInterrupts returns the subset of long-running interrupt IDs that
+// the current user turn's FunctionResponses reference.
+// Non-empty means this activation is a HITL resume.
+func answeredInterrupts(sess session.Session, userContent *genai.Content) map[string]bool {
 	if sess == nil {
 		return nil
 	}
+	responses := utils.FunctionResponses(userContent)
+	if len(responses) == 0 {
+		return nil
+	}
 	longRunning := map[string]struct{}{}
-	answered := map[string]bool{}
 	events := sess.Events()
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		for _, id := range ev.LongRunningToolIDs {
 			longRunning[id] = struct{}{}
 		}
-		for _, fr := range utils.FunctionResponses(ev.Content) {
-			if fr == nil || fr.ID == "" {
-				continue
-			}
-			if _, ok := longRunning[fr.ID]; ok {
-				answered[fr.ID] = true
-			}
+	}
+
+	answered := map[string]bool{}
+	for _, fr := range responses {
+		if fr == nil || fr.ID == "" {
+			continue
+		}
+		if _, ok := longRunning[fr.ID]; ok {
+			answered[fr.ID] = true
 		}
 	}
 	return answered
+}
+
+// resumeUserContent keeps only the parts whose FunctionResponse ID is in
+// resolved. Generic agents such as WorkflowAgent inspect ctx.UserContent
+// to detect resume, but they must not see stale text input from the
+// original START activation, nor responses to other interrupts. Returns
+// nil when nothing survives the filter; callers reach it only with a
+// non-empty resolved.
+func resumeUserContent(userContent *genai.Content, resolved map[string]bool) *genai.Content {
+	if userContent == nil {
+		return nil
+	}
+	parts := make([]*genai.Part, 0, len(userContent.Parts))
+	for _, part := range userContent.Parts {
+		if part == nil || part.FunctionResponse == nil {
+			continue
+		}
+		if resolved[part.FunctionResponse.ID] {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return &genai.Content{
+		Role:  userContent.Role,
+		Parts: parts,
+	}
 }
 
 // newAgentContext builds the per-agent InvocationContext, inheriting

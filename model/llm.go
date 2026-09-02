@@ -40,29 +40,29 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content
-	CitationMetadata    *genai.CitationMetadata
-	GroundingMetadata   *genai.GroundingMetadata
-	UsageMetadata       *genai.GenerateContentResponseUsageMetadata
-	CustomMetadata      map[string]any
-	LogprobsResult      *genai.LogprobsResult
-	InputTranscription  *genai.Transcription
-	OutputTranscription *genai.Transcription
-	ModelVersion        string
+	Content             *genai.Content                              `json:"content,omitempty"`
+	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
+	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
+	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`
+	LogprobsResult      *genai.LogprobsResult                       `json:"logprobsResult,omitempty"`
+	InputTranscription  *genai.Transcription                        `json:"inputTranscription,omitempty"`
+	OutputTranscription *genai.Transcription                        `json:"outputTranscription,omitempty"`
+	ModelVersion        string                                      `json:"modelVersion,omitempty"`
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	// The Runner fully processes only the final non-partial event, partial
 	// events are simply forwarded downstream (eg. to UI for display).
-	Partial bool
+	Partial bool `json:"partial,omitempty"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
-	TurnComplete bool
+	TurnComplete bool `json:"turnComplete,omitempty"`
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted             bool
-	SessionResumptionHandle string
-	ErrorCode               string
-	ErrorMessage            string
-	FinishReason            genai.FinishReason
-	AvgLogprobs             float64
+	Interrupted             bool               `json:"interrupted,omitempty"`
+	SessionResumptionHandle string             `json:"sessionResumptionHandle,omitempty"`
+	ErrorCode               string             `json:"errorCode,omitempty"`
+	ErrorMessage            string             `json:"errorMessage,omitempty"`
+	FinishReason            genai.FinishReason `json:"finishReason,omitempty"`
+	AvgLogprobs             float64            `json:"avgLogprobs,omitempty"`
 }

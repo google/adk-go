@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package controllers implements the HTTP controllers for the Agent
+// Engine API, dispatching query requests to registered method handlers.
 package controllers
 
 import (
