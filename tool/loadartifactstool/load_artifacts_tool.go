@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -258,6 +257,7 @@ func isInlineMIMETypeSupported(mimeType string) bool {
 }
 
 // isTextLikeMIMEType reports whether data of this type can be inlined as text.
+// The argument must already be normalized; the call site does so.
 func isTextLikeMIMEType(mimeType string) bool {
 	return strings.HasPrefix(mimeType, "text/") ||
 		mimeType == "application/csv" ||
@@ -269,7 +269,7 @@ func isTextLikeMIMEType(mimeType string) bool {
 // inline data it would reject. The result is never nil.
 func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
 	if part == nil {
-		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %s. No content was returned.]", artifactName))
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %q. No content was returned.]", artifactName))
 	}
 	if part.InlineData == nil {
 		return part
@@ -282,18 +282,19 @@ func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
 	data := part.InlineData.Data
 	// An empty blob is degenerate whatever its declared type.
 	if len(data) == 0 {
-		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %s, type: %s. No inline data was provided.]", artifactName, mimeType))
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %q, type: %q. No inline data was provided.]", artifactName, mimeType))
 	}
 	if isInlineMIMETypeSupported(mimeType) {
 		return part
 	}
-	// Binary data mislabelled as text would arrive as replacement characters.
-	if isTextLikeMIMEType(mimeType) && utf8.Valid(data) {
-		return genai.NewPartFromText(string(data))
+	// Text in a legacy encoding still carries readable content, so replace the
+	// invalid sequences rather than discarding the artifact.
+	if isTextLikeMIMEType(mimeType) {
+		return genai.NewPartFromText(strings.ToValidUTF8(string(data), "\uFFFD"))
 	}
 
 	return genai.NewPartFromText(fmt.Sprintf(
-		"[Binary artifact: %s, type: %s, size: %d bytes. Content cannot be displayed inline.]",
+		"[Binary artifact: %q, type: %q, size: %d bytes. Content cannot be displayed inline.]",
 		artifactName,
 		mimeType,
 		len(data),
