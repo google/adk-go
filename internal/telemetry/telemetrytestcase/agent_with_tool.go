@@ -37,12 +37,9 @@ var AgentWithToolCase = &telemetrytest.SpanDigest{
 				"gen_ai.request.model":           "mock",
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
-				// MockModel returns no UsageMetadata, so no token
-				// attrs are set. The mock response carries no
-				// FinishReason; the existing telemetry emits the
-				// empty FinishReason as a single-element string
-				// slice.
-				"gen_ai.response.finish_reasons": []string{""},
+				// The first turn requests a tool, so the response-level
+				// finish reason follows the semantic-convention enum.
+				"gen_ai.response.finish_reasons": []string{"tool_call"},
 			},
 			Logs: []*telemetrytest.LogDigest{
 				// Content elision is on by default.
@@ -82,7 +79,7 @@ var AgentWithToolCase = &telemetrytest.SpanDigest{
 				"gen_ai.request.model":           "mock",
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
-				"gen_ai.response.finish_reasons": []string{""},
+				"gen_ai.response.finish_reasons": []string{"stop"},
 			},
 			Logs: []*telemetrytest.LogDigest{
 				{

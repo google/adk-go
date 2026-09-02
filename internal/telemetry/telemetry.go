@@ -128,7 +128,9 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	}
 	span.SetAttributes(
 		gcpVertexAgentEventID.String(params.EventID),
-		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
+		semconv.GenAIResponseFinishReasons(
+			schemaFinishReason(params.Response, responseHasToolCall(params.Response)),
+		),
 	)
 	span.SetAttributes(responseContentAttributes(params.Response)...)
 	if params.Response.UsageMetadata != nil {
@@ -142,6 +144,18 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
 		)
 	}
+}
+
+func responseHasToolCall(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part != nil && part.FunctionCall != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // StartExecuteToolSpanParams contains parameters for [StartExecuteToolSpan].
@@ -158,7 +172,8 @@ func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
+		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args)),
+	))
 	return spanCtx, span
 }
 
