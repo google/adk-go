@@ -26,11 +26,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
@@ -477,5 +479,97 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
+	}
+}
+
+type trackingSpanProcessor struct {
+	shutdownCalled atomic.Bool
+}
+
+func (p *trackingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *trackingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *trackingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *trackingSpanProcessor) Shutdown(context.Context) error {
+	p.shutdownCalled.Store(true)
+	return nil
+}
+
+// TestRunShutsDownTelemetryWhenServerFailsToStart covers issue #1469:
+// when the HTTP server fails to start (e.g. port already bound),
+// Run must shut down the initialized OpenTelemetry providers.
+func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	tracker := &trackingSpanProcessor{}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(tracker)},
+	}
+
+	if err := l.Run(context.Background(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("telemetry shutdown was not called after server startup failure")
+	}
+}
+
+type trackingSublauncher struct {
+	telemetryFailSublauncher
+	userMessageCalled atomic.Bool
+}
+
+func (s *trackingSublauncher) UserMessage(webURL string, printer func(v ...any)) {
+	s.userMessageCalled.Store(true)
+}
+
+// TestRunDoesNotAnnounceURLWhenTelemetryInitFails covers issue #1469:
+// sublauncher UserMessage and URL announcements must only occur after telemetry
+// initialization succeeds.
+func TestRunDoesNotAnnounceURLWhenTelemetryInitFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	sub := &trackingSublauncher{}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+
+	if err := l.Run(context.Background(), config); err == nil {
+		t.Fatalf("Run() succeeded, want telemetry initialization failure")
+	}
+
+	if sub.userMessageCalled.Load() {
+		t.Errorf("UserMessage was called before telemetry initialization succeeded")
+	}
+	if got := buf.String(); strings.Contains(got, "Starting the web server") || strings.Contains(got, "Web servers starts on") {
+		t.Errorf("startup banner was logged before telemetry initialization succeeded: %q", got)
 	}
 }
