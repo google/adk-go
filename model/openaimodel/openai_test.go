@@ -360,6 +360,73 @@ func TestModel_GenerateStream_MatchesBlocking(t *testing.T) {
 	}
 }
 
+func TestModel_GenerateStream_Refusal(t *testing.T) {
+	const (
+		refusalOnlyDelta1 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"I cannot ","sequence_number":1}`
+		refusalOnlyDelta2 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"help with that.","sequence_number":2}`
+		refusalOnlyDone   = `{"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"I cannot help with that.","sequence_number":3}`
+		refusalOnlyFinal  = `{"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}}`
+
+		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request","sequence_number":1}`
+		mixedDelta1    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"I cannot ","sequence_number":2}`
+		mixedDelta2    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"help with that.","sequence_number":3}`
+		mixedDone      = `{"type":"response.refusal.done","item_id":"msg_1","output_index":1,"content_index":0,"refusal":"I cannot help with that.","sequence_number":4}`
+		mixedFinal     = `{"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request"}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}}`
+	)
+
+	tests := []struct {
+		name      string
+		events    []string
+		wantParts []*genai.Part
+	}{
+		{
+			name:      "refusal only",
+			events:    []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
+			wantParts: []*genai.Part{{Text: "I cannot help with that."}},
+		},
+		{
+			name:   "refusal after reasoning",
+			events: []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
+			wantParts: []*genai.Part{
+				{Text: "Checking the request", Thought: true},
+				{Text: "I cannot help with that."},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, tc.events...)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+
+			var streamedRefusal strings.Builder
+			for _, resp := range got[:len(got)-1] {
+				if resp.Content == nil {
+					continue
+				}
+				for _, part := range resp.Content.Parts {
+					if !part.Thought {
+						streamedRefusal.WriteString(part.Text)
+					}
+				}
+			}
+			if got, want := streamedRefusal.String(), "I cannot help with that."; got != want {
+				t.Errorf("streamed refusal = %q, want %q", got, want)
+			}
+
+			if final.Content == nil {
+				t.Fatal("final content = nil, want refusal content")
+			}
+			if diff := cmp.Diff(tc.wantParts, final.Content.Parts); diff != "" {
+				t.Errorf("final parts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestModel_GenerateStream_TruncatedLeavesUsageUnset pins that a stream cut off
 // before its terminal event reports no usage rather than zero usage, which would
 // understate a turn that did real work.

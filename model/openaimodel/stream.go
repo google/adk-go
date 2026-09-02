@@ -50,6 +50,13 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		}
 		// For text deltas, we create a response with a single text part.
 		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
+	case responseRefusalDelta:
+		delta := evt.AsResponseRefusalDelta()
+		if delta.Delta == "" {
+			return nil, nil
+		}
+		// Blocking responses expose refusals as text, so streaming does the same.
+		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseReasoningTextDelta:
 		delta := evt.AsResponseReasoningTextDelta()
 		if delta.Delta == "" {
@@ -100,6 +107,7 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		}
 		return nil, nil
 	case responseOutputTextDone,
+		responseRefusalDone,
 		responseReasoningTextDone,
 		responseReasoningSummaryTextDone,
 		responseCompleted,
