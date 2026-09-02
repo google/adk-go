@@ -792,3 +792,35 @@ func TestNewJSONSchemaFormatDoesNotMutateResponseJSONSchema(t *testing.T) {
 		t.Fatalf("newJSONSchemaFormat() mutated ResponseJsonSchema: got %s, want %s", got, want)
 	}
 }
+
+func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
+	const minimum = int64(9007199254740993)
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("return a count", genai.RoleUser),
+		},
+		Config: &genai.GenerateContentConfig{
+			ResponseJsonSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{
+						"type":    "integer",
+						"minimum": minimum,
+					},
+				},
+			},
+		},
+	}
+
+	params, err := buildOpenAIParams("gpt-4o-mini", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() error = %v", err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal(params) error = %v", err)
+	}
+	if got, want := string(data), `"minimum":9007199254740993`; !strings.Contains(got, want) {
+		t.Fatalf("json.Marshal(params) = %s, want exact integer constraint %s", got, want)
+	}
+}
