@@ -212,6 +212,14 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 			case <-time.After(delay):
 				continue
 			case <-ctx.Done():
+				// Cancellation while parked in the retry delay is a real
+				// failure too: report it before releasing sem, exactly
+				// like the exhausted-attempts path below. Without this,
+				// firstErr stays nil unless some other worker happens to
+				// report first, so a cancellation landing here can be
+				// silently dropped and the whole run yields success with
+				// a nil output for this item.
+				reportFailure(ctx.Err())
 				resCh <- workerResult{index: idx, err: ctx.Err()}
 				return
 			}

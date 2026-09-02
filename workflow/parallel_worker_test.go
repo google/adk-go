@@ -492,6 +492,75 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	close(blockCh)
 }
 
+func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
+	// jjsasha63's finding on #1239: runWorker's retry-delay select only
+	// calls reportFailure on the "cannot retry or exhausted attempts" path,
+	// not on the `case <-ctx.Done()` arm inside the delay wait. A worker
+	// parked in that delay when the top-level context is cancelled sends
+	// workerResult{err: ctx.Err()} straight to resCh without ever setting
+	// firstErr, and the aggregation loop only reads res.ev, never res.err,
+	// so a cancellation that lands here is silently dropped: nil error, nil
+	// output for that item.
+	wrapped := NewFunctionNode("always_fails", func(ctx agent.Context, input any) (any, error) {
+		return nil, errors.New("boom")
+	}, defaultNodeConfig)
+
+	rc := DefaultRetryConfig()
+	rc.MaxAttempts = 5
+	rc.InitialDelay = 2 * time.Second
+	rc.MaxDelay = 2 * time.Second
+	rc.Jitter = 0
+	rc.ShouldRetry = func(err error) bool { return true }
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, NodeConfig{RetryConfig: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	mockCtx := &MockInvocationContext{Context: ctx}
+	exCtx := agent.NewContext(mockCtx)
+	input := []any{1}
+
+	done := make(chan struct{})
+	var gotErr error
+	var hasFinalResult bool
+
+	go func() {
+		for ev, err := range pw.Run(exCtx, input) {
+			if err != nil {
+				gotErr = err
+			}
+			if _, ok := extractOutput(ev); ok {
+				hasFinalResult = true
+			}
+		}
+		close(done)
+	}()
+
+	// The single attempt fails immediately (well inside InitialDelay), so
+	// by the time we cancel, the worker is parked in the retry select
+	// waiting on time.After(2s), not mid-attempt.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during retry delay to complete")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error on cancellation during retry delay, got nil")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", gotErr)
+	}
+	if hasFinalResult {
+		t.Error("expected no final result to be yielded when cancelled mid-retry")
+	}
+}
+
 func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
