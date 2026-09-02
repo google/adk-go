@@ -133,11 +133,15 @@ func (v *vertexAIClient) searchMemory(ctx context.Context, req *memory.SearchReq
 	return res, nil
 }
 
-// createScope builds the MemoryBank scope. Memories are isolated by both
-// app_name and user_id: without app_name in the scope, applications that share
-// a MemoryBank for the same user could read each other's memories. This matches
-// the (app_name, user_id) keying used by the in-memory memory service and the
-// adk-python / adk-js MemoryBank implementations.
+// createScope builds the MemoryBank scope that partitions memories by
+// (app_name, user_id). Memory Bank matches the scope map exactly on retrieval,
+// so including app_name keeps each application's memories in its own partition;
+// without it, applications sharing a MemoryBank for the same user write into and
+// read from a single shared partition. This is a namespacing convention rather
+// than an authenticated confidentiality boundary — on the REST path the app name
+// comes from the request and the handler does not authenticate the caller — and
+// it matches the (app_name, user_id) keying used by the in-memory memory service
+// (memory/inmemory.go) and the adk-python MemoryBank implementation.
 func createScope(appName, userID string) map[string]string {
 	return map[string]string{"app_name": appName, "user_id": userID}
 }
