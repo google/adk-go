@@ -1,0 +1,70 @@
+# <What the reader will be able to do>
+
+<One paragraph: what the sample builds, and what is interesting about it.>
+
+- **Concept:** <the one API move, named>
+- **Needs LLM?** <No | Yes (Gemini)>
+- **<Needs a registry? / Needs a deployed service?>** <Yes or No in one line —
+  the detail belongs in Requirements, not here.>
+
+## Goal
+
+<What this sample proves that a config file cannot. Not a feature list.>
+
+## Requirements
+
+<What has to exist before this runs: an enabled API, an IAM role, credentials
+beyond ADC, a service listening somewhere. Link the shared section when one
+already explains it.>
+
+## How it works
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Main as sample
+    participant Dep as <the service or agent being demonstrated>
+
+    Note over Main,Dep: startup
+    Main->>Dep: <the call this sample is about>
+    Dep-->>Main: <what comes back>
+
+    Note over User,Dep: first turn
+    User->>Main: <prompt>
+    Main-->>User: <answer>
+```
+
+1. <what the code does, in the order it does it>
+2. <...>
+
+## Running the sample
+
+```bash
+export GOOGLE_CLOUD_PROJECT=your-project
+
+go run ./examples/<area>/<name>/ console
+```
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `GOOGLE_CLOUD_PROJECT` | yes | <what it selects> |
+| `<OPTIONAL_VAR>` | no | <what it changes, and its default> |
+
+## Example session
+
+<Where this output came from, and which part of it generalises.>
+
+```text
+$ go run ./examples/<area>/<name>/ console
+<output you actually got>
+```
+
+<What the transcript proves — tie it back to the Goal.>
+
+## What it shows
+
+<Optional: the two or three takeaways, one line each.>
+
+## Notes
+
+- **<The trap, stated as a claim.>** <Why it bites, and what to do instead.>
