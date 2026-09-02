@@ -119,14 +119,13 @@ type toolResponsePart struct {
 }
 
 // functionToolDefinition is the representation used by the GenAI semantic
-// conventions for a function declaration. Description and parameters are kept
-// as explicit fields so their absence is distinguishable from an empty value
-// in the recorded JSON.
+// conventions for a function declaration. Description is always emitted, while
+// parameters are included only when explicitly enabled.
 type functionToolDefinition struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Parameters  any    `json:"parameters"`
-	Type        string `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Type        string          `json:"type"`
 }
 
 // toolDefinitions converts the function declarations present in the actual
@@ -137,6 +136,7 @@ func toolDefinitions(config *genai.GenerateContentConfig) []functionToolDefiniti
 	if config == nil {
 		return nil
 	}
+	includeParameters := captureToolDefinitionParametersOnSpans()
 	var definitions []functionToolDefinition
 	for _, tool := range config.Tools {
 		if tool == nil {
@@ -146,23 +146,79 @@ func toolDefinitions(config *genai.GenerateContentConfig) []functionToolDefiniti
 			if declaration == nil {
 				continue
 			}
-			parameters := any(declaration.Parameters)
-			if declaration.ParametersJsonSchema != nil {
-				parameters = declaration.ParametersJsonSchema
-			}
-			definitions = append(definitions, functionToolDefinition{
+			definition := functionToolDefinition{
 				Name:        declaration.Name,
 				Description: declaration.Description,
-				Parameters:  parameters,
 				Type:        "function",
-			})
+			}
+			if includeParameters {
+				definition.Parameters = toolDefinitionParameters(declaration)
+			}
+			definitions = append(definitions, definition)
 		}
 	}
 	return definitions
 }
 
-// requestContentAttributes returns the gen_ai.system_instructions and
-// gen_ai.input.messages attributes for req, or nil when content capture is off
+// toolDefinitionParameters returns a valid JSON value for a declaration's
+// parameters. Each declaration is encoded independently so one malformed
+// application-provided schema cannot erase every tool definition on the span.
+func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMessage {
+	if declaration.Parameters == nil && declaration.ParametersJsonSchema == nil {
+		return json.RawMessage("null")
+	}
+
+	value := any(declaration.Parameters)
+	if declaration.ParametersJsonSchema != nil {
+		value = declaration.ParametersJsonSchema
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(unserializablePlaceholder)
+	}
+
+	var normalized any
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return json.RawMessage(unserializablePlaceholder)
+	}
+	lowercaseSchemaTypes(normalized)
+	encoded, err = json.Marshal(normalized)
+	if err != nil {
+		return json.RawMessage(unserializablePlaceholder)
+	}
+	return json.RawMessage(encoded)
+}
+
+// lowercaseSchemaTypes converts genai.Schema's protobuf enum spellings to the
+// lowercase type values required by JSON Schema. It also normalizes literal
+// schema maps supplied by callers, including nested schemas.
+func lowercaseSchemaTypes(value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		if typeValue, ok := value["type"]; ok {
+			switch typeValue := typeValue.(type) {
+			case string:
+				value["type"] = strings.ToLower(typeValue)
+			case []any:
+				for i, item := range typeValue {
+					if item, ok := item.(string); ok {
+						typeValue[i] = strings.ToLower(item)
+					}
+				}
+			}
+		}
+		for _, child := range value {
+			lowercaseSchemaTypes(child)
+		}
+	case []any:
+		for _, child := range value {
+			lowercaseSchemaTypes(child)
+		}
+	}
+}
+
+// requestContentAttributes returns the gen_ai.system_instructions,
+// gen_ai.tool.definitions, and gen_ai.input.messages attributes for req, or nil when content capture is off
 // or req carries nothing to record.
 //
 // Content is sensitive and often large, so the semantic conventions require
@@ -426,12 +482,14 @@ func schemaFinishReason(resp *model.LLMResponse, toolCall bool) string {
 
 // appendJSON encodes value and appends it to attrs under key, unless it does
 // not fit. See [maxContentAttributeBytes] for why an oversized attribute is
-// dropped rather than trimmed.
+// dropped rather than trimmed. Values used for tool payloads are encoded
+// independently before they reach this function so one bad payload cannot
+// discard its siblings.
 func appendJSON(attrs []attribute.KeyValue, key attribute.Key, value any) []attribute.KeyValue {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		// Unreachable: tool payloads are pre-encoded by toolPayload and
-		// everything else is a string or a slice of them.
+		// Callers should pre-encode values whose individual failures must be
+		// isolated, such as tool definition parameters.
 		return attrs
 	}
 	if len(encoded) > maxContentAttributeBytes {

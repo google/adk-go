@@ -44,6 +44,15 @@ func captureContent(t *testing.T) {
 	// Spans have to be asked for by name. A truthy value means log records
 	// only, which is what the variable meant before spans could carry content.
 	t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
+	t.Setenv(captureToolDefinitionParametersEnvVar, "")
+	ApplyEnv()
+}
+
+// captureToolDefinitionParameters turns on the explicit input-schema opt-in for one test.
+func captureToolDefinitionParameters(t *testing.T) {
+	t.Helper()
+	captureContent(t)
+	t.Setenv(captureToolDefinitionParametersEnvVar, "true")
 	ApplyEnv()
 }
 
@@ -333,8 +342,7 @@ func TestRequestContentAttributes_ToolDefinitions(t *testing.T) {
 		},
 	}
 
-	key := attribute.Key("gen_ai.tool.definitions")
-	encoded, ok := attrString(requestContentAttributes(req), key)
+	encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
 	if !ok {
 		t.Fatalf("gen_ai.tool.definitions was not set")
 	}
@@ -347,22 +355,11 @@ func TestRequestContentAttributes_ToolDefinitions(t *testing.T) {
 		{
 			"name":        "get_weather",
 			"description": "Gets the weather for a city.",
-			"parameters": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"city": map[string]any{
-						"type":        "string",
-						"description": "The city name.",
-					},
-				},
-				"required": []any{"city"},
-			},
-			"type": "function",
+			"type":        "function",
 		},
 		{
 			"name":        "get_time",
 			"description": "Gets the current time for a timezone.",
-			"parameters":  nil,
 			"type":        "function",
 		},
 	}
@@ -372,7 +369,7 @@ func TestRequestContentAttributes_ToolDefinitions(t *testing.T) {
 }
 
 func TestRequestContentAttributes_ToolDefinitions_Parameters(t *testing.T) {
-	captureContent(t)
+	captureToolDefinitionParameters(t)
 
 	req := &model.LLMRequest{
 		Config: &genai.GenerateContentConfig{
@@ -403,9 +400,9 @@ func TestRequestContentAttributes_ToolDefinitions_Parameters(t *testing.T) {
 		"name":        "get_weather",
 		"description": "",
 		"parameters": map[string]any{
-			"type": "OBJECT",
+			"type": "object",
 			"properties": map[string]any{
-				"city": map[string]any{"type": "STRING"},
+				"city": map[string]any{"type": "string"},
 			},
 			"required": []any{"city"},
 		},
@@ -416,8 +413,65 @@ func TestRequestContentAttributes_ToolDefinitions_Parameters(t *testing.T) {
 	}
 }
 
+func TestRequestContentAttributes_ToolDefinitions_ParametersFailureIsolated(t *testing.T) {
+	captureToolDefinitionParameters(t)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					{
+						Name:        "good_tool",
+						Description: "A valid tool.",
+						ParametersJsonSchema: map[string]any{
+							"type": "OBJECT",
+							"properties": map[string]any{
+								"value": map[string]any{"type": "STRING"},
+							},
+						},
+					},
+					{
+						Name:        "bad_tool",
+						Description: "An invalid tool.",
+						ParametersJsonSchema: map[string]any{
+							"type":    "object",
+							"invalid": func() {},
+						},
+					},
+				},
+			}},
+		},
+	}
+
+	encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
+	if !ok {
+		t.Fatal("gen_ai.tool.definitions was not set")
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tool definitions, want 2: %s", len(got), encoded)
+	}
+	if got[0]["name"] != "good_tool" || got[0]["parameters"].(map[string]any)["type"] != "object" {
+		t.Fatalf("good tool was not preserved and normalized: %#v", got[0])
+	}
+	if got[0]["parameters"].(map[string]any)["properties"].(map[string]any)["value"].(map[string]any)["type"] != "string" {
+		t.Fatalf("nested schema type was not normalized: %#v", got[0])
+	}
+	if got[1]["name"] != "bad_tool" || got[1]["parameters"] != unserializablePlaceholderValueForTest() {
+		t.Fatalf("bad tool was not isolated: %#v", got[1])
+	}
+}
+
+func unserializablePlaceholderValueForTest() string {
+	return "<unserializable>"
+}
+
 func TestRequestContentAttributes_ToolDefinitionsRespectsCapture(t *testing.T) {
 	t.Setenv(captureMessageContentEnvVar, "")
+	t.Setenv(captureToolDefinitionParametersEnvVar, "true")
 	ApplyEnv()
 
 	req := &model.LLMRequest{

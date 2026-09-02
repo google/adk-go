@@ -25,9 +25,7 @@ const systemInstructionsJSON = `[{"type":"text","content":"you are helpful\n\n` 
 	`You are an agent. Your internal name is \"some_root_agent\". ` +
 	`The description about you is \"A sample root agent.\"."}]`
 
-const toolDefinitionsJSON = `[{"name":"some_tool","description":"A sample tool.",` +
-	`"parameters":{"type":"object","properties":{"arg1":{"type":"string"}},` +
-	`"required":["arg1"],"additionalProperties":false},"type":"function"}]`
+const toolDefinitionsJSON = `[{"name":"some_tool","description":"A sample tool.","type":"function"}]`
 
 // AgentWithToolCaptureContentCase is the expected root span for
 // the same scenario as [AgentWithToolCase] but with content capture

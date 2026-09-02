@@ -36,6 +36,12 @@ import (
 // https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+// captureToolDefinitionParametersEnvVar controls whether tool input schemas
+// are included in gen_ai.tool.definitions. Tool names, types, and descriptions
+// remain captured with message content; parameters require this additional
+// opt-in because schemas can be large or contain sensitive details.
+const captureToolDefinitionParametersEnvVar = "ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS"
+
 // contentCaptureMode says which signals may carry message content.
 //
 // The variable was a boolean here before spans could carry content, and
@@ -54,8 +60,9 @@ const (
 )
 
 var (
-	captureMode contentCaptureMode = captureNone
-	once        sync.Once
+	captureMode                            contentCaptureMode = captureNone
+	captureToolDefinitionParametersEnabled bool
+	once                                   sync.Once
 )
 
 func parseContentCaptureMode(s string) contentCaptureMode {
@@ -273,11 +280,21 @@ func contentToJSONLikeValue(c *genai.Content) any {
 	return m
 }
 
-// ApplyEnv reads OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT. It accepts
-// EVENT_ONLY, SPAN_ONLY and SPAN_AND_EVENT, and treats "1" or "true" as
-// EVENT_ONLY for back-compatibility. Anything else records no content.
+// ApplyEnv reads the content-capture environment variables. It accepts
+// EVENT_ONLY, SPAN_ONLY and SPAN_AND_EVENT for message content, and treats
+// "1" or "true" as EVENT_ONLY for back-compatibility. Tool parameters require
+// a separate explicit opt-in.
 func ApplyEnv() {
 	captureMode = parseContentCaptureMode(os.Getenv(captureMessageContentEnvVar))
+	captureToolDefinitionParametersEnabled = evalsToTrue(os.Getenv(captureToolDefinitionParametersEnvVar))
+}
+
+// captureToolDefinitionParametersOnSpans reports whether input schemas may be
+// included in gen_ai.tool.definitions. The overall content-capture gate is
+// checked separately by the caller.
+func captureToolDefinitionParametersOnSpans() bool {
+	contentCapture()
+	return captureToolDefinitionParametersEnabled
 }
 
 func evalsToTrue(s string) bool {
