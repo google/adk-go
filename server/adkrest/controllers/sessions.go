@@ -17,6 +17,8 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -46,10 +48,9 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		return
 	}
 	createSessionRequest := models.CreateSessionRequest{}
-	// No state and no events, fails to decode req.Body failing with "EOF"
-	if req.ContentLength > 0 {
+	if req.Body != nil {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}

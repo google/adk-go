@@ -18,6 +18,7 @@ We'd love to accept your patches and contributions to this project.
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
+-   [AI-assisted development](#ai-assisted-development)
 
 ## Branches
 
@@ -119,6 +120,12 @@ information on using pull requests.
     you may instead describe the bug or feature directly within the PR
     description, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
+-   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
+    `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
+    title, and in the commit subject too on a single-commit PR, where that is
+    what lands instead. Release tooling reads the landed subject to pick the
+    next version and build the release notes, and silently skips anything with
+    no recognized type.
 -   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
 -   Please include a `testing plan` section in your PR to talk about how you
@@ -173,6 +180,18 @@ Depending on your change:
         runner setup.
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
+
+## AI-assisted development
+
+This repo ships skills for AI coding agents (Antigravity, Gemini CLI, Claude
+Code, and others) in `.agents/skills/`. Compatible tools load them on their own;
+otherwise read the relevant `SKILL.md` before starting that kind of work.
+
+-   **`adk-sample-creator`** — authoring or reworking a runnable example under
+    `examples/`: directory layout, `main.go` anatomy, the README template with
+    its diagram and transcript, and the checks to run before opening the PR.
+
+`AGENTS.md` carries the rest of the project context an agent needs.
 
 # ADK Web
 
