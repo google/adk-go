@@ -128,7 +128,7 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.IsError {
-		details, _ := formatMCPContent(res.Content)
+		details := formatMCPContent(res.Content)
 
 		errMsg := "Tool execution failed."
 		if details != "" {
@@ -138,18 +138,13 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		return nil, errors.New(errMsg)
 	}
 
-	content, hasNonText := formatMCPContent(res.Content)
-
 	if res.StructuredContent != nil {
-		result := map[string]any{
+		return map[string]any{
 			"output": res.StructuredContent,
-		}
-		if hasNonText && content != "" {
-			result["content"] = content
-		}
-		return result, nil
+		}, nil
 	}
 
+	content := formatMCPContent(res.Content)
 	if content == "" {
 		return nil, errors.New("no text content in tool response")
 	}
@@ -165,11 +160,9 @@ type formattedMCPContent struct {
 }
 
 // formatMCPContent renders MCP's ordered content blocks into the text-only
-// response shape supported by FunctionTool.Run. The boolean reports whether
-// the result contains a non-text block that must accompany structured output.
-func formatMCPContent(contents []mcp.Content) (string, bool) {
+// response shape supported by FunctionTool.Run.
+func formatMCPContent(contents []mcp.Content) string {
 	formatted := make([]formattedMCPContent, 0, len(contents))
-	hasNonText := false
 	for _, content := range contents {
 		block := formattedMCPContent{isPlain: true}
 		switch content := content.(type) {
@@ -201,11 +194,8 @@ func formatMCPContent(contents []mcp.Content) (string, bool) {
 			}
 			block.isPlain = false
 		default:
-			block.text = fmt.Sprintf("[MCP content: unsupported type %T]", content)
+			block.text = "[MCP content: unsupported]"
 			block.isPlain = false
-		}
-		if !block.isPlain {
-			hasNonText = true
 		}
 		formatted = append(formatted, block)
 	}
@@ -224,7 +214,7 @@ func formatMCPContent(contents []mcp.Content) (string, bool) {
 		result.WriteString(block.text)
 		previous = block
 	}
-	return result.String(), hasNonText
+	return result.String()
 }
 
 func formatEmbeddedResource(content *mcp.EmbeddedResource) string {
@@ -305,7 +295,7 @@ func decodeTextBlob(blob []byte, mimeType string) (string, bool) {
 
 	mediaType, params, err := mime.ParseMediaType(mimeType)
 	if err != nil {
-		mediaType = strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+		return "", false
 	}
 	if !isTextMediaType(mediaType) {
 		return "", false
@@ -335,7 +325,7 @@ func isTextMediaType(mediaType string) bool {
 	}
 	switch mediaType {
 	case "application/json", "application/javascript", "application/toml", "application/xml",
-		"application/x-yaml", "application/yaml", "image/svg+xml":
+		"application/x-yaml", "application/yaml":
 		return true
 	default:
 		return false
