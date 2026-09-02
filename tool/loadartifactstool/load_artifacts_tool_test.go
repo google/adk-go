@@ -590,6 +590,30 @@ func TestLoadArtifactsTool_ProcessRequest_MIMEConversion(t *testing.T) {
 			wantText:     "caf\uFFFD, 12\n",
 		},
 		{
+			name:         "svg image is delivered as text",
+			artifactName: "diagram.svg",
+			part:         genai.NewPartFromBytes([]byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), "image/svg+xml"),
+			wantText:     `<svg xmlns="http://www.w3.org/2000/svg"/>`,
+		},
+		{
+			name:         "legacy svg subtype is delivered as text",
+			artifactName: "old.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg/>"), "image/svg"),
+			wantText:     "<svg/>",
+		},
+		{
+			name:         "xml image subtype is delivered as text",
+			artifactName: "vector.xml",
+			part:         genai.NewPartFromBytes([]byte("<v/>"), "image/xml"),
+			wantText:     "<v/>",
+		},
+		{
+			name:         "svg application subtype is delivered as text",
+			artifactName: "chart.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg id=\"c\"/>"), "application/svg+xml"),
+			wantText:     "<svg id=\"c\"/>",
+		},
+		{
 			name:         "missing type defaults to octet-stream",
 			artifactName: "unknown.bin",
 			part:         genai.NewPartFromBytes([]byte{1, 2, 3, 4}, ""),

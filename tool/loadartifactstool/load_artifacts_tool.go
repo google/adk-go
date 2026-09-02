@@ -250,6 +250,14 @@ func normalizeMIMEType(mimeType string) string {
 // The media match is prefix-based on purpose: enumerating subtypes would rot.
 func isInlineMIMETypeSupported(mimeType string) bool {
 	m := normalizeMIMEType(mimeType)
+	// XML-based image subtypes match the image/ prefix but Gemini rejects them
+	// as inline data with 400 INVALID_ARGUMENT, so they take the text path.
+	// Mirrors adk-python's _GEMINI_UNSUPPORTED_INLINE_SUBTYPES, verified there
+	// against gemini-2.5-flash.
+	switch m {
+	case "image/svg", "image/svg+xml", "image/xml":
+		return false
+	}
 	return strings.HasPrefix(m, "image/") ||
 		strings.HasPrefix(m, "audio/") ||
 		strings.HasPrefix(m, "video/") ||
@@ -259,10 +267,17 @@ func isInlineMIMETypeSupported(mimeType string) bool {
 // isTextLikeMIMEType reports whether data of this type can be inlined as text.
 // The argument must already be normalized; the call site does so.
 func isTextLikeMIMEType(mimeType string) bool {
-	return strings.HasPrefix(mimeType, "text/") ||
-		mimeType == "application/csv" ||
-		mimeType == "application/json" ||
-		mimeType == "application/xml"
+	switch mimeType {
+	case "application/csv",
+		"application/json",
+		"application/svg+xml",
+		"application/xml",
+		"image/svg",
+		"image/svg+xml",
+		"image/xml":
+		return true
+	}
+	return strings.HasPrefix(mimeType, "text/")
 }
 
 // safePartForLLM returns a part the model will accept, converting or describing
