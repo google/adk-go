@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -60,6 +62,17 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	// TaskCompletedInjection guards the one-time injection of the
+	// task_completed tool and its instruction suffix that
+	// sequentialagent.RunLive performs on each LLM sub-agent. Reveal
+	// returns the same *State for the lifetime of an agent, so a tree
+	// built once and driven by several concurrent live sessions would
+	// otherwise race the read-then-append on Tools/Instruction. Keeping
+	// the guard on State ties its lifetime to the agent's, so it is
+	// collected with the agent and never accumulates in a process-global
+	// map. It is only ever used via (*State), never a copy.
+	TaskCompletedInjection sync.Once
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)

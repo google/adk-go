@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -448,6 +450,99 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 		if !hasTaskCompleted {
 			t.Errorf("sub-agent 1 does not have task_completed tool injected after RunLive")
 		}
+	}
+}
+
+// taskCompletedInstructionMarker is a stable fragment of the instruction
+// suffix RunLive appends alongside the task_completed tool. The test
+// counts it instead of hardcoding the whole sentence.
+const taskCompletedInstructionMarker = "call the task_completed function to exit so the next agents can take over"
+
+// TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree is the
+// regression test for the data race in RunLive's task_completed
+// injection: llminternal.Reveal(llmAgent) returns the sub-agent's shared,
+// persistent state, and the unguarded read-then-append/read-then-concat
+// used to race under any two concurrent RunLive calls dispatched onto the
+// same sub-agent (e.g. two simultaneous live/streaming sessions sharing
+// an agent tree built once at startup) -- confirmed with `go test -race`
+// before the fix. It also raced itself into double-injecting the tool
+// whenever both goroutines observed hasTaskCompleted == false before
+// either had written it back.
+//
+// Beyond "injected exactly once", the test pins the ordering guarantee
+// the sync.Once is there for: each goroutine reads state.Tools right
+// after its own RunLive returns and must observe the completed injection
+// (exactly one task_completed tool, never zero). A plain "already done"
+// marker would pass the final count assertion but let a losing caller
+// return before the winner's write is visible -- that read is what fails
+// under -race without the barrier.
+func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
+	subAgent := newCustomAgent(t, 1)
+
+	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_agent",
+			SubAgents: []agent.Agent{subAgent},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create sequential agent: %v", err)
+	}
+
+	liveAgent, ok := sequentialAgent.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	llmAgent, ok := subAgent.(llminternal.Agent)
+	if !ok {
+		t.Fatal("sub-agent does not implement llminternal.Agent")
+	}
+	state := llminternal.Reveal(llmAgent)
+
+	const concurrent = 20
+	seenByCaller := make([]int, concurrent)
+	var wg sync.WaitGroup
+	wg.Add(concurrent)
+	for i := range concurrent {
+		go func() {
+			defer wg.Done()
+			invCtx := &mockInvocationContext{agent: sequentialAgent, invocationID: "test_id", ctx: t.Context()}
+			_, _, _ = liveAgent.RunLive(invCtx)
+			// RunLive has returned, so the Once has completed: this read
+			// is ordered after the winner's write and must see it.
+			for _, tl := range state.Tools {
+				if tl != nil && tl.Name() == "task_completed" {
+					seenByCaller[i]++
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i, seen := range seenByCaller {
+		if seen != 1 {
+			t.Errorf("caller %d saw task_completed %d times in state.Tools after RunLive returned, want exactly 1", i, seen)
+		}
+	}
+
+	count := 0
+	for _, tl := range state.Tools {
+		if tl != nil && tl.Name() == "task_completed" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("task_completed injected %d times across %d concurrent RunLive calls, want exactly 1", count, concurrent)
+	}
+
+	// The tool is useless without the instruction telling the model to
+	// call it; two goroutines can both append the suffix and still leave
+	// one tool in the slice, so the suffix count is a distinct check.
+	if n := strings.Count(state.Instruction, taskCompletedInstructionMarker); n != 1 {
+		t.Errorf("task_completed instruction suffix appears %d times, want exactly 1", n)
 	}
 }
 

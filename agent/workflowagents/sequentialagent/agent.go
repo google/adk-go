@@ -149,18 +149,33 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	for _, subAgent := range subAgents {
 		if llmAgent, ok := subAgent.(llminternal.Agent); ok {
 			state := llminternal.Reveal(llmAgent)
-			hasTaskCompleted := false
-			for _, t := range state.Tools {
-				if t.Name() == "task_completed" {
-					hasTaskCompleted = true
-					break
+			// Reveal returns the sub-agent's shared, persistent State, so
+			// concurrent live sessions driving one agent tree would race
+			// this read-then-append on Tools/Instruction. The guard lives
+			// on State (see llminternal.State.TaskCompletedInjection): the
+			// injection runs exactly once, and every other RunLive caller
+			// for this sub-agent blocks on it before reading Tools rather
+			// than racing its own unsynchronized check.
+			state.TaskCompletedInjection.Do(func() {
+				hasTaskCompleted := false
+				for _, t := range state.Tools {
+					// llmagent.New copies cfg.Tools without validating, so a
+					// nil element can reach here; skip it rather than panic
+					// inside sync.Once (which would latch the guard shut).
+					if t == nil {
+						continue
+					}
+					if t.Name() == "task_completed" {
+						hasTaskCompleted = true
+						break
+					}
 				}
-			}
-			if !hasTaskCompleted {
-				state.Tools = append(state.Tools, taskCompletedTool)
-				instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-				state.Instruction += instructionSuffix
-			}
+				if !hasTaskCompleted {
+					state.Tools = append(state.Tools, taskCompletedTool)
+					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
+					state.Instruction += instructionSuffix
+				}
+			})
 		}
 	}
 
