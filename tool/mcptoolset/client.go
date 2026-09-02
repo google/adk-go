@@ -53,10 +53,10 @@ var refreshableErrors = []error{
 }
 
 // newConnectionRefresher creates a new connectionRefresher with the given client and transport.
-// If client is nil, a default MCP client will be created.
-func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connectionRefresher {
+// If client is nil, a default MCP client will be created with the given options.
+func newConnectionRefresher(client *mcp.Client, transport mcp.Transport, options *mcp.ClientOptions) *connectionRefresher {
 	if client == nil {
-		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
+		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, options)
 	}
 	return &connectionRefresher{
 		client:    client,

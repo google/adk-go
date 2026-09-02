@@ -16,6 +16,7 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -23,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -53,8 +55,34 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var clientOptions *mcp.ClientOptions
+	if cfg.ElicitationHandler != nil || cfg.ElicitationCompleteHandler != nil {
+		if cfg.Client != nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationHandler and ElicitationCompleteHandler cannot be combined with a custom Client; set them in the client's mcp.ClientOptions instead")
+		}
+		if cfg.ElicitationHandler == nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationCompleteHandler requires ElicitationHandler to be set; the client cannot service an elicitation without it")
+		}
+		clientOptions = &mcp.ClientOptions{
+			ElicitationHandler:         cfg.ElicitationHandler,
+			ElicitationCompleteHandler: cfg.ElicitationCompleteHandler,
+			// The capability inferred from ElicitationHandler alone covers only
+			// form mode; URL mode must be declared explicitly. RootsV2 preserves
+			// the default roots capability, which setting Capabilities would
+			// otherwise disable. RootsV2 is deprecated as of the 2026-07-28
+			// revision (SEP-2577) but remains the only field that carries
+			// ListChanged, so it stays until the SDK offers a replacement.
+			Capabilities: &mcp.ClientCapabilities{
+				Elicitation: &mcp.ElicitationCapabilities{
+					Form: &mcp.FormElicitationCapabilities{},
+					URL:  &mcp.URLElicitationCapabilities{},
+				},
+				RootsV2: &mcp.RootCapabilities{ListChanged: true},
+			},
+		}
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   newConnectionRefresher(cfg.Client, transport, clientOptions),
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -128,6 +156,39 @@ type Config struct {
 	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
 	RequireConfirmation bool
 
+	// ElicitationHandler handles elicitation/create requests from the MCP
+	// server, including URL-mode elicitations that servers use for
+	// out-of-band interactions such as auth challenges. Setting it makes the
+	// client advertise the elicitation capability for both form and URL mode.
+	//
+	// For URL mode the handler must not return until the out-of-band
+	// interaction has completed: nothing waits for the server's
+	// notifications/elicitation/complete notification on its behalf, and the
+	// call is retried as soon as the handler returns. A handler that returns
+	// early makes the server re-request input until the retry budget is spent.
+	// A server that reports the URL through the CodeURLElicitationRequired
+	// (-32042) error code rather than through an elicitation request is not
+	// handled at all.
+	//
+	// One handler serves every tool of the toolset, and the tool calls of a
+	// single turn run on separate goroutines, so the handler must be safe for
+	// concurrent use.
+	//
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
+
+	// ElicitationCompleteHandler handles notifications/elicitation/complete
+	// notifications, which servers send when an out-of-band (URL-mode)
+	// elicitation has been completed. It requires ElicitationHandler to also
+	// be set, since a completion notification cannot arrive unless an
+	// elicitation was created first. Like ElicitationHandler, it must be safe
+	// for concurrent use.
+	//
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationCompleteHandler func(context.Context, *mcp.ElicitationCompleteNotificationRequest)
+
 	// RequireConfirmationProvider allows for dynamic determination of whether
 	// user confirmation is needed. This field is a function called at runtime to decide if
 	// a confirmation request should be sent. The function takes the toolName and tool's input parameters as arguments.
@@ -176,6 +237,12 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
 			continue
+		}
+
+		// Checked after the filter so that excluding the tool by name remains a
+		// way to keep the rest of the toolset usable.
+		if llminternal.IsReservedToolName(mcpTool.Name) {
+			return nil, fmt.Errorf("MCP server advertises tool %q, a name reserved by the framework", mcpTool.Name)
 		}
 
 		adkTools = append(adkTools, t)
