@@ -74,8 +74,8 @@ func NewPubSubControllerWithConfig(cfg ControllerConfig) (*PubSubController, err
 
 // PubSubTriggerHandler handles the PubSub trigger endpoint.
 func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.Request) {
-	if err := verifyPushRequestAuth(r, c.runner.triggerConfig.ExpectedAudience); err != nil {
-		respondError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	if err := c.runner.verifyPushRequestAuth(r); err != nil {
+		respondAuthError(w, err)
 		return
 	}
 

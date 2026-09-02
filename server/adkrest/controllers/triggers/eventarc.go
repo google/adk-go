@@ -76,8 +76,8 @@ func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController,
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.
 func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *http.Request) {
-	if err := verifyPushRequestAuth(r, c.runner.triggerConfig.ExpectedAudience); err != nil {
-		respondError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	if err := c.runner.verifyPushRequestAuth(r); err != nil {
+		respondAuthError(w, err)
 		return
 	}
 

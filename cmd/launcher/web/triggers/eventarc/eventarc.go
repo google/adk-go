@@ -37,6 +37,7 @@ type eventarcConfig struct {
 	triggerMaxDelay   time.Duration
 	triggerMaxRuns    int
 	oidcAudience      string
+	oidcSvcAccounts   string
 }
 
 type eventarcLauncher struct {
@@ -55,8 +56,14 @@ func NewLauncher() web.Sublauncher {
 	fs.DurationVar(&config.triggerMaxDelay, "trigger_max_delay", 10*time.Second, "Maximum delay for trigger retry exponential backoff")
 	fs.IntVar(&config.triggerMaxRuns, "trigger_max_concurrent_runs", 100, "Maximum concurrent trigger runs")
 	fs.StringVar(&config.oidcAudience, "oidc_audience", "", "Expected audience of the Google-signed OIDC bearer token attached by Eventarc triggers configured with a service account. "+
-		"If set, requests without a valid token for this audience are rejected with 401. If unset, this endpoint performs no authentication of its own and "+
-		"relies entirely on the deployment platform (for example Cloud Run configured to require IAM authentication) to restrict who can reach it.")
+		"This is the audience the trigger was configured to mint tokens for, which defaults to the full destination endpoint URL. "+
+		"If set, requests without a valid token for this audience are rejected with 401. Verifying the audience alone does not identify the caller: "+
+		"any principal that can mint a Google-signed token for this audience passes it, so set -oidc_service_accounts as well to pin the caller identity. "+
+		"If unset, this endpoint performs no authentication of its own and relies entirely on the deployment platform (for example Cloud Run configured to "+
+		"require IAM authentication) to restrict who can reach it.")
+	fs.StringVar(&config.oidcSvcAccounts, "oidc_service_accounts", "", "Comma-separated allow-list of service account emails permitted to call this endpoint, "+
+		"matched against the verified token's email claim; other principals are rejected with 403. Requires -oidc_audience. The Eventarc trigger's service "+
+		"account must be configured to include an email claim in the token.")
 
 	return &eventarcLauncher{
 		config: config,
@@ -87,6 +94,9 @@ func (e *eventarcLauncher) Parse(args []string) ([]string, error) {
 	if e.config.triggerMaxRuns <= 0 {
 		return nil, fmt.Errorf("trigger_max_concurrent_runs must be > 0")
 	}
+	if e.config.oidcSvcAccounts != "" && e.config.oidcAudience == "" {
+		return nil, fmt.Errorf("oidc_service_accounts requires oidc_audience")
+	}
 
 	prefix := e.config.pathPrefix
 	if !strings.HasPrefix(prefix, "/") {
@@ -115,6 +125,8 @@ func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.
 		MaxDelay:          e.config.triggerMaxDelay,
 		MaxConcurrentRuns: e.config.triggerMaxRuns,
 		ExpectedAudience:  e.config.oidcAudience,
+
+		AllowedServiceAccounts: splitList(e.config.oidcSvcAccounts),
 	}
 
 	controller, err := triggers.NewEventarcControllerWithConfig(triggers.ControllerConfig{
@@ -139,10 +151,24 @@ func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.
 	return nil
 }
 
+// splitList parses a comma-separated flag value into a trimmed, non-empty slice.
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // UserMessage implements web.Sublauncher.
 func (e *eventarcLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       eventarc: Eventarc trigger endpoint is available at %s%s/apps/{app_name}/trigger/eventarc", webURL, e.config.pathPrefix))
-	if e.config.oidcAudience == "" {
+	switch {
+	case e.config.oidcAudience == "":
 		printer("       eventarc: WARNING: -oidc_audience is not set; this endpoint accepts unauthenticated requests unless the deployment platform restricts access on its own.")
+	case len(splitList(e.config.oidcSvcAccounts)) == 0:
+		printer("       eventarc: WARNING: -oidc_service_accounts is not set; any caller holding a Google-signed token for this audience is accepted, not only your trigger's service account.")
 	}
 }
