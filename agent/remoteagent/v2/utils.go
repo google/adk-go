@@ -148,15 +148,25 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 			parts = append(parts, genai.NewPartFromText(text))
 		} else if part.FunctionCall != nil {
 			call := part.FunctionCall
-			text := fmt.Sprintf("[%s] called tool %s with parameters:\n%s",
+			// The tool name is elided but left unfenced -- eliding markers
+			// is a complete answer to marker forgery, not to a name that
+			// carries a paragraph of unfenced text. Longer version of this
+			// comment, and the same tradeoff, in contents_processor.go's
+			// ConvertForeignEvent, which this function mirrors for the A2A
+			// path.
+			text := fmt.Sprintf("[%s] called tool `%s` with parameters:\n%s",
 				agentEvent.Author, llminternal.ElideQuoteMarkers(call.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", call.Args)))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else if part.FunctionResponse != nil {
 			resp := part.FunctionResponse
-			text := fmt.Sprintf("[%s] %s tool returned result:\n%s",
+			text := fmt.Sprintf("[%s] `%s` tool returned result:\n%s",
 				agentEvent.Author, llminternal.ElideQuoteMarkers(resp.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", resp.Response)))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else {
+			// ExecutableCode and CodeExecutionResult parts land here and are
+			// relayed verbatim, with no fence and no elision -- same
+			// tradeoff as ConvertForeignEvent's default case, for the same
+			// reason.
 			parts = append(parts, part)
 		}
 	}

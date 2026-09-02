@@ -562,7 +562,9 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // steers what it says, and its tool results carry whatever the tool read.
 // Each relayed text payload is therefore fenced (see fencing.go), and the
 // leading part states that fenced content is data, so a payload has to be
-// believed rather than merely obeyed.
+// believed rather than merely obeyed. What is and isn't covered by that is
+// per-part, not uniform -- see the comments on the FunctionCall,
+// FunctionResponse, and default cases below.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -580,19 +582,37 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 				Text: fmt.Sprintf("[%s] said:\n%s", ev.Author, QuoteUntrusted(p.Text)),
 			})
 		case p.FunctionCall != nil:
-			// The tool name is model-chosen too, so it is elided but left
-			// unfenced: it reads as part of the sentence and a fence there
-			// would obscure which tool ran.
+			// The tool name is model-chosen too, so it is elided before use.
+			// Eliding the markers is a complete answer to marker forgery: a
+			// name cannot close or open a fence it doesn't have literal
+			// markers to do it with. It is not a complete answer to a name
+			// that carries a paragraph of unfenced text -- a steered
+			// sub-agent can still put newlines and free-form text in a tool
+			// name, and that text is not itself quoted or bounded the way
+			// QuoteUntrusted's payload is. The name is left unfenced
+			// deliberately (a fence there would obscure which tool ran, and
+			// a fenced tool name would read strangely mid-sentence), so this
+			// is the same tradeoff adk-python makes for the same reason in
+			// the same place, not a gap introduced here.
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] called tool `%s` with parameters:\n%s",
 					ev.Author, ElideQuoteMarkers(p.FunctionCall.Name), QuoteUntrusted(stringify(p.FunctionCall.Args))),
 			})
 		case p.FunctionResponse != nil:
+			// See the FunctionCall case above: the same tradeoff applies to
+			// a tool's own name in its result.
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] `%s` tool returned result:\n%s",
 					ev.Author, ElideQuoteMarkers(p.FunctionResponse.Name), QuoteUntrusted(stringify(p.FunctionResponse.Response))),
 			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
+			// ExecutableCode and CodeExecutionResult parts land here and are
+			// relayed verbatim, with no fence and no elision -- deliberate
+			// and unchanged from before this file's fencing was added, not a
+			// gap introduced by it. Worth being explicit that
+			// OtherAgentContextPreamble's promise is scoped to what sits
+			// between its markers: a part with no markers around it at all
+			// is outside anything the preamble states a guarantee about.
 			converted.Parts = append(converted.Parts, p)
 		}
 	}
@@ -606,7 +626,16 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 }
 
 func stringify(v any) string {
-	s, _ := json.Marshal(v)
+	s, err := json.Marshal(v)
+	if err != nil {
+		// json.Marshal can fail on a value it cannot encode (a channel, a
+		// function, a type whose own MarshalJSON returns an error).
+		// Silently returning "" here would render as an empty fence,
+		// indistinguishable from the tool genuinely having returned
+		// nothing, rather than surfacing that its result could not be
+		// represented.
+		return fmt.Sprintf("<value could not be JSON-encoded: %v>", err)
+	}
 	return string(s)
 }
 
