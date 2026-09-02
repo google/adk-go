@@ -15,6 +15,7 @@
 package helper
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -160,6 +161,99 @@ func TestEventLogProbs(t *testing.T) {
 		}
 	} else {
 		t.Errorf("o is not a map")
+	}
+}
+
+func TestByteSlice(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						Text:             "hi",
+						ThoughtSignature: []byte{0xDE, 0xAD, 0xBE, 0xEF},
+					},
+				},
+			},
+		},
+	}
+	o, err := convertSnake("", "", event)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := o.(map[string]any)
+	if !ok {
+		t.Fatalf("o is not a map: %T", o)
+	}
+	content, ok := m["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content is not a map: %T", m["content"])
+	}
+	parts, ok := content["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts is not a 1-element slice: %v", content["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("part is not a map: %T", parts[0])
+	}
+	want := "3q2+7w=="
+	if got, _ := part["thought_signature"].(string); got != want {
+		t.Errorf("thought_signature = %q, want %q", got, want)
+	}
+}
+
+func TestByteSliceOmitEmpty(t *testing.T) {
+	type A struct {
+		Sig []byte `json:"sig,omitempty"`
+	}
+	got, err := convertSnake("", "", A{})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("got is not a map: %T", got)
+	}
+	if _, present := m["sig"]; present {
+		t.Errorf("sig should be omitted for an empty []byte, got: %v", m["sig"])
+	}
+}
+
+func TestRawMessage(t *testing.T) {
+	type A struct {
+		Default json.RawMessage `json:"default,omitempty"`
+	}
+	a := A{Default: json.RawMessage(`{"approved":false}`)}
+	got, err := convertSnake("", "", a)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	want := `{"default":{"approved":false}}`
+	if string(b) != want {
+		t.Errorf("marshaled output = %s, want %s", b, want)
+	}
+}
+
+func TestRawMessageOmitEmpty(t *testing.T) {
+	type A struct {
+		Default json.RawMessage `json:"default,omitempty"`
+	}
+	got, err := convertSnake("", "", A{})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("got is not a map: %T", got)
+	}
+	if _, present := m["default"]; present {
+		t.Errorf("default should be omitted for an empty json.RawMessage, got: %v", m["default"])
 	}
 }
 
