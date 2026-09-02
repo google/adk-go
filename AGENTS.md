@@ -16,6 +16,13 @@ Development happens on `main`, the 2.x line. `v1` is the maintenance branch for
 1.x; target it only for fixes that must ship to 1.x. See
 [Branches](CONTRIBUTING.md#branches).
 
+## Skills
+
+See [AI-assisted development](CONTRIBUTING.md#ai-assisted-development) in
+`CONTRIBUTING.md` for what this repo ships. The rule for agents: task-specific
+instructions live in `.agents/skills/<name>/SKILL.md`, and you read the matching
+one before starting that kind of work.
+
 ## Setup & core commands
 
 This repo is multi-module: the root module `google.golang.org/adk/v2` plus
@@ -85,8 +92,11 @@ A change is complete only when all of these pass locally:
   `Toolset`, `Service`); concrete impls live in sub-packages or `internal/`.
 - **Callbacks over subclassing** (`Before*`/`After*` for Agent/Model/Tool);
   returning non-nil from a `Before` callback short-circuits execution.
-- **Errors:** wrap with `fmt.Errorf("…: %w", err)`. Tool confirmation uses
-  sentinel errors (e.g. `tool.ErrConfirmationRequired`).
+- **Errors:** wrap with `fmt.Errorf("…: %w", err)`. Use `%v` only when
+  deliberately not exposing the wrapped error's type. Don't convert existing `%w` to `%v`;
+  it might break callers silently. Wrap sentinels first:
+  `fmt.Errorf("%w: …: %w", ErrX, err)`. Tool confirmation uses sentinel errors
+  (e.g. `tool.ErrConfirmationRequired`).
 - Prefer an existing helper over a new one; keep packages small and focused.
 
 ## Minimal example
@@ -140,9 +150,19 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 - Tests run **offline by default**: LLM HTTP traffic is replayed from
   `testdata/*.httprr` via `internal/httprr`. Never add live model or network
   calls to tests.
-- To (re)record a package's traffic, supply real credentials (e.g.
-  `GOOGLE_API_KEY`) and run `go generate ./<pkg>/...` (it runs
-  `go test -httprecord=…`); commit the updated `testdata/*.httprr`.
+- `-httprecord` takes a **regexp matched against the cassette's file path**,
+  not a `-run` test-name filter. Keep it as narrow as the set of cassettes you
+  mean to replace: recording against a live model produces a different response
+  every time, so a broad pattern rewrites unrelated cassettes and buries the
+  intended change.
+- To re-record **one** cassette — the normal case — supply real credentials
+  (e.g. `GOOGLE_API_KEY`) and name it in both flags:
+  `go test ./<pkg>/ -run TestFoo -httprecord='TestFoo\.httprr$'`.
+  Commit only that `testdata/*.httprr`.
+- To re-record a whole package, run `go generate ./<pkg>/...`; each package's
+  `//go:generate go test -httprecord=…` directives are scoped so that every
+  cassette is recorded exactly once (enforced by
+  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`).
 - Prefer table-driven tests; shared helpers live in `internal/testutil`.
 
 ## Boundaries

@@ -477,6 +477,29 @@ func TestToStructPB(t *testing.T) {
 			expectError: true,
 		},
 		{
+			// A tool that takes no arguments leaves FunctionCall.Args nil, which
+			// marshals to the JSON literal "null". That must convert to an empty
+			// Struct rather than an error, as structpb.NewStruct(nil) did.
+			name:        "nil map converts to an empty struct",
+			input:       map[string]any(nil),
+			expectError: false,
+			validate: func(t *testing.T, s *structpb.Struct) {
+				if got := len(s.GetFields()); got != 0 {
+					t.Errorf("len(fields) = %d, want 0", got)
+				}
+			},
+		},
+		{
+			name:        "untyped nil converts to an empty struct",
+			input:       nil,
+			expectError: false,
+			validate: func(t *testing.T, s *structpb.Struct) {
+				if got := len(s.GetFields()); got != 0 {
+					t.Errorf("len(fields) = %d, want 0", got)
+				}
+			},
+		},
+		{
 			name: "custom struct representing possible state delta",
 			input: struct {
 				StringValue string
@@ -569,6 +592,38 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 							genai.NewPartFromFunctionCall("tool", map[string]any{
 								"city": "Stockholm",
 							}),
+						},
+						Role: genai.RoleUser,
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			// Regression: a tool declaring no parameters yields a FunctionCall
+			// with nil Args. This must persist rather than fail the AppendEvent.
+			name: "function call with nil args",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "get_time"}},
+						},
+						Role: genai.RoleModel,
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			// Regression: a tool returning no payload yields a FunctionResponse
+			// with nil Response.
+			name: "function response with nil response",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "get_time"}},
 						},
 						Role: genai.RoleUser,
 					},

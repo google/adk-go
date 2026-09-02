@@ -28,6 +28,30 @@ type Service interface {
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
+	//
+	// Two further obligations, both checked by the shared conformance suite in
+	// session/sessiontestsuite, so an implementation that misses either goes
+	// red there rather than failing quietly in production:
+	//
+	// An event arriving with no ID must end up with one. Events built as struct
+	// literals by an agent or a tool never pass through [NewEvent] and arrive
+	// unnamed, and a stored event that cannot be named cannot be referred to by
+	// anything that identifies events by ID.
+	//
+	// Where the implementation assigns the ID itself, it must be on the
+	// caller's event, in place. Where the server assigns it, the ID appears on
+	// the event when it is read back instead, and the conformance suite waives
+	// the in-place half for those: session/vertexai is one, and it does not
+	// assign in place. What holds everywhere is that the stored event has an
+	// ID, which the suite checks on the read either way.
+	//
+	// [EventActions.Compaction] must survive the round trip. A context
+	// compaction summary carries its content only there: LLMResponse.Content is
+	// nil and there is no state or artifact delta, so a backend that decides
+	// what to persist by looking at content or deltas drops it without
+	// complaint. The session then comes back with no summary and no record that
+	// compaction ran, and the same range is summarized and billed again on
+	// every later turn.
 	AppendEvent(context.Context, Session, *Event) error
 }
 
