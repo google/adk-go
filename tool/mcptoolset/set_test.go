@@ -847,3 +847,71 @@ func TestMCPTool_EmptyTextResponse(t *testing.T) {
 		t.Fatalf("Expected output to be empty string, got: %v", res["output"])
 	}
 }
+
+// TestMCPTool_NonTextOnlyResponse covers the gap left by #1353: an empty text
+// result is a valid success, but only when the server sent nothing. A result
+// carrying just an image, audio, resource link or embedded resource also
+// accumulates no text, and reporting that as {"output": ""} hands the model an
+// empty map while discarding the entire payload.
+func TestMCPTool_NonTextOnlyResponse(t *testing.T) {
+	tests := []struct {
+		name    string
+		content mcp.Content
+	}{
+		{"image", &mcp.ImageContent{MIMEType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}}},
+		{"audio", &mcp.AudioContent{MIMEType: "audio/wav", Data: []byte{0x52, 0x49, 0x46, 0x46}}},
+		{"resource link", &mcp.ResourceLink{URI: "file:///tmp/report.pdf", Name: "report.pdf"}},
+		{"embedded resource", &mcp.EmbeddedResource{
+			Resource: &mcp.ResourceContents{URI: "file:///tmp/data.bin", MIMEType: "application/octet-stream", Blob: []byte{0x00, 0x01}},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: "non_text_tool", Description: "returns only non-text content"}, func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{tt.content},
+				}, nil, nil
+			})
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: clientTransport,
+			})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+
+			tools, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(
+					t.Context(),
+					icontext.InvocationContextParams{},
+				),
+			))
+			if err != nil {
+				t.Fatalf("Failed to get tools: %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("Expected 1 tool, got %d", len(tools))
+			}
+
+			toolCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			tc := agent.NewToolContext(toolCtx, "", nil, nil)
+
+			fnTool, ok := tools[0].(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("Expected tool to implement toolinternal.FunctionTool")
+			}
+
+			res, err := fnTool.Run(tc, map[string]any{})
+			if err == nil {
+				t.Fatalf("Expected Run to report the dropped content, got output=%q", res["output"])
+			}
+		})
+	}
+}

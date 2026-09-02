@@ -152,16 +152,25 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	textResponse := strings.Builder{}
+	droppedNonText := false
 
 	for _, c := range res.Content {
 		textContent, ok := c.(*mcp.TextContent)
 		if !ok {
+			droppedNonText = true
 			continue
 		}
 
 		if _, err := textResponse.WriteString(textContent.Text); err != nil {
 			return nil, fmt.Errorf("failed to write text response: %w", err)
 		}
+	}
+
+	// An empty result is valid per the MCP spec (#1352), but only when the
+	// server actually sent nothing. Non-text blocks are not yet rendered, so
+	// reporting them as an empty success would hide the whole payload.
+	if textResponse.Len() == 0 && droppedNonText {
+		return nil, errors.New("tool response contains only non-text content, which is not yet supported")
 	}
 
 	return map[string]any{
