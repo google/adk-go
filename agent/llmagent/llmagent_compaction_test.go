@@ -211,8 +211,8 @@ func TestCompactionE2E(t *testing.T) {
 	const sessionID = "compaction_session"
 	turns := []string{
 		"What is the weather in Zurich?",
-		"My favourite color is teal, remember that.",
-		"What was my favourite color again?",
+		"My favourite colour is teal, remember that.",
+		"What was my favourite colour again?",
 		// A tool call after the compaction point, so the prompt that follows it
 		// carries a function call and its response alongside a summary. That is
 		// the arrangement the call-pairing and call-recovery paths exist for,

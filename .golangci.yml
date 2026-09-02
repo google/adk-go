@@ -23,6 +23,7 @@ linters:
 
     misspell:
       locale: US
+      mode: restricted
 
     revive:
       rules:

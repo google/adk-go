@@ -1578,7 +1578,7 @@ immediately call ` + "`finish_task`" + ` with {"items":[...]}.`,
 	dr := newDelegationRunner(t, coordinator)
 
 	// --- Turn 1: extract + summarize ---
-	events1 := dr.turn("Extract and summarize: apples, bread, eggs.")
+	events1 := dr.turn("Extract and summarise: apples, bread, eggs.")
 
 	// Task path: extractor delegation + synthesized FR carrying the
 	// structured output (object schema, passed through directly).
@@ -1622,7 +1622,7 @@ immediately call ` + "`finish_task`" + ` with {"items":[...]}.`,
 	// tool result, so it can answer a follow-up without
 	// re-extracting. The mixed-dispatch pipeline state survives
 	// across turns.
-	events2 := dr.turn("How many items did I ask you to summarize?")
+	events2 := dr.turn("How many items did I ask you to summarise?")
 	if got := len(collectFCsByName(events2, "extractor")); got != 0 {
 		t.Errorf("turn 2: extractor FCs = %d, want 0 (no re-dispatch)", got)
 	}
