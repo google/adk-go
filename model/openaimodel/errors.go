@@ -47,7 +47,9 @@ var (
 	// ErrNoOutputItems is returned when the response contains no output items.
 	ErrNoOutputItems = errors.New("openai: response included no output items")
 	// ErrResponseFailed is returned when the server reports the response itself
-	// as failed, whatever output it came with.
+	// as failed, whatever output it came with. Such a failure arrives as HTTP
+	// 200, and both a blocking call and a stream report it in place of the
+	// output that would otherwise have read as a turn.
 	ErrResponseFailed = errors.New("openai: response failed")
 	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
 	ErrUnsupportedMessageContentType = errors.New("openai: unsupported message content type")

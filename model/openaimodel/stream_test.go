@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -142,7 +141,7 @@ func TestStreamTranslator_FunctionCall_MissingDoneName(t *testing.T) {
 
 func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	tr := newStreamTranslator()
-	event := decodeEvent(t, `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"the model failed to generate a response"}}}`)
+	event := decodeEvent(t, `{"type":"response.failed","response":{"id":"resp_123","status":"failed","error":{"code":"server_error","message":"the model failed to generate a response"}}}`)
 	resp, err := tr.process(event)
 	if resp != nil {
 		t.Errorf("process() = %+v, want nil alongside the error", resp)
@@ -150,17 +149,16 @@ func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	if !errors.Is(err, ErrResponseFailed) {
 		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
 	}
-	if want := "the model failed to generate a response (server_error)"; !strings.Contains(err.Error(), want) {
-		t.Errorf("process() err = %q, want it to mention %q", err, want)
+	if want := "openai: response failed (resp_123, server_error): the model failed to generate a response"; err.Error() != want {
+		t.Errorf("process() err = %q, want %q", err, want)
 	}
 }
 
-// TestResponseFailed_PathsAgree pins the invariant the fix exists for: the same
-// server failure must read the same whether it arrived on the blocking path or
-// as a streamed "response.failed" event. Asserting the two error texts against
-// each other, rather than each against its own literal, is what keeps them from
+// TestStreamTranslator_ResponseFailed_PathsAgree pins that one server failure
+// reads the same on the blocking path and as a streamed "response.failed".
+// Comparing the two texts to each other, not to literals, is what stops them
 // drifting apart again.
-func TestResponseFailed_PathsAgree(t *testing.T) {
+func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 	tests := []struct {
 		name    string
 		errJSON string

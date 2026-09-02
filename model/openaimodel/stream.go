@@ -82,8 +82,8 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		return singlePartResponse(part), nil
 	case responseFailed:
 		failed := evt.AsResponseFailed()
-		// If the response failed, we return an error with the message, built the
-		// same way the blocking path builds it so the two agree.
+		// Built by the same renderer the blocking path uses, so one server
+		// failure reads the same however it arrived.
 		return nil, failedResponseError(&failed.Response)
 	case errorEvent:
 		// Generic stream errors are also returned.

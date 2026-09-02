@@ -164,6 +164,15 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 			yield(nil, err)
 			return
 		}
+		// A failure stated in the terminal event's body rather than as a
+		// "response.failed" event, which nothing before this point tells from a
+		// healthy stream. Checked after the loop so a terminal event still
+		// overrides a "response.created" that announced a failure, and deltas
+		// already yielded stay yielded.
+		if openaiResp != nil && reportsFailure(openaiResp) {
+			yield(nil, failedResponseError(openaiResp))
+			return
+		}
 
 		final := aggregator.Close()
 		if final == nil {

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
@@ -29,7 +30,7 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 	if resp == nil {
 		return nil, ErrEmptyResponse
 	}
-	if resp.Status == responses.ResponseStatusFailed {
+	if reportsFailure(resp) {
 		return nil, failedResponseError(resp)
 	}
 	candidate, err := buildCandidate(resp)
@@ -45,16 +46,44 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 	}, nil
 }
 
-// failedResponseError renders a server-side failure as an error, preferring the
-// server's own message.
+// reportsFailure reports whether the server is describing a failure rather than
+// a turn, which on an HTTP 200 is the whole of what separates the two. Only
+// "failed" qualifies — "incomplete" is an ordinary truncation — except that a
+// body stating no status at all, which the API permits, is judged by its error
+// object instead.
+func reportsFailure(resp *responses.Response) bool {
+	switch resp.Status {
+	case responses.ResponseStatusFailed:
+		return true
+	case "":
+		return resp.Error.Message != "" || resp.Error.Code != ""
+	default:
+		return false
+	}
+}
+
+// failedResponseError renders a failure as an error quoting the server: the
+// message as the text, the response ID and error code as a parenthetical. The
+// ID is there because the response is discarded with the failure, so nothing
+// else is left to quote back to the provider.
 func failedResponseError(resp *responses.Response) error {
-	switch msg, code := resp.Error.Message, string(resp.Error.Code); {
-	case msg != "" && code != "":
-		return fmt.Errorf("%w: %s (%s)", ErrResponseFailed, msg, code)
+	// Trimmed, so a message of nothing but spaces leaves no dangling separator.
+	msg := strings.TrimSpace(resp.Error.Message)
+	var details []string
+	if id := strings.TrimSpace(resp.ID); id != "" {
+		details = append(details, id)
+	}
+	// A code the message already spells out is not worth repeating.
+	if code := strings.TrimSpace(string(resp.Error.Code)); code != "" && !strings.Contains(msg, code) {
+		details = append(details, code)
+	}
+	switch joined := strings.Join(details, ", "); {
+	case joined != "" && msg != "":
+		return fmt.Errorf("%w (%s): %s", ErrResponseFailed, joined, msg)
+	case joined != "":
+		return fmt.Errorf("%w (%s)", ErrResponseFailed, joined)
 	case msg != "":
 		return fmt.Errorf("%w: %s", ErrResponseFailed, msg)
-	case code != "":
-		return fmt.Errorf("%w: %s", ErrResponseFailed, code)
 	default:
 		// The server said "failed" and nothing more.
 		return ErrResponseFailed
@@ -202,8 +231,8 @@ func finishReason(resp *responses.Response) genai.FinishReason {
 		return genai.FinishReasonStop
 	default:
 		// "cancelled", "queued", "in_progress", a bare "incomplete", or a
-		// status a later SDK adds. None of them is a clean stop. "failed"
-		// never reaches here: convertResponse returns early on it.
+		// status a later SDK adds. None is a clean stop. "failed" does not reach
+		// here: both callers fail the turn before asking why it ended.
 		return genai.FinishReasonOther
 	}
 }
