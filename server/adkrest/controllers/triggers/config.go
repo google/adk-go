@@ -27,10 +27,17 @@ type TriggerConfig struct {
 	// MaxConcurrentRuns is the maximum number of concurrent runs.
 	MaxConcurrentRuns int
 	// ExpectedAudience, when non-empty, requires every request to carry a
-	// Google-signed OIDC bearer token (as attached by Pub/Sub push
-	// subscriptions and Eventarc triggers configured with a service account)
-	// whose audience claim matches this value; requests without one are
-	// rejected with 401 before the agent is invoked.
+	// Google-signed OIDC bearer token whose audience claim equals this value
+	// and whose issuer is Google; requests without one are rejected with 401
+	// before the agent is invoked.
+	//
+	// This alone does not identify the caller. idtoken.Validate checks the
+	// Google signature, the expiry and the audience string, and nothing else:
+	// the audience is chosen freely by whoever mints the token, so any
+	// principal that can call iam.serviceAccounts.getOpenIdToken on a service
+	// account of its own can obtain a Google-signed token for this audience.
+	// Set AllowedServiceAccounts to pin the check to the specific identities
+	// your trigger actually delivers as.
 	//
 	// This endpoint accepts arbitrary attacker-controlled content as agent
 	// input and otherwise has no authentication of its own: on platforms
@@ -38,4 +45,14 @@ type TriggerConfig struct {
 	// that gate is ever misconfigured), leaving this unset means anyone who
 	// can reach the endpoint can trigger arbitrary agent runs.
 	ExpectedAudience string
+	// AllowedServiceAccounts, when non-empty, additionally requires the
+	// verified token to carry a verified email claim matching one of these
+	// service account addresses, the identity the Pub/Sub push subscription
+	// or Eventarc trigger was configured with. Requests presenting a valid
+	// but unlisted principal are rejected with 403.
+	//
+	// Requires ExpectedAudience; it is ignored on its own. Tokens minted
+	// without an email claim (getOpenIdToken defaults includeEmail to false)
+	// are rejected, so the subscription must be configured to include it.
+	AllowedServiceAccounts []string
 }

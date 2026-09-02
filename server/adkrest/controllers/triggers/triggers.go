@@ -25,6 +25,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,6 +54,11 @@ type RetriableRunner struct {
 	triggerConfig   TriggerConfig
 
 	eventsCompactionConfig *compaction.Config
+
+	// validateIDToken defaults to idtoken.Validate when nil. It is a field
+	// rather than a package variable so parallel tests can each install their
+	// own fake without racing on the auth path.
+	validateIDToken tokenValidator
 }
 
 // ControllerConfig carries everything the trigger controllers need.
@@ -238,36 +244,110 @@ func calculateBackoff(attempt int, base, maxDelay time.Duration) time.Duration {
 	return delay + jitter
 }
 
-// validateIDToken verifies a Google-signed OIDC ID token against an expected
-// audience. It is a package variable (rather than a direct call to
-// idtoken.Validate) so tests in this package can substitute a fake verifier
-// without making a real network call to Google's certificate endpoint.
-var validateIDToken = idtoken.Validate
+// tokenValidator verifies a Google-signed OIDC ID token against an expected
+// audience, returning its claims. It matches the signature of
+// idtoken.Validate, which is what production uses; tests substitute a fake so
+// they don't make a real network call to Google's certificate endpoint.
+type tokenValidator func(ctx context.Context, idToken, audience string) (*idtoken.Payload, error)
+
+// Issuers Google uses for the OIDC ID tokens minted for Pub/Sub push
+// subscriptions and Eventarc triggers. Both spellings are in circulation.
+var googleIssuers = []string{"accounts.google.com", "https://accounts.google.com"}
+
+// authError distinguishes a caller that presented no usable credential (401)
+// from one whose credential verified but is not a principal this endpoint
+// accepts (403).
+type authError struct {
+	status int
+	// public is returned to the caller and deliberately carries no detail
+	// about which check failed; err is for the server-side log only.
+	public string
+	err    error
+}
+
+func (e *authError) Error() string { return e.err.Error() }
 
 // verifyPushRequestAuth requires a valid Google-signed OIDC bearer token when
-// expectedAudience is non-empty; it is a no-op when expectedAudience is empty,
+// ExpectedAudience is non-empty; it is a no-op when ExpectedAudience is empty,
 // preserving prior behavior for deployments that rely entirely on
 // platform-level access control (for example Cloud Run configured to require
 // IAM authentication) in front of this endpoint.
 //
-// Pub/Sub push subscriptions and Eventarc Cloud Run triggers configured with
-// a service account both attach exactly this kind of token, so this does not
-// require any change to how the trigger is configured on the Google Cloud
-// side — only that ExpectedAudience is set to match.
-func verifyPushRequestAuth(r *http.Request, expectedAudience string) error {
+// Pub/Sub push subscriptions and Eventarc Cloud Run triggers configured with a
+// service account both attach exactly this kind of token. Note that a
+// subscription's audience is whatever --push-auth-token-audience was set to,
+// defaulting to the full push endpoint URL, and that pinning the caller
+// identity via AllowedServiceAccounts requires the token to carry an email
+// claim, so unlike audience verification alone, that part does depend on how
+// the trigger is configured on the Google Cloud side.
+func (r *RetriableRunner) verifyPushRequestAuth(req *http.Request) error {
+	expectedAudience := r.triggerConfig.ExpectedAudience
 	if expectedAudience == "" {
 		return nil
 	}
-	const bearerPrefix = "Bearer "
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, bearerPrefix) {
-		return fmt.Errorf("missing bearer token")
+	token, err := bearerToken(req.Header.Get("Authorization"))
+	if err != nil {
+		return &authError{status: http.StatusUnauthorized, public: "missing or malformed bearer token", err: err}
 	}
-	token := strings.TrimPrefix(authHeader, bearerPrefix)
-	if _, err := validateIDToken(r.Context(), token, expectedAudience); err != nil {
-		return fmt.Errorf("invalid identity token: %w", err)
+
+	validate := r.validateIDToken
+	if validate == nil {
+		validate = idtoken.Validate
+	}
+	payload, err := validate(req.Context(), token, expectedAudience)
+	if err != nil {
+		return &authError{status: http.StatusUnauthorized, public: "invalid identity token", err: fmt.Errorf("invalid identity token: %w", err)}
+	}
+	if payload == nil {
+		return &authError{status: http.StatusUnauthorized, public: "invalid identity token", err: fmt.Errorf("identity token verified with no payload")}
+	}
+	if !slices.Contains(googleIssuers, payload.Issuer) {
+		return &authError{status: http.StatusUnauthorized, public: "invalid identity token", err: fmt.Errorf("untrusted issuer %q", payload.Issuer)}
+	}
+
+	// idtoken.Validate checks the signature, the expiry and the audience
+	// string, and leaves every identity claim to the caller. Without an
+	// allow-list the only property established is that somebody holds a
+	// Google-signed token for this audience, which any principal able to mint
+	// one can satisfy.
+	if len(r.triggerConfig.AllowedServiceAccounts) == 0 {
+		return nil
+	}
+	email, _ := payload.Claims["email"].(string)
+	verified, _ := payload.Claims["email_verified"].(bool)
+	if email == "" || !verified || !slices.Contains(r.triggerConfig.AllowedServiceAccounts, email) {
+		return &authError{status: http.StatusForbidden, public: "untrusted token principal", err: fmt.Errorf("principal %q (verified=%t) is not an allowed service account", email, verified)}
 	}
 	return nil
+}
+
+// bearerToken extracts the credential from an Authorization header. RFC 9110
+// makes the scheme case-insensitive.
+func bearerToken(authHeader string) (string, error) {
+	scheme, token, found := strings.Cut(authHeader, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", fmt.Errorf("Authorization header is not a Bearer credential")
+	}
+	if token = strings.TrimSpace(token); token == "" {
+		return "", fmt.Errorf("Bearer credential is empty")
+	}
+	return token, nil
+}
+
+// respondAuthError rejects a request that failed verifyPushRequestAuth,
+// keeping the reason server-side so an anonymous caller can't distinguish an
+// expired token from an audience mismatch from a bad signature.
+func respondAuthError(w http.ResponseWriter, err error) {
+	status, public := http.StatusUnauthorized, "unauthorized"
+	var authErr *authError
+	if errors.As(err, &authErr) {
+		status, public = authErr.status, authErr.public
+	}
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+	}
+	log.Printf("adk: trigger request rejected with %d: %v", status, err)
+	respondError(w, status, fmt.Sprintf("authentication failed: %s", public))
 }
 
 // Resolve the target app name from the request.
