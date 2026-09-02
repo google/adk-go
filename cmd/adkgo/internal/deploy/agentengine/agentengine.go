@@ -262,7 +262,7 @@ FROM gcr.io/distroless/static-debian11
 COPY --from=builder /app/` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
+CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 
 			b.WriteString(`, "agentengine"`)
 

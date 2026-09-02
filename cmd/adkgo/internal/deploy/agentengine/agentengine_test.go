@@ -85,6 +85,9 @@ func TestPrepareDockerfile_UsesGoModVersion(t *testing.T) {
 	if !strings.Contains(string(content), "ENV GOTOOLCHAIN=auto") {
 		t.Errorf("Dockerfile is missing the GOTOOLCHAIN=auto safety net:\n%s", content)
 	}
+	if !strings.Contains(string(content), `"web", "-host", "0.0.0.0", "-port"`) {
+		t.Errorf("Dockerfile CMD must bind the web server to all interfaces with -host 0.0.0.0:\n%s", content)
+	}
 }
 
 // TestDefaultBuilderGoVersionIsNotPinned guards that the last-resort tag stays a
