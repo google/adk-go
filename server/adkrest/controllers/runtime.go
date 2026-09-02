@@ -465,6 +465,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
+			if !errors.Is(err, websocket.ErrCloseSent) {
+				log.Printf("WebSocket write error for app %s: %v", appName, err)
+			}
 			break
 		}
 	}
