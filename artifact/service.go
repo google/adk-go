@@ -67,6 +67,8 @@ type SaveRequest struct {
 	// CustomMetadata contains caller-defined metadata persisted with the artifact.
 	// Backends with string-only metadata, including GCS, store each value using
 	// its string representation and return it as a string.
+	// The in-memory service shallow-copies the map on save and read; mutable
+	// values stored in it remain shared and must not be mutated after Save.
 	CustomMetadata map[string]any
 
 	// If set, the artifact will be saved with this version.
@@ -273,7 +275,8 @@ type VersionsResponse struct {
 
 // ArtifactVersion contains metadata describing a specific version of an artifact.
 // Every Service implementation populates all five fields. CustomMetadata is
-// non-nil and empty when no custom metadata was saved.
+// non-nil and empty when no custom metadata was saved. MimeType is the media
+// type recorded when the version was saved.
 type ArtifactVersion struct {
 	Version        int64
 	CanonicalURI   string

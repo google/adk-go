@@ -62,7 +62,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := artifact.InMemoryService()
-			metadata := map[string]any{"key": "value"}
+			metadata := map[string]any{"key": "value", "count": 42, "enabled": true}
 			firstPart := genai.NewPartFromBytes([]byte("data"), "image/png")
 			firstSaveCtx := platform.WithTimeProvider(t.Context(), func() time.Time { return firstCreateTime })
 			if _, err := srv.Save(firstSaveCtx, &artifact.SaveRequest{
@@ -109,7 +109,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 			wantFirst := &artifact.ArtifactVersion{
 				Version:        1,
 				CanonicalURI:   tc.uriPrefix + "1",
-				CustomMetadata: map[string]any{"key": "value"},
+				CustomMetadata: map[string]any{"key": "value", "count": 42, "enabled": true},
 				CreateTime:     firstCreateTime,
 				MimeType:       "image/png",
 			}

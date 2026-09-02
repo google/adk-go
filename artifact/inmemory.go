@@ -159,14 +159,6 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	nextVersion := int64(1)
-	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
-		nextVersion = internalVer + 1
-	}
 	customMetadata := maps.Clone(req.CustomMetadata)
 	if customMetadata == nil {
 		customMetadata = map[string]any{}
@@ -175,9 +167,18 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if req.Part.InlineData != nil {
 		mimeType = req.Part.InlineData.MIMEType
 	}
+	createTime := platform.Now(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nextVersion := int64(1)
+	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
+		nextVersion = internalVer + 1
+	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, &artifactEntry{
 		part:           req.Part,
-		createTime:     platform.Now(ctx),
+		createTime:     createTime,
 		customMetadata: customMetadata,
 		mimeType:       mimeType,
 	})

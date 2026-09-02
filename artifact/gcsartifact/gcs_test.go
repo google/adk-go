@@ -614,9 +614,11 @@ type fakeWriter struct {
 	buffer      *bytes.Buffer
 	contentType string
 	metadata    map[string]string
+	started     bool
 }
 
 func (w *fakeWriter) Write(p []byte) (n int, err error) {
+	w.started = true
 	return w.buffer.Write(p)
 }
 
@@ -652,10 +654,16 @@ func (w *fakeWriter) Close() error {
 
 // SetContentType implements the final piece of the interface.
 func (w *fakeWriter) SetContentType(cType string) {
+	if w.started {
+		panic("SetContentType called after Write")
+	}
 	w.contentType = cType
 }
 
 func (w *fakeWriter) SetMetadata(metadata map[string]string) {
+	if w.started {
+		panic("SetMetadata called after Write")
+	}
 	w.metadata = maps.Clone(metadata)
 	if bkt := w.obj.bucket; bkt != nil {
 		bkt.mu.Lock()
