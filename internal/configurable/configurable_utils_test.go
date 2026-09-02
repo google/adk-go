@@ -389,8 +389,12 @@ func TestResolveConfigReferenceCanonicalizesRegistryKey(t *testing.T) {
 	if err := os.MkdirAll(realDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q) failed: %v", realDir, err)
 	}
+	// SequentialAgent, not LlmAgent: an LlmAgent needs a model, and building one
+	// constructs a genai client, so the ResolveAgentReference half of this test
+	// stops at the Fatalf below in any environment without an API key. CI
+	// defines no such secret, so that half would never run there.
 	for _, name := range []string{"root_agent.yaml", "sub_agent.yaml"} {
-		cfg := fmt.Sprintf("name: %s\nagent_class: LlmAgent\nmodel: gemini-2.0-flash\n", strings.TrimSuffix(name, ".yaml"))
+		cfg := fmt.Sprintf("name: %s\nagent_class: SequentialAgent\n", strings.TrimSuffix(name, ".yaml"))
 		if err := os.WriteFile(filepath.Join(realDir, name), []byte(cfg), 0o644); err != nil {
 			t.Fatalf("WriteFile(%q) failed: %v", name, err)
 		}
