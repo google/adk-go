@@ -239,6 +239,19 @@ func getAuthorForEvent(ctx Context, event *session.Event) string {
 	return ctx.Agent().Name()
 }
 
+// eventActionsFrom returns the actions a callback accumulated, less the fields
+// that are the framework's to write rather than a callback's.
+//
+// A callback is handed the live [session.EventActions] so it can request state
+// deltas, escalation and transfers, and the struct is then copied wholesale onto
+// the persisted event. Anything on it that changes how later prompts are built
+// has to be filtered out here, or the callback gets to set it.
+func eventActionsFrom(actions *session.EventActions) session.EventActions {
+	out := *actions
+	out.Compaction = nil
+	return out
+}
+
 // runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
 // then it skips agent run and returns callback result.
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
@@ -260,7 +273,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *actions
+			event.Actions = eventActionsFrom(actions)
 			ctx.EndInvocation()
 			return event, nil
 		}
@@ -281,7 +294,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		ctx.EndInvocation()
 		return event, nil
 	}
@@ -291,7 +304,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		return event, nil
 	}
 
@@ -319,7 +332,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *actions
+			event.Actions = eventActionsFrom(actions)
 			return event, nil
 		}
 	}
@@ -339,7 +352,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		// TODO set context invocation ended
 		// ctx.invocationEnded = true
 		return event, nil
@@ -350,7 +363,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		return event, nil
 	}
 	return nil, nil

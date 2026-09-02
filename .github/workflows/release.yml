@@ -1,0 +1,73 @@
+# Release workflow keeps the version constant, the changelog and the release tag
+# in sync, without anything ever pushing straight to a release branch.
+#
+# On every push to a release line it reads the conventional commits since the
+# last release and maintains a single open "release PR" that bumps
+# internal/version/version.go (the constant line carries an
+# x-release-please-version annotation, rewritten by the generic updater),
+# regenerates CHANGELOG.md and updates the manifest. A maintainer reviews and
+# merges that PR like any other; merging it tags the merge commit vX.Y.Z and
+# publishes the GitHub release.
+name: Release
+
+on:
+  push:
+    branches: [ "main", "v1" ]
+
+  workflow_dispatch:
+
+# Serialize per release line: two runs racing on the same release PR would fight
+# over its branch, while main and v1 must not block each other.
+concurrency:
+  group: release-please-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    # Forks inherit this workflow but must never cut a release from it; without
+    # the guard every fork gets a failing run on each push to main.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release branch, the tag and the release
+      pull-requests: write   # open and update the release PR
+    env:
+      # Whether the secret exists, never its value: job env reaches every step.
+      HAS_RELEASE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+    steps:
+      # workflow_dispatch accepts any ref, so fail closed off the release lines.
+      - name: Select the config for this release line
+        id: line
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = "main" ]; then
+            config=.github/release-please-config.json
+            manifest=.github/.release-please-manifest.json
+          elif [ "$BRANCH" = "v1" ]; then
+            config=.github/release-please-config-v1.json
+            manifest=.github/.release-please-manifest-v1.json
+          else
+            echo "::error title=Not a release line::No release configuration for branch '$BRANCH'."
+            exit 1
+          fi
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      # An unset secret does not fall back to github.token; it is passed as an
+      # empty input and the action rejects it. Skip rather than fail the run.
+      - name: Check for the release token
+        if: env.HAS_RELEASE_PAT != 'true'
+        run: echo "::warning title=Release skipped::RELEASE_PAT is not configured, so no release PR was created or updated."
+
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+        if: env.HAS_RELEASE_PAT == 'true'
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          config-file: ${{ steps.line.outputs.config }}
+          manifest-file: ${{ steps.line.outputs.manifest }}
+          target-branch: ${{ github.ref_name }}

@@ -770,6 +770,36 @@ func TestStaticSchemaValidation(t *testing.T) {
 		t.Fatalf("failed to resolve schemaCompatB: %v", err)
 	}
 
+	// Same fields declared in a different order. jsonschema.For builds the
+	// "required" list in field order, so these produce ["foo","bar"] and
+	// ["bar","foo"] respectively while being otherwise identical.
+	type reorderTypeA struct {
+		Foo string `json:"foo"`
+		Bar int    `json:"bar"`
+	}
+	type reorderTypeB struct {
+		Bar int    `json:"bar"`
+		Foo string `json:"foo"`
+	}
+
+	schemaReorderA, err := jsonschema.For[reorderTypeA](nil)
+	if err != nil {
+		t.Fatalf("failed to create schemaReorderA: %v", err)
+	}
+	schemaReorderAResolved, err := schemaReorderA.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaReorderA: %v", err)
+	}
+
+	schemaReorderB, err := jsonschema.For[reorderTypeB](nil)
+	if err != nil {
+		t.Fatalf("failed to create schemaReorderB: %v", err)
+	}
+	schemaReorderBResolved, err := schemaReorderB.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaReorderB: %v", err)
+	}
+
 	tests := []struct {
 		name           string
 		edges          func() []Edge
@@ -825,6 +855,17 @@ func TestStaticSchemaValidation(t *testing.T) {
 			edges: func() []Edge {
 				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaCompatAResolved)}
 				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, schemaCompatBResolved, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+		},
+		{
+			name: "differ only in required order -> success",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaReorderAResolved)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, schemaReorderBResolved, nil)}
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
