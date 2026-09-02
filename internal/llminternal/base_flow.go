@@ -154,9 +154,13 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
-				// We may have reached max token limit during streaming mode.
-				// TODO: handle Partial response in model level. CL 781377328
-				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				// The last event is a partial streaming response. The realistic cause
+				// is a producer that ends a stream without a terminal aggregate (e.g.,
+				// an a2a peer whose stream ends on an appended artifact chunk with no
+				// terminal status). The turn was truncated, not completed, which is
+				// not expected, so we log a warning and return instead of looping again.
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
+					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
 		}
