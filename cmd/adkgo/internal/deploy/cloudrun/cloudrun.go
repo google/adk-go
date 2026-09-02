@@ -110,7 +110,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.region, "region", "r", "", "GCP Region")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "project_name", "p", "", "GCP Project Name")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceName, "service_name", "s", "", "Cloud Run Service name")
-	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceAccount, "service_account", "A", "", "Runtime service account for the Cloud Run service")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.serviceAccount, "service_account", "", "Runtime service account for the Cloud Run service")
 	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.secretName, "secret_name", "GOOGLE_API_KEY", "Secret Manager secret name mounted as GOOGLE_API_KEY (leave empty to skip Secret Manager mount)")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")

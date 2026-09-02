@@ -21,10 +21,9 @@ import (
 
 func TestBuildDeployParams(t *testing.T) {
 	tests := []struct {
-		name           string
-		flags          deployCloudRunFlags
-		wantContains   []string
-		wantNotContain []string
+		name       string
+		flags      deployCloudRunFlags
+		wantParams []string
 	}{
 		{
 			name: "default_secret_no_service_account",
@@ -38,14 +37,14 @@ func TestBuildDeployParams(t *testing.T) {
 					secretName:  "GOOGLE_API_KEY",
 				},
 			},
-			wantContains: []string{
+			wantParams: []string{
 				"run", "deploy", "my-service",
+				"--source", ".",
 				"--region", "us-central1",
 				"--project", "my-project",
+				"--ingress", "all",
+				"--no-allow-unauthenticated",
 				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
-			},
-			wantNotContain: []string{
-				"--service-account",
 			},
 		},
 		{
@@ -61,14 +60,16 @@ func TestBuildDeployParams(t *testing.T) {
 					secretName:     "CUSTOM_GEMINI_KEY",
 				},
 			},
-			wantContains: []string{
+			wantParams: []string{
 				"run", "deploy", "agent-service",
+				"--source", ".",
 				"--region", "europe-west1",
 				"--project", "eu-project",
+				"--ingress", "all",
+				"--no-allow-unauthenticated",
 				"--set-secrets=GOOGLE_API_KEY=CUSTOM_GEMINI_KEY:latest",
 				"--service-account", "agent-sa@eu-project.iam.gserviceaccount.com",
 			},
-			wantNotContain: []string{},
 		},
 		{
 			name: "empty_secret_name_skips_secret_mounting",
@@ -83,12 +84,14 @@ func TestBuildDeployParams(t *testing.T) {
 					secretName:     "",
 				},
 			},
-			wantContains: []string{
+			wantParams: []string{
 				"run", "deploy", "no-secret-service",
+				"--source", ".",
+				"--region", "us-east1",
+				"--project", "test-proj",
+				"--ingress", "all",
+				"--no-allow-unauthenticated",
 				"--service-account", "runner-sa@test-proj.iam.gserviceaccount.com",
-			},
-			wantNotContain: []string{
-				"--set-secrets",
 			},
 		},
 	}
@@ -97,18 +100,8 @@ func TestBuildDeployParams(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.flags.buildDeployParams()
 
-			for _, want := range tc.wantContains {
-				if !slices.Contains(got, want) {
-					t.Errorf("buildDeployParams() missing expected argument %q; got %v", want, got)
-				}
-			}
-
-			for _, notWant := range tc.wantNotContain {
-				for _, arg := range got {
-					if arg == notWant || (len(notWant) > 0 && len(arg) >= len(notWant) && arg[:len(notWant)] == notWant) {
-						t.Errorf("buildDeployParams() contains unexpected argument %q; got %v", arg, got)
-					}
-				}
+			if !slices.Equal(got, tc.wantParams) {
+				t.Errorf("buildDeployParams() mismatch\ngot:  %v\nwant: %v", got, tc.wantParams)
 			}
 		})
 	}
