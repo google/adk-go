@@ -1282,6 +1282,51 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
+	t.Run("the tool's name pairs reordered calls the event does not identify", func(t *testing.T) {
+		// The same reordering with no call ID on either item, which is the
+		// provider shape that leaves the streamed ID unusable to begin with.
+		// Falling through to position would give alpha beta's arguments and
+		// beta alpha's: both tools run, each on input the model wrote for the
+		// other, and nothing surfaces it. The name is on both sides.
+		got, err := runStream(t, evCreated,
+			`{"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"alpha","call_id":"call_1"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"f1","arguments":"{\"x\":1}"}`,
+			`{"type":"response.output_item.added","item":{"id":"f2","type":"function_call","name":"beta","call_id":"call_2"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"f2","arguments":"{\"y\":2}"}`,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"beta"},{"type":"function_call","name":"alpha"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{
+			{Name: "beta", Args: map[string]any{"y": float64(2)}},
+			{Name: "alpha", Args: map[string]any{"x": float64(1)}},
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("two calls to one tool fall back to position", func(t *testing.T) {
+		// The name narrows to both, so it identifies neither and position is
+		// all that is left. Pinned so the match above cannot quietly collapse
+		// two calls to one tool onto whichever streamed first.
+		got, err := runStream(t, evCreated, evAdded1, evArgs1, evAdded2, evArgs2,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"get_weather"},`+
+				`{"type":"function_call","name":"get_weather"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{
+			{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+			{Name: "get_weather", Args: map[string]any{"city": "NY"}},
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("the event places a call no aggregated turn held", func(t *testing.T) {
 		// A nameless call is dropped in aggregation while the text survives, so
 		// the turn holds no call and no position is a call's. The event's own

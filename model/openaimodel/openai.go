@@ -321,16 +321,40 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 // streamedCounterpart finds the call the deltas built for the same tool intent
 // the terminal item states, or nil when the two lists cannot be paired.
 //
-// The call ID is the only identity the two share, so it is tried first, and it
-// is the only pairing left once the counts differ. Position is the fallback:
-// alone it would be wrong for an event listing the same calls in another order,
-// pairing each with whichever call happened to stream in its place.
+// What identifies the call is tried before where it sits, because
+// [restoreUnstated] fills arguments from whatever this returns and a wrong
+// pairing does so silently. The call ID is the only identity the two lists
+// share, so it comes first, and it is the only pairing left once the counts
+// differ. The tool's name comes next, when exactly one streamed call bears it:
+// an item carrying no call ID is the same provider shape that leaves the
+// streamed ID unusable, so the first match is absent in precisely the case that
+// needs it. Position is the last resort — alone it would be wrong for an event
+// listing the same calls in another order, pairing each with whichever call
+// happened to stream in its place. Two calls to one tool, reordered and
+// identified by neither, stay out of reach: nothing tells them apart.
 func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
 	if item.CallID != "" {
 		for _, call := range streamed {
 			if call.ID == item.CallID {
 				return call
 			}
+		}
+	}
+	if item.Name != "" {
+		var named *genai.FunctionCall
+		for _, call := range streamed {
+			if call.Name != item.Name {
+				continue
+			}
+			if named != nil {
+				// The name narrows to both, so it identifies neither.
+				named = nil
+				break
+			}
+			named = call
+		}
+		if named != nil {
+			return named
 		}
 	}
 	if paired && nth < len(streamed) {
