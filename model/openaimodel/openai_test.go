@@ -1327,6 +1327,28 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
+	t.Run("two items restating one streamed call do not share its arguments", func(t *testing.T) {
+		// The name resolves both items to the single call that streamed, so
+		// both restore their arguments from it. Handing over the map itself
+		// would have one call's arguments change when a caller edits the
+		// other's, and plugin/functioncallmodifier deletes from it in place.
+		got, err := runStream(t, evCreated, evAdded1, evArgs1,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"get_weather"},`+
+				`{"type":"function_call","name":"get_weather"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		calls := functionCalls(assertTurnShape(t, got))
+		if len(calls) != 2 {
+			t.Fatalf("got %d function calls, want 2", len(calls))
+		}
+		delete(calls[0].Args, "city")
+		if diff := cmp.Diff(map[string]any{"city": "SF"}, calls[1].Args); diff != "" {
+			t.Errorf("editing one call's arguments changed the other's (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("the event places a call no aggregated turn held", func(t *testing.T) {
 		// A nameless call is dropped in aggregation while the text survives, so
 		// the turn holds no call and no position is a call's. The event's own

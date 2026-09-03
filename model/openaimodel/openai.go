@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -396,7 +397,10 @@ func restoreUnstated(part *genai.Part, item responses.ResponseOutputItemUnion, s
 		return
 	}
 	if !item.JSON.Arguments.Valid() && len(streamed.Args) > 0 {
-		call.Args = streamed.Args
+		// Cloned because two items naming one tool restate the same streamed
+		// call, and a caller editing one call's arguments — as
+		// [plugin/functioncallmodifier] does — must not edit the other's.
+		call.Args = maps.Clone(streamed.Args)
 	}
 	if call.Name == "" {
 		call.Name = streamed.Name
