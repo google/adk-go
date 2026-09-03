@@ -222,12 +222,13 @@ func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msgParts ...*a2a.
 
 func TestRemoteAgent_ADK2ADK(t *testing.T) {
 	testCases := []struct {
-		name          string
-		remoteEvents  []*session.Event
-		wantResponses []model.LLMResponse
-		wantEscalate  bool
-		wantTransfer  string
-		noStreaming   bool
+		name                 string
+		remoteEvents         []*session.Event
+		wantResponses        []model.LLMResponse
+		wantEscalate         bool
+		wantTransfer         string
+		allowTransferToAgent bool
+		noStreaming          bool
 	}{
 		{
 			name: "text streaming",
@@ -315,7 +316,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("stop", genai.RoleModel)},
 				{TurnComplete: true},
 			},
-			wantTransfer: "a-2",
+			wantTransfer:         "a-2",
+			allowTransferToAgent: true,
 		},
 		{
 			name: "long-running function call",
@@ -398,7 +400,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 						Agent:          newADKEventReplay(t, "root", tc.remoteEvents),
 					},
 				})
-				remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
+				card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(startA2AServer(executor).URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+				remoteAgent := utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: "a2a", AllowTransferToAgent: tc.allowTransferToAgent}))
 
 				mode := agent.StreamingModeSSE
 				if tc.noStreaming {
