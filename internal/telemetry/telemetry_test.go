@@ -287,9 +287,10 @@ func TestGenerateContent(t *testing.T) {
 			wantName:   "generate_content test-model",
 			wantStatus: codes.Error,
 			wantAttrs: map[attribute.Key]string{
-				semconv.GenAIOperationNameKey: "generate_content",
-				semconv.GenAIRequestModelKey:  "test-model",
-				gcpVertexAgentInvocationID:    invocationID,
+				semconv.GenAIOperationNameKey:         "generate_content",
+				semconv.GenAIRequestModelKey:          "test-model",
+				semconv.GenAIResponseFinishReasonsKey: "[\"error\"]",
+				gcpVertexAgentInvocationID:            invocationID,
 			},
 		},
 	}
@@ -369,6 +370,11 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 				Content: &genai.Content{Parts: []*genai.Part{{Text: "partial"}}},
 				Partial: true,
 			},
+			err:  errTest,
+			want: "error",
+		},
+		{
+			name: "stream error without response",
 			err:  errTest,
 			want: "error",
 		},

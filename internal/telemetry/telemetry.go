@@ -123,12 +123,12 @@ type TraceGenerateContentResultParams struct {
 // TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
+	span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
 	if params.Response == nil {
 		return
 	}
 	span.SetAttributes(
 		gcpVertexAgentEventID.String(params.EventID),
-		semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)),
 	)
 	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
 	if params.Response.UsageMetadata != nil {

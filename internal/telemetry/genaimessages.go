@@ -295,11 +295,16 @@ func modalityOf(mimeType string) string {
 	}
 }
 
-// hasToolCall reports whether any schema part is a tool call.
-func hasToolCall(parts []any) bool {
-	for _, p := range parts {
-		switch p.(type) {
-		case toolCallPart:
+// hasFunctionCall reports whether content carries a tool call. It reads the
+// genai parts directly rather than converting them: conversion base64-encodes
+// inline data and marshals tool arguments, and this runs on every span whether
+// content capture is on or off.
+func hasFunctionCall(c *genai.Content) bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p != nil && p.FunctionCall != nil {
 			return true
 		}
 	}
@@ -332,8 +337,9 @@ func schemaRole(c *genai.Content) string {
 // schemaFinishReason maps a response onto the schema's finish_reason, which
 // is required on every output message.
 //
-// A response carrying an error code, or one cut short by an interruption, did
-// not complete whatever its finish reason claims, so it reports "error".
+// A non-nil error, a response carrying an error code, or one cut short by an
+// interruption did not complete whatever its finish reason claims, so it
+// reports "error".
 // Gemini reports STOP for a turn that is a tool call, which the schema
 // distinguishes from a plain stop, so a turn containing tool call parts
 // reports "tool_call". genai enum values are protobuf wire names in
@@ -341,16 +347,12 @@ func schemaRole(c *genai.Content) string {
 // does not know is lowercased, which the schema allows since finish_reason
 // accepts any string.
 func schemaFinishReason(resp *model.LLMResponse, err error) string {
-	if resp == nil || err != nil {
-		return finishError
-	}
-	toolCall := resp.Content != nil && hasToolCall(semconvParts(resp.Content.Parts))
-	if resp.ErrorCode != "" || resp.Interrupted {
+	if resp == nil || err != nil || resp.ErrorCode != "" || resp.Interrupted {
 		return finishError
 	}
 	switch resp.FinishReason {
 	case "", genai.FinishReasonUnspecified, genai.FinishReasonStop:
-		if toolCall {
+		if hasFunctionCall(resp.Content) {
 			return finishToolCall
 		}
 		return finishStop

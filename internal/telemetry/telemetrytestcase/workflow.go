@@ -223,6 +223,7 @@ var WorkflowErrorFirstAgentCase = &telemetrytest.SpanDigest{
 								"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 								"gen_ai.operation.name":          "generate_content",
 								"gen_ai.request.model":           "mock",
+								"gen_ai.response.finish_reasons": []string{"error"},
 							},
 							Logs: []*telemetrytest.LogDigest{
 								{EventName: "gen_ai.system.message", Attributes: map[string]any{}, Body: map[string]any{"content": "<elided>"}},
@@ -310,6 +311,7 @@ var WorkflowErrorSecondAgentCase = &telemetrytest.SpanDigest{
 								"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 								"gen_ai.operation.name":          "generate_content",
 								"gen_ai.request.model":           "mock",
+								"gen_ai.response.finish_reasons": []string{"error"},
 							},
 							Logs: []*telemetrytest.LogDigest{
 								{EventName: "gen_ai.system.message", Attributes: map[string]any{}, Body: map[string]any{"content": "<elided>"}},
