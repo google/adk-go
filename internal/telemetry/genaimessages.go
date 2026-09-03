@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -69,6 +70,11 @@ const maxContentAttributeBytes = 60 << 10
 // Tool arguments and responses are filled in by application code and can hold a
 // NaN, an Inf, a func, a chan or a reference cycle.
 const unserializablePlaceholder = `"<unserializable>"`
+
+// unserializableSchemaPlaceholder is a valid JSON Schema used when a tool
+// parameter schema cannot be encoded. Unlike unserializablePlaceholder, this
+// value is used where the semantic convention requires a schema object.
+const unserializableSchemaPlaceholder = `{"type":"object","properties":{"serialization_error":{"type":"string"}}}`
 
 // maxInlineDataBytes bounds one inline payload before base64, which inflates it
 // by a third. A single image would otherwise consume the whole attribute and
@@ -174,46 +180,109 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return json.RawMessage(unserializablePlaceholder)
+		return json.RawMessage(unserializableSchemaPlaceholder)
 	}
 
 	var normalized any
-	if err := json.Unmarshal(encoded, &normalized); err != nil {
-		return json.RawMessage(unserializablePlaceholder)
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&normalized); err != nil {
+		return json.RawMessage(unserializableSchemaPlaceholder)
 	}
-	lowercaseSchemaTypes(normalized)
+	normalizeSchemaTypes(normalized)
 	encoded, err = json.Marshal(normalized)
 	if err != nil {
-		return json.RawMessage(unserializablePlaceholder)
+		return json.RawMessage(unserializableSchemaPlaceholder)
 	}
 	return json.RawMessage(encoded)
 }
 
-// lowercaseSchemaTypes converts genai.Schema's protobuf enum spellings to the
-// lowercase type values required by JSON Schema. It also normalizes literal
-// schema maps supplied by callers, including nested schemas.
-func lowercaseSchemaTypes(value any) {
-	switch value := value.(type) {
-	case map[string]any:
-		if typeValue, ok := value["type"]; ok {
-			switch typeValue := typeValue.(type) {
-			case string:
-				value["type"] = strings.ToLower(typeValue)
-			case []any:
-				for i, item := range typeValue {
-					if item, ok := item.(string); ok {
-						typeValue[i] = strings.ToLower(item)
-					}
+// normalizeSchemaTypes converts only genai.Schema's protobuf enum spellings
+// to the lowercase type values required by JSON Schema. It deliberately leaves
+// arbitrary strings in data-bearing fields such as default and examples alone.
+func normalizeSchemaTypes(value any) {
+	normalizeSchemaNode(value)
+}
+
+// normalizeSchemaNode walks only the JSON Schema locations that contain nested
+// schemas. Walking every nested map would also rewrite ordinary instance data
+// under keywords such as default, examples, and dependencies.
+func normalizeSchemaNode(value any) {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	if typeValue, ok := obj["type"]; ok {
+		if normalized, keep := normalizeSchemaTypeValue(typeValue); keep {
+			obj["type"] = normalized
+		} else {
+			delete(obj, "type")
+		}
+	}
+	for key, child := range obj {
+		switch key {
+		case "properties", "patternProperties", "dependentSchemas", "definitions", "$defs":
+			if schemas, ok := child.(map[string]any); ok {
+				for _, schema := range schemas {
+					normalizeSchemaNode(schema)
+				}
+			}
+		case "additionalProperties", "additionalItems", "items", "contains", "not", "if", "then", "else", "propertyNames", "unevaluatedProperties", "unevaluatedItems":
+			normalizeSchemaValue(child)
+		case "allOf", "anyOf", "oneOf", "prefixItems":
+			if schemas, ok := child.([]any); ok {
+				for _, schema := range schemas {
+					normalizeSchemaNode(schema)
 				}
 			}
 		}
-		for _, child := range value {
-			lowercaseSchemaTypes(child)
-		}
+	}
+}
+
+func normalizeSchemaValue(value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		normalizeSchemaNode(value)
 	case []any:
-		for _, child := range value {
-			lowercaseSchemaTypes(child)
+		for _, schema := range value {
+			normalizeSchemaNode(schema)
 		}
+	}
+}
+
+func normalizeSchemaTypeValue(value any) (any, bool) {
+	genaiTypeNames := map[string]string{
+		string(genai.TypeString):  "string",
+		string(genai.TypeNumber):  "number",
+		string(genai.TypeInteger): "integer",
+		string(genai.TypeBoolean): "boolean",
+		string(genai.TypeArray):   "array",
+		string(genai.TypeObject):  "object",
+		string(genai.TypeNULL):    "null",
+	}
+	switch value := value.(type) {
+	case string:
+		if normalized, ok := genaiTypeNames[value]; ok {
+			return normalized, true
+		}
+		if value == string(genai.TypeUnspecified) {
+			return nil, false
+		}
+		return value, true
+	case []any:
+		normalized := make([]any, 0, len(value))
+		for _, item := range value {
+			item, keep := normalizeSchemaTypeValue(item)
+			if keep {
+				normalized = append(normalized, item)
+			}
+		}
+		if len(normalized) == 0 {
+			return nil, false
+		}
+		return normalized, true
+	default:
+		return value, true
 	}
 }
 
