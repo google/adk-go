@@ -543,6 +543,17 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: "carries nothing to send",
 		},
 		{
+			// buildContentsDefault filters these out upstream, so this is the
+			// contract for a caller reaching convertContents directly: an
+			// empty part is reported, not quietly skipped.
+			name: "empty_part_is_reported",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{}),
+			},
+			wantErrText: "carries nothing to send",
+		},
+		{
 			// A request left empty by the drop is reported rather than sent,
 			// and says the drop emptied it rather than that nothing was sent.
 			name:        "only_thoughts",
@@ -720,9 +731,20 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 				return
 			}
 			if got != field.Name {
-				t.Errorf("unsupportedPayload() = %q for a part carrying only %s, want %q: "+
+				t.Fatalf("unsupportedPayload() = %q for a part carrying only %s, want %q: "+
 					"a field the package cannot send must be reported, not dropped",
 					got, field.Name, field.Name)
+			}
+			// The predicate agreeing is not enough: the caller has to see the
+			// error. Building the request proves convertContents does not
+			// swallow it on the way out.
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: string(genai.RoleUser), Parts: []*genai.Part{part}},
+			}}
+			_, err := buildOpenAIParams("fallback", req)
+			want := "unsupported content part: " + field.Name
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("buildOpenAIParams() err = %v, want it to mention %q", err, want)
 			}
 		})
 	}

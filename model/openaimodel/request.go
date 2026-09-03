@@ -17,6 +17,7 @@ package openaimodel
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -174,10 +175,10 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
 			case !sendText && !replayedReasoning(part):
 				// The part put no text in the buffer, carries no call or
-				// response, and is not reasoning there is a reason to drop:
-				// nothing in it reaches the request, so say so rather than
-				// let an empty part pass for a converted one.
-				return nil, fmt.Errorf("openai: content part carries nothing to send")
+				// response, and is not reasoning worth dropping: nothing in it
+				// reaches the request, so say so rather than let an empty part
+				// pass for a converted one.
+				return nil, errors.New("openai: content part carries nothing to send")
 			}
 		}
 		// After processing all parts in a content block, we flush any remaining text.
