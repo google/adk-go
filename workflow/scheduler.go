@@ -838,7 +838,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 			return it.err
 		}
 		// Matches adk-python, which marks every task it reaps during
-		// shutdown CANCELED regardless of who canceled it
+		// shutdown CANCELLED regardless of who canceled it //nolint:misspell
 		// (_workflow.py _cleanup_all_tasks, run from a finally).
 		ns.Status = NodeCancelled
 		return nil

@@ -743,7 +743,8 @@ contains both. Do not ask the user any questions.`,
 	}
 	coordinator, err := llmagent.New(llmagent.Config{
 		Name:        "coordinator",
-		Description: "Calls order_collector, then payment_collector, then summarises.",
+		// Note: "summarises" matches recorded HTTP cassette; do not edit without re-recording.
+		Description: "Calls order_collector, then payment_collector, then summarises.", 
 		Model:       newDelegationModel(t),
 		Mode:        llmagent.ModeChat,
 		SubAgents:   []agent.Agent{orderCollector, paymentCollector},

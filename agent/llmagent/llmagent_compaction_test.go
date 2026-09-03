@@ -211,6 +211,7 @@ func TestCompactionE2E(t *testing.T) {
 	const sessionID = "compaction_session"
 	turns := []string{
 		"What is the weather in Zurich?",
+		// Note: "favourite colour" prompt strings below match recorded HTTP cassettes; do not edit without re-recording.
 		"My favourite colour is teal, remember that.",
 		"What was my favourite colour again?",
 		// A tool call after the compaction point, so the prompt that follows it

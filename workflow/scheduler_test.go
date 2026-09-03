@@ -329,7 +329,7 @@ func TestScheduler_ExternalCancellationPrefersNodeError(t *testing.T) {
 
 // TestScheduler_ExternalCancellationMarksNodeCancelled pins the lifecycle
 // status of an externally canceled node. adk-python marks every task it
-// reaps during shutdown CANCELED whether the engine or the caller
+// reaps during shutdown CANCELLED whether the engine or the caller //nolint:misspell
 // canceled it (_workflow.py _cleanup_all_tasks, run from a finally), and
 // leaving the node at NodeRunning here would instead claim it still has a
 // task in flight.

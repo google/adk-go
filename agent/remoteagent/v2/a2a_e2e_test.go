@@ -62,6 +62,7 @@ const (
 	modelTextTaskComplete       = "Task complete!"
 
 	transferToolName      = "transfer_to_agent"
+	// Note: "transfering" matches recorded HTTP cassette; do not edit without re-recording.
 	modelTextRootTransfer = "transfering... please hold... beepboop..."
 )
 
