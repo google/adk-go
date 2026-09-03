@@ -614,6 +614,30 @@ func TestLoadArtifactsTool_ProcessRequest_MIMEConversion(t *testing.T) {
 			wantText:     "<svg id=\"c\"/>",
 		},
 		{
+			name:         "declared charset is honoured when decoding",
+			artifactName: "sales2.csv",
+			part:         genai.NewPartFromBytes([]byte("caf\xe9,12\n"), "text/csv; charset=windows-1252"),
+			wantText:     "café,12\n",
+		},
+		{
+			name:         "unknown charset falls back to lossy decoding",
+			artifactName: "odd.txt",
+			part:         genai.NewPartFromBytes([]byte{0xff}, "text/plain; charset=no-such-charset"),
+			wantText:     "\uFFFD",
+		},
+		{
+			name:         "control characters in the label do not dodge the text path",
+			artifactName: "config2.json",
+			part:         genai.NewPartFromBytes([]byte(`{"b":2}`), "application/json\x00"),
+			wantText:     `{"b":2}`,
+		},
+		{
+			name:         "control characters in the label do not reopen the inline path",
+			artifactName: "diagram2.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg/>"), "image/svg+xml\x00"),
+			wantText:     "<svg/>",
+		},
+		{
 			name:         "missing type defaults to octet-stream",
 			artifactName: "unknown.bin",
 			part:         genai.NewPartFromBytes([]byte{1, 2, 3, 4}, ""),

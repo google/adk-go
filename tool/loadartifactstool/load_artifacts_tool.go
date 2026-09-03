@@ -21,9 +21,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/encoding/ianaindex"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -239,29 +242,38 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	}, nil
 }
 
-// normalizeMIMEType drops any parameters and lowercases the type, which is
-// case-insensitive per RFC 2045.
+// normalizeMIMEType drops any parameters and control characters and lowercases
+// the type, which is case-insensitive per RFC 2045. Control characters never
+// appear in a legitimate label but would otherwise dodge the exact-match lists
+// below while still hitting the prefix matches.
 func normalizeMIMEType(mimeType string) string {
 	mimeType, _, _ = strings.Cut(mimeType, ";")
+	mimeType = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, mimeType)
 	return strings.ToLower(strings.TrimSpace(mimeType))
 }
 
 // isInlineMIMETypeSupported reports whether the model accepts this type inline.
-// The media match is prefix-based on purpose: enumerating subtypes would rot.
+// The argument must already be normalized; the call site does so. The media
+// match is prefix-based on purpose: enumerating subtypes would rot.
 func isInlineMIMETypeSupported(mimeType string) bool {
-	m := normalizeMIMEType(mimeType)
-	// XML-based image subtypes match the image/ prefix but Gemini rejects them
-	// as inline data with 400 INVALID_ARGUMENT, so they take the text path.
-	// Mirrors adk-python's _GEMINI_UNSUPPORTED_INLINE_SUBTYPES, verified there
-	// against gemini-2.5-flash.
-	switch m {
+	// Gemini rejects SVG source as inline image data whatever subtype it is
+	// labelled with (the rejection is on the bytes, not the label), so this
+	// list catches the conventional labels for such artifacts rather than
+	// mirroring a backend rule. The set matches adk-python's
+	// _GEMINI_UNSUPPORTED_INLINE_SUBTYPES.
+	switch mimeType {
 	case "image/svg", "image/svg+xml", "image/xml":
 		return false
 	}
-	return strings.HasPrefix(m, "image/") ||
-		strings.HasPrefix(m, "audio/") ||
-		strings.HasPrefix(m, "video/") ||
-		m == "application/pdf"
+	return strings.HasPrefix(mimeType, "image/") ||
+		strings.HasPrefix(mimeType, "audio/") ||
+		strings.HasPrefix(mimeType, "video/") ||
+		mimeType == "application/pdf"
 }
 
 // isTextLikeMIMEType reports whether data of this type can be inlined as text.
@@ -278,6 +290,24 @@ func isTextLikeMIMEType(mimeType string) bool {
 		return true
 	}
 	return strings.HasPrefix(mimeType, "text/")
+}
+
+// decodeArtifactText converts artifact bytes to UTF-8 text. A charset
+// parameter on the original MIME type is honoured when it names a known
+// encoding, so "text/csv; charset=windows-1252" round-trips instead of
+// degrading; otherwise invalid sequences are replaced rather than the
+// artifact discarded.
+func decodeArtifactText(data []byte, rawMIMEType string) string {
+	if _, params, err := mime.ParseMediaType(rawMIMEType); err == nil {
+		if cs := params["charset"]; cs != "" && !strings.EqualFold(cs, "utf-8") {
+			if enc, err := ianaindex.IANA.Encoding(cs); err == nil && enc != nil {
+				if decoded, err := enc.NewDecoder().Bytes(data); err == nil {
+					return string(decoded)
+				}
+			}
+		}
+	}
+	return strings.ToValidUTF8(string(data), "\uFFFD")
 }
 
 // safePartForLLM returns a part the model will accept, converting or describing
@@ -302,10 +332,10 @@ func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
 	if isInlineMIMETypeSupported(mimeType) {
 		return part
 	}
-	// Text in a legacy encoding still carries readable content, so replace the
-	// invalid sequences rather than discarding the artifact.
+	// Text in a legacy encoding still carries readable content, so decode it
+	// rather than discarding the artifact.
 	if isTextLikeMIMEType(mimeType) {
-		return genai.NewPartFromText(strings.ToValidUTF8(string(data), "\uFFFD"))
+		return genai.NewPartFromText(decodeArtifactText(data, part.InlineData.MIMEType))
 	}
 
 	return genai.NewPartFromText(fmt.Sprintf(
