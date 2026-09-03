@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/examples/internal/imagegen"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -46,14 +47,22 @@ func generateImage(ctx agent.Context, input generateImageInput) (generateImageRe
 		ctx,
 		"imagen-3.0-generate-002",
 		input.Prompt,
-		&genai.GenerateImagesConfig{NumberOfImages: 1})
+		&genai.GenerateImagesConfig{
+			NumberOfImages:   1,
+			IncludeRAIReason: true,
+		})
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
 		}, nil
 	}
 
-	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	imageBytes, err := imagegen.ImageBytes(response)
+	if err != nil {
+		return generateImageResult{}, err
+	}
+
+	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(imageBytes, "image/png"))
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
