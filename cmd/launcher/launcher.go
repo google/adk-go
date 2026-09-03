@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -98,4 +98,9 @@ type Config struct {
 	// different applications need different compaction, or must not share a
 	// summarizer, run them separately.
 	Compaction *compaction.Config
+	// MaxPayloadSize limits the REST API server's request body size in bytes.
+	// It is set by the web launcher from its -max_payload_size flag so the
+	// ADK REST API sublauncher enforces the same limit as the base router. If
+	// <= 0, the adkrest default (10 MiB) is used.
+	MaxPayloadSize int64
 }
