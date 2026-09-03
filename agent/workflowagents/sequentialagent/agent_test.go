@@ -476,13 +476,19 @@ const taskCompletedInstructionMarker = "call the task_completed function to exit
 // marker would pass the final count assertion but let a losing caller
 // return before the winner's write is visible -- that read is what fails
 // under -race without the barrier.
+//
+// The pipeline has three sub-agents so RunLive's injection loop runs more
+// than one iteration, and each sub-agent carries its own State with its own
+// sync.Once: the guard has to hold independently for every one of them.
 func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
-	subAgent := newCustomAgent(t, 1)
+	subAgents := []agent.Agent{
+		newCustomAgent(t, 1), newCustomAgent(t, 2), newCustomAgent(t, 3),
+	}
 
 	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
 		AgentConfig: agent.Config{
 			Name:      "seq_agent",
-			SubAgents: []agent.Agent{subAgent},
+			SubAgents: subAgents,
 		},
 	})
 	if err != nil {
@@ -496,14 +502,28 @@ func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
 		t.Fatalf("sequential agent does not implement RunLive")
 	}
 
-	llmAgent, ok := subAgent.(llminternal.Agent)
-	if !ok {
-		t.Fatal("sub-agent does not implement llminternal.Agent")
+	states := make([]*llminternal.State, len(subAgents))
+	for i, sub := range subAgents {
+		llmAgent, ok := sub.(llminternal.Agent)
+		if !ok {
+			t.Fatalf("sub-agent %d does not implement llminternal.Agent", i)
+		}
+		states[i] = llminternal.Reveal(llmAgent)
 	}
-	state := llminternal.Reveal(llmAgent)
+
+	countTaskCompleted := func(s *llminternal.State) int {
+		n := 0
+		for _, tl := range s.Tools {
+			if tl != nil && tl.Name() == "task_completed" {
+				n++
+			}
+		}
+		return n
+	}
 
 	const concurrent = 20
-	seenByCaller := make([]int, concurrent)
+	// seenByCaller[i][j]: what caller i saw in sub-agent j's Tools.
+	seenByCaller := make([][]int, concurrent)
 	var wg sync.WaitGroup
 	wg.Add(concurrent)
 	for i := range concurrent {
@@ -511,38 +531,35 @@ func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
 			defer wg.Done()
 			invCtx := &mockInvocationContext{agent: sequentialAgent, invocationID: "test_id", ctx: t.Context()}
 			_, _, _ = liveAgent.RunLive(invCtx)
-			// RunLive has returned, so the Once has completed: this read
-			// is ordered after the winner's write and must see it.
-			for _, tl := range state.Tools {
-				if tl != nil && tl.Name() == "task_completed" {
-					seenByCaller[i]++
-				}
+			// RunLive has returned, so every sub-agent's Once has completed:
+			// these reads are ordered after the winners' writes.
+			seen := make([]int, len(states))
+			for j, s := range states {
+				seen[j] = countTaskCompleted(s)
 			}
+			seenByCaller[i] = seen
 		}()
 	}
 	wg.Wait()
 
 	for i, seen := range seenByCaller {
-		if seen != 1 {
-			t.Errorf("caller %d saw task_completed %d times in state.Tools after RunLive returned, want exactly 1", i, seen)
+		for j, n := range seen {
+			if n != 1 {
+				t.Errorf("caller %d saw task_completed %d times in sub-agent %d's Tools after RunLive returned, want exactly 1", i, n, j)
+			}
 		}
 	}
 
-	count := 0
-	for _, tl := range state.Tools {
-		if tl != nil && tl.Name() == "task_completed" {
-			count++
+	for j, s := range states {
+		if n := countTaskCompleted(s); n != 1 {
+			t.Errorf("sub-agent %d: task_completed injected %d times across %d concurrent RunLive calls, want exactly 1", j, n, concurrent)
 		}
-	}
-	if count != 1 {
-		t.Errorf("task_completed injected %d times across %d concurrent RunLive calls, want exactly 1", count, concurrent)
-	}
-
-	// The tool is useless without the instruction telling the model to
-	// call it; two goroutines can both append the suffix and still leave
-	// one tool in the slice, so the suffix count is a distinct check.
-	if n := strings.Count(state.Instruction, taskCompletedInstructionMarker); n != 1 {
-		t.Errorf("task_completed instruction suffix appears %d times, want exactly 1", n)
+		// The tool is useless without the instruction telling the model to
+		// call it; two goroutines can both append the suffix and still leave
+		// one tool in the slice, so the suffix count is a distinct check.
+		if n := strings.Count(s.Instruction, taskCompletedInstructionMarker); n != 1 {
+			t.Errorf("sub-agent %d: task_completed instruction suffix appears %d times, want exactly 1", j, n)
+		}
 	}
 }
 
