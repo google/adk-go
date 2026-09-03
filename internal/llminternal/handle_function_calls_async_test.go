@@ -235,7 +235,10 @@ type singleCallMockModel struct {
 	model.LLM
 	toolName string
 	fcID     string
-	calls    int
+	// args is passed as the function call's Args; a plain empty map is used
+	// when unset, which is fine for tools that ignore their arguments.
+	args  map[string]any
+	calls int
 }
 
 func (m *singleCallMockModel) Name() string { return "single-call-mock" }
@@ -252,12 +255,16 @@ func (m *singleCallMockModel) GenerateContent(ctx context.Context, req *model.LL
 			}, nil)
 			return
 		}
+		args := m.args
+		if args == nil {
+			args = map[string]any{}
+		}
 		yield(&model.LLMResponse{
 			Content: &genai.Content{
 				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
 					ID:   m.fcID,
 					Name: m.toolName,
-					Args: map[string]any{},
+					Args: args,
 				}}},
 				Role: "model",
 			},
