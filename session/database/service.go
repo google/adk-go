@@ -380,8 +380,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
