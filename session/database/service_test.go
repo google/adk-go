@@ -51,6 +51,72 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 	}
 }
 
+// TestDatabaseService_StateUpdateTimeIsSet guards against a regression where
+// app_states / user_states rows were saved without ever assigning UpdateTime,
+// leaving a zero time.Time that MySQL rejects under strict mode
+// (Error 1292: Incorrect datetime value: '0000-00-00'). SQLite accepts the
+// zero value, so the guard asserts the column is populated rather than relying
+// on a MySQL-specific write failure.
+func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
+	fixedTime := time.Date(2026, time.July, 19, 17, 33, 48, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
+	s := emptyService(t)
+
+	// Create with app:/user: scoped initial state populates both state tables.
+	created, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+		State:   map[string]any{"app:config": "v1", "user:pref": "x"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var app storageAppState
+	if err := s.db.First(&app, "app_name = ?", "app").Error; err != nil {
+		t.Fatalf("load app state: %v", err)
+	}
+	if app.UpdateTime.IsZero() {
+		t.Errorf("app_states.update_time is zero after Create; want it populated")
+	}
+
+	var usr storageUserState
+	if err := s.db.First(&usr, "app_name = ? AND user_id = ?", "app", "user").Error; err != nil {
+		t.Fatalf("load user state: %v", err)
+	}
+	if usr.UpdateTime.IsZero() {
+		t.Errorf("user_states.update_time is zero after Create; want it populated")
+	}
+
+	// The AppendEvent path applies app:/user: state deltas separately; it must
+	// also maintain UpdateTime.
+	eventTime := fixedTime.Add(time.Minute)
+	event := &session.Event{
+		ID:        "e1",
+		Author:    "user",
+		Timestamp: eventTime,
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"app:config2": "v2", "user:pref2": "y"},
+		},
+	}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	if err := s.db.First(&app, "app_name = ?", "app").Error; err != nil {
+		t.Fatalf("reload app state: %v", err)
+	}
+	if app.UpdateTime.IsZero() {
+		t.Errorf("app_states.update_time is zero after AppendEvent; want it populated")
+	}
+	if err := s.db.First(&usr, "app_name = ? AND user_id = ?", "app", "user").Error; err != nil {
+		t.Fatalf("reload user state: %v", err)
+	}
+	if usr.UpdateTime.IsZero() {
+		t.Errorf("user_states.update_time is zero after AppendEvent; want it populated")
+	}
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
