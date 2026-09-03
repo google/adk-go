@@ -29,11 +29,13 @@
 // ErrUnsupportedConfigField.
 //
 // For a field with no equivalent at all, rejection keys on presence rather than
-// value: setting the knob is itself the request. The exception is
-// AudioTimestamp, a plain bool whose false cannot be told from unset, so it
-// alone still passes unremarked. A field that is translated can also be handed
-// a value that is not — a negative MaxOutputTokens or CandidateCount, or
-// Logprobs without ResponseLogprobs — and those are rejected too.
+// value: setting the knob is itself the request. Presence is only observable
+// where the zero value cannot be a setting — a pointer, slice, map or struct.
+// A plain bool or string cannot tell its zero from unset, so AudioTimestamp
+// false, and CachedContent, MediaResolution or ServiceTier left empty, pass
+// unremarked. A field that is translated can also be handed a value that is
+// not — a negative MaxOutputTokens or CandidateCount, or Logprobs without
+// ResponseLogprobs — and those are rejected too.
 //
 // ThinkingConfig is translated to the Responses API's effort-based reasoning.
 // ThinkingLevel maps to the effort of the same name. A token budget, which
