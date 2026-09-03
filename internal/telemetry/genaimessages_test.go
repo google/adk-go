@@ -460,13 +460,129 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersFailureIsolated(t *t
 	if got[0]["parameters"].(map[string]any)["properties"].(map[string]any)["value"].(map[string]any)["type"] != "string" {
 		t.Fatalf("nested schema type was not normalized: %#v", got[0])
 	}
-	if got[1]["name"] != "bad_tool" || got[1]["parameters"] != unserializablePlaceholderValueForTest() {
+	if got[1]["name"] != "bad_tool" {
 		t.Fatalf("bad tool was not isolated: %#v", got[1])
+	}
+	wantPlaceholder := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"serialization_error": map[string]any{"type": "string"},
+		},
+	}
+	if diff := cmp.Diff(wantPlaceholder, got[1]["parameters"]); diff != "" {
+		t.Errorf("invalid parameters placeholder (-want +got):\n%s", diff)
 	}
 }
 
-func unserializablePlaceholderValueForTest() string {
-	return "<unserializable>"
+func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing(t *testing.T) {
+	captureToolDefinitionParameters(t)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					{
+						Name:       "both_parameters",
+						Parameters: &genai.Schema{Type: genai.TypeObject},
+						ParametersJsonSchema: map[string]any{
+							"type": "STRING",
+						},
+					},
+					{Name: "no_parameters"},
+				},
+			}},
+		},
+	}
+
+	encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
+	if !ok {
+		t.Fatal("gen_ai.tool.definitions was not set")
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
+	}
+	want := []map[string]any{
+		{
+			"name":        "both_parameters",
+			"description": "",
+			"parameters":  map[string]any{"type": "string"},
+			"type":        "function",
+		},
+		{
+			"name":        "no_parameters",
+			"description": "",
+			"parameters":  nil,
+			"type":        "function",
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("tool definition parameter precedence and absence (-want +got):\\n%s", diff)
+	}
+}
+
+func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *testing.T) {
+	captureToolDefinitionParameters(t)
+
+	declaration := &genai.FunctionDeclaration{
+		ParametersJsonSchema: map[string]any{
+			"type": "OBJECT",
+			"properties": map[string]any{
+				"value": map[string]any{
+					"type":     []string{"OBJECT", "null"},
+					"default":  map[string]any{"type": "PRODUCTION", "region": "US-EAST1"},
+					"examples": []any{map[string]any{"type": "STAGING"}},
+				},
+				"unspecified": map[string]any{
+					"type":        "TYPE_UNSPECIFIED",
+					"description": "type is intentionally unspecified",
+				},
+			},
+			"dependencies": map[string]any{
+				"type": []string{"billingAddress"},
+			},
+		},
+	}
+
+	encoded := toolDefinitionParameters(declaration)
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("invalid parameters JSON: %v", err)
+	}
+	want := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{
+				"type":     []any{"object", "null"},
+				"default":  map[string]any{"type": "PRODUCTION", "region": "US-EAST1"},
+				"examples": []any{map[string]any{"type": "STAGING"}},
+			},
+			"unspecified": map[string]any{
+				"description": "type is intentionally unspecified",
+			},
+		},
+		"dependencies": map[string]any{
+			"type": []any{"billingAddress"},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("schema normalization (-want +got):\\n%s", diff)
+	}
+}
+
+func TestToolDefinitionParameters_PreservesLargeNumbers(t *testing.T) {
+	captureToolDefinitionParameters(t)
+
+	declaration := &genai.FunctionDeclaration{
+		ParametersJsonSchema: map[string]any{
+			"type":    "object",
+			"maximum": int64(9223372036854775807),
+		},
+	}
+	encoded := toolDefinitionParameters(declaration)
+	if !strings.Contains(string(encoded), `"maximum":9223372036854775807`) {
+		t.Fatalf("large integer lost precision in parameters: %s", encoded)
+	}
 }
 
 func TestRequestContentAttributes_ToolDefinitionsRespectsCapture(t *testing.T) {

@@ -38,6 +38,10 @@ import (
 // records or elides it for privacy.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+// captureToolDefinitionParametersEnvVar controls the explicit input-schema
+// capture opt-in used by the telemetry package.
+const captureToolDefinitionParametersEnvVar = "ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS"
+
 // TestTelemetrySchema_AgentWithTool runs the canonical
 // "llmagent with one FunctionTool" scenario end-to-end and asserts
 // the emitted span+log tree matches the expected shape exactly.
@@ -76,6 +80,9 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 			} else {
 				t.Setenv(captureMessageContentEnvVar, "")
 			}
+			// Keep this end-to-end test independent of a developer's local
+			// tool-schema capture setting.
+			t.Setenv(captureToolDefinitionParametersEnvVar, "")
 			telemetry.ApplyEnv()
 
 			// Install in-memory tracer + logger so the test sees
