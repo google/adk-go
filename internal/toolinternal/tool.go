@@ -46,3 +46,17 @@ type RequestProcessor interface {
 type ResponseDeferrer interface {
 	DefersResponse() bool
 }
+
+// SkipSummarizationResultDisplayer is implemented by tools whose result
+// should still be shown to the user as text when SkipSummarization causes
+// the agent loop to end on their function response event.
+//
+// SkipSummarization is set for two opposite reasons: agenttool sets it
+// because the sub-agent already produced the final answer, which is meant to
+// be seen; other tools (UI/widget tools, pending-confirmation flows) set it
+// to suppress an internal acknowledgement that was never meant to be shown.
+// Only tools that implement this interface, with DisplayResultOnSkipSummarization
+// returning true, get their result surfaced as a visible text part.
+type SkipSummarizationResultDisplayer interface {
+	DisplayResultOnSkipSummarization() bool
+}

@@ -15,15 +15,19 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"iter"
+	"log"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
@@ -426,6 +430,72 @@ func TestCallTool(t *testing.T) {
 			got := f.callTool(agent.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestDisplayableToolResultText(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   map[string]any
+		wantText string
+		wantOK   bool
+	}{
+		{
+			name:   "empty result is not displayable",
+			result: map[string]any{},
+			wantOK: false,
+		},
+		{
+			name:   "error result is not displayable",
+			result: map[string]any{"error": "boom"},
+			wantOK: false,
+		},
+		{
+			name:   "empty string result is not displayable",
+			result: map[string]any{"result": ""},
+			wantOK: false,
+		},
+		{
+			name:   "nil result is not displayable",
+			result: map[string]any{"result": nil},
+			wantOK: false,
+		},
+		{
+			name:     "single plain-text result key is shown as-is",
+			result:   map[string]any{"result": "sub-agent output"},
+			wantText: "sub-agent output",
+			wantOK:   true,
+		},
+		{
+			name:     "non-string result key is rendered as JSON",
+			result:   map[string]any{"result": 42},
+			wantText: `{"result":42}`,
+			wantOK:   true,
+		},
+		{
+			name:     "structured result is rendered as JSON",
+			result:   map[string]any{"status": "ok", "count": 3},
+			wantText: `{"count":3,"status":"ok"}`,
+			wantOK:   true,
+		},
+		{
+			name:     "JSON output is not HTML-escaped",
+			result:   map[string]any{"url": "https://example.com/a&b<c>"},
+			wantText: `{"url":"https://example.com/a&b<c>"}`,
+			wantOK:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotText, gotOK := displayableToolResultText(tc.result)
+			if gotOK != tc.wantOK {
+				t.Fatalf("displayableToolResultText(%v) ok = %v, want %v", tc.result, gotOK, tc.wantOK)
+			}
+			if gotOK && gotText != tc.wantText {
+				t.Errorf("displayableToolResultText(%v) = %q, want %q", tc.result, gotText, tc.wantText)
 			}
 		})
 	}
@@ -849,42 +919,307 @@ func TestIsThoughtOnlyTurn(t *testing.T) {
 	}
 }
 
-// recordStreamModel is a minimal model.LLM that records the streaming flag it
-// receives, so tests can assert how the flow derived it from the run config.
-type recordStreamModel struct {
-	stream bool
+// alwaysThinkingModel always returns a completed thought-only ("thinking")
+// turn and never surfaces an answer. Real models can get stuck in this state,
+// so the flow must not call the model forever waiting for an answer.
+type alwaysThinkingModel struct{ calls int }
+
+func (m *alwaysThinkingModel) Name() string { return "always-thinking" }
+
+func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		// Number each thought so a test can tell which turn's event the flow
+		// left as the result.
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: fmt.Sprintf("thinking %d", m.calls), Thought: true}},
+			},
+		}, nil)
+	}
 }
 
-func (m *recordStreamModel) Name() string { return "test-model" }
-
-func (m *recordStreamModel) GenerateContent(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
-	m.stream = stream
-	return func(func(*model.LLMResponse, error) bool) {}
-}
-
-// TestCallLLMStreamingModeWithoutContextRunConfig guards against the nil pointer
-// dereference in callLLM when the run config is not present in the Go context
-// (issue #586). agent.Run() can be invoked directly, bypassing the runner, so
-// runconfig.FromContext returns nil; the streaming mode must instead be read
-// from the invocation context's RunConfig().
-func TestCallLLMStreamingModeWithoutContextRunConfig(t *testing.T) {
-	m := &recordStreamModel{}
+func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
+	m := &alwaysThinkingModel{}
 	f := &Flow{Model: m}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		},
+	)
 
-	// No runconfig is stored in the Go context (as when the runner is bypassed),
-	// but the invocation context carries an SSE RunConfig.
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
-	})
-
-	req := &model.LLMRequest{}
-	for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+	// Bound the consumer so a regression fails the test instead of hanging it.
+	const safetyLimit = 50
+	events := 0
+	var lastEvent *session.Event
+	for ev, err := range f.Run(ctx) {
 		if err != nil {
-			t.Fatalf("callLLM() error = %v, want nil", err)
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events++
+		lastEvent = ev
+		if events > safetyLimit {
+			break
 		}
 	}
 
-	if !m.stream {
-		t.Errorf("GenerateContent received stream=%v, want true for SSE streaming mode", m.stream)
+	if events > safetyLimit {
+		t.Fatalf("Run() did not terminate on repeated thought-only turns: yielded >%d events, model called %d times", safetyLimit, m.calls)
 	}
+	if m.calls != maxConsecutiveThoughtOnlyTurns {
+		t.Errorf("model called %d times, want %d (maxConsecutiveThoughtOnlyTurns)", m.calls, maxConsecutiveThoughtOnlyTurns)
+	}
+	if events != maxConsecutiveThoughtOnlyTurns {
+		t.Errorf("Run() yielded %d events, want %d (one per thought-only turn)", events, maxConsecutiveThoughtOnlyTurns)
+	}
+
+	// Giving up leaves the last thinking event as the result. The literal
+	// "thinking 10" pins both that promise and the value of the bound: it is
+	// the tenth turn's thought, so an off-by-one or a changed bound fails here.
+	if lastEvent == nil || lastEvent.LLMResponse.Content == nil {
+		t.Fatalf("Run() left no content as the result: %#v", lastEvent)
+	}
+	wantParts := []*genai.Part{{Text: "thinking 10", Thought: true}}
+	if diff := cmp.Diff(wantParts, lastEvent.LLMResponse.Content.Parts); diff != "" {
+		t.Errorf("last event parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// scriptedThinkingModel replays a fixed sequence of turns and then keeps
+// repeating the final one, so a test can interleave thought-only turns with a
+// turn that is not a final response.
+type scriptedThinkingModel struct {
+	turns []*model.LLMResponse
+	calls int
+}
+
+func (m *scriptedThinkingModel) Name() string { return "scripted-thinking" }
+
+func (m *scriptedThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		i := m.calls
+		m.calls++
+		if i >= len(m.turns) {
+			i = len(m.turns) - 1
+		}
+		yield(m.turns[i], nil)
+	}
+}
+
+func thoughtTurn() *model.LLMResponse {
+	return &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{Text: "thinking", Thought: true}},
+	}}
+}
+
+// TestRun_ThoughtOnlyTurnCountResets pins the reset in Flow.Run: the cap counts
+// *consecutive* thought-only turns, so a turn that is not a final response
+// (here a function call) must clear the count. Without the reset the cap
+// becomes cumulative and the run stops after maxConsecutiveThoughtOnlyTurns
+// thought-only turns in total rather than in a row.
+func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
+	const toolName = "noop"
+	// Two thoughts, a function call (not a final response, so it resets the
+	// count), then thoughts forever.
+	m := &scriptedThinkingModel{turns: []*model.LLMResponse{
+		thoughtTurn(),
+		thoughtTurn(),
+		{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: toolName, Args: map[string]any{}}}},
+		}},
+		thoughtTurn(),
+	}}
+	f := &Flow{
+		Model: m,
+		Tools: []tool.Tool{&mockFunctionTool{name: toolName}},
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		},
+	)
+
+	const safetyLimit = 50
+	events := 0
+	for _, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events++
+		if events > safetyLimit {
+			break
+		}
+	}
+	if events > safetyLimit {
+		t.Fatalf("Run() did not terminate: yielded >%d events, model called %d times", safetyLimit, m.calls)
+	}
+
+	// 2 thought-only turns, then the function call resets the count, then a
+	// further maxConsecutiveThoughtOnlyTurns thought-only turns.
+	want := 2 + 1 + maxConsecutiveThoughtOnlyTurns
+	if m.calls != want {
+		t.Errorf("model called %d times, want %d; the consecutive-turn count did not reset on the non-final turn", m.calls, want)
+	}
+}
+
+// TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
+// when the last event from runOneStep has Partial=true.
+// This is a regression test for https://github.com/google/adk-go/issues/600.
+func TestFlowRunPartialLastEvent(t *testing.T) {
+	tests := []struct {
+		name              string
+		modelResponses    []*model.LLMResponse
+		requestProcessors []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
+		wantTexts         []string
+		wantLogAuthor     string
+	}{
+		{
+			name: "single partial response completes without error",
+			modelResponses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts:     []string{"Hello"},
+			wantLogAuthor: "test-agent",
+		},
+		{
+			name: "multiple partial responses complete without error",
+			modelResponses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+				{
+					Content: genai.NewContentFromText(" World", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts:     []string{"Hello", " World"},
+			wantLogAuthor: "test-agent",
+		},
+		{
+			name: "trailing partial from sub-agent completes without error",
+			requestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
+				func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "sub-agent"
+						ev.LLMResponse = model.LLMResponse{
+							Content: genai.NewContentFromText("I am a sub-agent", genai.RoleModel),
+							Partial: true,
+						}
+						yield(ev, nil)
+					}
+				},
+			},
+			wantTexts:     []string{"I am a sub-agent"},
+			wantLogAuthor: "sub-agent",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockAgent, err := agent.New(agent.Config{Name: "test-agent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+				StreamingMode: runconfig.StreamingModeSSE,
+			})
+
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Agent: mockAgent,
+			})
+
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.modelResponses {
+							if !yield(r, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+
+			f := &Flow{
+				Model:             m,
+				RequestProcessors: tc.requestProcessors,
+			}
+
+			var gotTexts []string
+			var gotErr error
+			// Bound the consumer so a regression fails the test instead of hanging it.
+			const safetyLimit = 50
+			eventsCount := 0
+
+			logOutput := captureLog(t, func() {
+				for ev, err := range f.Run(invCtx) {
+					if err != nil {
+						gotErr = err
+						break
+					}
+					eventsCount++
+					if eventsCount > safetyLimit {
+						t.Fatalf("Flow.Run() did not terminate: yielded >%d events", safetyLimit)
+					}
+					if ev != nil && ev.Content != nil {
+						for _, p := range ev.Content.Parts {
+							if p.Text != "" {
+								gotTexts = append(gotTexts, p.Text)
+							}
+						}
+					}
+				}
+			})
+
+			if gotErr != nil {
+				t.Errorf("Flow.Run() returned unexpected error: %v", gotErr)
+			}
+
+			if diff := cmp.Diff(tc.wantTexts, gotTexts); diff != "" {
+				t.Errorf("Flow.Run() text mismatch (-want +got):\n%s", diff)
+			}
+
+			wantLog := fmt.Sprintf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history\n",
+				invCtx.Agent().Name(), invCtx.InvocationID(), tc.wantLogAuthor)
+			if logOutput != wantLog {
+				t.Errorf("Flow.Run() log mismatch:\nwant: %q\ngot:  %q", wantLog, logOutput)
+			}
+		})
+	}
+}
+
+// captureLog redirects the output of the default [log.Logger] for the
+// duration of fn and returns everything that was written to it.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	origPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	// Reset flags/prefix so the captured output is deterministic and easy to
+	// assert against.
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+		log.SetPrefix(origPrefix)
+	})
+	fn()
+	return buf.String()
 }
