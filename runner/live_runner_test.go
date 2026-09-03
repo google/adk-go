@@ -15,9 +15,12 @@
 package runner
 
 import (
+	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -39,6 +42,128 @@ type dummyLiveSession struct{}
 
 func (d *dummyLiveSession) Send(req agent.LiveRequest) error { return nil }
 func (d *dummyLiveSession) Close() error                     { return nil }
+
+func TestRunner_RunLive_NilEventYieldedDoesNotDropFollowingEvent(t *testing.T) {
+	ctx := t.Context()
+	appName, userID, sessionID := "testApp", "testUser", "testSessionNilThenEvent"
+
+	sessionService := session.InMemoryService()
+	_, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
+	mockLive := &mockLiveAgent{
+		Agent: testAgent,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+				if !yield(nil, nil) {
+					return
+				}
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				yield(event, nil)
+			}, nil
+		},
+	}
+
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          mockLive,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	var events []*session.Event
+	for event, err := range iter {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event == nil {
+			t.Fatal("RunLive yielded a nil event")
+		}
+		events = append(events, event)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+}
+
+func TestRunner_RunLive_NilEventYieldedRespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	appName, userID, sessionID := "testApp", "testUser", "testSessionNilFlood"
+
+	sessionService := session.InMemoryService()
+	_, err := sessionService.Create(context.Background(), &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
+	mockLive := &mockLiveAgent{
+		Agent: testAgent,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+				for {
+					if !yield(nil, nil) {
+						return
+					}
+				}
+			}, nil
+		},
+	}
+
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          mockLive,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		var gotErr error
+		for _, err := range iter {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		done <- gotErr
+	}()
+
+	select {
+	case gotErr := <-done:
+		if !errors.Is(gotErr, context.Canceled) {
+			t.Fatalf("RunLive() error = %v, want context.Canceled", gotErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunLive() did not return after context cancellation")
+	}
+}
 
 func TestRunner_RunLive_Callbacks(t *testing.T) {
 	ctx := t.Context()

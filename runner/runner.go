@@ -719,6 +719,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+					return
+				}
 				continue
 			}
 
@@ -937,6 +941,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if event == nil {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+					return
+				}
 				continue
 			}
 

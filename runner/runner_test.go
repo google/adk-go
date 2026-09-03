@@ -17,10 +17,12 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -646,7 +648,11 @@ func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
 		Name: "nil_yielder",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				yield(nil, nil)
+				if !yield(nil, nil) {
+					return
+				}
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				yield(event, nil)
 			}
 		},
 	})
@@ -676,7 +682,67 @@ func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
 		}
 		count++
 	}
-	if count != 0 {
-		t.Errorf("expected 0 events, got %d", count)
+	if count != 1 {
+		t.Errorf("expected 1 event, got %d", count)
+	}
+}
+
+func TestRunner_NilEventYieldedRespectsContextCancellation(t *testing.T) {
+	nilAgent, err := agent.New(agent.Config{
+		Name: "nil_flood",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for {
+					if !yield(nil, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sessionService := session.InMemoryService()
+	_, err = sessionService.Create(context.Background(), &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user1",
+		SessionID: "session1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:        "test_app",
+		Agent:          nilAgent,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		var gotErr error
+		for _, err := range r.Run(ctx, "user1", "session1", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		done <- gotErr
+	}()
+
+	select {
+	case gotErr := <-done:
+		if !errors.Is(gotErr, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", gotErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not return after context cancellation")
 	}
 }
