@@ -149,7 +149,7 @@ func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	if !errors.Is(err, ErrResponseFailed) {
 		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
 	}
-	if want := "openai: response failed (resp_123, server_error): the model failed to generate a response"; err.Error() != want {
+	if want := `openai: response failed (id "resp_123", code "server_error"): the model failed to generate a response`; err.Error() != want {
 		t.Errorf("process() err = %q, want %q", err, want)
 	}
 }

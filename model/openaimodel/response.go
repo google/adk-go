@@ -63,19 +63,25 @@ func reportsFailure(resp *responses.Response) bool {
 }
 
 // failedResponseError renders a failure as an error quoting the server: the
-// message as the text, the response ID and error code as a parenthetical. The
-// ID is there because the response is discarded with the failure, so nothing
-// else is left to quote back to the provider.
+// message as the text, the response ID and error code as a labelled
+// parenthetical. The ID is there because the response is discarded with the
+// failure, so nothing else is left to quote back to the provider.
+//
+// The ID and code are labelled and quoted because they are server-chosen: bare,
+// an ID containing ", code " renders exactly as an ID and a code would, and
+// quoting is what makes the field boundary the server's to state rather than to
+// forge. Neither is elided when the message appears to repeat it — saying a code
+// twice is cosmetic, dropping the one the caller needs is not.
 func failedResponseError(resp *responses.Response) error {
-	// Trimmed, so a message of nothing but spaces leaves no dangling separator.
+	// Trimmed, so a value of nothing but spaces contributes nothing rather than
+	// a label or separator with nothing after it.
 	msg := strings.TrimSpace(resp.Error.Message)
 	var details []string
 	if id := strings.TrimSpace(resp.ID); id != "" {
-		details = append(details, id)
+		details = append(details, fmt.Sprintf("id %q", id))
 	}
-	// A code the message already spells out is not worth repeating.
-	if code := strings.TrimSpace(string(resp.Error.Code)); code != "" && !strings.Contains(msg, code) {
-		details = append(details, code)
+	if code := strings.TrimSpace(string(resp.Error.Code)); code != "" {
+		details = append(details, fmt.Sprintf("code %q", code))
 	}
 	switch joined := strings.Join(details, ", "); {
 	case joined != "" && msg != "":

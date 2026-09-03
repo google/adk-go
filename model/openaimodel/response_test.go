@@ -109,7 +109,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "the model failed to generate a response",
 				},
 			},
-			wantErr: "openai: response failed (resp_123, server_error): the model failed to generate a response",
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): the model failed to generate a response`,
 		},
 		{
 			name: "partial output",
@@ -122,7 +122,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "the model failed to generate a response",
 				},
 			},
-			wantErr: "openai: response failed (resp_123, server_error): the model failed to generate a response",
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): the model failed to generate a response`,
 		},
 		{
 			name: "message only",
@@ -138,14 +138,14 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 				Status: responses.ResponseStatusFailed,
 				Error:  responses.ResponseError{Code: "rate_limit_exceeded"},
 			},
-			wantErr: "openai: response failed (rate_limit_exceeded)",
+			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
 		},
 		{
 			name: "id only",
 			// Nothing but the status and the ID, still the handle to quote back
 			// to the provider.
 			resp:    &responses.Response{ID: "resp_123", Status: responses.ResponseStatusFailed},
-			wantErr: "openai: response failed (resp_123)",
+			wantErr: `openai: response failed (id "resp_123")`,
 		},
 		{
 			name: "no error object",
@@ -160,12 +160,13 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 				Status: responses.ResponseStatusFailed,
 				Error:  responses.ResponseError{Code: "server_error", Message: "  \n "},
 			},
-			wantErr: "openai: response failed (server_error)",
+			wantErr: `openai: response failed (code "server_error")`,
 		},
 		{
 			name: "message already names the code",
-			// A provider that prefixes the code onto the message would otherwise
-			// have it reported twice.
+			// Reported twice rather than elided: dropping a code because the
+			// message appears to contain it loses it whenever the message
+			// merely embeds it in a longer token.
 			resp: &responses.Response{
 				Status: responses.ResponseStatusFailed,
 				Error: responses.ResponseError{
@@ -173,7 +174,79 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "server_error: upstream exploded",
 				},
 			},
-			wantErr: "openai: response failed: server_error: upstream exploded",
+			wantErr: `openai: response failed (code "server_error"): server_error: upstream exploded`,
+		},
+		{
+			name: "code embedded in a longer token in the message",
+			// The case an unanchored substring test would silently drop.
+			resp: &responses.Response{
+				ID:     "resp_1",
+				Status: responses.ResponseStatusFailed,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "Downstream returned server_error_5xx; retry later.",
+				},
+			},
+			wantErr: `openai: response failed (id "resp_1", code "server_error"): Downstream returned server_error_5xx; retry later.`,
+		},
+		{
+			name: "message already names the id",
+			// Same rule for the ID, which had no de-duplication of its own.
+			resp: &responses.Response{
+				ID:     "resp_123",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Message: "resp_123 could not be completed"},
+			},
+			wantErr: `openai: response failed (id "resp_123"): resp_123 could not be completed`,
+		},
+		{
+			name: "id forging a second field",
+			// The whole reason the values are quoted: bare, this renders
+			// identically to an id of "resp_123" beside a code of
+			// "invalid_prompt".
+			resp: &responses.Response{
+				ID:     "resp_123, code invalid_prompt",
+				Status: responses.ResponseStatusFailed,
+			},
+			wantErr: `openai: response failed (id "resp_123, code invalid_prompt")`,
+		},
+		{
+			name: "id and code that merely have padding",
+			// Distinct from the whitespace-only row below: these trim to
+			// something, so a one-sided trim would leave the padding in.
+			resp: &responses.Response{
+				ID:     "  resp_123  ",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: "\tserver_error "},
+			},
+			wantErr: `openai: response failed (id "resp_123", code "server_error")`,
+		},
+		{
+			name: "blank id and code",
+			// Both trims, which nothing else exercises: whitespace-only values
+			// must contribute no label at all.
+			resp: &responses.Response{
+				ID:     "  ",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: " \t ", Message: "upstream exploded"},
+			},
+			wantErr: "openai: response failed: upstream exploded",
+		},
+		{
+			// The two halves of the absent-status rule, one at a time. With
+			// both set, flipping its || to && would go unnoticed.
+			name: "no status, message only",
+			resp: &responses.Response{
+				Error: responses.ResponseError{Message: "upstream exploded"},
+			},
+			wantErr: "openai: response failed: upstream exploded",
+		},
+		{
+			name: "no status, code only",
+			resp: &responses.Response{
+				Error: responses.ResponseError{Code: "rate_limit_exceeded"},
+			},
+			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
 		},
 	}
 	for _, tc := range tests {
@@ -194,8 +267,9 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 
 // TestConvertResponse_StatusOtherThanFailed pins how narrow the failure check
 // is: "failed" alone costs the caller its output, while a truncation, a
-// cancellation and an unknown status still convert. Widening the check — easy,
-// since every other status is also "not completed" — breaks this.
+// cancellation, a queued or in-progress body and an unknown status all still
+// convert. Widening the check to any of them — easy, since every other status
+// is also "not completed" — breaks a row here.
 func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -218,6 +292,8 @@ func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
 		},
 		{name: "incomplete with no reason", status: responses.ResponseStatusIncomplete, want: genai.FinishReasonOther},
 		{name: "cancelled", status: responses.ResponseStatusCancelled, want: genai.FinishReasonOther},
+		{name: "queued", status: responses.ResponseStatusQueued, want: genai.FinishReasonOther},
+		{name: "in progress", status: responses.ResponseStatusInProgress, want: genai.FinishReasonOther},
 		{name: "unknown to this SDK", status: "moderated", want: genai.FinishReasonOther},
 		{name: "absent", status: "", want: genai.FinishReasonStop},
 	}
