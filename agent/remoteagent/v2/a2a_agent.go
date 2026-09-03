@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -317,6 +318,9 @@ type A2AConfig struct {
 	// If Run exited due to an error including context cancellation it will be passed as cause.
 	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
 	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	// During streaming, if Run is canceled before task information arrives, it may wait up to the same
+	// 5 second cleanup budget. The caller's deadline remains an upper bound for this wait and the default
+	// cancel RPC.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
@@ -365,41 +369,87 @@ type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
 }
 
-const remoteTaskIDWaitTimeout = 5 * time.Second
+// remoteTaskCleanupTimeout bounds the total time spent after invocation
+// cancellation waiting for task information and making the default cancel RPC.
+const remoteTaskCleanupTimeout = 5 * time.Second
+
+// remoteTaskCleanupBudget detaches cancellation from the invocation while
+// preserving its deadline. The timeout starts lazily so normal long-running
+// streams are not bounded by the cleanup timeout.
+type remoteTaskCleanupBudget struct {
+	base       context.Context
+	cancelBase context.CancelFunc
+	timeout    time.Duration
+	startOnce  sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+func newRemoteTaskCleanupBudget(parent context.Context, timeout time.Duration) *remoteTaskCleanupBudget {
+	base := context.WithoutCancel(parent)
+	var cancelBase context.CancelFunc
+	if deadline, ok := parent.Deadline(); ok {
+		base, cancelBase = context.WithDeadline(base, deadline)
+	} else {
+		base, cancelBase = context.WithCancel(base)
+	}
+	return &remoteTaskCleanupBudget{
+		base:       base,
+		cancelBase: cancelBase,
+		timeout:    timeout,
+	}
+}
+
+func (b *remoteTaskCleanupBudget) start() context.Context {
+	b.startOnce.Do(func() {
+		b.ctx, b.cancel = context.WithTimeout(b.base, b.timeout)
+	})
+	return b.ctx
+}
+
+func (b *remoteTaskCleanupBudget) close() {
+	b.start()
+	b.cancel()
+	b.cancelBase()
+}
 
 // remoteTaskStreamContext keeps the remote stream alive briefly after the
 // invocation is canceled so cleanup can learn the remote task ID. It still
 // bounds that wait and cancels immediately once the ID is available.
 type remoteTaskStreamContext struct {
 	context.Context
-	cancel         context.CancelFunc
-	taskIDReceived chan struct{}
-	stopParentWait func() bool
+	cancel           context.CancelFunc
+	cleanupBudget    *remoteTaskCleanupBudget
+	waitComplete     chan struct{}
+	waitCompleteOnce sync.Once
+	stopParentWait   func() bool
 }
 
 func newRemoteTaskStreamContext(parent context.Context, timeout time.Duration) *remoteTaskStreamContext {
-	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	cleanupBudget := newRemoteTaskCleanupBudget(parent, timeout)
+	ctx, cancel := context.WithCancel(cleanupBudget.base)
 	streamCtx := &remoteTaskStreamContext{
-		Context:        ctx,
-		cancel:         cancel,
-		taskIDReceived: make(chan struct{}),
+		Context:       ctx,
+		cancel:        cancel,
+		cleanupBudget: cleanupBudget,
+		waitComplete:  make(chan struct{}),
 	}
 	streamCtx.stopParentWait = context.AfterFunc(parent, func() {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
+		cleanupCtx := cleanupBudget.start()
 		select {
-		case <-streamCtx.taskIDReceived:
-			streamCtx.cancel()
-		case <-timer.C:
-			streamCtx.cancel()
+		case <-streamCtx.waitComplete:
+		case <-cleanupCtx.Done():
 		case <-streamCtx.Done():
 		}
+		streamCtx.cancel()
 	})
 	return streamCtx
 }
 
-func (c *remoteTaskStreamContext) markTaskIDReceived() {
-	close(c.taskIDReceived)
+func (c *remoteTaskStreamContext) stopWaiting() {
+	c.waitCompleteOnce.Do(func() {
+		close(c.waitComplete)
+	})
 }
 
 func (c *remoteTaskStreamContext) close() {
@@ -456,20 +506,33 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return yield(nil, err)
 		}
 
-		var lastEvent a2a.Event
+		var (
+			lastCleanupTarget *remoteTaskCleanupTarget
+			streamCtx         *remoteTaskStreamContext
+		)
+		rememberCleanupTarget := func(event a2a.Event) bool {
+			target, ok := remoteTaskCleanupTargetFromEvent(event)
+			if !ok {
+				return false
+			}
+			lastCleanupTarget = &target
+			return true
+		}
 		defer func() {
+			var cleanupCtx context.Context
+			if streamCtx != nil {
+				streamCtx.close()
+				defer streamCtx.cleanupBudget.close()
+				cleanupCtx = streamCtx.cleanupBudget.start()
+			}
 			err := lastErr
 			if err == nil && ctx.Err() != nil {
 				err = context.Cause(ctx)
 			}
-			cleanupRemoteTask(ctx, cfg, card, sender, lastEvent, err)
+			cleanupRemoteTask(ctx, cleanupCtx, cfg, card, sender, lastCleanupTarget, err)
 		}()
 
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
-			if a2aEvent != nil {
-				lastEvent = a2aEvent
-			}
-
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
@@ -525,6 +588,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
 			a2aEvent, a2aErr := sender.SendMessage(ctx, req)
+			rememberCleanupTarget(a2aEvent)
 			processEvent(a2aEvent, a2aErr)
 			return
 		}
@@ -533,19 +597,25 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		streamCtx := newRemoteTaskStreamContext(ctx, remoteTaskIDWaitTimeout)
-		defer streamCtx.close()
-		taskIDReceived := false
+		streamCtx = newRemoteTaskStreamContext(ctx, remoteTaskCleanupTimeout)
+		cleanupTargetKnown := false
+		directResponseReceived := false
 		for a2aEvent, a2aErr := range sender.SendStreamingMessage(streamCtx, req) {
 			if a2aEvent != nil {
-				lastEvent = a2aEvent
-				if !taskIDReceived && a2aEvent.TaskInfo().TaskID != "" {
-					taskIDReceived = true
-					streamCtx.markTaskIDReceived()
+				if rememberCleanupTarget(a2aEvent) {
+					if !cleanupTargetKnown {
+						cleanupTargetKnown = true
+						streamCtx.stopWaiting()
+					}
+				}
+				if msg, ok := a2aEvent.(*a2a.Message); ok && msg != nil && msg.TaskID == "" {
+					directResponseReceived = true
+					streamCtx.stopWaiting()
 				}
 			}
 			if ctx.Err() != nil {
-				if taskIDReceived {
+				streamCtx.cleanupBudget.start()
+				if cleanupTargetKnown || directResponseReceived || a2aErr != nil {
 					return
 				}
 				continue
@@ -557,43 +627,69 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 	}
 }
 
-func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client A2AClient, lastEvent a2a.Event, cause error) {
-	if lastEvent == nil {
-		return
+type remoteTaskCleanupTarget struct {
+	taskInfo a2a.TaskInfo
+	state    a2a.TaskState
+}
+
+func remoteTaskCleanupTargetFromEvent(event a2a.Event) (remoteTaskCleanupTarget, bool) {
+	var target remoteTaskCleanupTarget
+	switch event := event.(type) {
+	case *a2a.Task:
+		if event == nil {
+			return target, false
+		}
+		target.taskInfo = event.TaskInfo()
+		target.state = event.Status.State
+	case *a2a.TaskStatusUpdateEvent:
+		if event == nil {
+			return target, false
+		}
+		target.taskInfo = event.TaskInfo()
+		target.state = event.Status.State
+	default:
+		return target, false
 	}
-	taskID := lastEvent.TaskInfo().TaskID
-	if taskID == "" {
-		return
+	if target.taskInfo.TaskID == "" {
+		return remoteTaskCleanupTarget{}, false
 	}
-	if _, ok := lastEvent.(*a2a.Message); ok {
-		return
-	}
-	var state a2a.TaskState
-	if tu, ok := lastEvent.(*a2a.TaskStatusUpdateEvent); ok {
-		state = tu.Status.State
-	}
-	if t, ok := lastEvent.(*a2a.Task); ok {
-		state = t.Status.State
-	}
-	if state.Terminal() {
+	return target, true
+}
+
+func cleanupRemoteTask(
+	ctx context.Context,
+	cleanupCtx context.Context,
+	cfg A2AConfig,
+	card *a2a.AgentCard,
+	client A2AClient,
+	target *remoteTaskCleanupTarget,
+	cause error,
+) {
+	if target == nil || target.state.Terminal() {
 		return
 	}
 
 	ctx = context.WithoutCancel(ctx)
 
 	if cfg.RemoteTaskCleanupCallback != nil {
-		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
+		cfg.RemoteTaskCleanupCallback(ctx, card, client, target.taskInfo, cause)
 		return
 	}
 
-	if state == a2a.TaskStateInputRequired && cause == nil {
+	if target.state == a2a.TaskStateInputRequired && cause == nil {
 		return
 	}
-	cancelCtx, cancelTimeout := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelTimeout()
-	_, err := client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: taskID})
+	if cleanupCtx == nil {
+		var cancelTimeout context.CancelFunc
+		cleanupCtx, cancelTimeout = context.WithTimeout(ctx, remoteTaskCleanupTimeout)
+		defer cancelTimeout()
+	}
+	if cleanupCtx.Err() != nil {
+		return
+	}
+	_, err := client.CancelTask(cleanupCtx, &a2a.CancelTaskRequest{ID: target.taskInfo.TaskID})
 	if err != nil {
-		log.Warn(ctx, "failed to cancel task", "task_id", taskID, "error", err)
+		log.Warn(ctx, "failed to cancel task", "task_id", target.taskInfo.TaskID, "error", err)
 	}
 }
 
