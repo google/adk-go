@@ -459,6 +459,20 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 			if event != nil { // an event might be skipped
 				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+					// aggregatePartial may synthesize a brand-new non-partial
+					// event from buffered partial chunks (the reassembled
+					// artifact). That event has not passed through the
+					// after-callbacks, so run them here. The pass-through `event`
+					// already ran callbacks above; skip it (same pointer) to
+					// avoid invoking callbacks on it twice.
+					if toEmit != event {
+						if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, toEmit, nil); cbResp != nil || cbErr != nil {
+							if cbErr != nil {
+								return yieldErr(cbErr)
+							}
+							toEmit = cbResp
+						}
+					}
 					if !yield(toEmit, nil) {
 						return false
 					}
