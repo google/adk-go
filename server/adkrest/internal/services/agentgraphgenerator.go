@@ -35,6 +35,39 @@ const (
 	Background = "\"#333537\""
 )
 
+// Colors for the light theme. The web UI preloads a light and a dark rendering
+// of the agent graph and picks one by the page theme, so a graph drawn only in
+// dark colors is unreadable for half the users.
+const (
+	DarkGray        = "\"#3c4043\""
+	MidGray         = "\"#5f6368\""
+	LightBackground = "\"#ffffff\""
+)
+
+// Theme is the palette an agent graph is drawn with.
+type Theme struct {
+	// Background is the graph canvas color.
+	Background string
+	// Foreground draws node labels, node borders and unhighlighted edges.
+	Foreground string
+	// ClusterBorder outlines a workflow-agent cluster.
+	ClusterBorder string
+}
+
+// DarkTheme is the palette ADK has always drawn with.
+var DarkTheme = Theme{Background: Background, Foreground: LightGray, ClusterBorder: White}
+
+// LightTheme is the palette for a light-mode page.
+var LightTheme = Theme{Background: LightBackground, Foreground: DarkGray, ClusterBorder: MidGray}
+
+// ThemeFor maps the web UI's dark_mode query parameter to a palette.
+func ThemeFor(darkMode bool) Theme {
+	if darkMode {
+		return DarkTheme
+	}
+	return LightTheme
+}
+
 var supportedClusterAgents = []agentinternal.Type{
 	agentinternal.TypeLoopAgent,
 	agentinternal.TypeSequentialAgent,
@@ -138,13 +171,13 @@ func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	agentInternal, ok := agent.(agentinternal.Agent)
 	if !ok {
 		return nil
 	}
 	for i, subAgent := range agent.SubAgents() {
-		err := buildGraph(cluster, parentGraph, subAgent, highlightedPairs, visitedNodes)
+		err := buildGraph(cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
@@ -152,7 +185,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 		// Sequential sub-agents should be connected one after another with edges.
 		case agentinternal.TypeSequentialAgent:
 			if i < len(agent.SubAgents())-1 {
-				err = drawEdge(parentGraph, nodeName(subAgent), nodeName(agent.SubAgents()[i+1]), highlightedPairs)
+				err = drawEdge(parentGraph, nodeName(subAgent), nodeName(agent.SubAgents()[i+1]), highlightedPairs, theme)
 				if err != nil {
 					return fmt.Errorf("draw cluster: draw edge: %w", err)
 				}
@@ -163,7 +196,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 			if nextAgentIdx >= len(agent.SubAgents()) {
 				nextAgentIdx = 0
 			}
-			err = drawEdge(parentGraph, nodeName(subAgent), nodeName(agent.SubAgents()[nextAgentIdx]), highlightedPairs)
+			err = drawEdge(parentGraph, nodeName(subAgent), nodeName(agent.SubAgents()[nextAgentIdx]), highlightedPairs, theme)
 			if err != nil {
 				return fmt.Errorf("draw cluster: draw edge: %w", err)
 			}
@@ -173,7 +206,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	return nil
 }
 
-func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
@@ -193,33 +226,33 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 		}
 		err = graph.AddSubGraph(graph.Name, cluster.Name, map[string]string{
 			"style":     "rounded",
-			"color":     White,
+			"color":     theme.ClusterBorder,
 			"label":     caption,
-			"fontcolor": LightGray,
+			"fontcolor": theme.Foreground,
 		})
 		if err != nil {
 			return fmt.Errorf("add cluster: %w", err)
 		}
-		return drawCluster(graph, cluster, agent, highlightedPairs, visitedNodes)
+		return drawCluster(graph, cluster, agent, highlightedPairs, visitedNodes, theme)
 	} else {
 		nodeAttributes := map[string]string{
 			"label":     caption,
 			"shape":     shape,
-			"fontcolor": LightGray,
+			"fontcolor": theme.Foreground,
 		}
 
 		if highlighted {
 			nodeAttributes["color"] = DarkGreen
 			nodeAttributes["style"] = "filled"
 		} else {
-			nodeAttributes["color"] = LightGray
+			nodeAttributes["color"] = theme.Foreground
 			nodeAttributes["style"] = "rounded"
 		}
 		return parentGraph.AddNode(graph.Name, name, nodeAttributes)
 	}
 }
 
-func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]string) error {
+func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]string, theme Theme) error {
 	edgeHighlighted := edgeHighlighted(from, to, highlightedPairs)
 	edgeAttributes := map[string]string{}
 	if edgeHighlighted != nil {
@@ -231,13 +264,13 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 			edgeAttributes["arrowhead"] = "normal"
 		}
 	} else {
-		edgeAttributes["color"] = LightGray
+		edgeAttributes["color"] = theme.Foreground
 		edgeAttributes["arrowhead"] = "none"
 	}
 	return graph.AddEdge(from, to, true, edgeAttributes)
 }
 
-func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil
@@ -246,7 +279,7 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 		return nil
 	}
 
-	err := drawNode(graph, parentGraph, instance, highlightedPairs, visitedNodes)
+	err := drawNode(graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return fmt.Errorf("draw node: %w", err)
 	}
@@ -258,18 +291,18 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 	if ok {
 		tools := llmagentinternal.Reveal(llmAgent).Tools
 		for _, tool := range tools {
-			err = drawNode(graph, parentGraph, tool, highlightedPairs, visitedNodes)
+			err = drawNode(graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool node: %w", err)
 			}
-			err = drawEdge(graph, nodeName(agent), nodeName(tool), highlightedPairs)
+			err = drawEdge(graph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool edge: %w", err)
 			}
 		}
 	}
 	for _, subAgent := range agent.SubAgents() {
-		err = buildGraph(graph, parentGraph, subAgent, highlightedPairs, visitedNodes)
+		err = buildGraph(graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("build sub agent graph: %w", err)
 		}
@@ -277,7 +310,15 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 	return nil
 }
 
+// GetAgentGraph renders the agent tree as Graphviz DOT source in the dark
+// theme. It is kept for callers that do not care about the palette.
 func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]string) (string, error) {
+	return GetAgentGraphWithTheme(ctx, agent, highlightedPairs, DarkTheme)
+}
+
+// GetAgentGraphWithTheme renders the agent tree as Graphviz DOT source using
+// the given palette.
+func GetAgentGraphWithTheme(ctx context.Context, agent agent.Agent, highlightedPairs [][]string, theme Theme) (string, error) {
 	graph := gographviz.NewGraph()
 	if err := graph.SetName("AgentGraph"); err != nil {
 		return "", fmt.Errorf("set graph name: %w", err)
@@ -288,11 +329,11 @@ func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]
 	if err := graph.AddAttr(graph.Name, "rankdir", "LR"); err != nil {
 		return "", fmt.Errorf("set graph rank direction: %w", err)
 	}
-	if err := graph.AddAttr(graph.Name, "bgcolor", Background); err != nil {
+	if err := graph.AddAttr(graph.Name, "bgcolor", theme.Background); err != nil {
 		return "", fmt.Errorf("set graph background color: %w", err)
 	}
 	visitedNodes := map[string]bool{}
-	err := buildGraph(graph, graph, agent, highlightedPairs, visitedNodes)
+	err := buildGraph(graph, graph, agent, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return "", fmt.Errorf("build root graph: %w", err)
 	}
