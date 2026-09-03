@@ -47,8 +47,11 @@
 // what it does take. That is deliberate: quietly substituting a neighboring
 // effort would bill the caller for thinking they asked not to do.
 // IncludeThoughts asks for reasoning summaries, which arrive as parts with
-// Thought set; it is off by default because summaries require a verified
-// OpenAI organization.
+// Thought set. It is off by default because summaries require a verified
+// OpenAI organization, and that is enforced per model rather than per account:
+// the same key that gets summaries from gpt-5.4-nano is refused by o4-mini. So
+// asking for one unprompted would break reasoning on the older models for
+// callers who never wanted summaries at all.
 //
 // Two of those differ from adk-python's OpenAI Responses support, which sends
 // a summary unconditionally and maps a zero budget to minimal. Both were
