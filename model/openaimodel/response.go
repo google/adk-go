@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"unicode"
 
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
@@ -52,41 +51,25 @@ const maxServerTextRunes = 256
 
 // clipServerText trims a server-chosen string and caps its length, so that a
 // pathological one — a megabyte of message — cannot become the error a caller
-// logs. Truncation is marked, so a clipped value is never mistaken for what the
-// server actually said.
+// logs. Truncation is marked, so a clipped value does not read as the whole of
+// what the server said.
+//
+// Callers render the result with %q. That, rather than an escaper of our own,
+// is what stops a control character in it from forging a line in an operator's
+// log; see the same reasoning at [google.golang.org/adk/v2/auth/gcp].
 func clipServerText(s string) string {
 	s = strings.TrimSpace(s)
-	if r := []rune(s); len(r) > maxServerTextRunes {
-		s = strings.TrimSpace(string(r[:maxServerTextRunes])) + "…"
+	// Counted by ranging rather than by materialising []rune: an 8 MiB message
+	// would otherwise cost 32 MiB to yield at most a kilobyte. Ranging a string
+	// yields the byte index of each rune, so s[:i] never splits one.
+	n := 0
+	for i := range s {
+		if n == maxServerTextRunes {
+			return strings.TrimSpace(s[:i]) + "…"
+		}
+		n++
 	}
 	return s
-}
-
-// escapeControl renders the control characters in a server-chosen string
-// visibly, so an interior newline cannot forge a second line in a log. Quotes
-// and ordinary punctuation are left alone: this is for values interpolated
-// bare, where %q is not already doing the escaping.
-func escapeControl(s string) string {
-	if strings.IndexFunc(s, unicode.IsControl) < 0 {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n':
-			b.WriteString(`\n`)
-		case r == '\r':
-			b.WriteString(`\r`)
-		case r == '\t':
-			b.WriteString(`\t`)
-		case unicode.IsControl(r):
-			fmt.Fprintf(&b, `\x%02x`, r)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // reportsFailure reports whether the server is describing a failure rather than
@@ -99,7 +82,10 @@ func reportsFailure(resp *responses.Response) bool {
 	case responses.ResponseStatusFailed:
 		return true
 	case "":
-		return resp.Error.Message != "" || resp.Error.Code != ""
+		// Clipped, not raw: the renderer reports what clipping leaves, so a
+		// predicate reading the raw value would send a body whose error is
+		// nothing but whitespace down the failure path and then name nothing.
+		return clipServerText(resp.Error.Message) != "" || clipServerText(string(resp.Error.Code)) != ""
 	default:
 		return false
 	}
@@ -117,9 +103,8 @@ func reportsFailure(resp *responses.Response) bool {
 // twice is cosmetic, dropping the one the caller needs is not.
 func failedResponseError(resp *responses.Response) error {
 	// Clipped, so a value of nothing but spaces contributes nothing rather than
-	// a label or separator with nothing after it. %q escapes what it quotes, so
-	// only the message needs escaping of its own.
-	msg := escapeControl(clipServerText(resp.Error.Message))
+	// a label or separator with nothing after it.
+	msg := clipServerText(resp.Error.Message)
 	var details []string
 	if id := clipServerText(resp.ID); id != "" {
 		details = append(details, fmt.Sprintf("id %q", id))
@@ -129,11 +114,11 @@ func failedResponseError(resp *responses.Response) error {
 	}
 	switch joined := strings.Join(details, ", "); {
 	case joined != "" && msg != "":
-		return fmt.Errorf("%w (%s): %s", ErrResponseFailed, joined, msg)
+		return fmt.Errorf("%w (%s): %q", ErrResponseFailed, joined, msg)
 	case joined != "":
 		return fmt.Errorf("%w (%s)", ErrResponseFailed, joined)
 	case msg != "":
-		return fmt.Errorf("%w: %s", ErrResponseFailed, msg)
+		return fmt.Errorf("%w: %q", ErrResponseFailed, msg)
 	default:
 		// The server said "failed" and nothing more.
 		return ErrResponseFailed

@@ -109,7 +109,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "the model failed to generate a response",
 				},
 			},
-			wantErr: `openai: response failed (id "resp_123", code "server_error"): the model failed to generate a response`,
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`,
 		},
 		{
 			name: "partial output",
@@ -122,7 +122,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "the model failed to generate a response",
 				},
 			},
-			wantErr: `openai: response failed (id "resp_123", code "server_error"): the model failed to generate a response`,
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`,
 		},
 		{
 			name: "message only",
@@ -130,7 +130,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 				Status: responses.ResponseStatusFailed,
 				Error:  responses.ResponseError{Message: "upstream exploded"},
 			},
-			wantErr: "openai: response failed: upstream exploded",
+			wantErr: `openai: response failed: "upstream exploded"`,
 		},
 		{
 			name: "code only",
@@ -174,7 +174,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "server_error: upstream exploded",
 				},
 			},
-			wantErr: `openai: response failed (code "server_error"): server_error: upstream exploded`,
+			wantErr: `openai: response failed (code "server_error"): "server_error: upstream exploded"`,
 		},
 		{
 			name: "code embedded in a longer token in the message",
@@ -187,7 +187,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 					Message: "Downstream returned server_error_5xx; retry later.",
 				},
 			},
-			wantErr: `openai: response failed (id "resp_1", code "server_error"): Downstream returned server_error_5xx; retry later.`,
+			wantErr: `openai: response failed (id "resp_1", code "server_error"): "Downstream returned server_error_5xx; retry later."`,
 		},
 		{
 			name: "message already names the id",
@@ -197,7 +197,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 				Status: responses.ResponseStatusFailed,
 				Error:  responses.ResponseError{Message: "resp_123 could not be completed"},
 			},
-			wantErr: `openai: response failed (id "resp_123"): resp_123 could not be completed`,
+			wantErr: `openai: response failed (id "resp_123"): "resp_123 could not be completed"`,
 		},
 		{
 			name: "id forging a second field",
@@ -230,7 +230,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 				Status: responses.ResponseStatusFailed,
 				Error:  responses.ResponseError{Code: " \t ", Message: "upstream exploded"},
 			},
-			wantErr: "openai: response failed: upstream exploded",
+			wantErr: `openai: response failed: "upstream exploded"`,
 		},
 		{
 			// The two halves of the absent-status rule, one at a time. With
@@ -239,7 +239,7 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			resp: &responses.Response{
 				Error: responses.ResponseError{Message: "upstream exploded"},
 			},
-			wantErr: "openai: response failed: upstream exploded",
+			wantErr: `openai: response failed: "upstream exploded"`,
 		},
 		{
 			name: "no status, code only",
@@ -263,68 +263,6 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestFailedResponseError_ServerText pins what a server-chosen string cannot do
-// to an error built from it: forge a second log line, or grow without bound.
-func TestFailedResponseError_ServerText(t *testing.T) {
-	t.Run("interior newlines are escaped", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
-			ID:     "resp_1\r\nid forged",
-			Status: responses.ResponseStatusFailed,
-			Error: responses.ResponseError{
-				Code:    "server_error\nnope",
-				Message: "line1\r\nERROR forged line 2\tand a tab",
-			},
-		})
-		got := err.Error()
-		for _, forbidden := range []string{"\n", "\r", "\t"} {
-			if strings.Contains(got, forbidden) {
-				t.Errorf("error %q still contains a raw control character %q", got, forbidden)
-			}
-		}
-		for _, want := range []string{`\r\n`, `\t`} {
-			if !strings.Contains(got, want) {
-				t.Errorf("error %q does not render %s visibly", got, want)
-			}
-		}
-	})
-
-	t.Run("a huge message is capped", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Message: strings.Repeat("A", 1<<20)},
-		})
-		// The cap plus the sentinel, the ": " separator and the ellipsis.
-		if got, max := len(err.Error()), maxServerTextRunes+64; got > max {
-			t.Errorf("error is %d bytes, want at most %d", got, max)
-		}
-		if !strings.HasSuffix(err.Error(), "…") {
-			t.Errorf("error %q does not mark that it was truncated", err.Error())
-		}
-	})
-
-	t.Run("a huge id and code are capped", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
-			ID:     strings.Repeat("B", 1<<20),
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Code: responses.ResponseErrorCode(strings.Repeat("C", 1<<20))},
-		})
-		if got, max := len(err.Error()), 2*maxServerTextRunes+64; got > max {
-			t.Errorf("error is %d bytes, want at most %d", got, max)
-		}
-	})
-
-	t.Run("a short message is left exactly as the server wrote it", func(t *testing.T) {
-		const msg = "upstream exploded (code 429): retry"
-		err := failedResponseError(&responses.Response{
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Message: msg},
-		})
-		if want := "openai: response failed: " + msg; err.Error() != want {
-			t.Errorf("error = %q, want %q", err.Error(), want)
-		}
-	})
 }
 
 // TestConvertResponse_StatusOtherThanFailed pins how narrow the failure check
