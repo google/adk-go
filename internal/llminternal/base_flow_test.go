@@ -15,7 +15,9 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -681,5 +683,45 @@ func TestPreprocess_Toolset(t *testing.T) {
 				t.Errorf("preprocess() model = %s, wantModel %s", req.Model, tc.wantModel)
 			}
 		})
+	}
+}
+
+// recordStreamModel is a minimal model.LLM that records the streaming flag it
+// receives, so tests can assert how the flow derived it from the run config.
+type recordStreamModel struct {
+	stream bool
+}
+
+func (m *recordStreamModel) Name() string { return "test-model" }
+
+func (m *recordStreamModel) GenerateContent(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	m.stream = stream
+	return func(func(*model.LLMResponse, error) bool) {}
+}
+
+// TestCallLLMStreamingModeWithoutContextRunConfig guards against the nil pointer
+// dereference in callLLM when the run config is not present in the Go context
+// (issue #586). agent.Run() can be invoked directly, bypassing the runner, so
+// runconfig.FromContext returns nil; the streaming mode must instead be read
+// from the invocation context's RunConfig().
+func TestCallLLMStreamingModeWithoutContextRunConfig(t *testing.T) {
+	m := &recordStreamModel{}
+	f := &Flow{Model: m}
+
+	// No runconfig is stored in the Go context (as when the runner is bypassed),
+	// but the invocation context carries an SSE RunConfig.
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+
+	req := &model.LLMRequest{}
+	for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+		if err != nil {
+			t.Fatalf("callLLM() error = %v, want nil", err)
+		}
+	}
+
+	if !m.stream {
+		t.Errorf("GenerateContent received stream=%v, want true for SSE streaming mode", m.stream)
 	}
 }
