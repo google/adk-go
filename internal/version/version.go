@@ -14,5 +14,8 @@
 
 package version
 
-// Version exposes the current ADK Go version, used for llm request tagging
-const Version = "2.3.0"
+// Version exposes the current ADK Go version, used for llm request tagging.
+//
+// The trailing annotation marks this line for Release Please, which rewrites
+// the value in the release PR. Do not edit it by hand.
+const Version = "2.3.0" // x-release-please-version
