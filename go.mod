@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.126.0
-	cloud.google.com/go/storage v1.64.0
+	cloud.google.com/go/storage v1.65.0
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.11.0
@@ -16,7 +16,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/openai/openai-go/v3 v3.51.0
+	github.com/openai/openai-go/v3 v3.54.0
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/contrib/detectors/gcp v1.45.0
 	go.opentelemetry.io/otel v1.45.0
@@ -28,8 +28,8 @@ require (
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
 	google.golang.org/api v0.293.0
-	google.golang.org/genai v1.68.0
-	google.golang.org/grpc v1.83.0
+	google.golang.org/genai v1.69.0
+	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.31.2
@@ -45,7 +45,7 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 )
 
-require github.com/a2aproject/a2a-go/v2 v2.4.0
+require github.com/a2aproject/a2a-go/v2 v2.5.0
 
 require (
 	cel.dev/expr v0.25.2 // indirect

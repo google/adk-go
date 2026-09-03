@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -56,6 +57,135 @@ func TestBuildOpenAIParams_Text(t *testing.T) {
 	}
 }
 
+// TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText guards that a replayed
+// assistant turn is serialized as an output message with content type
+// "output_text". Sending "input_text" for the assistant role makes the OpenAI
+// Responses API reject every multi-turn request with HTTP 400 from the second
+// message onward.
+func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
+	req := &model.LLMRequest{
+		Model: "gpt-4o-mini",
+		Contents: []*genai.Content{
+			genai.NewContentFromText("hi", genai.RoleUser),
+			genai.NewContentFromText("hello there", genai.RoleModel),
+			genai.NewContentFromText("can you code", genai.RoleUser),
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+
+	items := params.Input.OfInputItemList
+	if len(items) != 3 {
+		t.Fatalf("got %d input items, want 3: %+v", len(items), items)
+	}
+
+	// User turns remain easy input messages using input_text.
+	if items[0].OfMessage == nil || items[2].OfMessage == nil {
+		t.Fatalf("user turns should be easy input messages: %+v", items)
+	}
+	if got := items[0].OfMessage.Content.OfInputItemContentList[0].OfInputText.Type; got != constant.InputText("input_text") {
+		t.Errorf("user content type = %q, want input_text", got)
+	}
+
+	// The assistant turn must be an output message using output_text.
+	out := items[1].OfOutputMessage
+	if out == nil {
+		t.Fatalf("assistant turn should be an output message, got %+v", items[1])
+	}
+	if len(out.Content) != 1 || out.Content[0].OfOutputText == nil {
+		t.Fatalf("assistant output message content malformed: %+v", out.Content)
+	}
+	if got, want := out.Content[0].OfOutputText.Text, "hello there"; got != want {
+		t.Errorf("assistant text = %q, want %q", got, want)
+	}
+	// Verify the wire format OpenAI actually receives. Asserting the marshalled
+	// JSON rather than the structs is what makes these checks meaningful: Type
+	// elides its zero value to "output_text", ID is dropped when empty, and
+	// Status is `omitzero`, so none of the three is observable on the struct.
+	raw, err := json.Marshal(items[1])
+	if err != nil {
+		t.Fatalf("marshal assistant item: %v", err)
+	}
+	if !strings.Contains(string(raw), `"output_text"`) {
+		t.Errorf("assistant item JSON missing output_text: %s", raw)
+	}
+	if strings.Contains(string(raw), `"input_text"`) {
+		t.Errorf("assistant item JSON must not contain input_text: %s", raw)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal assistant item: %v", err)
+	}
+	// OpenAI mints message IDs on output; a replayed turn has none to echo back
+	// and must omit the field rather than invent one, or the request is rejected.
+	if v, ok := wire["id"]; ok {
+		t.Errorf("assistant item must not carry an id, got %v: %s", v, raw)
+	}
+	if got := wire["status"]; got != "completed" {
+		t.Errorf("assistant item status = %v, want completed: %s", got, raw)
+	}
+	if got := wire["role"]; got != "assistant" {
+		t.Errorf("assistant item role = %v, want assistant: %s", got, raw)
+	}
+}
+
+// TestBuildOpenAIParams_ItemOrdering pins the order in which a model turn's
+// parts become input items. Text is buffered and flushed by convertContents
+// immediately before a function call or response is appended; dropping that
+// flush does not lose the text but does emit it after the call, silently
+// reordering the history. Assistant text became a third item kind with the
+// output_text fix, so the ordering needs a guard.
+func TestBuildOpenAIParams_ItemOrdering(t *testing.T) {
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "call_1"}}
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  []string
+	}{
+		{
+			name:  "text before call is flushed first",
+			parts: []*genai.Part{{Text: "Let me check."}, call},
+			want:  []string{"output_message", "function_call"},
+		},
+		{
+			name:  "text after call is flushed last",
+			parts: []*genai.Part{call, {Text: "Checking now."}},
+			want:  []string{"function_call", "output_message"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: string(genai.RoleModel), Parts: tc.parts},
+			}}
+			params, err := buildOpenAIParams("fallback", req)
+			if err != nil {
+				t.Fatalf("buildOpenAIParams() err = %v", err)
+			}
+			var got []string
+			for _, item := range params.Input.OfInputItemList {
+				switch {
+				case item.OfOutputMessage != nil:
+					got = append(got, "output_message")
+				case item.OfMessage != nil:
+					got = append(got, "message")
+				case item.OfFunctionCall != nil:
+					got = append(got, "function_call")
+				case item.OfFunctionCallOutput != nil:
+					got = append(got, "function_call_output")
+				default:
+					got = append(got, "unknown")
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("item order = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
@@ -86,12 +216,12 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 		t.Fatalf("missing function call/response in %+v", params.Input.OfInputItemList)
 		return
 	}
-	if call.CallID == "" || response.CallID == "" {
+	if call.CallID == "" || !response.CallID.Valid() {
 		t.Fatalf("call IDs must be populated: call=%+v response=%+v", call, response)
 		return
 	}
-	if call.CallID != response.CallID {
-		t.Fatalf("call IDs mismatch: %q vs %q", call.CallID, response.CallID)
+	if call.CallID != response.CallID.Value {
+		t.Fatalf("call IDs mismatch: %q vs %q", call.CallID, response.CallID.Value)
 	}
 }
 

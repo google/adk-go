@@ -170,6 +170,16 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	}, nil
 }
 
+// quoteFilterLiteral quotes a value for safe use as a Google AIP-160 filter
+// string literal. Backslashes are escaped first, then double quotes, so that
+// caller-controlled input stays inside the quoted value and cannot inject
+// additional filter predicates. See https://google.aip.dev/160.
+func quoteFilterLiteral(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
 func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequest) ([]session.Session, error) {
 	sessions := make([]session.Session, 0)
 
@@ -188,7 +198,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
 	if req.UserID != "" {
-		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
+		rpcReq.Filter = "userId=" + quoteFilterLiteral(req.UserID)
 	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
 	for {
@@ -323,7 +333,13 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.NodeInfo != nil ||
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
-		len(event.Routes) > 0
+		len(event.Routes) > 0 ||
+		// A context-compaction summary lives entirely on Actions.Compaction:
+		// its Content is nil and it has no state or artifact delta, so without
+		// raw_event nothing about it reaches the backend. On reload the session
+		// would hold neither the summary nor any record that compaction ran,
+		// and the same range would be summarized again on every trigger.
+		event.Actions.Compaction != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

@@ -225,12 +225,13 @@ func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msgParts ...*a2a.
 
 func TestRemoteAgent_ADK2ADK(t *testing.T) {
 	testCases := []struct {
-		name          string
-		remoteEvents  []*session.Event
-		wantResponses []model.LLMResponse
-		wantEscalate  bool
-		wantTransfer  string
-		noStreaming   bool
+		name                 string
+		remoteEvents         []*session.Event
+		wantResponses        []model.LLMResponse
+		wantEscalate         bool
+		wantTransfer         string
+		allowTransferToAgent bool
+		noStreaming          bool
 	}{
 		{
 			name: "text streaming",
@@ -318,7 +319,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("stop", genai.RoleModel)},
 				{TurnComplete: true},
 			},
-			wantTransfer: "a-2",
+			wantTransfer:         "a-2",
+			allowTransferToAgent: true,
 		},
 		{
 			name: "long-running function call",
@@ -401,7 +403,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 						Agent:          newADKEventReplay(t, "root", tc.remoteEvents),
 					},
 				})
-				remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
+				card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(startA2AServer(executor).URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+				remoteAgent := utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: "a2a", AllowTransferToAgent: tc.allowTransferToAgent}))
 
 				mode := agent.StreamingModeSSE
 				if tc.noStreaming {
@@ -910,6 +913,83 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
 			}
 		})
+	}
+}
+
+// TestRemoteAgent_AfterCallbackRunsOnAggregatedArtifact guards that
+// AfterRequestCallbacks run on the non-partial event synthesized from partial
+// artifact chunks (the reassembled artifact), not only on the raw incoming
+// events. Streaming an artifact as Append chunks ending with LastChunk routes
+// through buildNonPartialAggregation, which previously bypassed the callbacks —
+// so a callback that acts only on non-partial events never saw a chunked
+// artifact.
+func TestRemoteAgent_AfterCallbackRunsOnAggregatedArtifact(t *testing.T) {
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				first := a2a.NewArtifactEvent(execCtx, a2a.NewTextPart("Hello"))
+				last := a2a.NewArtifactUpdateEvent(execCtx, first.Artifact.ID, a2a.NewTextPart(", world!"))
+				last.Append = true
+				last.LastChunk = true // routes through buildNonPartialAggregation
+				events := []a2a.Event{
+					a2a.NewSubmittedTask(execCtx, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("..."))),
+					first,
+					last,
+					a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil),
+				}
+				for _, ev := range events {
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	}
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
+	}
+
+	// Record the text of every non-partial event handed to the callback. The
+	// callback deliberately ignores partial chunks, so its metadata can't leak
+	// into the aggregated event via chunk aggregation — only a direct call on
+	// the aggregated event can record it.
+	var nonPartialSeen []string
+	after := []AfterA2ARequestCallback{
+		func(ctx agent.Context, req *a2a.SendMessageRequest, result *session.Event, err error) (*session.Event, error) {
+			if result != nil && !result.Partial && result.Content != nil && len(result.Content.Parts) > 0 {
+				nonPartialSeen = append(nonPartialSeen, result.Content.Parts[0].Text)
+			}
+			return nil, nil
+		},
+	}
+
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:                  "a2a",
+		AgentCard:             card,
+		AfterRequestCallbacks: after,
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	found := false
+	for _, txt := range nonPartialSeen {
+		if txt == "Hello, world!" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("after-callback was not invoked on the aggregated artifact event; non-partial events seen = %v, want to include %q", nonPartialSeen, "Hello, world!")
 	}
 }
 
@@ -1611,6 +1691,250 @@ func TestClassifyCardSource(t *testing.T) {
 			}
 			if isFile != tc.isFile {
 				t.Errorf("classifyCardSource(%q) isFile = %v, want %v", tc.source, isFile, tc.isFile)
+			}
+		})
+	}
+}
+
+// newFixedURLCardServer serves a card whose single declared interface points
+// wherever ifaceURL says, independent of the server's own address -- used to
+// simulate a card declaring an interface at a different origin than the one
+// it was fetched from.
+func newFixedURLCardServer(t *testing.T, ifaceURL string) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		card := &a2a.AgentCard{
+			Name: "test-agent",
+			SupportedInterfaces: []*a2a.AgentInterface{
+				{URL: ifaceURL, ProtocolBinding: "JSONRPC"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestNewAgentCardProvider_RejectsOffOriginInterface pins the fix for a
+// sibling of the vulnerability already fixed in the reflection-based
+// Verify() path of a different ADK port: a card fetched from a trusted,
+// configured source is not itself trusted content, and
+// agentcard.DefaultResolver.Resolve performs no check that a resolved
+// card's declared interfaces have anything to do with where the card was
+// fetched from. Confirmed directly against the resolver's own source
+// (v2.4.0, the version this package depends on): it fetches, parses, and
+// returns the card with no validation of its contents at all. Without this
+// check, a card served from a trusted source could redirect all A2A
+// traffic for the agent -- including any credential material the request
+// path carries -- to an attacker-chosen origin.
+func TestNewAgentCardProvider_RejectsOffOriginInterface(t *testing.T) {
+	server := newFixedURLCardServer(t, "https://attacker.example.net/rpc")
+
+	_, err := NewAgentCardProvider(server.URL)(t.Context())
+	if !errors.Is(err, ErrUntrustedCardInterface) {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want %v", server.URL, err, ErrUntrustedCardInterface)
+	}
+}
+
+// newCardServer serves a card whose interfaces are built from the server's
+// own base URL, computed from the listener before the server starts
+// accepting connections. A prior version of these tests instead declared
+// `var server *httptest.Server` and had the handler closure read `server`
+// itself, assigned only after httptest.NewServer(mux) returned -- the
+// handler goroutine reading a variable the test goroutine had not yet
+// written, with nothing ordering the two. Deriving the base URL from the
+// listener address up front, and starting the server only once the
+// handler is wired to that fixed string, removes the unsynchronized
+// access entirely rather than relying on it happening not to matter in
+// practice.
+func newCardServer(t *testing.T, ifaces func(base string) []*a2a.AgentInterface) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewUnstartedServer(nil)
+	base := "http://" + server.Listener.Addr().String()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		card := &a2a.AgentCard{
+			Name:                "test-agent",
+			SupportedInterfaces: ifaces(base),
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+	server.Config.Handler = mux
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestNewAgentCardProvider_AcceptsSameOriginInterface confirms the fix above
+// does not regress the legitimate case: an interface URL that genuinely
+// shares the origin the card was fetched from.
+func TestNewAgentCardProvider_AcceptsSameOriginInterface(t *testing.T) {
+	server := newCardServer(t, func(base string) []*a2a.AgentInterface {
+		return []*a2a.AgentInterface{
+			{URL: base + "/rpc", ProtocolBinding: "JSONRPC"},
+		}
+	})
+
+	card, err := NewAgentCardProvider(server.URL)(t.Context())
+	if err != nil {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want nil", server.URL, err)
+	}
+	if len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != server.URL+"/rpc" {
+		t.Errorf("card.SupportedInterfaces = %+v, want a single interface at %q", card.SupportedInterfaces, server.URL+"/rpc")
+	}
+}
+
+// TestNewAgentCardProvider_RejectsOffOriginSecondInterface confirms every
+// declared interface is checked, not only whichever one a transport
+// negotiation would select.
+func TestNewAgentCardProvider_RejectsOffOriginSecondInterface(t *testing.T) {
+	server := newCardServer(t, func(base string) []*a2a.AgentInterface {
+		return []*a2a.AgentInterface{
+			{URL: base + "/rpc", ProtocolBinding: "JSONRPC"},
+			{URL: "https://attacker.example.net/rpc2", ProtocolBinding: "GRPC"},
+		}
+	})
+
+	_, err := NewAgentCardProvider(server.URL)(t.Context())
+	if !errors.Is(err, ErrUntrustedCardInterface) {
+		t.Fatalf("NewAgentCardProvider(%q) error = %v, want %v", server.URL, err, ErrUntrustedCardInterface)
+	}
+}
+
+// TestValidateCardInterfaceOrigins is table-driven so each rule the check
+// applies -- the scheme half of the origin comparison, the host half, the
+// port half, and the independent https/loopback requirement -- is pinned
+// by a case that isolates it. Verified against the two ways the original,
+// non-table-driven tests this replaces could pass while the check they
+// exist to pin was broken: deleting the host half of the origin
+// comparison, or deleting the scheme half, each left every prior test in
+// this file passing. Every case below was re-checked against both
+// deletions and fails on each.
+func TestValidateCardInterfaceOrigins(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		ifaces  []string
+		wantErr bool
+	}{
+		{"same origin https", "https://good.example.com", []string{"https://good.example.com/rpc"}, false},
+		{"same origin loopback http", "http://127.0.0.1:8080", []string{"http://127.0.0.1:8080/rpc"}, false},
+		{"no interfaces", "https://good.example.com", nil, false},
+
+		// Pins the host half of the origin check.
+		{"off-origin host, same scheme", "https://good.example.com", []string{"https://attacker.example.net/rpc"}, true},
+		// Pins the scheme half.
+		{"off-origin scheme, same host", "http://127.0.0.1:8080", []string{"https://127.0.0.1:8080/rpc"}, true},
+
+		{
+			"second interface off-origin", "https://good.example.com",
+			[]string{"https://good.example.com/rpc", "https://attacker.example.net/rpc2"},
+			true,
+		},
+		{"plain http on non-loopback", "http://example.com", []string{"http://example.com/rpc"}, true},
+		{"off-origin port", "https://good.example.com:8443", []string{"https://good.example.com:9443/rpc"}, true},
+		{"relative interface URL", "https://good.example.com", []string{"/rpc"}, true},
+		{"empty interface URL", "https://good.example.com", []string{""}, true},
+
+		// Case-insensitive host comparison, matching adk-python's
+		// _url_origin: a DNS hostname's case does not change what it names.
+		// Not exercised by the cases above, which all keep host case fixed.
+		{
+			"interface host uppercase, source lowercase", "https://good.example.com",
+			[]string{"https://Good.Example.com/rpc"},
+			false,
+		},
+		{
+			"source host uppercase, interface lowercase", "https://Good.Example.com",
+			[]string{"https://good.example.com/rpc"},
+			false,
+		},
+
+		// Default-port normalization, matching adk-python's _DEFAULT_PORTS:
+		// an omitted port and its scheme's default port name the same
+		// origin. "off-origin port" above pins that differing explicit
+		// ports are still rejected; these pin that an omitted port isn't
+		// one of them.
+		{
+			"interface has explicit default https port, source omits it", "https://good.example.com",
+			[]string{"https://good.example.com:443/rpc"},
+			false,
+		},
+		{
+			"source has explicit default https port, interface omits it", "https://good.example.com:443",
+			[]string{"https://good.example.com/rpc"},
+			false,
+		},
+		{
+			"interface has explicit default http port on loopback, source omits it", "http://localhost",
+			[]string{"http://localhost:80/rpc"},
+			false,
+		},
+
+		// isLoopbackHost has its own table (TestIsLoopbackHost below); this
+		// case exists to confirm the two functions integrate correctly, not
+		// to re-cover isLoopbackHost's own cases.
+		{
+			"http on dns name with 127 prefix matching source", "http://127.evil.com",
+			[]string{"http://127.evil.com/rpc"},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &a2a.AgentCard{}
+			for _, u := range tt.ifaces {
+				card.SupportedInterfaces = append(card.SupportedInterfaces,
+					&a2a.AgentInterface{URL: u, ProtocolBinding: "JSONRPC"})
+			}
+			err := validateCardInterfaceOrigins(card, tt.source)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("validateCardInterfaceOrigins(%q) error = %v, wantErr %v", tt.source, err, tt.wantErr)
+			}
+			if tt.wantErr && err != nil && !errors.Is(err, ErrUntrustedCardInterface) {
+				t.Errorf("error = %v, want it to wrap ErrUntrustedCardInterface", err)
+			}
+		})
+	}
+}
+
+// TestIsLoopbackHost is table-driven for the same reason as
+// TestValidateCardInterfaceOrigins above: isLoopbackHost used to be a
+// prefix test on the hostname string, under which isLoopbackHost("127.evil.com")
+// returned true for that ordinary, attacker-registrable DNS name. These
+// cases were checked against that version and fail against it.
+func TestIsLoopbackHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "IPv4 loopback exact", host: "127.0.0.1", want: true},
+		{name: "IPv4 loopback, other address in the range", host: "127.5.5.5", want: true},
+		{name: "IPv6 loopback", host: "::1", want: true},
+		{name: "localhost", host: "localhost", want: true},
+		{name: "localhost mixed case", host: "LocalHost", want: true},
+		{name: "subdomain of localhost, RFC 6761", host: "app.localhost", want: true},
+		{name: "dns name with a 127 prefix is not loopback", host: "127.evil.com", want: false},
+		{name: "dns name containing localhost as a substring is not loopback", host: "notlocalhost.example.com", want: false},
+		{name: "public IPv4 address", host: "93.184.216.34", want: false},
+		{name: "empty host", host: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLoopbackHost(tc.host); got != tc.want {
+				t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
 	}
