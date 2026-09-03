@@ -51,7 +51,7 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		artifacts:         newTrackedArtifacts(ic.Artifacts(), actions),
 	}
 	return cc
 }
@@ -73,7 +73,7 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		artifacts:         newTrackedArtifacts(ic.Artifacts(), actions),
 		functionCallID:    functionCallID,
 		toolConfirmation:  confirmation,
 	}
@@ -236,6 +236,17 @@ func (c *callbackContextState) Set(key string, val any) error {
 
 func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationContext.Session().State().All()
+}
+
+// newTrackedArtifacts wraps inner so that each successful Save is recorded
+// into the supplied EventActions.ArtifactDelta. It returns nil when inner is
+// nil so that "no artifact service configured" stays observable (a nil
+// Artifacts) instead of panicking on the first promoted method call.
+func newTrackedArtifacts(inner Artifacts, actions *session.EventActions) Artifacts {
+	if inner == nil {
+		return nil
+	}
+	return &trackedArtifacts{Artifacts: inner, actions: actions}
 }
 
 // trackedArtifacts wraps an Artifacts to record each successful Save into the
