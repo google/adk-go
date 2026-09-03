@@ -282,6 +282,17 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}},
 		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
 		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
+		// A name that normalizes to a different one routes to a different service
+		// than the one validateResource inspected.
+		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}},
+		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}},
+		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}},
+		// Percent-escapes are rejected by the charset, not decoded: the name is
+		// interpolated into a URL, so an escape that survives becomes traversal or
+		// a segment break once the server decodes it.
+		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}},
+		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}},
+		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}},
 	}
 	// Point at a live server: a client with no endpoint fails at transport for
 	// every input, which cannot tell a rejected request from an unreachable one.
@@ -298,7 +309,7 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 			if err == nil {
 				t.Fatalf("RetrieveCredential(%+v) = nil error, want error", tc.req)
 			}
-			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "invalid characters") {
+			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "resource ") {
 				t.Errorf("error = %v, want a request-validation error", err)
 			}
 			if got := hits.Load(); got != 0 {

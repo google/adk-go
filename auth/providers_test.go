@@ -110,8 +110,11 @@ func TestConsentRequiredError(t *testing.T) {
 	if consent.AuthURI != "https://consent.example" {
 		t.Errorf("AuthURI = %q, want %q", consent.AuthURI, "https://consent.example")
 	}
-	if !strings.Contains(err.Error(), "consent.example") {
-		t.Errorf("Error() = %q, want it to mention the auth URI", err.Error())
+	// The message must not carry the URI: it becomes a tool's error, which reaches
+	// the model and the session store, and the URI carries the state and nonce
+	// that bind the credential.
+	if strings.Contains(err.Error(), "consent.example") {
+		t.Errorf("Error() = %q, want the auth URI kept on the field only", err.Error())
 	}
 }
 

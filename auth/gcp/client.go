@@ -49,11 +49,37 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts; the client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
-// use, so it can't inject extra path segments, a query, or a fragment into the
-// request URL it is interpolated into. A separate ".." check blocks path
-// traversal (dots are allowed so domain-style ids still pass).
-var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
+// use. It cannot inject a query, a fragment, an authority or a percent-escape
+// into the request URL the name is interpolated into; extra path segments are
+// allowed, since a resource name is itself a path. The colon is allowed for
+// domain-scoped project ids (projects/example.com:my-project/...) — the name is
+// always appended after the endpoint and a /v1 segment, so it can never be read
+// as a scheme.
+var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
+
+// validateResource rejects a resource name that cannot be safely interpolated
+// into a request URL, or that would not survive path normalization — an empty,
+// "." or ".." segment blocks traversal, and also keeps the name the caller
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
+func validateResource(name string) error {
+	if !resourceNameRE.MatchString(name) {
+		return fmt.Errorf("resource %q has invalid characters", name)
+	}
+	for seg := range strings.SplitSeq(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("resource %q has an empty or relative path segment", name)
+		}
+	}
+	return nil
+}
 
 // Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
 var (
@@ -192,8 +218,8 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 	if req.UserID == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
 	}
-	if !resourceNameRE.MatchString(req.Resource) || strings.Contains(req.Resource, "..") {
-		return nil, fmt.Errorf("gcp: RetrieveCredential resource %q has invalid characters", req.Resource)
+	if err := validateResource(req.Resource); err != nil {
+		return nil, fmt.Errorf("gcp: RetrieveCredential: %w", err)
 	}
 
 	retrieve := c.retrieveAgentIdentity
@@ -214,11 +240,11 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
-			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
+			return nil, ErrConsentRejected
 		case pendingOutcome:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
+				return nil, ErrPollTimeout
 			}
 			wait := min(backoff, remaining)
 			select {

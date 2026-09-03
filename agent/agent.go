@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -427,6 +428,23 @@ func (c *invocationContext) Memory() Memory {
 
 func (c *invocationContext) Session() session.Session {
 	return c.session
+}
+
+// Value implements context.Context, answering the ADK identity key like every
+// other invocation context so a promoted copy and this one cannot disagree. It
+// owns its session, so no session means no identity — never the enclosing
+// invocation's, whose user made no such call.
+func (c *invocationContext) Value(key any) any {
+	if key == adkcontext.IdentityKey {
+		if id, ok := identityOf(func() session.Session { return c.session }); ok {
+			return id
+		}
+		return nil
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
 }
 
 func (c *invocationContext) InvocationID() string {

@@ -23,11 +23,66 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// Identity is an ADK invocation's identity: the acting user, app name, and
+// session a call belongs to. It is recovered from a plain context.Context via
+// [IdentityFromContext], which reads it off the live session each time, so a
+// session mutated mid-invocation is reflected in the next lookup.
+type Identity struct {
+	// UserID is the acting end user, as the embedding server put it on the
+	// session. ADK does not authenticate it: anything acting on behalf of this
+	// user — minting a per-user credential, for instance — is trusting the server
+	// to have bound session.UserID to an authenticated principal. ADK's own REST
+	// server takes it from the request body.
+	UserID string
+	// AppName is the app the invocation belongs to.
+	AppName string
+	// SessionID identifies the conversation the invocation belongs to.
+	SessionID string
+}
+
+// identityOf reads an invocation identity from the session getSession returns.
+// It is the one place package agent turns a session into an [Identity], so every
+// context type here answers the identity key the same way.
+//
+// getSession is called inside the recover, not before it: Session() is itself a
+// method on caller-supplied code and can panic on its own.
+func identityOf(getSession func() session.Session) (Identity, bool) {
+	return adkcontext.Recovered(func() Identity {
+		// One Session value, then one call per field: re-reading Session() per
+		// field risks a torn identity, and some context wrappers log on every read.
+		s := getSession()
+		return Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
+	})
+}
+
+// IdentityFromContext returns the ADK invocation [Identity] carried by ctx, if
+// present.
+//
+// ADK contexts embed context.Context and register their identity under a private
+// key, so code that only holds a context.Context — for example an
+// http.RoundTripper running deep beneath a tool call, past intermediaries that
+// wrap the context — can recover the acting identity without threading a typed
+// context through every layer.
+//
+// It returns (zero, false) both for a context that does not descend from an ADK
+// context and for an invocation with no readable session; the two are not
+// distinguishable here. The invocation types in this module never report an
+// enclosing invocation's user in place of their own — one implemented elsewhere
+// cannot make that promise, since the key is unnameable outside the module and
+// its embedded parent answers instead. ok does not imply a populated Identity
+// either: an invocation whose session carries no user yields an empty UserID, so
+// a caller that needs one must check.
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
+	return id, ok
+}
 
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
@@ -342,6 +397,79 @@ func (c *commonContext) SessionID() string {
 
 func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
+}
+
+// Value implements context.Context. For the ADK identity key it returns the
+// [Identity] of the invocation this context speaks for (so [IdentityFromContext]
+// can recover it from a derived context); every other key delegates to the
+// embedded context, preserving existing behavior.
+//
+// Only the identity key touches the invocation, so no other key is affected by
+// its state, and a session that panics costs the identity, not the process.
+func (c *commonContext) Value(key any) any {
+	if key == adkcontext.IdentityKey {
+		return c.identity()
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+// identity answers the ADK identity key, as an any so it can report "none".
+//
+// A commonContext owns no session, so it speaks for the invocation it wraps, and
+// reads that invocation's own session first. Asking the invocation's Value first
+// looks equivalent and is not: an InvocationContext written outside this module
+// embeds the context it was derived from, to inherit cancellation, and cannot
+// override a key it cannot name — so its Value answers with the *enclosing*
+// invocation's identity even when it has a session of its own naming a different
+// user. Reading the session first is what makes an invocation report itself.
+//
+// Only an invocation with no readable session of its own delegates, by asking the
+// invocation it wraps. A tool or callback context is exactly that shape by design
+// and hands the key to the context underneath. An invocation that owns a session
+// field and has none — a nested invocation built without one — gets nil back from
+// that ask and reports no identity, rather than inheriting a user who made no
+// such call.
+//
+// A commonContext speaking for no invocation at all is the one case that consults
+// its own parent, since there is nothing else it could answer for.
+func (c *commonContext) identity() any {
+	if c.invocationContext == nil {
+		if c.Context == nil {
+			return nil
+		}
+		return c.Context.Value(adkcontext.IdentityKey)
+	}
+	// Method value and call both inside the recover: Session() is caller-supplied
+	// code and invocationContext can be a typed-nil pointer.
+	s, read := adkcontext.Recovered(func() session.Session { return c.invocationContext.Session() })
+	if !read {
+		// The invocation cannot say who it is. It must not inherit an answer from
+		// what it embeds: a broken invocation is not an absent one, and the context
+		// it was derived from belongs to a different call.
+		return nil
+	}
+	if s != nil {
+		if id, ok := identityOf(func() session.Session { return s }); ok {
+			return id
+		}
+		// Present but unreadable is broken too, and delegating would inherit.
+		return nil
+	}
+	// No session of its own, which a tool or callback context is by design, so ask
+	// the invocation. Type-asserted, not merely checked against nil: one with a
+	// permissive Value that answers every key would otherwise hand back something
+	// that is not an Identity and be taken for one.
+	if v, ok := adkcontext.Recovered(func() any {
+		return c.invocationContext.Value(adkcontext.IdentityKey)
+	}); ok {
+		if id, isIdentity := v.(Identity); isIdentity {
+			return id
+		}
+	}
+	return nil
 }
 
 var (
