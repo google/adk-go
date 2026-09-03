@@ -252,6 +252,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
+			if event == nil {
+				continue
+			}
+
 			// only commit non-partial event to a session service
 			if !event.LLMResponse.Partial {
 				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
@@ -454,6 +458,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				if modifiedEvent != nil {
 					event = modifiedEvent
 				}
+			}
+
+			if event == nil {
+				continue
 			}
 
 			// Chronological event buffering logic for Live streaming.
