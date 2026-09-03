@@ -533,14 +533,75 @@ func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
 // A budget below the dynamic sentinel means nothing in genai and cannot be
 // translated, so it is named rather than rounded into some effort.
 func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-		ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))},
-	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"budget alone", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))}},
+		// A level wins over a budget, and must not carry a nonsense one past
+		// unmentioned on its way through.
+		{"budget behind a winning level", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelLow,
+			ThinkingBudget: genai.Ptr(int32(-2)),
+		}},
+		{"budget behind thoughts", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(-100)),
+			IncludeThoughts: true,
+		}},
 	}
-	if !strings.Contains(err.Error(), "ThinkingBudget") {
-		t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+				ThinkingConfig: tc.thinking,
+			})
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), "ThinkingBudget") {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
+			}
+		})
+	}
+}
+
+// THINKING_LEVEL_UNSPECIFIED is the caller declining to name a level, so it
+// stands in for medium only when no budget says something more specific. Alone
+// it still means "think", which is why it is not simply treated as unset.
+func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+		want     shared.ReasoningParam
+	}{
+		{"unspecified alone", &genai.ThinkingConfig{
+			ThinkingLevel: genai.ThinkingLevelUnspecified,
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"unspecified yields to zero budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelUnspecified,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelUnspecified,
+			ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget)),
+		}, shared.ReasoningParam{}},
+		// A named level is a choice, so it keeps winning.
+		{"named level still wins over zero budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelHigh,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(params.Reasoning, tc.want) {
+				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, tc.want)
+			}
+		})
 	}
 }
 

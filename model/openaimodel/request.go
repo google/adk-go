@@ -419,30 +419,44 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 	if cfg == nil {
 		return nil
 	}
+	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget < dynamicThinkingBudget {
+		// Rejected up here rather than in the branch that reads the budget,
+		// because a level set alongside it wins and would otherwise carry the
+		// request through with the nonsense value unmentioned.
+		return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
+	}
+	// A level outranks a budget, but only when it names one: UNSPECIFIED is the
+	// caller declining to choose, so a budget they did set is the more specific
+	// instruction and takes over.
+	level := cfg.ThinkingLevel
+	if level == genai.ThinkingLevelUnspecified && cfg.ThinkingBudget != nil {
+		level = ""
+	}
+
 	var reasoning shared.ReasoningParam
 	switch {
-	case cfg.ThinkingLevel != "":
-		effort, ok := reasoningEfforts[cfg.ThinkingLevel]
+	case level != "":
+		effort, ok := reasoningEfforts[level]
 		if !ok {
 			// A level genai grew after this map was written: better an error
 			// naming it than an effort string the API will reject obscurely.
-			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, cfg.ThinkingLevel)
+			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
 		}
 		reasoning.Effort = effort
 	case cfg.ThinkingBudget != nil:
-		switch budget := *cfg.ThinkingBudget; {
-		case budget == 0:
+		// Anything below dynamicThinkingBudget was rejected above, so what is
+		// left is none of it, the model's choice, or some positive amount.
+		switch *cfg.ThinkingBudget {
+		case 0:
 			// "Do not think" is what the none effort says. Not minimal: minimal
 			// is the least thinking rather than none of it, and models are
 			// dropping it — gpt-5.4-nano rejects minimal while accepting none.
 			reasoning.Effort = shared.ReasoningEffortNone
-		case budget == dynamicThinkingBudget:
+		case dynamicThinkingBudget:
 			// The caller asked the model to decide, so no effort is sent and it
 			// does. Pinning a number here would be us deciding instead.
-		case budget > 0:
-			reasoning.Effort = shared.ReasoningEffortMedium
 		default:
-			return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, budget)
+			reasoning.Effort = shared.ReasoningEffortMedium
 		}
 	case !cfg.IncludeThoughts:
 		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel, ThinkingBudget or IncludeThoughts", ErrUnsupportedConfigField)
