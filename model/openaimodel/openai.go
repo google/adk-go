@@ -405,6 +405,13 @@ func restoreUnstated(part *genai.Part, item responses.ResponseOutputItemUnion, s
 	if call.Name == "" {
 		call.Name = streamed.Name
 	}
+	if call.ID == "" {
+		// An item stating no call ID leaves the caller nothing to match the
+		// tool's result back to, and what streamed is the ID the turn already
+		// reported. An item that states one still outranks it, so the event's
+		// own ID is what reaches the wire wherever the provider sends one.
+		call.ID = streamed.ID
+	}
 }
 
 // partsWithoutCalls splits a turn's parts into those that are not function

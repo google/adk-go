@@ -1299,8 +1299,8 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 			t.Fatalf("streaming err = %v", err)
 		}
 		want := []*genai.FunctionCall{
-			{Name: "beta", Args: map[string]any{"y": float64(2)}},
-			{Name: "alpha", Args: map[string]any{"x": float64(1)}},
+			{Name: "beta", ID: "call_2", Args: map[string]any{"y": float64(2)}},
+			{Name: "alpha", ID: "call_1", Args: map[string]any{"x": float64(1)}},
 		}
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
@@ -1319,11 +1319,37 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 			t.Fatalf("streaming err = %v", err)
 		}
 		want := []*genai.FunctionCall{
-			{Name: "get_weather", Args: map[string]any{"city": "SF"}},
-			{Name: "get_weather", Args: map[string]any{"city": "NY"}},
+			{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}},
+			{Name: "get_weather", ID: "call_2", Args: map[string]any{"city": "NY"}},
 		}
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("an item stating no call id keeps the one the turn reported", func(t *testing.T) {
+		// Replacement takes the event's items whole, so a provider that omits
+		// call_id there leaves the caller nothing to match the tool's result
+		// back to — main reports call_1 for this stream. An item that does
+		// state one still outranks what streamed, as the control below shows.
+		for _, tc := range []struct {
+			name, item, wantID string
+		}{
+			{"omitted", `{"type":"function_call","name":"get_weather","arguments":"{\"city\":\"SF\"}"}`, "call_1"},
+			{"stated, and it wins", `{"type":"function_call","name":"get_weather","call_id":"call_9","arguments":"{\"city\":\"SF\"}"}`, "call_9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := runStream(t, evCreated, evAdded1, evArgs1,
+					`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model",`+
+						`"status":"completed","output":[`+tc.item+`]}}`)
+				if err != nil {
+					t.Fatalf("streaming err = %v", err)
+				}
+				want := []*genai.FunctionCall{{Name: "get_weather", ID: tc.wantID, Args: map[string]any{"city": "SF"}}}
+				if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+					t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+				}
+			})
 		}
 	})
 
