@@ -291,10 +291,22 @@ func describeInput(items responses.ResponseInputParam) []string {
 				texts = append(texts, c.OfInputText.Text)
 			}
 			got = append(got, string(item.OfMessage.Role)+":"+strings.Join(texts, "|"))
+		case item.OfOutputMessage != nil:
+			// A replayed assistant turn goes out as an output message, whose
+			// content uses "output_text" rather than "input_text".
+			texts := make([]string, 0, len(item.OfOutputMessage.Content))
+			for _, c := range item.OfOutputMessage.Content {
+				if c.OfOutputText == nil {
+					texts = append(texts, "<non-text>")
+					continue
+				}
+				texts = append(texts, c.OfOutputText.Text)
+			}
+			got = append(got, "assistant:"+strings.Join(texts, "|"))
 		case item.OfFunctionCall != nil:
 			got = append(got, "call:"+item.OfFunctionCall.Name+"/"+item.OfFunctionCall.CallID)
 		case item.OfFunctionCallOutput != nil:
-			got = append(got, "output:"+item.OfFunctionCallOutput.CallID)
+			got = append(got, "output:"+item.OfFunctionCallOutput.CallID.Or(""))
 		default:
 			got = append(got, "<unrecognized item>")
 		}
@@ -442,12 +454,61 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: "unsupported content part",
 		},
 		{
+			// The same part with reasoning text riding on it. Suppressing the
+			// text must not also suppress the rejection, or the image leaves
+			// the request unannounced — the arm keys on what the part
+			// contributed, not on whether it had text.
+			name: "thought_text_riding_on_media_is_still_rejected",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{
+					Thought:    true,
+					Text:       "scratch",
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			wantErrText: "unsupported content part",
+		},
+		{
+			name: "thought_text_riding_on_code_is_still_rejected",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(&genai.Part{
+					Thought:        true,
+					Text:           "scratch",
+					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
+				}),
+			},
+			wantErrText: "unsupported content part",
+		},
+		{
+			// Dropping the reasoning must not swallow the role error the same
+			// turn would have raised had its text been an answer: nothing
+			// buffers, so flushText returns before normalizeRole runs.
+			name: "unsupported_role_still_reported_on_a_thought_only_turn",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{thought("scratch")}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// The same turn with the marker off, showing the error is reported
+			// identically either way.
+			name: "unsupported_role_reported_on_an_ordinary_turn",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{Text: "answer"}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
 			// A request left empty by the drop is reported rather than sent,
 			// and says the drop emptied it rather than that nothing was sent.
 			name:        "only_thoughts",
 			contents:    []*genai.Content{modelTurn(thought("scratch"))},
 			wantErr:     ErrNoContents,
-			wantErrText: "every part was replayed reasoning",
+			wantErrText: "every part was dropped",
 		},
 	}
 
@@ -520,6 +581,42 @@ func TestReplayedReasoning(t *testing.T) {
 			&genai.Part{Thought: true, FunctionResponse: &genai.FunctionResponse{Name: "f"}},
 			false,
 		},
+		// Server-side tool traffic and transcription are payload too, even
+		// though nothing in the repo populates them today.
+		{
+			"thought_marked_tool_call",
+			&genai.Part{Thought: true, ToolCall: &genai.ToolCall{ID: "t1"}},
+			false,
+		},
+		{
+			"thought_marked_tool_response",
+			&genai.Part{Thought: true, ToolResponse: &genai.ToolResponse{ID: "t1"}},
+			false,
+		},
+		{
+			"thought_marked_audio_transcription",
+			&genai.Part{Thought: true, AudioTranscription: &genai.Transcription{Text: "hello"}},
+			false,
+		},
+		// These three only qualify media carried in another field, so on a
+		// thought they hold nothing back.
+		{
+			"thought_with_video_metadata",
+			&genai.Part{Thought: true, Text: "scratch", VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(2.0)}},
+			true,
+		},
+		{
+			"thought_with_media_resolution",
+			&genai.Part{Thought: true, Text: "scratch", MediaResolution: &genai.PartMediaResolution{
+				Level: genai.PartMediaResolutionLevelMediaResolutionLow,
+			}},
+			true,
+		},
+		{
+			"thought_with_part_metadata",
+			&genai.Part{Thought: true, Text: "scratch", PartMetadata: map[string]any{"src": "a"}},
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -527,6 +624,63 @@ func TestReplayedReasoning(t *testing.T) {
 				t.Errorf("replayedReasoning() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestReplayedReasoning_EveryPayloadFieldDisqualifies walks genai.Part field by
+// field so the drop cannot outgrow its own audit. Every field that is not the
+// reasoning itself or metadata qualifying media held elsewhere must keep the
+// part out of the drop, and a field added by a later genai release is covered
+// by default: it is not on the ignore list, so the case is generated and the
+// part has to be rejected as unsupported rather than disappear with the
+// reasoning.
+func TestReplayedReasoning_EveryPayloadFieldDisqualifies(t *testing.T) {
+	// The reasoning a Responses request has nowhere to put, plus the fields
+	// that describe media carried in another field and hold nothing on their
+	// own. Everything else counts as payload.
+	ignored := map[string]bool{
+		"Text": true, "Thought": true, "ThoughtSignature": true,
+		"VideoMetadata": true, "MediaResolution": true, "PartMetadata": true,
+	}
+
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		if ignored[field.Name] {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			part := &genai.Part{Thought: true, Text: "scratch"}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+			if replayedReasoning(part) {
+				t.Errorf("replayedReasoning() = true for a thought carrying %s; "+
+					"it would be dropped instead of rejected as unsupported", field.Name)
+			}
+		})
+	}
+}
+
+// nonZero builds a non-zero value of typ, for the field walk above.
+func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
+	t.Helper()
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return reflect.New(typ.Elem())
+	case reflect.Map:
+		return reflect.MakeMap(typ)
+	case reflect.Slice:
+		return reflect.MakeSlice(typ, 1, 1)
+	case reflect.String:
+		return reflect.ValueOf("x").Convert(typ)
+	case reflect.Bool:
+		return reflect.ValueOf(true).Convert(typ)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return reflect.ValueOf(int64(1)).Convert(typ)
+	case reflect.Float32, reflect.Float64:
+		return reflect.ValueOf(1.0).Convert(typ)
+	default:
+		t.Fatalf("genai.Part gained a %s field; teach nonZero how to fill it", typ.Kind())
+		return reflect.Value{}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -54,7 +55,7 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 			// Conversion emptied a non-empty request; don't report it as a
 			// caller who sent nothing.
 			return responses.ResponseNewParams{}, fmt.Errorf(
-				"%w: every part was replayed reasoning or carried nothing to send", ErrNoContents)
+				"%w: every part was dropped as replayed reasoning or blank text", ErrNoContents)
 		}
 		return responses.ResponseNewParams{}, ErrNoContents
 	}
@@ -134,8 +135,17 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			// Text and call/response are read independently because one part
 			// can carry both: choosing between them would either put reasoning
 			// on the wire or strand the call's response in callTracker.
-			if part.Text != "" && !part.Thought {
+			sendText := part.Text != "" && !part.Thought
+			switch {
+			case sendText:
 				textParts = append(textParts, part.Text)
+			case part.Text != "":
+				// The reasoning text is dropped, but the role it arrived under
+				// is still checked: dropping it must not silence the error
+				// flushText would otherwise have raised.
+				if _, err := normalizeRole(curRole); err != nil {
+					return nil, err
+				}
 			}
 			switch {
 			case part.FunctionCall != nil:
@@ -158,8 +168,11 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 					return nil, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case part.Text == "" && !replayedReasoning(part):
-				// Nothing buffered and nothing substantive here.
+			case !sendText && !replayedReasoning(part):
+				// The part put no text in the buffer and carries no call or
+				// response, so nothing in it reaches the request. Keyed on
+				// what was contributed rather than on part.Text, or a thought
+				// riding on an image would match no arm and vanish.
 				return nil, fmt.Errorf("openai: unsupported content part %T", part)
 			}
 		}
@@ -194,11 +207,23 @@ func replayedReasoning(part *genai.Part) bool {
 	if part.Text != "" && !part.Thought {
 		return false
 	}
-	// Marking media or a call as a thought must not make it vanish; those go on
-	// to be converted, or rejected as unsupported, on their merits.
-	return part.FunctionCall == nil && part.FunctionResponse == nil &&
-		part.InlineData == nil && part.FileData == nil &&
-		part.ExecutableCode == nil && part.CodeExecutionResult == nil
+	// Everything else the part carries decides the answer, and the test is
+	// stated as "nothing else is set" rather than as a list of the fields that
+	// disqualify it: marking media or a call as a thought must not make it
+	// vanish, and a field added to genai.Part in a later release should be
+	// rejected as unsupported rather than silently dropped along with the
+	// reasoning. Clearing the fields a Responses request has nowhere to put —
+	// the reasoning itself, its signature, and metadata that only qualifies
+	// media carried in another field — leaves a zero Part when there is
+	// genuinely nothing else to send.
+	rest := *part
+	rest.Text = ""
+	rest.Thought = false
+	rest.ThoughtSignature = nil
+	rest.VideoMetadata = nil
+	rest.MediaResolution = nil
+	rest.PartMetadata = nil
+	return reflect.DeepEqual(rest, genai.Part{})
 }
 
 // newMessage builds an easy input message for an already-normalized role.
