@@ -365,32 +365,31 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 		refusalOnlyDelta1 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"I cannot ","sequence_number":1}`
 		refusalOnlyDelta2 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"help with that.","sequence_number":2}`
 		refusalOnlyDone   = `{"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"I cannot help with that.","sequence_number":3}`
-		refusalOnlyFinal  = `{"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}}`
+		refusalOnlyBody   = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
+		refusalOnlyFinal  = `{"type":"response.completed","sequence_number":4,"response":` + refusalOnlyBody + `}`
 
 		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request","sequence_number":1}`
 		mixedDelta1    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"I cannot ","sequence_number":2}`
 		mixedDelta2    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"help with that.","sequence_number":3}`
 		mixedDone      = `{"type":"response.refusal.done","item_id":"msg_1","output_index":1,"content_index":0,"refusal":"I cannot help with that.","sequence_number":4}`
-		mixedFinal     = `{"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request"}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}}`
+		mixedBody      = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request"}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
+		mixedFinal     = `{"type":"response.completed","sequence_number":5,"response":` + mixedBody + `}`
 	)
 
 	tests := []struct {
-		name      string
-		events    []string
-		wantParts []*genai.Part
+		name         string
+		events       []string
+		blockingBody string
 	}{
 		{
-			name:      "refusal only",
-			events:    []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
-			wantParts: []*genai.Part{{Text: "I cannot help with that."}},
+			name:         "refusal only",
+			events:       []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
+			blockingBody: refusalOnlyBody,
 		},
 		{
-			name:   "refusal after reasoning",
-			events: []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
-			wantParts: []*genai.Part{
-				{Text: "Checking the request", Thought: true},
-				{Text: "I cannot help with that."},
-			},
+			name:         "refusal after reasoning",
+			events:       []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
+			blockingBody: mixedBody,
 		},
 	}
 
@@ -401,6 +400,13 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 				t.Fatalf("GenerateContent() stream err = %v", err)
 			}
 			final := assertTurnShape(t, got)
+			blocking, err := runBlocking(t, tc.blockingBody)
+			if err != nil {
+				t.Fatalf("GenerateContent() blocking err = %v", err)
+			}
+			if len(blocking) != 1 {
+				t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+			}
 
 			var streamedRefusal strings.Builder
 			for _, resp := range got[:len(got)-1] {
@@ -417,11 +423,8 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 				t.Errorf("streamed refusal = %q, want %q", got, want)
 			}
 
-			if final.Content == nil {
-				t.Fatal("final content = nil, want refusal content")
-			}
-			if diff := cmp.Diff(tc.wantParts, final.Content.Parts); diff != "" {
-				t.Errorf("final parts mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+				t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
 			}
 		})
 	}

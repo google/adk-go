@@ -64,6 +64,18 @@ func TestStreamTranslator_RefusalDelta(t *testing.T) {
 	}
 }
 
+func TestStreamTranslator_EmptyRefusalDelta(t *testing.T) {
+	tr := newStreamTranslator()
+	event := decodeEvent(t, `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"","sequence_number":1}`)
+	resp, err := tr.process(event)
+	if err != nil {
+		t.Fatalf("process() err = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("process() response = %+v, want nil", resp)
+	}
+}
+
 func TestStreamTranslator_FunctionCall(t *testing.T) {
 	tr := newStreamTranslator()
 	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real"}}`)
