@@ -394,28 +394,58 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	return rejectUnsupportedConfigFields(cfg)
 }
 
+// reasoningEfforts maps every genai thinking level onto a Responses reasoning
+// effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
+// still asks the model to think, so it resolves to medium.
+var reasoningEfforts = map[genai.ThinkingLevel]shared.ReasoningEffort{
+	genai.ThinkingLevelUnspecified: shared.ReasoningEffortMedium,
+	genai.ThinkingLevelMinimal:     shared.ReasoningEffortMinimal,
+	genai.ThinkingLevelLow:         shared.ReasoningEffortLow,
+	genai.ThinkingLevelMedium:      shared.ReasoningEffortMedium,
+	genai.ThinkingLevelHigh:        shared.ReasoningEffortHigh,
+}
+
 // applyThinkingConfig maps genai's thinking config onto effort-based reasoning,
 // as adk-python does. Responses has no token-budget knob, so only a budget's
-// zero/non-zero distinction survives. IncludeThoughts is not read.
+// zero/non-zero distinction survives.
+//
+// Summary is sent only when the caller sets IncludeThoughts. Reasoning
+// summaries require a verified OpenAI organization, so requesting one
+// unprompted would fail every reasoning call made by an unverified org — the
+// reason adk-python's unconditional summary is not copied here.
 func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	var effort shared.ReasoningEffort
+	var reasoning shared.ReasoningParam
 	switch {
-	case cfg.ThinkingLevel == genai.ThinkingLevelUnspecified:
-		// Explicit "unspecified" is distinct from unset, and still asks to think.
-		effort = shared.ReasoningEffortMedium
 	case cfg.ThinkingLevel != "":
-		effort = shared.ReasoningEffort(strings.ToLower(string(cfg.ThinkingLevel)))
-	case cfg.ThinkingBudget == nil:
-		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel or ThinkingBudget", ErrUnsupportedConfigField)
-	case *cfg.ThinkingBudget == 0:
-		effort = shared.ReasoningEffortMinimal
-	default:
-		effort = shared.ReasoningEffortMedium
+		effort, ok := reasoningEfforts[cfg.ThinkingLevel]
+		if !ok {
+			// A level genai grew after this map was written: better an error
+			// naming it than an effort string the API will reject obscurely.
+			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, cfg.ThinkingLevel)
+		}
+		reasoning.Effort = effort
+	case cfg.ThinkingBudget != nil:
+		// A zero budget means "do not think", which is what the none effort
+		// says. Not minimal: minimal is the least thinking rather than none of
+		// it, and models are dropping it — gpt-5.4-nano rejects minimal while
+		// accepting none.
+		if *cfg.ThinkingBudget == 0 {
+			reasoning.Effort = shared.ReasoningEffortNone
+		} else {
+			reasoning.Effort = shared.ReasoningEffortMedium
+		}
+	case !cfg.IncludeThoughts:
+		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel, ThinkingBudget or IncludeThoughts", ErrUnsupportedConfigField)
 	}
-	params.Reasoning = shared.ReasoningParam{Effort: effort, Summary: shared.ReasoningSummaryConcise}
+	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
+	// asks only for the summaries that response.go surfaces as thought parts.
+	if cfg.IncludeThoughts {
+		reasoning.Summary = shared.ReasoningSummaryAuto
+	}
+	params.Reasoning = reasoning
 	return nil
 }
 
@@ -433,7 +463,7 @@ var unsupportedConfigFields = []struct {
 	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
 	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
 	{"CachedContent", func(c *genai.GenerateContentConfig) bool { return c.CachedContent != "" }},
-	{"ResponseModalities", func(c *genai.GenerateContentConfig) bool { return len(c.ResponseModalities) > 0 }},
+	{"ResponseModalities", func(c *genai.GenerateContentConfig) bool { return c.ResponseModalities != nil }},
 	{"MediaResolution", func(c *genai.GenerateContentConfig) bool { return c.MediaResolution != "" }},
 	{"SpeechConfig", func(c *genai.GenerateContentConfig) bool { return c.SpeechConfig != nil }},
 	{"AudioTimestamp", func(c *genai.GenerateContentConfig) bool { return c.AudioTimestamp }},

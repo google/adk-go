@@ -443,30 +443,44 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
-// ThinkingConfig is honoured rather than rejected, matching adk-python's
-// mapping onto effort-based reasoning.
+// ThinkingConfig is honoured rather than rejected, mapping onto effort-based
+// reasoning. Summary rides on IncludeThoughts alone: it requires a verified
+// OpenAI organization, so sending it unasked would fail every reasoning call an
+// unverified org makes.
 func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		thinking *genai.ThinkingConfig
-		want     shared.ReasoningEffort
+		want     shared.ReasoningParam
 	}{
-		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningEffortMinimal},
-		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningEffortLow},
-		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningEffortMedium},
-		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningEffortHigh},
+		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningParam{Effort: shared.ReasoningEffortLow}},
+		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
 		// Explicitly unspecified is distinct from unset, and resolves to medium.
-		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningEffortMedium},
-		// Responses has no token budget, so only zero/non-zero survives.
-		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningEffortMinimal},
-		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningEffortMedium},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-1))}, shared.ReasoningEffortMedium},
-		// A level wins over a budget, and IncludeThoughts does not affect either.
+		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		// Responses has no token budget, so only zero/non-zero survives. Zero is
+		// none rather than minimal: minimal is the least thinking, not none of it.
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-1))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		// A level wins over a budget, so an explicit MINIMAL still means minimal
+		// even alongside the zero budget that would otherwise mean none.
 		{"level wins over budget", &genai.ThinkingConfig{
-			ThinkingLevel:   genai.ThinkingLevelLow,
-			ThinkingBudget:  genai.Ptr(int32(0)),
+			ThinkingLevel:  genai.ThinkingLevelMinimal,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		// IncludeThoughts is what asks for summaries, and only it.
+		{"thoughts with level", &genai.ThinkingConfig{
+			ThinkingLevel:   genai.ThinkingLevelHigh,
 			IncludeThoughts: true,
-		}, shared.ReasoningEffortLow},
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh, Summary: shared.ReasoningSummaryAuto}},
+		{"thoughts with budget", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(2048)),
+			IncludeThoughts: true,
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium, Summary: shared.ReasoningSummaryAuto}},
+		// Thoughts alone leave the effort to the model rather than inventing one.
+		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
 	}
 
 	for _, tc := range tests {
@@ -475,19 +489,73 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
-			want := shared.ReasoningParam{Effort: tc.want, Summary: shared.ReasoningSummaryConcise}
-			if !reflect.DeepEqual(params.Reasoning, want) {
-				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, want)
+			if !reflect.DeepEqual(params.Reasoning, tc.want) {
+				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, tc.want)
 			}
 		})
 	}
 }
 
-// A ThinkingConfig carrying neither knob cannot be mapped onto an effort, and
-// adk-python raises here rather than guess.
+// A summary costs a verified organization, so no caller gets one without
+// asking. This is the regression guard for the unconditional summary that made
+// every translated ThinkingConfig a 400.
+func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
+	thinkings := []*genai.ThinkingConfig{
+		{ThinkingLevel: genai.ThinkingLevelHigh},
+		{ThinkingBudget: genai.Ptr(int32(0))},
+		{ThinkingBudget: genai.Ptr(int32(4096))},
+		{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false},
+	}
+	for _, thinking := range thinkings {
+		params := &responses.ResponseNewParams{}
+		if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: thinking}); err != nil {
+			t.Fatalf("applyGenerationConfig(%+v) error = %v, want nil", thinking, err)
+		}
+		if params.Reasoning.Summary != "" {
+			t.Errorf("applyGenerationConfig(%+v) set Summary = %q, want it unset", thinking, params.Reasoning.Summary)
+		}
+	}
+}
+
+// A thinking level genai grows later must be named in an error, not lowercased
+// into an effort string the API rejects with a message pointing nowhere useful.
+func TestApplyGenerationConfigRejectsUnknownThinkingLevel(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("EXHAUSTIVE")},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "EXHAUSTIVE") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name the level", err)
+	}
+}
+
+// reasoningEfforts must cover every level genai declares, or a caller setting a
+// perfectly valid level gets an error instead of the reasoning they asked for.
+func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
+	levels := []genai.ThinkingLevel{
+		genai.ThinkingLevelUnspecified,
+		genai.ThinkingLevelMinimal,
+		genai.ThinkingLevelLow,
+		genai.ThinkingLevelMedium,
+		genai.ThinkingLevelHigh,
+	}
+	for _, level := range levels {
+		if _, ok := reasoningEfforts[level]; !ok {
+			t.Errorf("reasoningEfforts is missing genai.ThinkingLevel %q", level)
+		}
+	}
+	if len(reasoningEfforts) != len(levels) {
+		t.Errorf("reasoningEfforts has %d entries, want %d: genai declared a level this test does not list", len(reasoningEfforts), len(levels))
+	}
+}
+
+// A ThinkingConfig carrying no knob at all cannot be mapped onto anything, and
+// guessing an effort for it would be the silent behavior this package rejects.
 func TestApplyGenerationConfigRejectsEmptyThinkingConfig(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-		ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},
+		ThinkingConfig: &genai.ThinkingConfig{},
 	})
 	if !errors.Is(err, ErrUnsupportedConfigField) {
 		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
@@ -534,6 +602,20 @@ func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "EnableEnhancedCivicAnswers") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name EnableEnhancedCivicAnswers", err)
+	}
+}
+
+// A slice can tell an explicit empty from unset, so it should: asking for no
+// modalities at all is still a request this package cannot honour.
+func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ResponseModalities: []string{},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "ResponseModalities") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name ResponseModalities", err)
 	}
 }
 
@@ -601,6 +683,27 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 	for name := range rejected {
 		if _, ok := cfgType.FieldByName(name); !ok {
 			t.Errorf("unsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
+		}
+	}
+}
+
+// ThinkingConfig is the one nested type this package claims to read in full, so
+// a field added to it must be translated rather than dropped like the parts of
+// Tools and the schema types that doc.go still excludes from the guarantee.
+func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
+	read := map[string]bool{
+		"IncludeThoughts": true,
+		"ThinkingBudget":  true,
+		"ThinkingLevel":   true,
+	}
+	cfgType := reflect.TypeOf(genai.ThinkingConfig{})
+	for i := range cfgType.NumField() {
+		field := cfgType.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		if !read[field.Name] {
+			t.Errorf("genai.ThinkingConfig.%s is not read by applyThinkingConfig: it would be silently ignored", field.Name)
 		}
 	}
 }
