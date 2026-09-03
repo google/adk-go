@@ -76,7 +76,7 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 
 	// Coordinator: a chat-mode LlmAgent that on its first turn emits
 	// a TaskAgentTool FC to delegate to the task sub-agent, then on
-	// its second turn (after the wrapper synthesises the task's FR)
+	// its second turn (after the wrapper synthesizes the task's FR)
 	// emits a final text "delegation complete" and exits.
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
@@ -823,7 +823,7 @@ func runChatCoordinatorOneTurn(t *testing.T, coord agent.Agent, userText string)
 // the coordinator must see both FRs before producing its final reply.
 //
 // Note on chat-loop semantics: the coordinator's first LLM turn emits
-// ONE task FC (to sub_a); the wrapper dispatches it and synthesises
+// ONE task FC (to sub_a); the wrapper dispatches it and synthesizes
 // the FR; the loop re-enters Agent.Run; the second LLM turn emits the
 // FC for sub_b; same dispatch; loop re-enters once more; the third
 // LLM turn emits the final coordinator reply. So this test pins
@@ -1055,7 +1055,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	//     FC and re-enter, but to simulate "the session has an
 	//     unresolved FC from a prior turn" we have the coordinator's
 	//     second-turn script emit a terminal text "first done" — this
-	//     happens AFTER the wrapper synthesises the FR on its first
+	//     happens AFTER the wrapper synthesizes the FR on its first
 	//     re-entry, so by the time the second user turn fires below,
 	//     the FC is resolved already.
 	//

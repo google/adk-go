@@ -34,7 +34,7 @@ import (
 
 // seedWrappedSession stands in for the wrapper an agent installs over the real
 // session when it hands a sub-agent a synthetic first turn. It decorates the
-// session and is not a type any session service recognises.
+// session and is not a type any session service recognizes.
 type seedWrappedSession struct {
 	session.Session
 }

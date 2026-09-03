@@ -1653,7 +1653,7 @@ func TestPluginCannotSmuggleAFunctionCallIntoASummary(t *testing.T) {
 //
 // A plugin appending is the reliable way to reach the window, not the only one.
 // An event carries the timestamp it was created at rather than the one it was
-// stored at, so parallel tool responses and sub-agent events funnelled through
+// stored at, so parallel tool responses and sub-agent events funneled through
 // a channel are routinely created before a range ends and stored after it.
 func TestStragglerInThePluginWindowIsNotLost(t *testing.T) {
 	t.Parallel()

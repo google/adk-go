@@ -168,7 +168,7 @@ type RunState struct {
 }
 
 // NewRunState returns an empty state with the Nodes map
-// initialised so callers can write to it without a nil check.
+// initialized so callers can write to it without a nil check.
 func NewRunState() *RunState {
 	return &RunState{Nodes: map[string]*NodeState{}}
 }

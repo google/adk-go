@@ -84,7 +84,7 @@ func TestScheduler_MessageAsOutput_FeedsSuccessor(t *testing.T) {
 }
 
 // TestScheduler_FanOutConcurrency verifies that three nodes
-// downstream of START are mid-Run simultaneously, not serialised by
+// downstream of START are mid-Run simultaneously, not serialized by
 // the legacy BFS. Each node blocks on its release channel until the
 // test signals.
 func TestScheduler_FanOutConcurrency(t *testing.T) {
@@ -228,7 +228,7 @@ func TestScheduler_ExternalCancellationFailsRun(t *testing.T) {
 // TestScheduler_ExternalCancellationDuringPendingRetry covers the ordering
 // in which no completion is left to classify: the node's activation has
 // already been handled and rescheduled as a retry, so the only thing
-// keeping the loop alive is the retry timer. Cancelling here makes
+// keeping the loop alive is the retry timer. Canceling here makes
 // cancelAll stop that timer and empty retryTimers, ending the loop without
 // another trip through handleCompletion. The cancellation has to be
 // recorded when it is observed, or the run reports success with the graph
@@ -329,11 +329,11 @@ func TestScheduler_ExternalCancellationPrefersNodeError(t *testing.T) {
 
 // TestScheduler_ExternalCancellationMarksNodeCancelled pins the lifecycle
 // status of an externally canceled node. adk-python marks every task it
-// reaps during shutdown CANCELLED whether the engine or the caller
+// reaps during shutdown CANCELED whether the engine or the caller
 // canceled it (_workflow.py _cleanup_all_tasks, run from a finally), and
 // leaving the node at NodeRunning here would instead claim it still has a
 // task in flight.
-// Both flavours of a dying context are covered: on a deadline runNode
+// Both flavors of a dying context are covered: on a deadline runNode
 // reports context.DeadlineExceeded, which must still read as the context
 // dying rather than as a failure the node decided on by itself.
 func TestScheduler_ExternalCancellationMarksNodeCancelled(t *testing.T) {

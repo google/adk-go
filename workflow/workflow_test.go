@@ -277,7 +277,7 @@ func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.E
 func TestWorkflowRouting(t *testing.T) {
 	// testTracker collects the names of nodes that ran. The
 	// scheduler runs sibling nodes concurrently, so appends must be
-	// serialised.
+	// serialized.
 	type testTracker struct {
 		mu       sync.Mutex
 		executed []string

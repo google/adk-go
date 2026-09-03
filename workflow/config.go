@@ -36,7 +36,7 @@ func defaultShouldRetry(err error) bool {
 // DefaultRetryConfig returns a copy of the default retry policy
 // (5 attempts, 1s initial delay, 60s cap, 2x backoff, full jitter,
 // retry every error). Override fields on the returned value to
-// customise:
+// customize:
 //
 //	rc := workflow.DefaultRetryConfig()
 //	rc.MaxAttempts = 10

@@ -468,7 +468,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for workers to start before cancelling
+	// Wait for workers to start before canceling
 	<-startedCh
 	<-startedCh
 	cancel()

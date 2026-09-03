@@ -408,7 +408,7 @@ func stringify(v map[string]any) string {
 // The obvious two are carriage return and newline. U+0085, U+2028 and U+2029
 // are line breaks in Unicode, and vertical tab and form feed are treated as
 // ones by enough consumers that a value carrying either should not be passed
-// through untouched. None of them is worth trusting a model not to honour: the
+// through untouched. None of them is worth trusting a model not to honor: the
 // summary built from this transcript replaces the real conversation in every
 // later prompt, so a forged turn is not read once, it becomes history.
 const lineBreakers = "\r\n\v\f\u0085\u2028\u2029"

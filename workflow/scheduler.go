@@ -31,7 +31,7 @@ import (
 
 // defaultEventQueueCapacity bounds the buffered channel between
 // node-runner goroutines and the consumer. A small fixed capacity
-// keeps backpressure tight without serialising producers.
+// keeps backpressure tight without serializing producers.
 const defaultEventQueueCapacity = 16
 
 var (
@@ -237,7 +237,7 @@ type retryItem struct {
 
 func (retryItem) isQueueItem() {}
 
-// newScheduler returns an initialised scheduler ready for the
+// newScheduler returns an initialized scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
 //
@@ -352,7 +352,7 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch s
 
 // startNode is the unguarded core of scheduleResumedNode: it
 // creates the per-node context, registers bookkeeping, and
-// launches the runner goroutine. Always honours the call; the
+// launches the runner goroutine. Always honors the call; the
 // concurrency-cap check is done by scheduleResumedNode (the
 // public entry point) before reaching here.
 func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
@@ -540,7 +540,7 @@ func (s *scheduler) cancelAll() {
 // run is the single-consumer loop. It drains the eventQueue, applies
 // state-side effects, yields events to the caller, and schedules
 // successor nodes when a node completes. Returns when all running
-// tasks have signalled completion.
+// tasks have signaled completion.
 //
 // On non-nil yield-return-false (caller broke from the range loop)
 // or on a non-retryable node error, run cancels all in-flight
@@ -788,7 +788,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 	}
 }
 
-// handleCompletion finalises a node's run: transitions its lifecycle
+// handleCompletion finalizes a node's run: transitions its lifecycle
 // status, removes the live task, and (if scheduleSuccessors is true)
 // schedules its successors. When the consumer is draining (caller
 // stopped or a node failed), pass scheduleSuccessors=false so the
@@ -838,7 +838,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 			return it.err
 		}
 		// Matches adk-python, which marks every task it reaps during
-		// shutdown CANCELLED regardless of who canceled it
+		// shutdown CANCELED regardless of who canceled it
 		// (_workflow.py _cleanup_all_tasks, run from a finally).
 		ns.Status = NodeCancelled
 		return nil

@@ -692,7 +692,7 @@ contains everything you need.`,
 // =============================================================================
 
 // TestDelegation_02_ChatToTwoTaskSequential covers runChat's outer
-// re-entry loop: after dispatching the first task FC and synthesising
+// re-entry loop: after dispatching the first task FC and synthesizing
 // its FR, the coordinator's LLM is re-invoked and emits the second
 // task FC in the SAME user turn. Validates that each sub-agent runs
 // in its own isolation scope and that the coordinator sees both
@@ -825,7 +825,7 @@ always contains everything needed for both steps.`,
 	if got := finalModelTextAuthor(events2); got != "coordinator" {
 		t.Errorf("turn 2: final model text author = %q, want %q", got, "coordinator")
 	}
-	// Reply should mention both pizza (order) and a recognisable
+	// Reply should mention both pizza (order) and a recognizable
 	// fragment of the card number (payment) — proves both FRs are
 	// in the coordinator's view.
 	if reply := finalModelText(events2); !mentionsAll(reply, "pizza") {

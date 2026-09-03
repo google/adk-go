@@ -127,7 +127,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// patch quietly. ADK Kotlin, which this design was adapted from, runs
 		// no plugin hook on either of its compaction paths, so the gap is
 		// consistent with the reference; that is a statement about consistency
-		// rather than a defence of the behavior. It is documented on the
+		// rather than a defense of the behavior. It is documented on the
 		// exported surface at compaction.Config.TokenThreshold.
 		if !compactioninternal.SanitizeSummary(summary) {
 			finish(nil, "the summary held nothing usable")

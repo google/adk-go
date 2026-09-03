@@ -314,7 +314,7 @@ type Summarizer interface {
 	// Either may carry [SummarizeResult.Usage].
 	//
 	// ctx must be honored. An implementation that ignores it holds the turn
-	// open for as long as it runs, and cancelling the caller's context does not
+	// open for as long as it runs, and canceling the caller's context does not
 	// cut it short, because the run does not return until this call does.
 	// Post-invocation compaction is driven from a deferred call, so this
 	// outlasts even a consumer that has stopped reading events. The framework

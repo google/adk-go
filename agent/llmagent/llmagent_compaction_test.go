@@ -96,7 +96,7 @@ const minCassetteBytes = 1024
 // package claims it. That partitioning is enforced by
 // TestHTTPRecordDirectivesPartitionCassettes: every cassette must be re-recordable
 // by exactly one directive, so neither a stray "go generate ./..." nor a broad
-// pattern can quietly rewrite a neighbour's recording along with this one.
+// pattern can quietly rewrite a neighbor's recording along with this one.
 //
 // This used to carry no directive at all, on the grounds that the package-level
 // one matched every cassette here. It no longer does -- that directive is now

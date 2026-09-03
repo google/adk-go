@@ -635,7 +635,7 @@ func TestExcludesSurvivesABackendThatDropsPrecision(t *testing.T) {
 		t.Error("an event the record names as a hole is being treated as covered")
 	}
 
-	// The range test is deliberately not normalised. An event just past the end
+	// The range test is deliberately not normalized. An event just past the end
 	// was summarized by nothing, and widening the range to reach it is the
 	// deletion this whole mechanism exists to prevent.
 	past := &session.Event{ID: "b", InvocationID: "inv1", Timestamp: rng.EndTimestamp.Add(time.Nanosecond)}

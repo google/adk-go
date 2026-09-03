@@ -296,7 +296,7 @@ func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCo
 // It counts only text parts, so it under-counts a prompt dominated by inline
 // data, and it sees nothing outside contents -- notably not the system
 // instruction or tool declarations, which for an agent with many tools or a
-// large skills catalogue can dominate. It is therefore a floor, not an
+// large skills catalog can dominate. It is therefore a floor, not an
 // estimate, and is consulted only until the first model response reports a real
 // prompt token count.
 func EstimateTokensFromContents(contents []*genai.Content) int {

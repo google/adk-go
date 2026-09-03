@@ -348,7 +348,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 1,
 		},
 		{
-			// Cancelling the invocation context while the reader is blocked in
+			// Canceling the invocation context while the reader is blocked in
 			// Recv is the everyday teardown path: cleanup closes the
 			// connection, the reader's Recv fails, and its error send must not
 			// block forever on the abandoned channel.
@@ -422,7 +422,7 @@ func liveHistoryProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f 
 // Every other return in RunLive's own body releases the attempt through
 // cleanup (or cancelConn, before the connection exists). The SendHistory
 // failure path returns without either, so the websocket is never closed.
-// Cancelling the context would not help: genai dials with
+// Canceling the context would not help: genai dials with
 // websocket.DefaultDialer.Dial, which takes no context, and nothing in the SDK
 // watches one — only an explicit Close releases that socket. So the connection
 // survives for the lifetime of the process, not just the invocation.

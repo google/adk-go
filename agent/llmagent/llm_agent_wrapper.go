@@ -52,7 +52,7 @@ import (
 //     Agent.Run on each iteration it scans the session for unresolved
 //     task delegations (task FCs from this coordinator without a
 //     matching FR), dispatches each via workflow.RunNode under a
-//     stable WithRunID(fc.ID), and synthesises a user-role FR event so
+//     stable WithRunID(fc.ID), and synthesizes a user-role FR event so
 //     the LLM sees the task result on the next round. The loop ends
 //     when the LLM finishes without delegating. transfer_to_agent is
 //     handled in-process by llmagent.Run (forwarded through the same
@@ -560,7 +560,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			if !yield(ev, nil) {
 				return
 			}
-			// Only act on non-partial (finalised) events. Streaming
+			// Only act on non-partial (finalized) events. Streaming
 			// flows emit partial events with the same content as the
 			// eventual final aggregated event; partials are not
 			// persisted to the session, so dispatching off a partial
