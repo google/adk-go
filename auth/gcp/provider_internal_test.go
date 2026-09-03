@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,4 +390,118 @@ func newTestProvider(t *testing.T) *provider {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 	return p.(*provider)
+}
+
+// Two Clients left to Application Default Credentials are still two cache
+// dimensions. NewClient resolves ADC afresh on every call and the transport
+// underneath it can come from the context, so this package cannot know that two
+// of them authenticate as the same principal — and a false miss costs a round
+// trip where a false hit discloses one principal's token to another.
+func TestADCClientsDoNotShareACacheSlot(t *testing.T) {
+	fakeADC(t)
+	newADCClient := func() *Client {
+		t.Helper()
+		c, err := NewClient(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		return c
+	}
+	first, second := newADCClient(), newADCClient()
+	if first.cacheSlot == second.cacheSlot {
+		t.Error("two ADC-built Clients share a cache slot, so one would be served the other's credential")
+	}
+}
+
+// A Client's cache slot must not repeat in another process. A store can outlive
+// the process that wrote to it, or be shared by two, and an entry written by a
+// Client that no longer exists names an identity nothing can check.
+func TestClientCacheSlotIsProcessUnique(t *testing.T) {
+	// The width is spelled out rather than derived from nonceBytes: a test that
+	// measures the constant against itself moves with it, and a nonce narrowed to
+	// a byte would collide between two processes once in 256 while still passing
+	// an inequality check almost every run. 128 bits, hex-encoded.
+	if len(clientNonce) < 32 {
+		t.Fatalf("clientNonce is %d hex characters, want at least 32 (128 bits)", len(clientNonce))
+	}
+	if clientNonce == newClientNonce() {
+		t.Fatal("clientNonce is fixed; two processes constructing Clients in the same order would collide")
+	}
+	c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if !strings.Contains(c.cacheSlot, clientNonce) {
+		t.Errorf("cache slot %q does not carry the per-process nonce", c.cacheSlot)
+	}
+}
+
+// joinFields must be injective: no two distinct field lists may encode alike,
+// whatever characters the fields contain. This is what stands between a scope
+// holding a delimiter and a cross-provider cache hit, and the cache-dimension
+// cases in provider_test.go do not pin it on their own — none of the pairs they
+// compare uses ":" as a field value, so a ":"-separated join tells them apart.
+func TestJoinFieldsIsInjective(t *testing.T) {
+	// Every field list that can be built from this alphabet, at every length up to
+	// 3. A separator-joining encoding collides inside the set whatever separator
+	// it picks, because each separator is itself a field value. The long entries
+	// are load-bearing too: with every field under ten bytes the length prefix is
+	// a single digit and is self-punctuating, so dropping the ":" would survive.
+	long := strings.Repeat("a", 19)
+	alphabet := []string{"", "a", ",", "|", ":", "0", "1:", "a,b", "a|b", "23", long, "319" + long}
+	var lists [][]string
+	var build func(prefix []string, depth int)
+	build = func(prefix []string, depth int) {
+		lists = append(lists, slices.Clone(prefix))
+		if depth == 0 {
+			return
+		}
+		for _, f := range alphabet {
+			build(append(prefix, f), depth-1)
+		}
+	}
+	build(nil, 3)
+
+	seen := make(map[string][]string, len(lists))
+	for _, l := range lists {
+		enc := joinFields(l...)
+		if prev, ok := seen[enc]; ok {
+			t.Fatalf("joinFields(%q) and joinFields(%q) both encode to %q", prev, l, enc)
+		}
+		seen[enc] = l
+	}
+	t.Logf("%d distinct field lists, %d distinct encodings", len(lists), len(seen))
+}
+
+// NewClient is called concurrently in production — two providers on the lazy
+// path build their default clients on goroutines they own — and a slot handed
+// out twice is a cross-principal cache hit.
+func TestNewClientSlotsAreUniqueUnderConcurrency(t *testing.T) {
+	const n = 32
+	slots := make([]string, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
+			if err != nil {
+				t.Errorf("NewClient() error = %v", err)
+				return
+			}
+			slots[i] = c.cacheSlot
+		}()
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool, n)
+	for _, s := range slots {
+		if s == "" {
+			t.Fatal("a Client was built with an empty cache slot")
+		}
+		if seen[s] {
+			t.Fatalf("cache slot %q was handed to two Clients", s)
+		}
+		seen[s] = true
+	}
 }

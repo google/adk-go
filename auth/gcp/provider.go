@@ -16,9 +16,12 @@ package gcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,6 +63,26 @@ type ProviderConfig struct {
 	// synchronously, so the cost and any failure move to startup, where they can
 	// at least be reported.
 	Client *Client
+	// Store caches resolved credentials across requests. When nil, a private
+	// in-memory store is used. Caching matters here because each miss is a
+	// network round-trip (and up to a ~10s pending poll) to the credential
+	// service.
+	//
+	// One store can safely back several providers: entries are keyed by the app,
+	// the end user, and everything that decides what the service returns — the
+	// resource, the scopes, the continue URI, and the Client. Two providers share
+	// an entry when they share a Client and agree on all of that, and not
+	// otherwise. Building a Client per provider is therefore a way to get no
+	// sharing at all; see [Config.HTTPClient].
+	//
+	// The cost of caching is staleness. A credential revoked before it expires
+	// keeps being served until the cached entry does, which is the service's
+	// expiry or an hour, whichever comes first. To invalidate one sooner, pass
+	// [Client.CacheKey] to [auth.CredentialStore.Delete] — which needs a Client,
+	// so set one here rather than leaving it to the lazy default if you intend to
+	// invalidate at all. The provider does not expose the Client it builds for
+	// itself.
+	Store auth.CredentialStore
 }
 
 // ErrClientUnavailable means the default Application Default Credentials client
@@ -70,8 +93,8 @@ var ErrClientUnavailable = errors.New("gcp: default credentials client unavailab
 
 // ErrNoActingUser means the provider could not determine the acting end user,
 // either because the context is not an ADK context or because the invocation
-// carries no user. Unlike adk-python, which degrades such a turn into an auth
-// request, the Go provider fails the request: no user, no credential.
+// carries no user. No user, no credential — the same call adk-python makes,
+// which raises on a missing user id rather than degrading the turn.
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
@@ -125,9 +148,14 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 	if cfg.Client != nil && cfg.Client.httpClient == nil {
 		return nil, errors.New("gcp: ProviderConfig.Client must come from NewClient")
 	}
+	store := cfg.Store
+	if store == nil {
+		store = auth.NewInMemoryCredentialStore()
+	}
 	p := &provider{
 		scheme:      cfg.Scheme,
 		client:      cfg.Client,
+		store:       store,
 		newClient:   func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
 		initTimeout: defaultInitTimeout,
 	}
@@ -142,8 +170,46 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 	return p, nil
 }
 
+// maxCachedLifetime caps how long a credential is cached, whatever expiry the
+// service reports, so a bad or injected expireTime cannot pin one indefinitely.
+// It also bounds how long a credential revoked before its expiry keeps being
+// served, which the service warns can happen at any time.
+const maxCachedLifetime = time.Hour
+
+// cacheSlot is the store slot a credential for s, minted through c, is cached
+// under. It covers everything that decides what comes back: the client (which
+// fixes both the service asked and the identity the ask is authenticated as),
+// the resource, the scopes, and the continue URI. A store shared by several
+// providers would otherwise serve one provider's credential to another —
+// the broad token to a read-only provider, or one caller identity's token to a
+// second identity's provider.
+//
+// The components are length-prefixed before hashing, so no combination of
+// delimiters inside a scope or a URI can collide two different schemes. Sorting
+// the scopes makes the slot independent of the caller's ordering.
+//
+// There is no adk-python original to match. Python's credential service is not
+// on this provider's path at all: GcpAuthProviderScheme is a CustomAuthScheme,
+// and CredentialManager returns the provider's credential directly without ever
+// loading or saving one (credential_manager.py). Caching GCP credentials is a Go
+// addition, and this slot is its own design. The nearest analogue is
+// AuthConfig.get_credential_key (auth_tool.py), which joins two digests of
+// canonical JSON — one of the auth scheme, one of the credential used to obtain
+// it. Go cannot produce the second, a Client's credentials being opaque to this
+// package, so it names the Client instead.
+func cacheSlot(c *Client, s ProviderScheme) string {
+	scopes := slices.Clone(s.Scopes)
+	slices.Sort(scopes)
+	fields := []string{c.cacheSlot, s.Name, strconv.Itoa(len(scopes))}
+	fields = append(fields, scopes...)
+	fields = append(fields, s.ContinueURI)
+	sum := sha256.Sum256([]byte(joinFields(fields...)))
+	return hex.EncodeToString(sum[:])
+}
+
 type provider struct {
 	scheme ProviderScheme
+	store  auth.CredentialStore
 	// initCtx roots the lazily built default client, which is why NewProvider
 	// asks for a process-scoped context. Nil when a Client was supplied.
 	initCtx context.Context
@@ -185,6 +251,10 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
 	}
 
+	// Before the cache read, because the Client is part of the cache key and a
+	// provider that has not built one yet has no slot, so nothing can be cached
+	// under it. Costs one mutex on the hot path; the client is built at most
+	// once.
 	client, err := p.resolveClient(ctx)
 	if err != nil {
 		// Not attributed: a client-init failure is about this process's own
@@ -192,7 +262,17 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		// fails it identically. Attributing it would also stack the package prefix.
 		return nil, err
 	}
-	cred, err := client.RetrieveCredential(ctx, Request{
+
+	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}
+	// A store read error is non-fatal: fall through and fetch a fresh credential.
+	// A hit carrying no credential is a miss, though the interface forbids one:
+	// a third-party store is not worth failing closed over, and returning a nil
+	// credential to auth.Transport would fail the request anyway.
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil {
+		return cred, nil
+	}
+
+	r, err := client.RetrieveCredential(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      id.UserID,
 		Scopes:      p.scheme.Scopes,
@@ -201,7 +281,38 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if err != nil {
 		return nil, p.attribute(err)
 	}
-	return cred, nil
+	p.cache(ctx, key, r)
+	return r.Credential, nil
+}
+
+// cache stores r under key, best-effort: a store write failure must not fail
+// auth.
+//
+// Nothing is stored unless the service gave a lifetime with enough left to be
+// worth reading back. That single test covers four cases: the service reported
+// no expiry, meaning it cannot say when the token dies, so the credential cannot
+// be vouched for later; it reported an unparseable one, which reaches here as
+// the same zero time; it reported one already spent, which a store deriving a
+// TTL from it would turn into a negative one; or it reported one so close that
+// a store applying the standard margin would refuse to serve the entry the
+// moment it was written.
+//
+// The far end is clamped rather than rejected, so a wildly distant expiry —
+// wrong, or injected — shortens to the cap instead of pinning the entry.
+//
+// Wall clock, not platform.Now: what is being decided is when a real credential
+// stops working, which no simulated clock changes. [auth.CredentialStore.Set]
+// says the same of the value written here.
+func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
+	now := time.Now()
+	if !r.ExpiresAt.After(now.Add(auth.ExpirySkew)) {
+		return
+	}
+	expiresAt := r.ExpiresAt
+	if capped := now.Add(maxCachedLifetime); expiresAt.After(capped) {
+		expiresAt = capped
+	}
+	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
 }
 
 // attribute names the resource a retrieval failure belongs to: several providers
