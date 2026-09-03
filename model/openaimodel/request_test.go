@@ -443,7 +443,7 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
-// ThinkingConfig is honoured rather than rejected, mapping onto effort-based
+// ThinkingConfig is honored rather than rejected, mapping onto effort-based
 // reasoning. Summary rides on IncludeThoughts alone: it requires a verified
 // OpenAI organization, so sending it unasked would fail every reasoning call an
 // unverified org makes.
@@ -577,17 +577,58 @@ func TestApplyGenerationConfigOmitsReasoningByDefault(t *testing.T) {
 	}
 }
 
-// Logprobs is translated only alongside ResponseLogprobs; alone it reached
-// neither the params nor the wire.
-func TestApplyGenerationConfigRejectsOrphanLogprobs(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-		Logprobs: genai.Ptr(int32(5)),
-	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+// A field can be translated and still be handed a value that is not. These are
+// the values that would otherwise slip through the presence check, since the
+// field they belong to is one the package does support.
+func TestApplyGenerationConfigRejectsUntranslatableValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   *genai.GenerateContentConfig
+		names string
+	}{
+		// Logprobs only sizes the list ResponseLogprobs asks for.
+		{"orphan Logprobs", &genai.GenerateContentConfig{Logprobs: genai.Ptr(int32(5))}, "Logprobs"},
+		{"negative MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: -1}, "MaxOutputTokens"},
+		{"negative CandidateCount", &genai.GenerateContentConfig{CandidateCount: -1}, "CandidateCount"},
 	}
-	if !strings.Contains(err.Error(), "Logprobs") {
-		t.Errorf("applyGenerationConfig() error = %q, want it to name Logprobs", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.names)
+			}
+		})
+	}
+}
+
+// The values either side of the rejected ones still work, so tightening the
+// check did not turn ordinary configs into errors.
+func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+	}{
+		{"unset MaxOutputTokens", &genai.GenerateContentConfig{}},
+		{"positive MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: 1}},
+		{"unset CandidateCount", &genai.GenerateContentConfig{}},
+		// Zero and one both mean the single candidate Responses returns.
+		{"single CandidateCount", &genai.GenerateContentConfig{CandidateCount: 1}},
+		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
+			ResponseLogprobs: true,
+			Logprobs:         genai.Ptr(int32(5)),
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg); err != nil {
+				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
+			}
+		})
 	}
 }
 
@@ -606,7 +647,7 @@ func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 }
 
 // A slice can tell an explicit empty from unset, so it should: asking for no
-// modalities at all is still a request this package cannot honour.
+// modalities at all is still a request this package cannot honor.
 func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ResponseModalities: []string{},
@@ -619,17 +660,49 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 	}
 }
 
-// The named errors are checked before the sentinel, so code matching on them
-// keeps working when a caller sets both.
+// Every named error is checked before the sentinel, so an errors.Is call site
+// that worked before ErrUnsupportedConfigField existed still works when the
+// caller happens to set one of the newly-rejected fields as well.
 func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	topK := float32(5)
-	cfg := &genai.GenerateContentConfig{
-		TopK: &topK,
-		Seed: genai.Ptr(int32(7)),
+	// Each case pairs a named error with a field that returns the sentinel; the
+	// named error must win. Logprobs is here because it is rejected from within
+	// the translation order rather than from the trailing sweep, which is
+	// exactly where a sentinel can get in front of a named error by accident.
+	tests := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+		want error
+	}{
+		{"TopK over Seed", &genai.GenerateContentConfig{
+			TopK: &topK,
+			Seed: genai.Ptr(int32(7)),
+		}, ErrTopKNotSupported},
+		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs: genai.Ptr(int32(5)),
+			Labels:   map[string]string{"team": "search"},
+		}, ErrLabelsNotSupported},
+		{"SafetySettings over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs:       genai.Ptr(int32(5)),
+			SafetySettings: []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment}},
+		}, ErrSafetySettingsNotSupported},
+		{"MIME type over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs:         genai.Ptr(int32(5)),
+			ResponseMIMEType: "text/csv",
+		}, ErrUnsupportedMIMEType},
+		{"StopSequences over ThinkingConfig", &genai.GenerateContentConfig{
+			StopSequences:  []string{"STOP"},
+			ThinkingConfig: &genai.ThinkingConfig{},
+		}, ErrStopSequencesNotSupported},
 	}
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg)
-	if !errors.Is(err, ErrTopKNotSupported) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrTopKNotSupported)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }
 

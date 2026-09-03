@@ -344,10 +344,6 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		}
 		// Responses returns logprobs only when explicitly included.
 		params.Include = append(params.Include, responses.ResponseIncludableMessageOutputTextLogprobs)
-	} else if cfg.Logprobs != nil {
-		// Logprobs only sizes the list ResponseLogprobs asks for, so alone it
-		// reaches neither params nor the wire.
-		return fmt.Errorf("%w: Logprobs without ResponseLogprobs", ErrUnsupportedConfigField)
 	}
 	if cfg.SystemInstruction != nil {
 		inst, err := flattenContentText(cfg.SystemInstruction)
@@ -388,6 +384,9 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		return ErrSafetySettingsNotSupported
 	}
 	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
+		return err
+	}
+	if err := rejectUntranslatableValues(cfg); err != nil {
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
@@ -449,10 +448,34 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 	return nil
 }
 
+// rejectUntranslatableValues catches the settings whose field is translated but
+// whose particular value is not, which the presence check below cannot see.
+//
+// It runs after every named error so that a caller who set one of those too
+// gets the error they have always got, rather than this sentinel jumping the
+// queue and breaking their errors.Is.
+func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
+	switch {
+	case cfg.Logprobs != nil && !cfg.ResponseLogprobs:
+		// Logprobs only sizes the list ResponseLogprobs asks for, so alone it
+		// reaches neither params nor the wire.
+		return fmt.Errorf("%w: Logprobs without ResponseLogprobs", ErrUnsupportedConfigField)
+	case cfg.MaxOutputTokens < 0:
+		// Only a positive cap is translated. A negative one is neither a cap
+		// nor the absence of one, so it would otherwise vanish.
+		return fmt.Errorf("%w: negative MaxOutputTokens", ErrUnsupportedConfigField)
+	case cfg.CandidateCount < 0:
+		// Above one is ErrMultipleCandidatesNotSupported; zero and one both mean
+		// the single candidate Responses returns. Below zero means nothing.
+		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
+	}
+	return nil
+}
+
 // unsupportedConfigFields lists the GenerateContentConfig fields this package
 // cannot translate, each with a predicate reporting whether the caller set it.
 // Presence, not value: setting a knob at all means the caller expected an effect.
-// ServiceTier could be honoured (openai-go has service_tier) and is left for a
+// ServiceTier could be honored (openai-go has service_tier) and is left for a
 // separate change; HTTPOptions is transport, taken from ClientConfig instead.
 var unsupportedConfigFields = []struct {
 	name  string

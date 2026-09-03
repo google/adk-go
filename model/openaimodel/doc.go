@@ -24,10 +24,16 @@
 // Every top-level field of genai.GenerateContentConfig is either translated to
 // the Responses API or rejected with an error naming it. The long-standing
 // rejections (TopK, StopSequences, multiple candidates, the penalties, Labels,
-// SafetySettings) keep their own errors, and the rest return
-// ErrUnsupportedConfigField. Rejection keys on presence rather than value, so
-// setting a knob at all is enough — except for AudioTimestamp, a plain bool
-// whose false is indistinguishable from unset and so still passes unremarked.
+// SafetySettings) keep their own errors and are checked first, so an existing
+// errors.Is call site is unaffected; everything else returns
+// ErrUnsupportedConfigField.
+//
+// For a field with no equivalent at all, rejection keys on presence rather than
+// value: setting the knob is itself the request. The exception is
+// AudioTimestamp, a plain bool whose false cannot be told from unset, so it
+// alone still passes unremarked. A field that is translated can also be handed
+// a value that is not — a negative MaxOutputTokens or CandidateCount, or
+// Logprobs without ResponseLogprobs — and those are rejected too.
 //
 // ThinkingConfig is translated to the Responses API's effort-based reasoning:
 // ThinkingLevel maps to the effort of the same name, and a token budget, which
@@ -35,7 +41,7 @@
 // otherwise. Models differ in which efforts they accept — gpt-5.4-nano takes
 // none but not minimal, the o-series takes neither — so asking for one a model
 // lacks draws a 400 naming reasoning.effort and listing what it does take.
-// That is deliberate: quietly substituting a neighbouring effort would bill the
+// That is deliberate: quietly substituting a neighboring effort would bill the
 // caller for thinking they asked not to do. IncludeThoughts asks for reasoning
 // summaries, which arrive as parts with Thought set; it is off by default
 // because summaries require a verified OpenAI organization.
