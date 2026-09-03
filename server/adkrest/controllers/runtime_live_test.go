@@ -100,7 +100,7 @@ const (
 	// Keep this below RunLiveHandler's one-second close-drain deadline so the
 	// test verifies that the handler waits for the client's close reply.
 	testCloseDrainGracePeriod = 50 * time.Millisecond
-	testCloseDrainMaxLatency  = 500 * time.Millisecond
+	testCloseReplyExitTimeout = 100 * time.Millisecond
 )
 
 func dialRunLiveHandler(
@@ -444,7 +444,6 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 		t.Fatal("RunLiveHandler returned before receiving the close reply")
 	case <-time.After(testCloseDrainGracePeriod):
 	}
-	replySentAt := time.Now()
 	if err := conn.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(closeErr.Code, "client acknowledged"),
@@ -452,9 +451,10 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 	); err != nil {
 		t.Fatalf("WriteControl(close reply) failed: %v", err)
 	}
-	waitForHandlerExit(t, handlerDone)
-	if elapsed := time.Since(replySentAt); elapsed > testCloseDrainMaxLatency {
-		t.Errorf("RunLiveHandler took %v to exit after the close reply, want less than %v", elapsed, testCloseDrainMaxLatency)
+	select {
+	case <-handlerDone:
+	case <-time.After(testCloseReplyExitTimeout):
+		t.Fatalf("RunLiveHandler did not exit promptly after the close reply")
 	}
 }
 
