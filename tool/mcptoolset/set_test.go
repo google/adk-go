@@ -849,21 +849,55 @@ func TestMCPTool_EmptyTextResponse(t *testing.T) {
 }
 
 // TestMCPTool_NonTextOnlyResponse covers the gap left by #1353: an empty text
-// result is a valid success, but only when the server sent nothing. A result
-// carrying just an image, audio, resource link or embedded resource also
-// accumulates no text, and reporting that as {"output": ""} hands the model an
-// empty map while discarding the entire payload.
+// result is a valid success, but only when there was no other content to lose.
+// A result carrying just an image, audio, resource link or embedded resource
+// also accumulates no text, and reporting that as {"output": ""} hands the
+// model an empty string while discarding the entire payload.
+//
+// The mixed case is the control. A non-text block alongside real text must
+// still succeed, which pins the textResponse.Len() == 0 half of the condition:
+// without it, every result carrying a non-text block would error.
+//
+// TODO(#1401): the mixed case still drops its non-text block silently (#1391).
+// When #1401 renders those blocks, this whole test goes away with the guard.
 func TestMCPTool_NonTextOnlyResponse(t *testing.T) {
 	tests := []struct {
-		name    string
-		content mcp.Content
+		name       string
+		content    []mcp.Content
+		wantErr    bool
+		wantOutput string
 	}{
-		{"image", &mcp.ImageContent{MIMEType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}}},
-		{"audio", &mcp.AudioContent{MIMEType: "audio/wav", Data: []byte{0x52, 0x49, 0x46, 0x46}}},
-		{"resource link", &mcp.ResourceLink{URI: "file:///tmp/report.pdf", Name: "report.pdf"}},
-		{"embedded resource", &mcp.EmbeddedResource{
-			Resource: &mcp.ResourceContents{URI: "file:///tmp/data.bin", MIMEType: "application/octet-stream", Blob: []byte{0x00, 0x01}},
-		}},
+		{
+			name:    "image only",
+			content: []mcp.Content{&mcp.ImageContent{MIMEType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}}},
+			wantErr: true,
+		},
+		{
+			name:    "audio only",
+			content: []mcp.Content{&mcp.AudioContent{MIMEType: "audio/wav", Data: []byte{0x52, 0x49, 0x46, 0x46}}},
+			wantErr: true,
+		},
+		{
+			name:    "resource link only",
+			content: []mcp.Content{&mcp.ResourceLink{URI: "file:///tmp/report.pdf", Name: "report.pdf"}},
+			wantErr: true,
+		},
+		{
+			name: "embedded resource only",
+			content: []mcp.Content{&mcp.EmbeddedResource{
+				Resource: &mcp.ResourceContents{URI: "file:///tmp/data.bin", MIMEType: "application/octet-stream", Blob: []byte{0x00, 0x01}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "text alongside non-text still succeeds",
+			content: []mcp.Content{
+				&mcp.TextContent{Text: "caption"},
+				&mcp.ImageContent{MIMEType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}},
+			},
+			wantErr:    false,
+			wantOutput: "caption",
+		},
 	}
 
 	for _, tt := range tests {
@@ -871,9 +905,9 @@ func TestMCPTool_NonTextOnlyResponse(t *testing.T) {
 			clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
 			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
-			mcp.AddTool(server, &mcp.Tool{Name: "non_text_tool", Description: "returns only non-text content"}, func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
+			mcp.AddTool(server, &mcp.Tool{Name: "non_text_tool", Description: "returns non-text content"}, func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
 				return &mcp.CallToolResult{
-					Content: []mcp.Content{tt.content},
+					Content: tt.content,
 				}, nil, nil
 			})
 			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
@@ -909,8 +943,24 @@ func TestMCPTool_NonTextOnlyResponse(t *testing.T) {
 			}
 
 			res, err := fnTool.Run(tc, map[string]any{})
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("Run() returned %v, want success", err)
+				}
+				if res["output"] != tt.wantOutput {
+					t.Fatalf("Run() output = %q, want %q", res["output"], tt.wantOutput)
+				}
+				return
+			}
+
 			if err == nil {
-				t.Fatalf("Expected Run to report the dropped content, got output=%q", res["output"])
+				t.Fatalf("Run() succeeded with output=%q, want an error reporting the dropped content", res["output"])
+			}
+			// Pin the identity of the error: a transport failure, or the
+			// pre-#1353 "no text content" error, must not satisfy this case.
+			if want := `tool "non_text_tool" returned only non-text content`; !strings.Contains(err.Error(), want) {
+				t.Fatalf("Run() error = %q, want it to contain %q", err.Error(), want)
 			}
 		})
 	}
