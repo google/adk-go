@@ -123,10 +123,13 @@ type CredentialStore interface {
 	// Delete removes any entry for key. Removing an absent key is not an error.
 	//
 	// It is the invalidation hook for a caller that learns a credential is no
-	// longer good before it expires — on consent revocation or logout. ADK does
-	// not call it: a credential rejected downstream is refreshed by the provider
-	// that issued it, not deleted from the store, and until a provider implements
-	// that refresh a revoked credential is served until its cached entry expires.
+	// longer good before it expires — on consent revocation or logout — and ADK
+	// calls it for one case of its own: a provider refreshing a credential the
+	// downstream rejected drops the entry when it cannot replace it, so a
+	// credential known to be bad is never served again. An implementation should
+	// therefore expect Delete on a request path, not only from an operator.
+	//
+	// A revocation nobody tells ADK about is still served until the entry expires.
 	// The auth/gcp provider bounds that to an hour and exposes the key to delete
 	// as gcp.Client.CacheKey.
 	//

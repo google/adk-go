@@ -291,6 +291,14 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// PriorToken is the previously issued, now rejected, token. Setting it asks
+	// the service to mint a fresh credential rather than return the one it
+	// already has. Empty on a normal fetch.
+	//
+	// The two services spell the ask differently on the wire and this one field
+	// covers both — Agent Identity is sent the token, the IAM Connector a
+	// boolean. See the request types below.
+	PriorToken string
 }
 
 // Retrieval is the result of [Client.RetrieveCredential].
@@ -437,13 +445,36 @@ func parseExpireTime(v lenientTime) time.Time {
 	return t
 }
 
-// retrieveRequest is the JSON body for both services' credentials:retrieve RPC
-// (the auth provider / connector is bound to the URL path, not the body).
-type retrieveRequest struct {
-	UserID      string   `json:"userId,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	ContinueURI string   `json:"continueUri,omitempty"`
-}
+// The two services agree on the retrieval body except for how a caller forces a
+// refresh, so that one field is all these types do not share.
+//
+// Agent Identity takes the rejected token itself, and documents that a caller
+// seeing a PERMISSION_DENIED should retry with it set
+// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+// RetrieveCredentialsRequest.forceRefreshToken). The IAM Connector takes a
+// boolean instead — it publishes no discovery document to anonymous callers, but
+// adk-python's generated client fills the field in, as force_refresh
+// (integrations/agent_identity/_iam_connector_credentials_provider.py). Sending
+// one service the other's field would leave the refresh unforced at best, and
+// rejected as an unknown field at worst.
+type (
+	// agentIdentityRequest is the JSON body for Agent Identity's
+	// credentials:retrieve (the auth provider is bound to the URL path, not the
+	// body).
+	agentIdentityRequest struct {
+		UserID            string   `json:"userId,omitempty"`
+		Scopes            []string `json:"scopes,omitempty"`
+		ContinueURI       string   `json:"continueUri,omitempty"`
+		ForceRefreshToken string   `json:"forceRefreshToken,omitempty"`
+	}
+	// connectorRequest is the same for the IAM Connector.
+	connectorRequest struct {
+		UserID       string   `json:"userId,omitempty"`
+		Scopes       []string `json:"scopes,omitempty"`
+		ContinueURI  string   `json:"continueUri,omitempty"`
+		ForceRefresh bool     `json:"forceRefresh,omitempty"`
+	}
+)
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential; any other header
