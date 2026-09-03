@@ -68,6 +68,21 @@ func TestElideQuoteMarkers(t *testing.T) {
 		}
 	})
 
+	t.Run("does not reassemble a begin marker split by the replacement", func(t *testing.T) {
+		// Symmetric case to the one above, built from QuotedContentBegin
+		// halves instead of QuotedContentEnd halves. Low incremental
+		// value on its own -- an empty sentinel already fails the end-marker
+		// case above -- but cheap to add and closes the asymmetry.
+		straddling := "<<<BEGIN_QUOTED_AG" + llminternal.QuotedContentBegin + "ENT_CONTENT>>>"
+		got := llminternal.ElideQuoteMarkers(straddling)
+		if strings.Contains(got, llminternal.QuotedContentBegin) {
+			t.Errorf("elision reassembled a live begin marker from a straddling string: %q", got)
+		}
+		if strings.Contains(got, llminternal.QuotedContentEnd) {
+			t.Errorf("elision reassembled a live end marker from a straddling string: %q", got)
+		}
+	})
+
 	t.Run("text without markers is unchanged", func(t *testing.T) {
 		const text = "nothing to elide here"
 		if got := llminternal.ElideQuoteMarkers(text); got != text {

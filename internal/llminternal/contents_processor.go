@@ -606,13 +606,14 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 					ev.Author, ElideQuoteMarkers(p.FunctionResponse.Name), QuoteUntrusted(stringify(p.FunctionResponse.Response))),
 			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
-			// ExecutableCode and CodeExecutionResult parts land here and are
-			// relayed verbatim, with no fence and no elision -- deliberate
-			// and unchanged from before this file's fencing was added, not a
-			// gap introduced by it. Worth being explicit that
-			// OtherAgentContextPreamble's promise is scoped to what sits
-			// between its markers: a part with no markers around it at all
-			// is outside anything the preamble states a guarantee about.
+			// File, InlineData, ExecutableCode, and CodeExecutionResult
+			// parts all land here and are relayed verbatim, with no fence
+			// and no elision -- deliberate and unchanged from before this
+			// file's fencing was added, not a gap introduced by it. Worth
+			// being explicit that OtherAgentContextPreamble's promise is
+			// scoped to what sits between its markers: a part with no
+			// markers around it at all is outside anything the preamble
+			// states a guarantee about.
 			converted.Parts = append(converted.Parts, p)
 		}
 	}

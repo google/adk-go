@@ -163,10 +163,10 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 				agentEvent.Author, llminternal.ElideQuoteMarkers(resp.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", resp.Response)))
 			parts = append(parts, genai.NewPartFromText(text))
 		} else {
-			// ExecutableCode and CodeExecutionResult parts land here and are
-			// relayed verbatim, with no fence and no elision -- same
-			// tradeoff as ConvertForeignEvent's default case, for the same
-			// reason.
+			// File, InlineData, ExecutableCode, and CodeExecutionResult
+			// parts all land here and are relayed verbatim, with no fence
+			// and no elision -- same tradeoff as ConvertForeignEvent's
+			// default case, for the same reason.
 			parts = append(parts, part)
 		}
 	}
