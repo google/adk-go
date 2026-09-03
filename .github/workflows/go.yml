@@ -9,11 +9,11 @@ on:
   push:
     branches: [ "main", "v1" ]
 
+  # Deliberately unfiltered by base branch. A stacked PR targets the branch
+  # below it rather than main, so any allow-list here silently skips build,
+  # test and lint for every PR in a stack. A red linter survived a whole
+  # review round that way.
   pull_request:
-    # Stacked PRs target the branch below them rather than main, so limiting
-    # this to main and v1 meant no build, test or lint job ever ran against a
-    # stack. A red linter survived a whole review round that way.
-    branches: [ "main", "v1", "baptmont/**" ]
 
   workflow_dispatch:
 
