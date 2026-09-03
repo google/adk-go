@@ -120,6 +120,12 @@ information on using pull requests.
     you may instead describe the bug or feature directly within the PR
     description, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
+-   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
+    `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
+    title, and in the commit subject too on a single-commit PR, where that is
+    what lands instead. Release tooling reads the landed subject to pick the
+    next version and build the release notes, and silently skips anything with
+    no recognized type.
 -   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
 -   Please include a `testing plan` section in your PR to talk about how you

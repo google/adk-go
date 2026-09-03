@@ -186,6 +186,11 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 	log.Println()
 
+	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
+	if err != nil {
+		return fmt.Errorf("telemetry initialization failed: %v", err)
+	}
+
 	srv := w.buildHTTPServer(router)
 
 	errChan := make(chan error, 1)
@@ -195,11 +200,6 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		}
 		close(errChan)
 	}()
-
-	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
-	if err != nil {
-		return fmt.Errorf("telemetry initialization failed: %v", err)
-	}
 
 	select {
 	case <-ctx.Done():

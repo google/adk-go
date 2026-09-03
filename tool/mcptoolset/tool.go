@@ -145,9 +145,6 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	content := formatMCPContent(res.Content)
-	if content == "" {
-		return nil, errors.New("no text content in tool response")
-	}
 
 	return map[string]any{
 		"output": content,
@@ -166,6 +163,9 @@ func formatMCPContent(contents []mcp.Content) string {
 	for _, content := range contents {
 		block := formattedMCPContent{isPlain: true}
 		switch content := content.(type) {
+		case nil:
+			block.text = "[MCP content: unavailable]"
+			block.isPlain = false
 		case *mcp.TextContent:
 			if content == nil {
 				block.text = "[MCP text content: unavailable]"
@@ -294,7 +294,7 @@ func decodeTextBlob(blob []byte, mimeType string) (string, bool) {
 	}
 
 	mediaType, params, err := mime.ParseMediaType(mimeType)
-	if err != nil {
+	if err != nil && (!errors.Is(err, mime.ErrInvalidMediaParameter) || hasMIMECharsetParameter(mimeType)) {
 		return "", false
 	}
 	if !isTextMediaType(mediaType) {
@@ -317,6 +317,20 @@ func decodeTextBlob(blob []byte, mimeType string) (string, bool) {
 		return "", false
 	}
 	return string(blob), true
+}
+
+func hasMIMECharsetParameter(value string) bool {
+	_, params, ok := strings.Cut(value, ";")
+	for ok {
+		var parameter string
+		parameter, params, ok = strings.Cut(params, ";")
+		name, _, _ := strings.Cut(parameter, "=")
+		name = strings.ToLower(strings.Join(strings.Fields(name), ""))
+		if name == "charset" || strings.HasPrefix(name, "charset*") {
+			return true
+		}
+	}
+	return false
 }
 
 func isTextMediaType(mediaType string) bool {

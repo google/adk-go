@@ -95,6 +95,18 @@ func TestMCPToolRunContent(t *testing.T) {
 				"mimeType=\"application/pdf\", size=4 bytes]"},
 		},
 		{
+			name: "empty blob is represented by metadata without size",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///empty.pdf",
+					MIMEType: "application/pdf",
+					Blob:     []byte{},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///empty.pdf\", " +
+				"mimeType=\"application/pdf\"]"},
+		},
+		{
 			name: "unsupported text charset is represented by metadata",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -143,6 +155,42 @@ func TestMCPToolRunContent(t *testing.T) {
 				"mimeType=\"text/plain; charset=\\\"utf-16\", size=4 bytes]"},
 		},
 		{
+			name: "text blob with malformed unrelated parameter is decoded",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///notes.txt",
+					MIMEType: "text/plain; name=my file.txt",
+					Blob:     []byte("hello"),
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///notes.txt\", " +
+				"mimeType=\"text/plain; name=my file.txt\"]\nhello"},
+		},
+		{
+			name: "JSON blob with malformed unrelated parameter is decoded",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///response.json",
+					MIMEType: "application/json; profile=https://example.com/schema",
+					Blob:     []byte(`{"status":"ok"}`),
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///response.json\", " +
+				"mimeType=\"application/json; profile=https://example.com/schema\"]\n{\"status\":\"ok\"}"},
+		},
+		{
+			name: "charset-like parameter name does not block decoding",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///notes.txt",
+					MIMEType: "text/plain; x-charset-note=",
+					Blob:     []byte("hello"),
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///notes.txt\", " +
+				"mimeType=\"text/plain; x-charset-note=\"]\nhello"},
+		},
+		{
 			name: "malformed media type is represented by metadata",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -183,6 +231,13 @@ func TestMCPToolRunContent(t *testing.T) {
 				"description=\"Large text file\", size=1048576 bytes]"},
 		},
 		{
+			name: "resource link without metadata uses a plain label",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.ResourceLink{},
+			}},
+			want: map[string]any{"output": "[MCP resource link]"},
+		},
+		{
 			name: "image and audio are represented in order",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.TextContent{Text: "media:"},
@@ -193,6 +248,13 @@ func TestMCPToolRunContent(t *testing.T) {
 			}},
 			want: map[string]any{"output": "media:\n[MCP image: mimeType=\"image/png\", size=3 bytes]\n" +
 				"[MCP audio: mimeType=\"audio/wav\", size=2 bytes]\ndone"},
+		},
+		{
+			name: "image without MIME type omits MIME metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.ImageContent{Data: []byte{1, 2}},
+			}},
+			want: map[string]any{"output": "[MCP image: size=2 bytes]"},
 		},
 		{
 			name: "empty leading block does not add a separator",
@@ -221,7 +283,15 @@ func TestMCPToolRunContent(t *testing.T) {
 				"[MCP resource link: uri=\"https://example.com/file\"]"},
 		},
 		{
-			name: "structured output with mixed content remains compatible",
+			name: "existing newline follows non-text content",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.ImageContent{MIMEType: "image/png", Data: []byte{1}},
+				&mcp.TextContent{Text: "\nnotes"},
+			}},
+			want: map[string]any{"output": "[MCP image: mimeType=\"image/png\", size=1 bytes]\nnotes"},
+		},
+		{
+			name: "structured output takes precedence over mixed content",
 			result: &mcp.CallToolResult{
 				StructuredContent: map[string]any{"sha": "abc123"},
 				Content: []mcp.Content{
@@ -256,24 +326,41 @@ func TestMCPToolRunContent(t *testing.T) {
 				"[MCP resource link: uri=\"https://example.com/error\", mimeType=\"text/plain\"]",
 		},
 		{
-			name:    "nil content returns an error",
-			result:  &mcp.CallToolResult{},
-			wantErr: "no text content in tool response",
+			name: "error response without details omits details suffix",
+			result: &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{},
+				},
+			},
+			wantErr: "Tool execution failed.",
 		},
 		{
-			name: "empty content returns an error",
+			name:   "nil content returns empty output",
+			result: &mcp.CallToolResult{},
+			want:   map[string]any{"output": ""},
+		},
+		{
+			name: "empty content returns empty output",
 			result: &mcp.CallToolResult{
 				Content: []mcp.Content{},
 			},
-			wantErr: "no text content in tool response",
+			want: map[string]any{"output": ""},
 		},
 		{
-			name: "all-empty text content returns an error",
+			name: "all-empty text content returns empty output",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.TextContent{},
 				&mcp.TextContent{},
 			}},
-			wantErr: "no text content in tool response",
+			want: map[string]any{"output": ""},
+		},
+		{
+			name: "untyped nil content is unavailable",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				nil,
+			}},
+			want: map[string]any{"output": "[MCP content: unavailable]"},
 		},
 		{
 			name: "typed nil content does not panic",
