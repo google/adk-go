@@ -836,10 +836,18 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 // It uses JSON marshaling as an intermediary step to safely serialize
 // the input data before constructing the *structpb.Struct.
 // Returns an error if any part of the JSON round-trip or conversion fails.
+//
+// A nil value marshals to the JSON literal "null", which structpb rejects.
+// Such a value is treated as an empty Struct, matching structpb.NewStruct(nil)
+// and keeping callers that pass an absent map (for example a function call
+// that takes no arguments) from failing.
 func toStructPB(value any) (*structpb.Struct, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %w", err)
+	}
+	if string(data) == "null" {
+		return &structpb.Struct{}, nil
 	}
 	res := &structpb.Struct{}
 	if err := res.UnmarshalJSON(data); err != nil {
