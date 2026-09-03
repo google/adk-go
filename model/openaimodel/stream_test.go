@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -185,5 +186,25 @@ func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 				t.Errorf("paths disagree:\n stream   = %q\n blocking = %q", streamErr, blockErr)
 			}
 		})
+	}
+}
+
+// TestStreamTranslator_ErrorEvent_ServerText pins that the generic stream error
+// gets the same treatment as a failed response body: the text is the server's,
+// so it cannot forge a log line or run away in length.
+func TestStreamTranslator_ErrorEvent_ServerText(t *testing.T) {
+	event := decodeEvent(t, `{"type":"error","message":"boom\r\nERROR forged"}`)
+	_, err := newStreamTranslator().process(event)
+	if err == nil {
+		t.Fatal("process() err = nil, want the stream error")
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Errorf("process() err = %q still contains a raw newline", err)
+	}
+
+	long := decodeEvent(t, `{"type":"error","message":"`+strings.Repeat("A", 1<<16)+`"}`)
+	_, err = newStreamTranslator().process(long)
+	if got, max := len(err.Error()), maxServerTextRunes+64; got > max {
+		t.Errorf("process() err is %d bytes, want at most %d", got, max)
 	}
 }

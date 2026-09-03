@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode"
 
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
@@ -44,6 +45,48 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 		UsageMetadata:  convertUsage(resp.Usage),
 		PromptFeedback: promptFeedback(resp),
 	}, nil
+}
+
+// maxServerTextRunes bounds any server-chosen string an error quotes.
+const maxServerTextRunes = 256
+
+// clipServerText trims a server-chosen string and caps its length, so that a
+// pathological one — a megabyte of message — cannot become the error a caller
+// logs. Truncation is marked, so a clipped value is never mistaken for what the
+// server actually said.
+func clipServerText(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > maxServerTextRunes {
+		s = strings.TrimSpace(string(r[:maxServerTextRunes])) + "…"
+	}
+	return s
+}
+
+// escapeControl renders the control characters in a server-chosen string
+// visibly, so an interior newline cannot forge a second line in a log. Quotes
+// and ordinary punctuation are left alone: this is for values interpolated
+// bare, where %q is not already doing the escaping.
+func escapeControl(s string) string {
+	if strings.IndexFunc(s, unicode.IsControl) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case unicode.IsControl(r):
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // reportsFailure reports whether the server is describing a failure rather than
@@ -73,14 +116,15 @@ func reportsFailure(resp *responses.Response) bool {
 // forge. Neither is elided when the message appears to repeat it — saying a code
 // twice is cosmetic, dropping the one the caller needs is not.
 func failedResponseError(resp *responses.Response) error {
-	// Trimmed, so a value of nothing but spaces contributes nothing rather than
-	// a label or separator with nothing after it.
-	msg := strings.TrimSpace(resp.Error.Message)
+	// Clipped, so a value of nothing but spaces contributes nothing rather than
+	// a label or separator with nothing after it. %q escapes what it quotes, so
+	// only the message needs escaping of its own.
+	msg := escapeControl(clipServerText(resp.Error.Message))
 	var details []string
-	if id := strings.TrimSpace(resp.ID); id != "" {
+	if id := clipServerText(resp.ID); id != "" {
 		details = append(details, fmt.Sprintf("id %q", id))
 	}
-	if code := strings.TrimSpace(string(resp.Error.Code)); code != "" {
+	if code := clipServerText(string(resp.Error.Code)); code != "" {
 		details = append(details, fmt.Sprintf("code %q", code))
 	}
 	switch joined := strings.Join(details, ", "); {

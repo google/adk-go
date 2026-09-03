@@ -87,8 +87,10 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		return nil, failedResponseError(&failed.Response)
 	case errorEvent:
 		// Generic stream errors are also returned.
-		if evt.Message != "" {
-			return nil, fmt.Errorf("openai stream error: %s", evt.Message)
+		// Same treatment as a failed response body: the text is the server's,
+		// so it is capped and its control characters escaped.
+		if msg := escapeControl(clipServerText(evt.Message)); msg != "" {
+			return nil, fmt.Errorf("openai stream error: %s", msg)
 		}
 		return nil, fmt.Errorf("openai stream error")
 	case responseOutputItemAdded:
