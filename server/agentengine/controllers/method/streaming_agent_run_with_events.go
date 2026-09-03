@@ -17,6 +17,7 @@ package method
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/server/agentengine/internal/helper"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type streamingAgentRunWithEventsHandler struct {
@@ -92,6 +94,16 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 	for event, err := range events {
 		log.Printf("Processing event: %+v err: %+v\n", event, err)
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so emitting
+			// an error and closing the stream would tell the client its request
+			// failed after it has received the response, in order to report
+			// that a later prompt will be larger. The other three serving
+			// surfaces log and carry on, and this one was the outlier.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("agentengine: %v", err)
+				continue
+			}
 			log.Printf("error in events: %v\n", err)
 			e := helper.EmitJSONError(rw, err)
 			if e != nil {
@@ -236,6 +248,7 @@ func (s *streamingAgentRunWithEventsHandler) run(ctx context.Context, req *model
 		ArtifactService:   config.ArtifactService,
 		MemoryService:     config.MemoryService,
 		PluginConfig:      config.PluginConfig,
+		Compaction:        config.Compaction,
 		AutoCreateSession: true,
 	})
 	if err != nil {
