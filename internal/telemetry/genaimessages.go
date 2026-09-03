@@ -157,7 +157,7 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 //
 // Partial responses are skipped. Each streamed chunk would otherwise overwrite
 // the attribute, leaving the span holding a fragment rather than the answer.
-func responseContentAttributes(resp *model.LLMResponse) []attribute.KeyValue {
+func responseContentAttributes(resp *model.LLMResponse, err error) []attribute.KeyValue {
 	if resp == nil || resp.Partial || !captureContentOnSpans() {
 		return nil
 	}
@@ -174,7 +174,7 @@ func responseContentAttributes(resp *model.LLMResponse) []attribute.KeyValue {
 	return appendJSON(nil, genAIOutputMessages, []chatMessage{{
 		Role:         roleAssistant,
 		Parts:        parts,
-		FinishReason: schemaFinishReason(resp, hasToolCall(parts)),
+		FinishReason: schemaFinishReason(resp, err),
 	}})
 }
 
@@ -340,10 +340,11 @@ func schemaRole(c *genai.Content) string {
 // SCREAMING_SNAKE_CASE and are never emitted verbatim; a value this mapping
 // does not know is lowercased, which the schema allows since finish_reason
 // accepts any string.
-func schemaFinishReason(resp *model.LLMResponse, toolCall bool) string {
-	if resp == nil {
+func schemaFinishReason(resp *model.LLMResponse, err error) string {
+	if resp == nil || err != nil {
 		return finishError
 	}
+	toolCall := resp.Content != nil && hasToolCall(semconvParts(resp.Content.Parts))
 	if resp.ErrorCode != "" || resp.Interrupted {
 		return finishError
 	}

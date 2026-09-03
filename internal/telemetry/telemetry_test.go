@@ -337,6 +337,7 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 	tests := []struct {
 		name     string
 		response *model.LLMResponse
+		err      error
 		want     string
 	}{
 		{
@@ -358,14 +359,18 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 			want:     "length",
 		},
 		{
-			name:     "content filter",
-			response: &model.LLMResponse{FinishReason: genai.FinishReasonSafety},
-			want:     "content_filter",
+			name:     "safety error code",
+			response: &model.LLMResponse{FinishReason: genai.FinishReasonSafety, ErrorCode: "SAFETY"},
+			want:     "error",
 		},
 		{
-			name:     "error code",
-			response: &model.LLMResponse{FinishReason: genai.FinishReasonStop, ErrorCode: "429"},
-			want:     "error",
+			name: "stream error",
+			response: &model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{{Text: "partial"}}},
+				Partial: true,
+			},
+			err:  errTest,
+			want: "error",
 		},
 	}
 
@@ -373,7 +378,7 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setupTestTracer(t)
 			_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
-			TraceGenerateContentResult(span, TraceGenerateContentResultParams{Response: tc.response})
+			TraceGenerateContentResult(span, TraceGenerateContentResultParams{Response: tc.response, Error: tc.err})
 			span.End()
 
 			spans := exporter.GetSpans()

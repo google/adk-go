@@ -37,8 +37,9 @@ var AgentWithToolCase = &telemetrytest.SpanDigest{
 				"gen_ai.request.model":           "mock",
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
-				// The first turn requests a tool, so the response-level
-				// finish reason follows the semantic-convention enum.
+				// MockModel returns no UsageMetadata, so no token attrs are set.
+				// The first turn requests a tool, so the response-level finish reason
+				// follows the semantic-convention enum.
 				"gen_ai.response.finish_reasons": []string{"tool_call"},
 			},
 			Logs: []*telemetrytest.LogDigest{
