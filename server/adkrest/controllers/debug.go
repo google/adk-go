@@ -72,6 +72,12 @@ func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.
 // ADK web expects different format than in [SessionSpansHandler].
 // The main difference is that span attributes need to be flattened in the response.
 func convertEventSpan(span services.DebugSpan) map[string]any {
+	// A nil slice marshals to JSON null, which fails the array schema the ADK web
+	// UI validates against and makes it discard the response.
+	logs := span.Logs
+	if logs == nil {
+		logs = []services.DebugLog{}
+	}
 	flattened := map[string]any{
 		"name":           span.Name,
 		"start_time":     span.StartTime,
@@ -79,7 +85,7 @@ func convertEventSpan(span services.DebugSpan) map[string]any {
 		"trace_id":       span.TraceID,
 		"span_id":        span.SpanID,
 		"parent_span_id": span.ParentSpanID,
-		"logs":           span.Logs,
+		"logs":           logs,
 	}
 	for k, v := range span.Attributes {
 		flattened[string(k)] = v
