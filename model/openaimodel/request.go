@@ -132,14 +132,18 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			if part == nil {
 				continue
 			}
-			// Text and call/response are read independently because one part
-			// can carry both: choosing between them would either put reasoning
-			// on the wire or strand the call's response in callTracker.
+			// A part is read field by field rather than as one choice among
+			// alternatives, because it can carry several at once. Anything
+			// this package cannot send is reported first and on its own, so
+			// that something sendable elsewhere on the same part — text, or a
+			// function call — cannot carry it out of the request unannounced.
+			if field := unsupportedPayload(part); field != "" {
+				return nil, fmt.Errorf("openai: unsupported content part: %s", field)
+			}
 			sendText := part.Text != "" && !part.Thought
-			switch {
-			case sendText:
+			if sendText {
 				textParts = append(textParts, part.Text)
-			case part.Text != "":
+			} else if part.Text != "" {
 				// The reasoning text is dropped, but the role it arrived under
 				// is still checked: dropping it must not silence the error
 				// flushText would otherwise have raised.
@@ -169,11 +173,11 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
 			case !sendText && !replayedReasoning(part):
-				// The part put no text in the buffer and carries no call or
-				// response, so nothing in it reaches the request. Keyed on
-				// what was contributed rather than on part.Text, or a thought
-				// riding on an image would match no arm and vanish.
-				return nil, fmt.Errorf("openai: unsupported content part %T", part)
+				// The part put no text in the buffer, carries no call or
+				// response, and is not reasoning there is a reason to drop:
+				// nothing in it reaches the request, so say so rather than
+				// let an empty part pass for a converted one.
+				return nil, fmt.Errorf("openai: content part carries nothing to send")
 			}
 		}
 		// After processing all parts in a content block, we flush any remaining text.
@@ -207,23 +211,40 @@ func replayedReasoning(part *genai.Part) bool {
 	if part.Text != "" && !part.Thought {
 		return false
 	}
-	// Everything else the part carries decides the answer, and the test is
-	// stated as "nothing else is set" rather than as a list of the fields that
-	// disqualify it: marking media or a call as a thought must not make it
-	// vanish, and a field added to genai.Part in a later release should be
-	// rejected as unsupported rather than silently dropped along with the
-	// reasoning. Clearing the fields a Responses request has nowhere to put —
-	// the reasoning itself, its signature, and metadata that only qualifies
-	// media carried in another field — leaves a zero Part when there is
-	// genuinely nothing else to send.
+	// Marking a call or anything else as a thought must not make it vanish.
+	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		unsupportedPayload(part) == ""
+}
+
+// unsupportedPayload names the first field on part that this package has no way
+// to send, or "" when the part holds nothing beyond what convertContents
+// accounts for.
+//
+// The test is stated as the absence of anything unaccounted for rather than as
+// a list of the fields that disqualify a part, so that a field added to
+// genai.Part by a later release is reported here by default instead of leaving
+// the request unnoticed.
+func unsupportedPayload(part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
 	rest := *part
-	rest.Text = ""
-	rest.Thought = false
-	rest.ThoughtSignature = nil
-	rest.VideoMetadata = nil
-	rest.MediaResolution = nil
-	rest.PartMetadata = nil
-	return reflect.DeepEqual(rest, genai.Part{})
+	rest.Text = ""              // sent, or dropped when it is reasoning
+	rest.Thought = false        // the marker deciding which
+	rest.ThoughtSignature = nil // no Responses input item can carry one
+	rest.FunctionCall = nil     // sent as a function_call item
+	rest.FunctionResponse = nil // sent as a function_call_output item
+	rest.VideoMetadata = nil    // qualifies media carried in another field
+	rest.MediaResolution = nil  // likewise
+	rest.PartMetadata = nil     // caller bookkeeping, never content
+
+	v := reflect.ValueOf(rest)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return v.Type().Field(i).Name
+		}
+	}
+	return ""
 }
 
 // newMessage builds an easy input message for an already-normalized role.
