@@ -35,19 +35,27 @@
 // a value that is not — a negative MaxOutputTokens or CandidateCount, or
 // Logprobs without ResponseLogprobs — and those are rejected too.
 //
-// ThinkingConfig is translated to the Responses API's effort-based reasoning:
-// ThinkingLevel maps to the effort of the same name, and a token budget, which
-// Responses has no knob for, collapses to none effort when zero and medium
-// otherwise. Models differ in which efforts they accept — gpt-5.4-nano takes
-// none but not minimal, the o-series takes neither — so asking for one a model
-// lacks draws a 400 naming reasoning.effort and listing what it does take.
-// That is deliberate: quietly substituting a neighboring effort would bill the
-// caller for thinking they asked not to do. IncludeThoughts asks for reasoning
-// summaries, which arrive as parts with Thought set; it is off by default
-// because summaries require a verified OpenAI organization.
+// ThinkingConfig is translated to the Responses API's effort-based reasoning.
+// ThinkingLevel maps to the effort of the same name. A token budget, which
+// Responses has no knob for, survives only as the distinction between none of
+// it (zero, the none effort), some of it (positive, medium), and the model's
+// own choice (-1, no effort sent). Models differ in which efforts they accept —
+// gpt-5.4-nano takes none but not minimal, the o-series takes neither — so
+// asking for one a model lacks draws a 400 naming reasoning.effort and listing
+// what it does take. That is deliberate: quietly substituting a neighboring
+// effort would bill the caller for thinking they asked not to do.
+// IncludeThoughts asks for reasoning summaries, which arrive as parts with
+// Thought set; it is off by default because summaries require a verified
+// OpenAI organization.
+//
+// Two of those differ from adk-python's OpenAI Responses support, which sends
+// a summary unconditionally and maps a zero budget to minimal. Both were
+// measured to fail against live models, so parity is broken deliberately here.
 //
 // The guarantee stops at the top level: within Tools, ToolConfig and the schema
-// types, the parts this package does not read are still dropped quietly.
+// types, the parts this package does not read are still dropped quietly. It is
+// also stricter than adk-python, which drops these settings in silence, so a
+// config ported from Python may need fields removed before it is accepted.
 //
 // Clients construct a ClientConfig and pass it to NewModel:
 //

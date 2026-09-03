@@ -463,7 +463,13 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 		// none rather than minimal: minimal is the least thinking, not none of it.
 		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
 		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-1))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		// -1 is genai's "you decide", and the way to say that to Responses is to
+		// send no effort at all rather than to pick one on the caller's behalf.
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}, shared.ReasoningParam{}},
+		{"dynamic budget with thoughts", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(dynamicThinkingBudget)),
+			IncludeThoughts: true,
+		}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
 		// A level wins over a budget, so an explicit MINIMAL still means minimal
 		// even alongside the zero budget that would otherwise mean none.
 		{"level wins over budget", &genai.ThinkingConfig{
@@ -500,20 +506,41 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 // asking. This is the regression guard for the unconditional summary that made
 // every translated ThinkingConfig a 400.
 func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
-	thinkings := []*genai.ThinkingConfig{
-		{ThinkingLevel: genai.ThinkingLevelHigh},
-		{ThinkingBudget: genai.Ptr(int32(0))},
-		{ThinkingBudget: genai.Ptr(int32(4096))},
-		{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false},
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(4096))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}},
+		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
 	}
-	for _, thinking := range thinkings {
-		params := &responses.ResponseNewParams{}
-		if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: thinking}); err != nil {
-			t.Fatalf("applyGenerationConfig(%+v) error = %v, want nil", thinking, err)
-		}
-		if params.Reasoning.Summary != "" {
-			t.Errorf("applyGenerationConfig(%+v) set Summary = %q, want it unset", thinking, params.Reasoning.Summary)
-		}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if params.Reasoning.Summary != "" {
+				t.Errorf("applyGenerationConfig() set Summary = %q, want it unset", params.Reasoning.Summary)
+			}
+		})
+	}
+}
+
+// A budget below the dynamic sentinel means nothing in genai and cannot be
+// translated, so it is named rather than rounded into some effort.
+func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "ThinkingBudget") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
 	}
 }
 
@@ -531,8 +558,15 @@ func TestApplyGenerationConfigRejectsUnknownThinkingLevel(t *testing.T) {
 	}
 }
 
-// reasoningEfforts must cover every level genai declares, or a caller setting a
-// perfectly valid level gets an error instead of the reasoning they asked for.
+// Every level genai declares today maps to an effort, so a caller setting a
+// valid level gets reasoning rather than an error.
+//
+// Go cannot enumerate the constants of a string enum, so this list is written
+// out and cannot notice a level genai adds later. It does not need to: an
+// unmapped level is rejected by name at runtime, which is a diagnosable failure
+// rather than the silent drop this package exists to avoid. The length check
+// below only catches the opposite drift — an entry added to the map that is not
+// a level, or one this list forgot.
 func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 	levels := []genai.ThinkingLevel{
 		genai.ThinkingLevelUnspecified,
@@ -547,7 +581,21 @@ func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 		}
 	}
 	if len(reasoningEfforts) != len(levels) {
-		t.Errorf("reasoningEfforts has %d entries, want %d: genai declared a level this test does not list", len(reasoningEfforts), len(levels))
+		t.Errorf("reasoningEfforts has %d entries, want %d: it gained one this test does not list", len(reasoningEfforts), len(levels))
+	}
+
+	// And the mapping is reachable end to end, not just present in the map: a
+	// map entry nothing reads would pass the loop above and still drop the level.
+	for _, level := range levels {
+		params := &responses.ResponseNewParams{}
+		cfg := &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: level}}
+		if err := applyGenerationConfig(params, cfg); err != nil {
+			t.Errorf("applyGenerationConfig(ThinkingLevel %q) error = %v, want nil", level, err)
+			continue
+		}
+		if params.Reasoning.Effort != reasoningEfforts[level] {
+			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, reasoningEfforts[level])
+		}
 	}
 }
 

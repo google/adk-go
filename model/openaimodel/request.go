@@ -404,9 +404,12 @@ var reasoningEfforts = map[genai.ThinkingLevel]shared.ReasoningEffort{
 	genai.ThinkingLevelHigh:        shared.ReasoningEffortHigh,
 }
 
-// applyThinkingConfig maps genai's thinking config onto effort-based reasoning,
-// as adk-python does. Responses has no token-budget knob, so only a budget's
-// zero/non-zero distinction survives.
+// dynamicThinkingBudget is genai's "let the model size its own thinking".
+const dynamicThinkingBudget = -1
+
+// applyThinkingConfig maps genai's thinking config onto effort-based reasoning.
+// Responses has no token-budget knob, so a budget survives only as the
+// distinction between none, some, and the model's own choice.
 //
 // Summary is sent only when the caller sets IncludeThoughts. Reasoning
 // summaries require a verified OpenAI organization, so requesting one
@@ -427,14 +430,19 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 		}
 		reasoning.Effort = effort
 	case cfg.ThinkingBudget != nil:
-		// A zero budget means "do not think", which is what the none effort
-		// says. Not minimal: minimal is the least thinking rather than none of
-		// it, and models are dropping it — gpt-5.4-nano rejects minimal while
-		// accepting none.
-		if *cfg.ThinkingBudget == 0 {
+		switch budget := *cfg.ThinkingBudget; {
+		case budget == 0:
+			// "Do not think" is what the none effort says. Not minimal: minimal
+			// is the least thinking rather than none of it, and models are
+			// dropping it — gpt-5.4-nano rejects minimal while accepting none.
 			reasoning.Effort = shared.ReasoningEffortNone
-		} else {
+		case budget == dynamicThinkingBudget:
+			// The caller asked the model to decide, so no effort is sent and it
+			// does. Pinning a number here would be us deciding instead.
+		case budget > 0:
 			reasoning.Effort = shared.ReasoningEffortMedium
+		default:
+			return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, budget)
 		}
 	case !cfg.IncludeThoughts:
 		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel, ThinkingBudget or IncludeThoughts", ErrUnsupportedConfigField)
