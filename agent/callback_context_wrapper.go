@@ -257,6 +257,12 @@ func (c *callbackContextWrapper) UserID() string {
 
 // Value implements [Context].
 func (c *callbackContextWrapper) Value(key any) any {
+	// Fails closed rather than dereferencing: this is reached from
+	// http.RoundTripper on the caller's goroutine, where net/http does not
+	// recover, and a hand-built wrapper can hold neither.
+	if c == nil || c.context == nil {
+		return nil
+	}
 	return c.context.Value(key)
 }
 

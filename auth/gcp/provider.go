@@ -292,6 +292,14 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 		// caller-deadline arm below returns, and the two mean different things.
 		return nil, fmt.Errorf("%w: the attempt exceeded %v and is still running", ErrClientUnavailable, p.initTimeout)
 	case <-ctx.Done():
+		// Same reasoning as the bound: a result that is already there beats a
+		// caller that has just given up, and select would pick between them at
+		// random.
+		select {
+		case <-in.done:
+			return in.result()
+		default:
+		}
 		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
 	}
 }

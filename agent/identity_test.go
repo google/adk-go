@@ -318,3 +318,34 @@ func TestIdentityThroughNestedSessionlessContexts(t *testing.T) {
 		})
 	}
 }
+
+// TestWrapperValueFailsClosed pins that the wrappers' own Value survives a
+// hand-built receiver. Reached through the identity procedure these are already
+// recovered, but a wrapper is a context.Context and anything may call Value on
+// it directly, where nothing recovers.
+func TestWrapperValueFailsClosed(t *testing.T) {
+	type probeKey struct{}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"tool wrapper with no inner context", &toolContextWrapper{}},
+		{"callback wrapper with no inner context", &callbackContextWrapper{}},
+		{"typed-nil tool wrapper", (*toolContextWrapper)(nil)},
+		{"typed-nil callback wrapper", (*callbackContextWrapper)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("Value panicked: %v", p)
+				}
+			}()
+			if v := tc.ctx.Value(probeKey{}); v != nil {
+				t.Errorf("Value(probeKey{}) = %v, want nil", v)
+			}
+			if _, ok := IdentityFromContext(tc.ctx); ok {
+				t.Error("IdentityFromContext() ok = true, want no identity")
+			}
+		})
+	}
+}
