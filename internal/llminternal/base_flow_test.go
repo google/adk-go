@@ -1223,3 +1223,55 @@ func captureLog(t *testing.T, fn func()) string {
 	fn()
 	return buf.String()
 }
+
+func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
+	tests := []struct {
+		name          string
+		responses     []*model.LLMResponse
+		wantResponses int
+	}{
+		{
+			name:          "nil only",
+			responses:     []*model.LLMResponse{nil},
+			wantResponses: 0,
+		},
+		{
+			name: "nil then final",
+			responses: []*model.LLMResponse{
+				nil,
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "done"}}}},
+			},
+			wantResponses: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, resp := range tc.responses {
+							if !yield(resp, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+
+			gotResponses := 0
+			for _, err := range f.callLLM(ctx, &model.LLMRequest{}, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() returned unexpected error: %v", err)
+				}
+				gotResponses++
+			}
+			if gotResponses != tc.wantResponses {
+				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
