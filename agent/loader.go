@@ -18,7 +18,9 @@ import (
 	"fmt"
 )
 
-// Loader allows to load a particular agent by name and get the root agent
+// Loader allows to load a particular agent by name and get the root agent.
+//
+// TODO: move Loader/NewSingleLoader/NewMultiLoader to a separate, experimental package.
 type Loader interface {
 	// ListAgents returns a list of names of all agents
 	ListAgents() []string
@@ -27,6 +29,9 @@ type Loader interface {
 	// RootAgent returns the root agent
 	RootAgent() Agent
 }
+
+var _ Loader = (*multiLoader)(nil)
+var _ Loader = (*singleLoader)(nil)
 
 // multiLoader should be used when you have multiple agents
 type multiLoader struct {
@@ -39,17 +44,17 @@ type singleLoader struct {
 	root Agent
 }
 
-// NewSingleLoader returns a loader with only one agent, which becomes the root agent
+// NewSingleLoader returns a loader with only one agent, which becomes the root agent.
 func NewSingleLoader(a Agent) Loader {
 	return &singleLoader{root: a}
 }
 
-// singleAgentLoader implements AgentLoader. Returns root agent's name
+// singleLoader implements Loader. Returns root agent's name
 func (s *singleLoader) ListAgents() []string {
 	return []string{s.root.Name()}
 }
 
-// singleAgentLoader implements AgentLoader. Returns root for empty name and for root.Name(), error otherwise.
+// singleLoader implements Loader. Returns root for empty name and for root.Name(), error otherwise.
 func (s *singleLoader) LoadAgent(name string) (Agent, error) {
 	if name == "" {
 		return s.root, nil
@@ -60,13 +65,13 @@ func (s *singleLoader) LoadAgent(name string) (Agent, error) {
 	return nil, fmt.Errorf("cannot load agent '%s' - provide an empty string or use '%s'", name, s.root.Name())
 }
 
-// singleAgentLoader implements AgentLoader. Returns the root agent.
+// singleLoader implements Loader. Returns the root agent.
 func (s *singleLoader) RootAgent() Agent {
 	return s.root
 }
 
-// NewMultiLoader returns a new AgentLoader with the given root Agent and other agents.
-// Returns an error if more than one agent (including root) shares the same name
+// NewMultiLoader returns a new Loader with the given root Agent and other agents.
+// Returns an error if more than one agent (including root) shares the same name.
 func NewMultiLoader(root Agent, agents ...Agent) (Loader, error) {
 	m := make(map[string]Agent)
 	m[root.Name()] = root
