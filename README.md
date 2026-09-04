@@ -50,16 +50,20 @@ go get google.golang.org/adk/v2
 ## 🔭 Telemetry
 
 ADK records tool names, descriptions, and types in `gen_ai.tool.definitions`
-when GenAI content capture is enabled. Tool parameter schemas are excluded by
+when span content capture is enabled. Tool parameter schemas are excluded by
 default because they may contain sensitive application details. To opt in to
-parameter-schema capture, set:
+parameter-schema capture, enable span content capture and set the ADK-specific
+flag:
 
 ```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY
 export ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS=true
 ```
 
-Use this setting only when the captured tool schemas are appropriate for your
-telemetry destination.
+Use `SPAN_AND_EVENT` instead of `SPAN_ONLY` if message content should also be
+recorded in log events. The parameter-capture flag has no effect unless span
+content capture is enabled. Use this setting only when the captured tool
+schemas are appropriate for your telemetry destination.
 
 ## 📖 Docs for AI coding agents
 
