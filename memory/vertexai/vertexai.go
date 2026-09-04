@@ -89,6 +89,12 @@ func (v *vertexAIService) AddSessionToMemory(ctx context.Context, s session.Sess
 	return err
 }
 
+// AddEventsToMemory is not yet supported by the Vertex AI Memory Bank
+// service; use AddSessionToMemory to ingest a full session instead.
+func (v *vertexAIService) AddEventsToMemory(ctx context.Context, req *memory.AddEventsToMemoryRequest) error {
+	return fmt.Errorf("vertexAIService does not support AddEventsToMemory")
+}
+
 // SearchMemory implements [memory.Service].
 func (v *vertexAIService) SearchMemory(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error) {
 	return v.client.searchMemory(ctx, req)

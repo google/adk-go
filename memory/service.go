@@ -33,9 +33,33 @@ type Service interface {
 	//
 	// A session can be added multiple times during its lifetime.
 	AddSessionToMemory(ctx context.Context, s session.Session) error
+	// AddEventsToMemory adds an explicit list of events to the memory service.
+	//
+	// This is intended for callers who want to persist only a subset of
+	// events (e.g. the latest turn) rather than re-ingesting the full
+	// session via AddSessionToMemory. Implementations should treat Events
+	// as an incremental update and must not assume it represents the full
+	// session.
+	AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error
 	// SearchMemory returns memory entries relevant to the given query.
 	// Empty slice is returned if there are no matches.
 	SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
+}
+
+// AddEventsToMemoryRequest represents a request for [Service.AddEventsToMemory].
+type AddEventsToMemoryRequest struct {
+	AppName string
+	UserID  string
+	Events  []*session.Event
+
+	// Below are optional fields.
+
+	// SessionID scopes the events to a session. Implementations may ignore
+	// it if not applicable.
+	SessionID string
+	// CustomMetadata is optional, implementation-defined metadata for
+	// memory generation (e.g. TTL).
+	CustomMetadata map[string]any
 }
 
 // SearchRequest represents a request for memory search.

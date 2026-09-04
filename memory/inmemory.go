@@ -60,31 +60,9 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 	var values []value
 
 	for event := range curSession.Events().All() {
-		if event.LLMResponse.Content == nil {
-			continue
+		if v, ok := eventToValue(event); ok {
+			values = append(values, v)
 		}
-
-		words := make(map[string]struct{})
-		for _, part := range event.LLMResponse.Content.Parts {
-			if part.Text == "" {
-				continue
-			}
-
-			maps.Copy(words, extractWords(part.Text))
-		}
-
-		if len(words) == 0 {
-			continue
-		}
-
-		values = append(values, value{
-			id:             event.ID,
-			content:        event.LLMResponse.Content,
-			author:         event.Author,
-			timestamp:      event.Timestamp,
-			customMetadata: event.CustomMetadata,
-			words:          words,
-		})
 	}
 
 	k := key{
@@ -103,6 +81,72 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 
 	sid := sessionID(curSession.ID())
 	v[sid] = values
+	return nil
+}
+
+func eventToValue(event *session.Event) (value, bool) {
+	if event.LLMResponse.Content == nil {
+		return value{}, false
+	}
+
+	words := make(map[string]struct{})
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.Text == "" {
+			continue
+		}
+
+		maps.Copy(words, extractWords(part.Text))
+	}
+
+	if len(words) == 0 {
+		return value{}, false
+	}
+
+	return value{
+		id:             event.ID,
+		content:        event.LLMResponse.Content,
+		author:         event.Author,
+		timestamp:      event.Timestamp,
+		customMetadata: event.CustomMetadata,
+		words:          words,
+	}, true
+}
+
+func (s *inMemoryService) AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error {
+	k := key{
+		appName: req.AppName,
+		userID:  req.UserID,
+	}
+	sid := sessionID(req.SessionID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions, ok := s.store[k]
+	if !ok {
+		sessions = map[sessionID][]value{}
+		s.store[k] = sessions
+	}
+	existing := sessions[sid]
+
+	existingIDs := make(map[string]struct{}, len(existing))
+	for _, v := range existing {
+		existingIDs[v.id] = struct{}{}
+	}
+
+	for _, event := range req.Events {
+		if _, ok := existingIDs[event.ID]; ok {
+			continue
+		}
+		v, ok := eventToValue(event)
+		if !ok {
+			continue
+		}
+		existing = append(existing, v)
+		existingIDs[event.ID] = struct{}{}
+	}
+
+	sessions[sid] = existing
 	return nil
 }
 
