@@ -745,6 +745,40 @@ func TestDecoratorAnswersForItselfWhileReadingTheEnclosingUsersData(t *testing.T
 	// and by promotion, and that is what the rule warns a decorator author about.
 }
 
+// TestAnUnmarkedContextCanAnswerTheKeyItself pins the limit of the mechanism,
+// which the rule used to state backwards.
+//
+// It said a decorator intercepting the key "reports nothing". That is true only
+// when it answers with some other type, which is the only variant the matrix
+// covered. Identity is an ordinary exported struct, so a wrapper can build one
+// and have it reported — the key is unforgeable, the value is not. Pinned in
+// both directions, because the false half was the half that mattered: a reader
+// of the old sentence would have taken interception for a defence.
+func TestAnUnmarkedContextCanAnswerTheKeyItself(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+
+	if id, ok := IdentityFromContext(permissiveInvocationValue{InvocationContext: enclosing}); ok || id != (Identity{}) {
+		t.Errorf("answering with another type: IdentityFromContext() = %+v, %v; "+
+			"want the zero Identity and false", id, ok)
+	}
+	forged := Identity{UserID: "someone else", AppName: "app", SessionID: "s"}
+	id, ok := IdentityFromContext(forgingInvocationValue{InvocationContext: enclosing, id: forged})
+	if !ok || id != forged {
+		t.Errorf("answering with an Identity: IdentityFromContext() = %+v, %v; want %+v, true. "+
+			"The mechanism does not authenticate the value, and the rule must not imply it does.",
+			id, ok, forged)
+	}
+}
+
+// forgingInvocationValue answers the identity key with an Identity it built
+// itself, which nothing outside the module is prevented from doing.
+type forgingInvocationValue struct {
+	InvocationContext
+	id Identity
+}
+
+func (d forgingInvocationValue) Value(any) any { return d.id }
+
 func artifactsOf(user string) Artifacts { return userArtifacts(user) }
 
 // userArtifacts stands in for internal/artifact.Artifacts, which carries

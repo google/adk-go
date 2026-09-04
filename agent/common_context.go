@@ -109,8 +109,13 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     derived context reports its user, or none at all if it has no readable
 //     session. Passing it *as the context itself* reports whatever it embeds,
 //     because the key is unnameable outside the module, so it cannot override the
-//     key and its parent answers — unless its own Value intercepts the key, in
-//     which case it reports nothing.
+//     key and its parent answers. What it CAN do is answer every key: a Value
+//     returning some other type puts nothing under the identity key and the
+//     context reports none, but one returning an [Identity] has that Identity
+//     reported. [Identity] is an ordinary exported struct, so any wrapper in the
+//     chain can construct one. The key is unforgeable; the value it addresses is
+//     not, and this function is only as trustworthy as the wrappers between it
+//     and the invocation.
 //   - Call a context-producing method ON it and it is dropped, promoting or not,
 //     because the promoted method belongs to what it embeds. It must override
 //     every one of them, returning a derived copy of ITSELF. The rule is the
