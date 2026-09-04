@@ -170,6 +170,16 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	}, nil
 }
 
+// quoteFilterLiteral quotes a value for safe use as a Google AIP-160 filter
+// string literal. Backslashes are escaped first, then double quotes, so that
+// caller-controlled input stays inside the quoted value and cannot inject
+// additional filter predicates. See https://google.aip.dev/160.
+func quoteFilterLiteral(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
 func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequest) ([]session.Session, error) {
 	sessions := make([]session.Session, 0)
 
@@ -188,7 +198,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
 	if req.UserID != "" {
-		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
+		rpcReq.Filter = "userId=" + quoteFilterLiteral(req.UserID)
 	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
 	for {
@@ -836,10 +846,18 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 // It uses JSON marshaling as an intermediary step to safely serialize
 // the input data before constructing the *structpb.Struct.
 // Returns an error if any part of the JSON round-trip or conversion fails.
+//
+// A nil value marshals to the JSON literal "null", which structpb rejects.
+// Such a value is treated as an empty Struct, matching structpb.NewStruct(nil)
+// and keeping callers that pass an absent map (for example a function call
+// that takes no arguments) from failing.
 func toStructPB(value any) (*structpb.Struct, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %w", err)
+	}
+	if string(data) == "null" {
+		return &structpb.Struct{}, nil
 	}
 	res := &structpb.Struct{}
 	if err := res.UnmarshalJSON(data); err != nil {
