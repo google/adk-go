@@ -98,11 +98,12 @@ queued again, which is how you regenerate a backport that went stale. A branch
 left behind by a run that died does not suppress anything: the next run replays
 it.
 
-Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
-and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
-held**. A pull request opened by `github-actions[bot]` gets its workflows in an
-approval-required state, so open the backport PR and click **Approve workflows
-to run** in the merge box; anyone with write access can.
+Backport PRs get the usual CI, because `go.yml` runs on every pull request
+whatever its base branch, and `apidiff.yml` lists `v1` among the base branches
+it filters on — but **the runs start held**. A pull request opened by
+`github-actions[bot]` gets its workflows in an approval-required state, so open
+the backport PR and click **Approve workflows to run** in the merge box. Anyone
+with write access can.
 
 That is what running on the built-in `GITHUB_TOKEN` costs, and it is worth
 paying: no long-lived credential lives in the repository, and the click lands on
@@ -289,7 +290,7 @@ Requirements for unit tests:
     live model or network call.
 -   Named so that a failure message identifies what broke without opening the
     file.
--   Fast and isolated; include comments for complex scenarios.
+-   Fast and isolated, with comments for complex scenarios.
 
 #### Manual End-to-End (E2E) Tests
 

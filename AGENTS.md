@@ -111,10 +111,16 @@ A change is complete only when all of these pass locally:
 
 - **Streaming:** agent runs return `iter.Seq2[*session.Event, error]`; consume
   with `for event, err := range … {}`. Don't collect events into a slice.
-- **Interface-first:** public packages expose interfaces (`Agent`, `Tool`,
-  `Toolset`, `Service`); concrete impls live in sub-packages or `internal/`.
-- **Callbacks over subclassing** (`Before*`/`After*` for Agent/Model/Tool);
-  returning non-nil from a `Before` callback short-circuits execution.
+- **Interface-first:** the core abstractions are interfaces — `agent.Agent`,
+  `tool.Tool`, `tool.Toolset`, and a separate `Service` interface in each of
+  `session`, `artifact` and `memory`. Concrete implementations live in
+  sub-packages or `internal/`, except the in-memory ones, which sit beside the
+  interface they implement.
+- **Callbacks over subclassing** (`Before*`/`After*` for Agent/Model/Tool). A
+  `Before` model or tool callback short-circuits the underlying call when it
+  returns either a non-nil result or a non-nil error. `BeforeAgentCallback`
+  behaves differently: only non-nil content short-circuits, and returning an
+  error surfaces that error without stopping the agent from running.
 - **Errors:** wrap with `fmt.Errorf("…: %w", err)`. Use `%v` only when
   deliberately not exposing the wrapped error's type. Don't convert existing `%w` to `%v`;
   it might break callers silently. Wrap sentinels first:
@@ -142,17 +148,26 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 
 ## Testing
 
-- Tests run **offline by default**: LLM HTTP traffic is replayed from
-  `testdata/*.httprr` via `internal/httprr`. Never add live model or network
-  calls to tests.
+- **LLM traffic is replayed, not live.** A package with `testdata/*.httprr`
+  replays through `internal/httprr` with no flags and no credentials.
+  `session/vertexai` uses a second, unrelated system: `rpcreplay` with
+  `testdata/*.replay` files, refreshed by `UPDATE_REPLAYS=true`. Never add a
+  live model or network call to a test.
 - `-httprecord` takes a **regexp matched against the cassette's file path**,
   not a `-run` test-name filter. Keep it as narrow as the set of cassettes you
   mean to replace: recording against a live model produces a different response
   every time, so a broad pattern rewrites unrelated cassettes and buries the
   intended change.
 - To re-record **one** cassette — the normal case — supply real credentials
-  (e.g. `GOOGLE_API_KEY`) and name it in both flags:
-  `go test ./<pkg>/ -run TestFoo -httprecord='TestFoo\.httprr$'`.
+  (e.g. `GOOGLE_API_KEY`) and name **the cassette file**, which is often not
+  the name of a top-level test. Most cassettes here are subtest-derived, so a
+  pattern built from the top-level test name matches nothing, records nothing,
+  and still exits 0. List the directory first, then name the file exactly:
+  ```bash
+  ls <pkg>/testdata/*.httprr
+  go test ./<pkg>/ -run TestToolCallback \
+      -httprecord='TestToolCallback_before_callback_response_used\.httprr$'
+  ```
   Commit only that `testdata/*.httprr`.
 - To re-record a whole package, run `go generate ./<pkg>/...`; each package's
   `//go:generate go test -httprecord=…` directives are scoped so that every
@@ -174,7 +189,11 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 - Any change to the public API surface, and any breaking change.
 
 **Never**
-- Break the public API — keep changes backward-compatible.
+- Break the public API — keep changes backward-compatible. An `apidiff` check
+  compares every module against the merge base and fails on an incompatible
+  change. A `breaking-change` label downgrades that failure to a report, so
+  applying it is a deliberate decision to make with a maintainer, not a way
+  round a red check.
 - Edit vendored code (`internal/httprr`) or commit secrets / API keys.
 - Add tests that make live LLM or network calls.
 
