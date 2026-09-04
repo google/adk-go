@@ -49,7 +49,7 @@ func TestSynthesizeAgentOutput_SkipsLongRunningToolEvent(t *testing.T) {
 }
 
 // Positive control: plain model text without LRT gets promoted.
-// Pins the LRT guard as a targeted skip, not a global behaviour change.
+// Pins the LRT guard as a targeted skip, not a global behavior change.
 func TestSynthesizeAgentOutput_PromotesPlainModelText(t *testing.T) {
 	t.Parallel()
 

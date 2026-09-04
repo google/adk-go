@@ -181,7 +181,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 // completion. Treating them as MessageAsOutput would cache an
 // empty "" as the agent's "output" and, on resume, short-circuit
 // the re-run via collectNodeOutputs / WithRunID-replay — making
-// the chat wrapper synthesise a bogus completion FR for what is
+// the chat wrapper synthesize a bogus completion FR for what is
 // still an open delegation.
 func synthesizeAgentOutput(event *session.Event) {
 	if event == nil || event.Output != nil {

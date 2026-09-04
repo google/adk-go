@@ -167,7 +167,7 @@ func canonicalTemplate(tmpl string) string {
 }
 
 // concretePath substitutes a real value for every placeholder in a golden
-// template. An unrecognised placeholder is a test bug, not a server bug: left
+// template. An unrecognized placeholder is a test bug, not a server bug: left
 // alone it would be sent literally, which still routes and would hide the
 // mistake.
 func concretePath(t *testing.T, tmpl string) string {
@@ -187,7 +187,7 @@ func concretePath(t *testing.T, tmpl string) string {
 //
 // It asserts routing and nothing else. 200, 400, 500 and 501 are all answers
 // from a route that exists, and an unimplemented developer endpoint answering
-// 501 is the intended behaviour, not a failure. Exactly two responses mean the
+// 501 is the intended behavior, not a failure. Exactly two responses mean the
 // request never reached a handler: 405, and the plain-text 404 the mux writes
 // for an unknown path. A handler's own 404 ("no such session") carries a JSON
 // body and passes.

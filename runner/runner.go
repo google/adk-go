@@ -286,7 +286,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	if compactionctx.FromContext(ctx).AlreadyCompacted() {
 		return nil
 	}
-	// Compaction is an optimisation, so a cancelled or expired run should not
+	// Compaction is an optimisation, so a canceled or expired run should not
 	// spend a model call on it, nor write a summary the caller never waited
 	// for.
 	if ctx.Err() != nil {
@@ -332,7 +332,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	// is named by nothing, so prompt assembly drops it. This does not need a
 	// hostile plugin or even a concurrent invocation to reach: an event carries
 	// the timestamp it was created at rather than the one it was stored at, so
-	// parallel tool responses and sub-agent events funnelled through a channel
+	// parallel tool responses and sub-agent events funneled through a channel
 	// are routinely created before the range ends and appended after it.
 	// The identities present when the window was chosen, captured once. The
 	// race guard compares against the snapshot session; the repair after the

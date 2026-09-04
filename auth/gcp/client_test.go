@@ -125,7 +125,7 @@ func TestRetrieveCredential(t *testing.T) {
 			bodies:      []string{`{"done":true}`},
 			wantErrText: "no credential",
 		},
-		// The two services deliberately disagree on an unrecognised 200: Agent
+		// The two services deliberately disagree on an unrecognized 200: Agent
 		// Identity's result is a closed oneof, so an unknown arm can only be a
 		// mismatch worth failing on...
 		{
@@ -136,7 +136,7 @@ func TestRetrieveCredential(t *testing.T) {
 			wantCalls:   1,
 		},
 		// ...whereas a connector operation that is merely not done yet is normal,
-		// so an unrecognised one keeps being polled until the timeout.
+		// so an unrecognized one keeps being polled until the timeout.
 		{
 			name:        "connector unrecognized operation polls to timeout",
 			resource:    connectorResource,

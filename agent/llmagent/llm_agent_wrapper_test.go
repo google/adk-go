@@ -76,7 +76,7 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 
 	// Coordinator: a chat-mode LlmAgent that on its first turn emits
 	// a TaskAgentTool FC to delegate to the task sub-agent, then on
-	// its second turn (after the wrapper synthesises the task's FR)
+	// its second turn (after the wrapper synthesizes the task's FR)
 	// emits a final text "delegation complete" and exits.
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
@@ -327,7 +327,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 	})
 
-	t.Run("single_turn + struct input is JSON-marshalled", func(t *testing.T) {
+	t.Run("single_turn + struct input is JSON-marshaled", func(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
@@ -345,7 +345,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		// JSON map iteration order is non-deterministic; check both keys present.
 		if !strings.Contains(text, `"task":"summarize"`) ||
 			!strings.Contains(text, `"limit":5`) {
-			t.Errorf("text %q does not look like marshalled %+v", text, input)
+			t.Errorf("text %q does not look like marshaled %+v", text, input)
 		}
 	})
 
@@ -823,11 +823,11 @@ func runChatCoordinatorOneTurn(t *testing.T, coord agent.Agent, userText string)
 // the coordinator must see both FRs before producing its final reply.
 //
 // Note on chat-loop semantics: the coordinator's first LLM turn emits
-// ONE task FC (to sub_a); the wrapper dispatches it and synthesises
+// ONE task FC (to sub_a); the wrapper dispatches it and synthesizes
 // the FR; the loop re-enters Agent.Run; the second LLM turn emits the
 // FC for sub_b; same dispatch; loop re-enters once more; the third
 // LLM turn emits the final coordinator reply. So this test pins
-// runChat's sequential dispatch-and-re-enter behaviour.
+// runChat's sequential dispatch-and-re-enter behavior.
 func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 	t.Parallel()
 	const (
@@ -862,7 +862,7 @@ func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 	subB := makeTaskAgent(nameB)
 
 	// Coordinator emits FC-A first, then FC-B (after seeing FR-A
-	// synthesised into session), then a final "all done" reply.
+	// synthesized into session), then a final "all done" reply.
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
 			{Content: fcContent(fcIDA, nameA, map[string]any{"q": "first"})},
@@ -1017,7 +1017,7 @@ func TestChatTask_ValidationErrorDrivesRetry(t *testing.T) {
 // TestChatCoordinator_ResumesUnresolvedTaskFC verifies that on
 // the first user turn, the coordinator emits a task FC but no
 // matching FR is produced (we simulate this by stopping the runner
-// before the FR can be synthesised — in this Go variant we instead
+// before the FR can be synthesized — in this Go variant we instead
 // rely on the fact that a fresh runner.Run on a SECOND user turn
 // triggers the wrapper's findUnresolvedTaskDelegations pre-LLM
 // scan, which re-dispatches the still-pending FC before letting the
@@ -1055,7 +1055,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	//     FC and re-enter, but to simulate "the session has an
 	//     unresolved FC from a prior turn" we have the coordinator's
 	//     second-turn script emit a terminal text "first done" — this
-	//     happens AFTER the wrapper synthesises the FR on its first
+	//     happens AFTER the wrapper synthesizes the FR on its first
 	//     re-entry, so by the time the second user turn fires below,
 	//     the FC is resolved already.
 	//
@@ -1111,7 +1111,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	}
 
 	// Now drive a user turn. The wrapper's pre-LLM scan must find
-	// the pending FC, dispatch it, and synthesise an FR — all
+	// the pending FC, dispatch it, and synthesize an FR — all
 	// BEFORE the coordinator's LLM is called.
 	events := []*session.Event{}
 	for ev, err := range r.Run(t.Context(), "u", "s",

@@ -238,9 +238,9 @@ func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err := Validate(fm); err != nil {
 		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
-	marshalled, err := yaml.Marshal(fm)
+	marshaled, err := yaml.Marshal(fm)
 	if err != nil {
 		return nil, fmt.Errorf("marshal frontmatter: %w", err)
 	}
-	return slices.Concat(frontmatterSeparator, marshalled, frontmatterSeparator, []byte(markdown)), nil
+	return slices.Concat(frontmatterSeparator, marshaled, frontmatterSeparator, []byte(markdown)), nil
 }

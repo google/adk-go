@@ -70,7 +70,7 @@ func compactionSummaryEvent(ts, start, end int, summary string) *session.Event {
 // compactionInvocationCtx builds an invocation context over events for an agent
 // named agentName.
 //
-// Compaction records are only honoured when the run has compaction configured,
+// Compaction records are only honored when the run has compaction configured,
 // so configured selects which side of that gate the context sits on.
 func compactionInvocationCtx(t *testing.T, agentName string, events []*session.Event, configured bool) agent.InvocationContext {
 	t.Helper()
@@ -263,7 +263,7 @@ func TestContentsRequestProcessor_CompactionKeepsToolPairing(t *testing.T) {
 //
 // A record tells prompt assembly to drop a span of history and put content of
 // the record's choosing in its place. EventActions is writable by tool code and
-// the REST create-session body maps onto the stored event, so honouring an
+// the REST create-session body maps onto the stored event, so honoring an
 // unsolicited record would hand any writer an erase-and-inject primitive, even
 // in an application that never enabled compaction.
 func TestContentsRequestProcessor_CompactionIgnoredWhenNotConfigured(t *testing.T) {
@@ -353,7 +353,7 @@ func TestContentsRequestProcessor_CompactionFromAnotherAgent(t *testing.T) {
 // A hole names an event by invocation and timestamp. ConvertForeignEvent builds
 // a replacement event and its output goes straight into Apply, so blanking the
 // invocation made the hole stop matching. The event was then inside the range,
-// named by nothing, and dropped in favour of a summary that never described it.
+// named by nothing, and dropped in favor of a summary that never described it.
 func TestForeignEventKeepsItsInvocationSoAHoleStillProtectsIt(t *testing.T) {
 	t.Parallel()
 

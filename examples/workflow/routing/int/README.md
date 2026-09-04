@@ -52,7 +52,7 @@ Agent -> rolled 8 — handling HIGH range (8..10)
 | `FunctionNode` producing a typed value | `roll_die` returns `int` |
 | Custom `BaseNode` emitting a routing event | `route_by_value` sets `Event.Routes = []string{fmt.Sprint(value)}` and `Event.Output = value` so downstream FunctionNodes get a typed `int` input |
 | `MultiRoute[int]` matching a set of ints | three downstream edges, one per range |
-| Random behaviour to exercise different paths between runs | `math/rand/v2` in `roll_die` |
+| Random behavior to exercise different paths between runs | `math/rand/v2` in `roll_die` |
 
 ## Notes
 
