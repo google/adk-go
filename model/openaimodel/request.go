@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -386,11 +387,79 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
 		return err
 	}
+	if cfg.ServiceTier != "" {
+		tier, ok := serviceTiers[cfg.ServiceTier]
+		if !ok {
+			return fmt.Errorf("%w: ServiceTier %q", ErrUnsupportedConfigField, cfg.ServiceTier)
+		}
+		params.ServiceTier = tier
+	}
 	if err := rejectUntranslatableValues(cfg); err != nil {
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
 	return rejectUnsupportedConfigFields(cfg)
+}
+
+// serviceTiers maps genai's processing tiers onto the Responses equivalents.
+// OpenAI offers more tiers than genai can name; the ones genai has all
+// correspond. An explicit "unspecified" is the caller asking not to choose,
+// which is what auto means.
+var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
+	genai.ServiceTierUnspecified: responses.ResponseNewParamsServiceTierAuto,
+	genai.ServiceTierStandard:    responses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierFlex:        responses.ResponseNewParamsServiceTierFlex,
+	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
+}
+
+// requestOptions translates the parts of HTTPOptions that describe transport
+// rather than the Gemini wire format into openai-go request options.
+//
+// HTTPOptions is not a generation setting and openaimodel takes its endpoint
+// and credentials from ClientConfig, but an application commonly sets headers
+// or a timeout once on the config it hands every agent — and the compaction
+// summarizer forwards the field verbatim (session/compaction/llm_summarizer.go).
+// Rejecting it outright would fail every call such an application makes, and
+// ignoring it would drop a header the caller may well need, so the two fields
+// that mean the same thing to any HTTP client are honored.
+//
+// Called after applyGenerationConfig has accepted the config, which is where
+// the Gemini-shaped remainder is rejected.
+func requestOptions(cfg *genai.GenerateContentConfig) []option.RequestOption {
+	if cfg == nil || cfg.HTTPOptions == nil {
+		return nil
+	}
+	var opts []option.RequestOption
+	// Add rather than set: these join the client's headers instead of
+	// replacing them, so a caller cannot accidentally drop authorization.
+	for key, values := range cfg.HTTPOptions.Headers {
+		for _, value := range values {
+			opts = append(opts, option.WithHeaderAdd(key, value))
+		}
+	}
+	if cfg.HTTPOptions.Timeout != nil {
+		opts = append(opts, option.WithRequestTimeout(*cfg.HTTPOptions.Timeout))
+	}
+	return opts
+}
+
+// unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
+// Gemini wire format rather than transport, and so cannot cross to Responses.
+var unsupportedHTTPOptionFields = []struct {
+	name  string
+	isSet func(*genai.HTTPOptions) bool
+}{
+	// The endpoint belongs to ClientConfig, which is also the only place it can
+	// be set coherently alongside the API key that authenticates against it.
+	{"BaseURL", func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
+	{"BaseURLResourceScope", func(o *genai.HTTPOptions) bool { return o.BaseURLResourceScope != "" }},
+	{"APIVersion", func(o *genai.HTTPOptions) bool { return o.APIVersion != "" }},
+	// Both shape a Gemini request body, which is not the body being sent.
+	{"ExtraBody", func(o *genai.HTTPOptions) bool { return o.ExtraBody != nil }},
+	{"ExtrasRequestProvider", func(o *genai.HTTPOptions) bool { return o.ExtrasRequestProvider != nil }},
+	// openai-go retries too, but on its own schedule; honoring only the retry
+	// count would quietly discard the backoff the caller asked for.
+	{"RetryOptions", func(o *genai.HTTPOptions) bool { return o.RetryOptions != nil }},
 }
 
 // reasoningEfforts maps every genai thinking level onto a Responses reasoning
@@ -459,7 +528,10 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 			reasoning.Effort = shared.ReasoningEffortMedium
 		}
 	case !cfg.IncludeThoughts:
-		return fmt.Errorf("%w: ThinkingConfig needs ThinkingLevel, ThinkingBudget or IncludeThoughts", ErrUnsupportedConfigField)
+		// Nothing on the struct is set, so nothing was asked for and nothing is
+		// dropped by sending no reasoning block. IncludeThoughts false is a
+		// request this package satisfies rather than one it cannot honor.
+		return nil
 	}
 	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
 	// asks only for the summaries that response.go surfaces as thought parts.
@@ -491,19 +563,26 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 		// the single candidate Responses returns. Below zero means nothing.
 		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
 	}
+	// HTTPOptions is honored field by field rather than whole: the transport
+	// parts are translated by requestOptions, and only the Gemini-shaped
+	// remainder has nowhere to go.
+	if cfg.HTTPOptions != nil {
+		for _, field := range unsupportedHTTPOptionFields {
+			if field.isSet(cfg.HTTPOptions) {
+				return fmt.Errorf("%w: HTTPOptions.%s", ErrUnsupportedConfigField, field.name)
+			}
+		}
+	}
 	return nil
 }
 
 // unsupportedConfigFields lists the GenerateContentConfig fields this package
 // cannot translate, each with a predicate reporting whether the caller set it.
 // Presence, not value: setting a knob at all means the caller expected an effect.
-// ServiceTier could be honored (openai-go has service_tier) and is left for a
-// separate change; HTTPOptions is transport, taken from ClientConfig instead.
 var unsupportedConfigFields = []struct {
 	name  string
 	isSet func(*genai.GenerateContentConfig) bool
 }{
-	{"HTTPOptions", func(c *genai.GenerateContentConfig) bool { return c.HTTPOptions != nil }},
 	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
 	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
 	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
@@ -517,7 +596,6 @@ var unsupportedConfigFields = []struct {
 		return c.EnableEnhancedCivicAnswers != nil
 	}},
 	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
-	{"ServiceTier", func(c *genai.GenerateContentConfig) bool { return c.ServiceTier != "" }},
 	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
 }
 

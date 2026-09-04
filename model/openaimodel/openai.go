@@ -84,15 +84,18 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if err != nil {
 		return singleErrorSequence(err)
 	}
+	// Safe only because buildOpenAIParams has already rejected the parts of
+	// HTTPOptions that have no equivalent here.
+	opts := requestOptions(req.Config)
 	if stream {
-		return m.generateStream(ctx, params)
+		return m.generateStream(ctx, params, opts...)
 	}
-	return m.generate(ctx, params)
+	return m.generate(ctx, params, opts...)
 }
 
-func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, opts ...option.RequestOption) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		resp, err := m.client.Responses.New(ctx, params)
+		resp, err := m.client.Responses.New(ctx, params, opts...)
 		if err != nil {
 			yield(nil, fmt.Errorf("openai: call failed: %w", err))
 			return
@@ -108,9 +111,9 @@ func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNew
 	}
 }
 
-func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, opts ...option.RequestOption) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		stream := m.client.Responses.NewStreaming(ctx, params)
+		stream := m.client.Responses.NewStreaming(ctx, params, opts...)
 		defer func() { _ = stream.Close() }()
 
 		aggregator := llminternal.NewStreamingResponseAggregator()

@@ -32,10 +32,23 @@
 // value: setting the knob is itself the request. Presence is only observable
 // where the zero value cannot be a setting — a pointer, slice, map or struct.
 // A plain bool or string cannot tell its zero from unset, so AudioTimestamp
-// false, and CachedContent, MediaResolution or ServiceTier left empty, pass
-// unremarked. A field that is translated can also be handed a value that is
-// not — a negative MaxOutputTokens or CandidateCount, or Logprobs without
-// ResponseLogprobs — and those are rejected too.
+// false, and CachedContent or MediaResolution left empty, pass unremarked.
+// A field that is translated can also be handed a value that is not — a
+// negative MaxOutputTokens or CandidateCount, or Logprobs without
+// ResponseLogprobs — and those are rejected too. What is never rejected is a
+// setting that asks for nothing: an empty ThinkingConfig or HTTPOptions
+// requests no behavior, and is satisfied by sending none.
+//
+// ServiceTier is translated; every tier genai names has a Responses
+// equivalent, with genai's "standard" reaching OpenAI as "default".
+//
+// HTTPOptions is transport rather than generation, and is honored in the two
+// places that mean the same thing to any HTTP client: Headers are added to the
+// request, and Timeout bounds it. The endpoint and credentials come from
+// ClientConfig, so BaseURL, BaseURLResourceScope and APIVersion are rejected
+// rather than fighting it, as are ExtraBody and ExtrasRequestProvider, which
+// shape a Gemini request body this package does not send, and RetryOptions,
+// whose backoff has no faithful equivalent.
 //
 // ThinkingConfig is translated to the Responses API's effort-based reasoning.
 // ThinkingLevel maps to the effort of the same name. A token budget, which
@@ -46,6 +59,7 @@
 // asking for one a model lacks draws a 400 naming reasoning.effort and listing
 // what it does take. That is deliberate: quietly substituting a neighboring
 // effort would bill the caller for thinking they asked not to do.
+// A ThinkingConfig with nothing set asks for nothing and is accepted as such.
 // IncludeThoughts asks for reasoning summaries, which arrive as parts with
 // Thought set. It is off by default because summaries require a verified
 // OpenAI organization, and that is enforced per model rather than per account:

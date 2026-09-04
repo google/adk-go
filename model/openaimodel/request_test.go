@@ -15,11 +15,15 @@
 package openaimodel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
@@ -414,7 +418,6 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 		field string
 		cfg   *genai.GenerateContentConfig
 	}{
-		{"HTTPOptions", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{}}},
 		{"Seed", &genai.GenerateContentConfig{Seed: genai.Ptr(int32(7))}},
 		{"RoutingConfig", &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}},
 		{"ModelSelectionConfig", &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}},
@@ -426,7 +429,6 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 		{"ImageConfig", &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}},
 		{"EnableEnhancedCivicAnswers", &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}},
 		{"ModelArmorConfig", &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}},
-		{"ServiceTier", &genai.GenerateContentConfig{ServiceTier: genai.ServiceTierFlex}},
 		{"AudioTranscriptionConfig", &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}},
 	}
 
@@ -660,17 +662,29 @@ func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 	}
 }
 
-// A ThinkingConfig carrying no knob at all cannot be mapped onto anything, and
-// guessing an effort for it would be the silent behavior this package rejects.
-func TestApplyGenerationConfigRejectsEmptyThinkingConfig(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-		ThinkingConfig: &genai.ThinkingConfig{},
-	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+// A ThinkingConfig with nothing set asks for nothing, so nothing is sent and
+// nothing is dropped. IncludeThoughts false in particular is a request this
+// package satisfies — by not including thoughts — rather than one it cannot
+// honor, so erroring would fail a caller who got precisely what they asked for.
+func TestApplyGenerationConfigAcceptsEmptyThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"zero value", &genai.ThinkingConfig{}},
+		{"thoughts explicitly off", &genai.ThinkingConfig{IncludeThoughts: false}},
 	}
-	if !strings.Contains(err.Error(), "ThinkingConfig") {
-		t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingConfig", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+				t.Errorf("params.Reasoning = %+v, want zero: nothing was asked for", params.Reasoning)
+			}
+		})
 	}
 }
 
@@ -755,6 +769,192 @@ func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 	}
 }
 
+// Every tier genai names has a Responses equivalent, so setting one is honored
+// rather than refused. OpenAI offers tiers genai cannot name; that is fine, the
+// mapping only has to be total in this direction.
+func TestApplyGenerationConfigServiceTier(t *testing.T) {
+	tests := []struct {
+		tier genai.ServiceTier
+		want responses.ResponseNewParamsServiceTier
+	}{
+		{genai.ServiceTierFlex, responses.ResponseNewParamsServiceTierFlex},
+		{genai.ServiceTierPriority, responses.ResponseNewParamsServiceTierPriority},
+		// genai's "standard" is what OpenAI calls "default".
+		{genai.ServiceTierStandard, responses.ResponseNewParamsServiceTierDefault},
+		// Explicitly declining to choose is what auto means.
+		{genai.ServiceTierUnspecified, responses.ResponseNewParamsServiceTierAuto},
+	}
+
+	for _, tc := range tests {
+		t.Run(string(tc.tier), func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ServiceTier: tc.tier}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if params.ServiceTier != tc.want {
+				t.Errorf("params.ServiceTier = %q, want %q", params.ServiceTier, tc.want)
+			}
+		})
+	}
+
+	// A tier genai adds later is named rather than passed through as a string
+	// the API would refuse for reasons the caller cannot act on.
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ServiceTier: genai.ServiceTier("platinum"),
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("unknown tier: error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "platinum") {
+		t.Errorf("unknown tier: error = %q, want it to name the tier", err)
+	}
+}
+
+// serviceTiers must cover every tier genai declares, or a caller setting a
+// valid one gets an error instead of the tier they asked for.
+func TestServiceTiersCoverEveryGenaiTier(t *testing.T) {
+	tiers := []genai.ServiceTier{
+		genai.ServiceTierUnspecified,
+		genai.ServiceTierStandard,
+		genai.ServiceTierFlex,
+		genai.ServiceTierPriority,
+	}
+	for _, tier := range tiers {
+		if _, ok := serviceTiers[tier]; !ok {
+			t.Errorf("serviceTiers is missing genai.ServiceTier %q", tier)
+		}
+	}
+	if len(serviceTiers) != len(tiers) {
+		t.Errorf("serviceTiers has %d entries, want %d: it gained one this test does not list", len(serviceTiers), len(tiers))
+	}
+}
+
+// HTTPOptions is transport rather than generation, and an application commonly
+// sets headers or a timeout once on a config it hands every agent. Rejecting
+// the whole struct failed every such call; the two fields that mean the same
+// thing to any HTTP client are translated instead.
+func TestRequestOptionsHonorsTransportFields(t *testing.T) {
+	timeout := 45 * time.Second
+	cfg := &genai.GenerateContentConfig{
+		HTTPOptions: &genai.HTTPOptions{
+			Headers: http.Header{
+				"X-Trace-Id": []string{"abc123"},
+				"X-Multi":    []string{"one", "two"},
+			},
+			Timeout: &timeout,
+		},
+	}
+	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+		t.Fatalf("applyGenerationConfig() error = %v, want nil: headers and a timeout are honored", err)
+	}
+	// Three options: one per header value, plus the timeout.
+	if got := len(requestOptions(cfg)); got != 4 {
+		t.Errorf("requestOptions() produced %d options, want 4 (3 header values + 1 timeout)", got)
+	}
+
+	// The options have to reach the wire, not merely be constructed. openai-go
+	// applies them to the outgoing request, so a fake transport can read them.
+	var gotHeader http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed",` +
+			`"output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed",` +
+			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+	}))
+	defer srv.Close()
+
+	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "test", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   cfg,
+	}
+	for _, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+	if got := gotHeader.Get("X-Trace-Id"); got != "abc123" {
+		t.Errorf("X-Trace-Id = %q, want %q: the header never reached the request", got, "abc123")
+	}
+	if got := gotHeader.Values("X-Multi"); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Errorf("X-Multi = %v, want both values", got)
+	}
+}
+
+// The rest of HTTPOptions describes the Gemini wire format, which is not the
+// request being sent, so it is named rather than quietly doing nothing.
+func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
+	retry := int32(3)
+	tests := []struct {
+		field string
+		opts  *genai.HTTPOptions
+	}{
+		{"BaseURL", &genai.HTTPOptions{BaseURL: "https://example.test"}},
+		{"BaseURLResourceScope", &genai.HTTPOptions{BaseURLResourceScope: genai.ResourceScope("global")}},
+		{"APIVersion", &genai.HTTPOptions{APIVersion: "v1beta"}},
+		{"ExtraBody", &genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}},
+		{"RetryOptions", &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: &retry}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+				HTTPOptions: tc.opts,
+			})
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
+			}
+		})
+	}
+}
+
+// An empty HTTPOptions asks for no transport change, which is satisfiable by
+// doing nothing — the same rule the empty ThinkingConfig follows.
+func TestRequestOptionsEmptyHTTPOptions(t *testing.T) {
+	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{}}
+	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+	}
+	if opts := requestOptions(cfg); len(opts) != 0 {
+		t.Errorf("requestOptions() produced %d options, want none", len(opts))
+	}
+	if opts := requestOptions(nil); len(opts) != 0 {
+		t.Errorf("requestOptions(nil) produced %d options, want none", len(opts))
+	}
+}
+
+// unsupportedHTTPOptionFields must name real fields, or an entry guards nothing.
+func TestUnsupportedHTTPOptionFieldsAreAccountedFor(t *testing.T) {
+	honored := map[string]bool{"Headers": true, "Timeout": true}
+	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
+	for _, field := range unsupportedHTTPOptionFields {
+		rejected[field.name] = true
+	}
+
+	optType := reflect.TypeOf(genai.HTTPOptions{})
+	for i := range optType.NumField() {
+		field := optType.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		if !honored[field.Name] && !rejected[field.Name] {
+			t.Errorf("genai.HTTPOptions.%s is neither honored nor rejected: it would be silently ignored", field.Name)
+		}
+	}
+	for name := range rejected {
+		if _, ok := optType.FieldByName(name); !ok {
+			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+		}
+	}
+}
+
 // A slice can tell an explicit empty from unset, so it should: asking for no
 // modalities at all is still a request this package cannot honor.
 func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
@@ -832,6 +1032,8 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"ResponseSchema":     true,
 		"ResponseJsonSchema": true,
 		"ThinkingConfig":     true,
+		"ServiceTier":        true,
+		"HTTPOptions":        true,
 		"Tools":              true,
 		"ToolConfig":         true,
 	}
