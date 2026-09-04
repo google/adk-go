@@ -288,6 +288,19 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 
 func (s *liveSessionImpl) Close() error {
 	s.closeOnce.Do(func() {
+		// Cancel all in-flight streaming tools BEFORE closing s.done.
+		// Tools that respect ctx.Done() get a clean, deterministic signal
+		// here; Send() only becomes a backstop for tools that are still
+		// mid-flight when this fires.
+		s.mu.Lock()
+		for toolName, tasks := range s.activeTools {
+			for _, t := range tasks {
+				t.cancel()
+			}
+			delete(s.activeTools, toolName)
+		}
+		s.mu.Unlock()
+
 		close(s.done)
 	})
 	return nil
@@ -406,6 +419,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			cleanup := func() {
 				cancelConn()
 				_ = liveConn.Close()
+				// Deliberately does NOT cancel s.activeTools. cleanup() runs on every
+				// reconnect attempt during transient network failures, where session
+				// resumption -- and continuity of in-flight streaming tools -- is
+				// still intended. activeTools cancellation belongs exclusively to
+				// liveSessionImpl.Close(), the sync.Once-guarded true termination path.
 			}
 
 			eventsChan := make(chan *session.Event)
@@ -1218,36 +1236,78 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							Context:   toolCtx,
 							cancelCtx: cancelCtx,
 						}
-						if impl, ok := liveSess.(*liveSessionImpl); ok {
+						impl, isImpl := liveSess.(*liveSessionImpl)
+						if isImpl {
 							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
 						}
 						go func() {
 							defer func() {
-								if impl, ok := liveSess.(*liveSessionImpl); ok {
+								if isImpl {
 									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+
+							// chunkResult carries one RunStream iteration's output. A
+							// dedicated inner goroutine drives RunStream exclusively, so a
+							// blocked iteration inside the tool never prevents the outer
+							// goroutine from observing session teardown.
+							type chunkResult struct {
+								chunk string
+								err   error
+							}
+							chunkCh := make(chan chunkResult)
+
+							// Inner goroutine: the ONLY caller of RunStream. Exits when the
+							// iterator is exhausted or when cancelCtx is cancelled between
+							// iterations.
+							go func() {
+								defer close(chunkCh)
+								for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+									select {
+									case chunkCh <- chunkResult{chunk, err}:
+									case <-cancelCtx.Done():
+										return
+									}
+								}
+							}()
+
+							// Outer goroutine: races chunk delivery against cancellation.
+							// Its exit is gated on cancelCtx.Done(), which the framework
+							// controls directly -- never on the inner goroutine's progress.
+							for {
 								select {
-								case <-cancelCtx.Done():
-									return
-								default:
-								}
-								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
-									return
-								}
-								updatedContent := &genai.Content{
-									Role: "user",
-									Parts: []*genai.Part{
-										{
-											Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk),
+								case res, ok := <-chunkCh:
+									if !ok {
+										return // RunStream exhausted normally.
+									}
+									if res.err != nil {
+										fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), res.err)
+										return
+									}
+									updatedContent := &genai.Content{
+										Role: "user",
+										Parts: []*genai.Part{
+											{
+												Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), res.chunk),
+											},
 										},
-									},
-								}
-								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
-									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									}
+									if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
+										fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+										return
+									}
+
+								case <-cancelCtx.Done():
+									// Close() fired. Keep draining chunkCh so the inner
+									// goroutine -- which may currently be blocked sending a
+									// chunk it already produced -- is never left with no
+									// reader. This goroutine exits as soon as the inner
+									// goroutine closes chunkCh.
+									go func() {
+										for range chunkCh {
+										}
+									}()
 									return
 								}
 							}
