@@ -22,7 +22,15 @@ import (
 	"google.golang.org/genai"
 )
 
-// ImageBytes returns the first usable image in a generation response.
+// ImageBytes returns the bytes of the first usable image in a generation
+// response. If the response contains no generated images, it returns an error
+// reporting that no images were returned. If the entries contain no usable
+// image data but include RAI filtering reasons, the error includes the first
+// non-empty reason. Otherwise, an error reports that the entries contain no
+// usable image data.
+//
+// On error, ImageBytes returns nil bytes. On success, the returned bytes alias
+// the image data in the SDK response; they are not copied.
 func ImageBytes(response *genai.GenerateImagesResponse) ([]byte, error) {
 	if response == nil || len(response.GeneratedImages) == 0 {
 		return nil, errors.New("image generation returned no images")

@@ -45,13 +45,17 @@ func TestImageBytes(t *testing.T) {
 			wantErr: "image generation returned no usable image data",
 		},
 		{
-			name: "filtered image",
+			name: "first filtering reason",
 			response: &genai.GenerateImagesResponse{
 				GeneratedImages: []*genai.GeneratedImage{
-					{RAIFilteredReason: "blocked by safety policy"},
+					{RAIFilteredReason: "blocked"},
+					{
+						Image:             &genai.Image{},
+						RAIFilteredReason: "later reason",
+					},
 				},
 			},
-			wantErr: "image generation returned no image: blocked by safety policy",
+			wantErr: "image generation returned no image: blocked",
 		},
 		{
 			name: "empty image data",
@@ -68,10 +72,11 @@ func TestImageBytes(t *testing.T) {
 				GeneratedImages: []*genai.GeneratedImage{
 					nil,
 					{RAIFilteredReason: "filtered"},
-					{Image: &genai.Image{ImageBytes: []byte("image")}},
+					{Image: &genai.Image{ImageBytes: []byte("first image")}},
+					{Image: &genai.Image{ImageBytes: []byte("second image")}},
 				},
 			},
-			want: []byte("image"),
+			want: []byte("first image"),
 		},
 	}
 
@@ -81,6 +86,9 @@ func TestImageBytes(t *testing.T) {
 			if test.wantErr != "" {
 				if err == nil || err.Error() != test.wantErr {
 					t.Fatalf("ImageBytes() error = %v, want %q", err, test.wantErr)
+				}
+				if got != nil {
+					t.Errorf("ImageBytes() = %q, want nil on error", got)
 				}
 				return
 			}

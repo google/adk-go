@@ -59,6 +59,7 @@ func generateImage(ctx agent.Context, input generateImageInput) (generateImageRe
 
 	imageBytes, err := imagegen.ImageBytes(response)
 	if err != nil {
+		// Propagate the error so callers can surface any response filtering reason.
 		return generateImageResult{}, err
 	}
 
