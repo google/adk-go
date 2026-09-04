@@ -202,6 +202,14 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 			branch := "br"
 			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})
 		}},
+		// The same method called directly on the invocation rather than on a
+		// commonContext holding it. That is the shape the rule warns about, and
+		// the column above does not reach it: Promote holds the row, so the call
+		// lands on the commonContext.
+		{name: "WithICDelta called on the invocation", method: "WithICDelta", promoted: true, of: func(ic InvocationContext) context.Context {
+			branch := "br"
+			return Promote(ic.WithICDelta(&InvocationContextDelta{Branch: &branch}))
+		}},
 		// WithContext is inherited exactly as WithICDelta is.
 		{name: "WithContext called on the invocation", method: "WithContext", promoted: true, of: func(ic InvocationContext) context.Context {
 			return Promote(ic.WithContext(t.Context()))
@@ -489,6 +497,7 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		"PromoteWithDelta",
 		"PromoteWithDelta, nil InvocationContextDelta",
 		"WithICDelta on a promoted context",
+		"WithICDelta called on the invocation",
 		"WithContext called on the invocation",
 		"WithAgentCancel called on the context",
 		"WithAgentTimeout called on the context",
@@ -654,11 +663,101 @@ func TestPromotedColumnsActuallyDropADecorator(t *testing.T) {
 		})
 	}
 	// Pinned because "no promoted columns" would make every check above vacuous
-	// and still report success. Seven, not six: PromoteWithDelta and WithICDelta
-	// on a promoted context both reach WithICDelta, by different routes.
-	if want := 7; promoted != want {
+	// and still report success. Eight, not six: three columns reach WithICDelta,
+	// through PromoteWithDelta, on a held invocation, and on one directly.
+	if want := 8; promoted != want {
 		t.Errorf("promoted columns = %d, want %d", promoted, want)
 	}
+}
+
+// TestPromotedColumnsCallTheMethodTheyName closes the half the test above leaves
+// open.
+//
+// Dropping a bare decorator proves a column calls SOME context-producing method
+// on it, not the one its method field names — any two of them are
+// interchangeable there. So the column is run a second time against a decorator
+// overriding exactly the named method and nothing else: if the column really
+// calls it, the override keeps the decorator, and if it calls a different one
+// that method is promoted and the decorator goes. Swapping a column body from
+// WithContext to WithICDelta now fails, where before it left the covered-set
+// claim standing with nothing behind it.
+func TestPromotedColumnsCallTheMethodTheyName(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+	for _, c := range identityColumns(t, enclosing) {
+		if !c.promoted {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			d := selectiveDecorator{
+				Context:  Promote(enclosing),
+				own:      matrixOwner("u"),
+				override: c.method,
+			}
+			id, ok := IdentityFromContext(c.of(d))
+			if !ok || id.UserID != "u" {
+				t.Errorf("IdentityFromContext() = %q, %v; want \"u\", true.\n"+
+					"The decorator overrides %s and nothing else, so a column that calls %s "+
+					"must keep it. Getting the enclosing user means this column calls some "+
+					"OTHER context-producing method, and the coverage it is credited with for "+
+					"%s is not real.", id.UserID, ok, c.method, c.method, c.method)
+			}
+		})
+	}
+}
+
+// selectiveDecorator intercepts exactly one context-producing method and lets
+// every other one promote, so a column can be checked for calling the method it
+// says it calls.
+type selectiveDecorator struct {
+	Context
+	own      session.Session
+	override string
+}
+
+func (d selectiveDecorator) Session() session.Session { return d.own }
+
+func (d selectiveDecorator) WithContext(ctx context.Context) InvocationContext {
+	if d.override == "WithContext" {
+		return d
+	}
+	return d.Context.WithContext(ctx)
+}
+
+func (d selectiveDecorator) WithICDelta(delta *InvocationContextDelta) InvocationContext {
+	if d.override == "WithICDelta" {
+		return d
+	}
+	return d.Context.WithICDelta(delta)
+}
+
+func (d selectiveDecorator) WithDelta(delta *CommonContextDelta) Context {
+	if d.override == "WithDelta" {
+		return d
+	}
+	return d.Context.WithDelta(delta)
+}
+
+func (d selectiveDecorator) WithAgentContext(ctx context.Context) Context {
+	if d.override == "WithAgentContext" {
+		return d
+	}
+	return d.Context.WithAgentContext(ctx)
+}
+
+func (d selectiveDecorator) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	c, cancel := d.Context.WithAgentTimeout(timeout)
+	if d.override == "WithAgentTimeout" {
+		return d, cancel
+	}
+	return c, cancel
+}
+
+func (d selectiveDecorator) WithAgentCancel() (Context, context.CancelFunc) {
+	c, cancel := d.Context.WithAgentCancel()
+	if d.override == "WithAgentCancel" {
+		return d, cancel
+	}
+	return c, cancel
 }
 
 // bareContextDecorator is the minimum an author writes: embed the context you
@@ -794,6 +893,34 @@ func TestDeltaDerivationsReachWithICDeltaOnly(t *testing.T) {
 	if id, ok := IdentityFromContext(Promote(d.WithDelta(delta))); !ok || id.UserID != "enclosing" {
 		t.Errorf("IdentityFromContext() = %q, %v; want \"enclosing\", true: a direct "+
 			"WithDelta is promoted from the embedded context and drops the decorator", id.UserID, ok)
+	}
+}
+
+// TestNilInvocationDeltaIsSafeOnlyOnceHeld pins where the nil-delta exception
+// actually holds.
+//
+// The rule used to offer it as a general exception, in the bullet about calling
+// a method directly on the decorator — where it is false. A promoted method
+// never reaches the decorator, so it cannot consult the delta at all, and the
+// decorator is gone whatever the delta says. Held inside a commonContext it is
+// true, because there the delta is inspected before the invocation is touched.
+// An author reading the old wording would have concluded a delta carrying only
+// Path or RunID needed no interception, which is exactly how entering a workflow
+// drops one.
+func TestNilInvocationDeltaIsSafeOnlyOnceHeld(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+	path := "n@1"
+	noICDelta := func() *CommonContextDelta { return &CommonContextDelta{Path: &path} }
+
+	d := icDeltaOnlyDecorator{Context: Promote(enclosing), own: matrixOwner("u")}
+	if id, ok := IdentityFromContext(d.WithDelta(noICDelta())); !ok || id.UserID != "enclosing" {
+		t.Errorf("direct WithDelta: IdentityFromContext() = %q, %v; want \"enclosing\", true. "+
+			"A promoted method cannot consult the delta, so an empty one is no shelter.", id.UserID, ok)
+	}
+	if id, ok := IdentityFromContext(Promote(d).WithDelta(noICDelta())); !ok || id.UserID != "u" {
+		t.Errorf("held WithDelta: IdentityFromContext() = %q, %v; want \"u\", true. "+
+			"Held in a commonContext the delta is inspected first, so an empty one "+
+			"leaves the invocation alone.", id.UserID, ok)
 	}
 }
 

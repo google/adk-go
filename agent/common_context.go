@@ -90,10 +90,12 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //
 // Promotion also reaches what a method HANDS BACK, which matters most where the
 // thing handed back carries a user. A decorator that overrides Session but not
-// [Context.Artifacts] or [Context.Memory] gets handles built for the enclosing
-// invocation, and those carry AppName, UserID and SessionID as the storage and
-// search keys. So such a context can answer this function with its own user
-// while reading and writing the ENCLOSING user's artifacts and memories. That
+// [Context.Artifacts], [Context.Memory] or [Context.SearchMemory] gets handles
+// built for the enclosing invocation, and those carry AppName, UserID and
+// SessionID as the storage and search keys — SearchMemory by way of the Memory
+// handle it reaches through. So such a context can answer this function with its
+// own user while reading and writing the ENCLOSING user's artifacts and
+// memories. That
 // behaviour predates the identity key and is unchanged by it — Session, UserID
 // and AppName have always reported the enclosing invocation on the same shape —
 // but a decorator author reading this rule needs to know the credential is not
@@ -116,8 +118,9 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     [InvocationContext.WithContext] and [InvocationContext.WithICDelta] on
 //     [InvocationContext], plus [Context.WithDelta], [Context.WithAgentContext],
 //     [Context.WithAgentTimeout] and [Context.WithAgentCancel] on [Context].
-//     One exception is worth knowing: a delta carrying no
-//     [InvocationContextDelta] leaves the invocation alone, so it is safe.
+//     There is no exception here: a direct call drops it whatever the delta
+//     says, including one carrying no [InvocationContextDelta] at all, because
+//     the promoted method never reaches the decorator to consult the delta.
 //   - Promoting it first shelters it from three of those four. [Promote] holds
 //     the decorator in a commonContext, and WithAgentContext, WithAgentTimeout
 //     and WithAgentCancel re-parent only the context.Context above it, so the
@@ -126,6 +129,10 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     promotion, exactly as [PromoteWithDelta] does. Both reach WithICDelta and
 //     neither reaches WithDelta, so overriding WithICDelta alone is enough for
 //     them — it is a direct call on the decorator that WithDelta must also cover.
+//     This is the one place a delta carrying no [InvocationContextDelta] is
+//     genuinely safe: held inside a commonContext, such a delta leaves the
+//     invocation untouched. Held is the operative word, and it is why the
+//     exception belongs here and not above.
 //
 // Two further things a decorator cannot fix by overriding the methods above:
 //
