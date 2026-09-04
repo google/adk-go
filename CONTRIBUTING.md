@@ -4,6 +4,7 @@ We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
 -   [Branches](#branches)
+    -   [Backporting to `v1`](#backporting-to-v1)
 -   [Multi-Module Development](#multi-module-development)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
@@ -44,6 +45,88 @@ To work on a 1.x fix, base your branch on `v1`:
 ```bash
 git switch -c my-fix origin/v1
 ```
+
+### Backporting to `v1`
+
+Three labels are in play, and only one of them does anything:
+
+| Label       | Meaning                                                        |
+| ----------- | -------------------------------------------------------------- |
+| `v1-needed` | This change still owes a 1.x equivalent. **Drives the queue.**  |
+| `v2`        | Informational: the PR targets `main`.                           |
+| `v1`        | Informational: the PR targets the `v1` branch.                  |
+
+Add `v1-needed` while the context is fresh — at review time, not later. It is
+the only signal the automation reads, so a fix that should reach 1.x without it
+is a fix nobody backports.
+
+Merging a `v1-needed` PR opens its backport by itself: the
+[`Backport to v1`](.github/workflows/backport.yml) workflow replays the squash
+commit onto a branch cut from `v1` and opens a pull request against it. **One
+backport PR per original PR** — a change that conflicts costs its own backport
+and nothing else. The workflow works off the label queue rather than the merge
+event, so a PR labelled *after* it merged is picked up by the nightly run, and
+re-running on one that is already backported is a no-op rather than an error.
+
+The workflow runs `scripts/backport.sh`, which is also usable directly — to
+check the queue, or to work through a conflict the automation could not:
+
+```bash
+scripts/backport.sh --list         # what is pending?
+scripts/backport.sh 1301           # replay one PR into a scratch worktree
+scripts/backport.sh --pr           # replay the whole queue and open the PRs
+```
+
+It replays each commit on a detached HEAD in a scratch worktree under `$TMPDIR`,
+so your working tree and your branches are left alone — it does add and remove
+its own worktree in your clone, and prunes stale worktree registrations while
+doing so. Nothing leaves the machine without `--pr`.
+
+The script rewrites the module path (`google.golang.org/adk/v2` →
+`google.golang.org/adk`) in each patch before applying it. That difference is
+otherwise the main source of cherry-pick conflicts, because it puts every Go
+file's import block out of sync between the two branches.
+
+A PR leaves the queue when its change reaches `v1` — matched on the
+`(cherry picked from commit <sha>)` trailer the script writes, not on anything
+parsed out of a title — or while a backport pull request for it is open. Close
+that pull request and delete its `backport/v1/pr-<n>` branch and the PR is
+queued again, which is how you regenerate a backport that went stale. A branch
+left behind by a run that died does not suppress anything: the next run replays
+it.
+
+Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
+and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
+held**. A pull request opened by `github-actions[bot]` gets its workflows in an
+approval-required state, so open the backport PR and click **Approve workflows
+to run** in the merge box; anyone with write access can.
+
+That is what running on the built-in `GITHUB_TOKEN` costs, and it is worth
+paying: no long-lived credential lives in the repository, and the click lands on
+a pull request someone has to review anyway. The one repository setting it needs
+is "Allow GitHub Actions to create and approve pull requests", under
+Settings → Actions → General.
+
+Authorship follows the same mechanism as today, with one visible change. Each
+replayed commit keeps its original author, and squash-merging the backport PR
+makes the PR owner the author of the commit that lands on `v1`, recording the
+original author as a `Co-authored-by:` trailer. Because these pull requests are
+opened by `github-actions[bot]`, that owner is now the bot: `git blame` on `v1`
+will point at it, and the human author is the trailer.
+
+Two things the tooling cannot do for you:
+
+-   **A clean apply is not a correct backport.** `v1` may lack a helper or a
+    refactor that `main` already had, so a patch can apply and still not
+    compile. Build and test the backport branch before merging it.
+-   **Dependency changes need judgement.** The 1.x dependency set differs from
+    main's, so `go.mod` hunks often reject. Re-run with `--skip-gomod` and
+    `go mod tidy` the module instead.
+
+When a patch conflicts, a local run applies what it can and leaves `.rej` files
+in the worktree to work from. The unattended run does not push a half-applied
+tree: it comments on the original PR asking for a manual backport, once, and
+leaves the PR queued so a later `v1` change can still let it land on its own.
 
 ## Multi-Module Development
 
