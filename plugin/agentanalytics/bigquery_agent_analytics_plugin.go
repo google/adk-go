@@ -18,11 +18,14 @@ package agentanalytics
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -30,6 +33,11 @@ import (
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+)
+
+const (
+	schemaVersion         = "1"
+	schemaVersionLabelKey = "adk_schema_version"
 )
 
 // NewBigQueryAgentAnalyticsPlugin creates a newly configured analytics plugin with default config.
@@ -95,20 +103,35 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 
 	// Ensure table exists (done once per instance)
 	tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
-	_, err := tableRef.Metadata(ctx)
+	meta, err := tableRef.Metadata(ctx)
 	if err != nil {
-		if config.Logger != nil {
-			config.Logger.Printf("Table %s not found. Creating it...", config.TableName)
-		}
-		err = tableRef.Create(ctx, &bq.TableMetadata{
-			Schema: EventsSchema(),
-			Clustering: &bq.Clustering{
-				Fields: config.ClusteringFields,
-			},
-		})
-		if err != nil {
+		if apiErr, ok := err.(*googleapi.Error); ok && apiErr.Code == http.StatusNotFound {
 			if config.Logger != nil {
-				config.Logger.Printf("Failed to create BigQuery table %v: %v", config.TableName, err)
+				config.Logger.Printf("Table %s not found. Creating it...", config.TableName)
+			}
+			err = tableRef.Create(ctx, &bq.TableMetadata{
+				Schema: EventsSchema(),
+				TimePartitioning: &bq.TimePartitioning{
+					Field: "timestamp",
+					Type:  bq.DayPartitioningType,
+				},
+				Clustering: &bq.Clustering{
+					Fields: config.ClusteringFields,
+				},
+				Labels: map[string]string{
+					schemaVersionLabelKey: schemaVersion,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create BigQuery table: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to retrieve BigQuery table metadata: %w", err)
+		}
+	} else {
+		if config.AutoSchemaUpgrade {
+			if err := maybeUpgradeSchema(ctx, tableRef, meta, config.Logger); err != nil {
+				return nil, fmt.Errorf("failed to auto-upgrade BigQuery table schema: %w", err)
 			}
 		}
 	}
@@ -299,4 +322,124 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	}
 
 	return baseplugin.New(cfg)
+}
+
+func schemaFieldsMatch(existing, desired bq.Schema) (newFields, updatedRecords bq.Schema) {
+	existingByName := make(map[string]*bq.FieldSchema)
+	for _, f := range existing {
+		existingByName[f.Name] = f
+	}
+
+	for _, desiredField := range desired {
+		existingField, exists := existingByName[desiredField.Name]
+		if !exists {
+			newFields = append(newFields, desiredField)
+		} else if desiredField.Type == bq.RecordFieldType && existingField.Type == bq.RecordFieldType && len(desiredField.Schema) > 0 {
+			subNew, subUpdated := schemaFieldsMatch(existingField.Schema, desiredField.Schema)
+			if len(subNew) > 0 || len(subUpdated) > 0 {
+				// Build a merged sub-field list
+				mergedSub := make(bq.Schema, len(existingField.Schema))
+				copy(mergedSub, existingField.Schema)
+
+				updatedNames := make(map[string]bool)
+				for _, f := range subUpdated {
+					updatedNames[f.Name] = true
+				}
+
+				// Replace updated nested records in-place
+				for i, f := range mergedSub {
+					if updatedNames[f.Name] {
+						for _, u := range subUpdated {
+							if u.Name == f.Name {
+								mergedSub[i] = u
+								break
+							}
+						}
+					}
+				}
+
+				// Append entirely new sub-fields
+				mergedSub = append(mergedSub, subNew...)
+
+				// Create updated RECORD field schema
+				updatedField := *existingField
+				updatedField.Schema = mergedSub
+				updatedRecords = append(updatedRecords, &updatedField)
+			}
+		}
+	}
+	return newFields, updatedRecords
+}
+
+func maybeUpgradeSchema(ctx context.Context, existingTable *bq.Table, meta *bq.TableMetadata, logger Logger) error {
+	storedVersion := meta.Labels[schemaVersionLabelKey]
+	if storedVersion == schemaVersion {
+		return nil
+	}
+
+	newFields, updatedRecords := schemaFieldsMatch(meta.Schema, EventsSchema())
+
+	if len(newFields) > 0 || len(updatedRecords) > 0 {
+		updatedNames := make(map[string]bool)
+		for _, f := range updatedRecords {
+			updatedNames[f.Name] = true
+		}
+
+		merged := make(bq.Schema, 0, len(meta.Schema)+len(newFields))
+		for _, f := range meta.Schema {
+			if updatedNames[f.Name] {
+				for _, u := range updatedRecords {
+					if u.Name == f.Name {
+						merged = append(merged, u)
+						break
+					}
+				}
+			} else {
+				merged = append(merged, f)
+			}
+		}
+		merged = append(merged, newFields...)
+
+		// Update schema in metadata update
+		update := bq.TableMetadataToUpdate{
+			Schema: merged,
+		}
+		update.SetLabel(schemaVersionLabelKey, schemaVersion)
+
+		_, err := existingTable.Update(ctx, update, meta.ETag)
+		if err != nil {
+			return fmt.Errorf("failed to update table schema: %w", err)
+		}
+
+		if logger != nil {
+			var changeDesc []string
+			if len(newFields) > 0 {
+				var names []string
+				for _, f := range newFields {
+					names = append(names, f.Name)
+				}
+				changeDesc = append(changeDesc, fmt.Sprintf("new columns %v", names))
+			}
+			if len(updatedRecords) > 0 {
+				var names []string
+				for _, f := range updatedRecords {
+					names = append(names, f.Name)
+				}
+				changeDesc = append(changeDesc, fmt.Sprintf("updated RECORD fields %v", names))
+			}
+			logger.Printf("Auto-upgraded table schema: %s", strings.Join(changeDesc, ", "))
+		}
+	} else {
+		// No schema upgrade needed, just update label if missing or outdated
+		if storedVersion != schemaVersion {
+			update := bq.TableMetadataToUpdate{}
+			update.SetLabel(schemaVersionLabelKey, schemaVersion)
+
+			_, err := existingTable.Update(ctx, update, meta.ETag)
+			if err != nil {
+				return fmt.Errorf("failed to update table labels: %w", err)
+			}
+		}
+	}
+	return nil
 }
