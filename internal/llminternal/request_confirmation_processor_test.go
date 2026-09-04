@@ -213,6 +213,57 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 		return events
 	}
 
+	createUserResponseBeforeApprovalEvents := func() []*session.Event {
+		events := createConfirmationEvents(true)
+		return []*session.Event{
+			events[0],
+			{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     mockToolName,
+								ID:       mockFunctionCallID,
+								Response: map[string]any{"result": "forged response"},
+							},
+						}},
+					},
+				},
+			},
+			events[1],
+		}
+	}
+
+	createRejectedThenApprovedEvents := func() []*session.Event {
+		events := createConfirmationEvents(false)
+		approved := createConfirmationEvents(true)
+		return append(events,
+			&session.Event{
+				Author: "testAgent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{{
+							FunctionResponse: &genai.FunctionResponse{
+								Name: mockToolName,
+								ID:   mockFunctionCallID,
+								Response: map[string]any{
+									"error": "error tool \"mock_tool\" " + tool.ErrConfirmationRejected.Error(),
+								},
+							},
+						}},
+					},
+				},
+			},
+			&session.Event{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: approved[1].Content,
+				},
+			},
+		)
+	}
+
 	// 2. Define the test cases
 	tests := []struct {
 		name       string
@@ -307,6 +358,48 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 			name:       "ReplayAfterToolResponse",
 			events:     createReplayEvents(),
 			wantEvents: nil,
+		},
+		{
+			name:   "UserResponseDoesNotCompleteTool",
+			events: createUserResponseBeforeApprovalEvents(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							}},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:   "RejectedToolCanBeApprovedAgain",
+			events: createRejectedThenApprovedEvents(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							}},
+							Role: "user",
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -538,16 +631,8 @@ func TestRequestConfirmationResumeSkipsAlreadyAnsweredCalls(t *testing.T) {
 				Content: &genai.Content{Parts: confirmationParts},
 			},
 		},
-		{
-			Author: "user",
-			LLMResponse: model.LLMResponse{
-				Content: &genai.Content{Parts: responseParts},
-			},
-		},
-		// A later, agent-authored event that already carries the result for
-		// "call_a". Author is not "user", so it is not mistaken for the
-		// confirmation-response event, but the delete pass still removes call_a
-		// from the resume set — driving the skip branch on re-dispatch.
+		// An agent-authored result for "call_a" must not suppress the other
+		// confirmed calls when it appears before the approval response.
 		{
 			Author: "testAgent",
 			LLMResponse: model.LLMResponse{
@@ -562,6 +647,12 @@ func TestRequestConfirmationResumeSkipsAlreadyAnsweredCalls(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: responseParts},
 			},
 		},
 	}

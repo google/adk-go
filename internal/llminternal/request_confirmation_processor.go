@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -213,26 +214,12 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			removeAlreadyCompletedTools(events, k, confirmationEventIndex, toolsToResumeByFunctionCallID)
+			removeAlreadyCompletedTools(events, k, confirmationEventIndex, agentName, toolsToResumeByFunctionCallID)
 			if len(toolsToResumeByFunctionCallID) == 0 {
 				continue
 			}
 
-			// TODO consider forward or backward pass instead of nested loops
-			// Remove the tools that have already been confirmed.
-			for j := len(events) - 1; j > confirmationEventIndex; j-- {
-				event = events[j]
-				responses := utils.FunctionResponses(event.Content)
-				if len(responses) == 0 {
-					continue
-				}
-				for _, resp := range responses {
-					delete(toolsToResumeByFunctionCallID, resp.ID)
-				}
-				if len(toolsToResumeByFunctionCallID) == 0 {
-					break
-				}
-			}
+			removeAlreadyCompletedTools(events, confirmationEventIndex, len(events), agentName, toolsToResumeByFunctionCallID)
 			if len(toolsToResumeByFunctionCallID) == 0 {
 				continue
 			}
@@ -263,17 +250,37 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 	}
 }
 
-func removeAlreadyCompletedTools(events []*session.Event, startIndex, endIndex int, toolsToResume map[string]*confirmedCall) {
+// removeAlreadyCompletedTools removes only agent-authored tool responses from
+// the bounded event window. The lower bound is the confirmation request: the
+// earlier request-time error must not suppress the first approval, while later
+// completed responses must suppress replays. A rejection is not a completion;
+// it leaves the confirmation eligible for a later answer.
+func removeAlreadyCompletedTools(events []*session.Event, startIndex, endIndex int, agentName string, toolsToResume map[string]*confirmedCall) {
 	for j := startIndex + 1; j < endIndex; j++ {
-		responses := utils.FunctionResponses(events[j].Content)
+		event := events[j]
+		if event.Author != agentName {
+			continue
+		}
+		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
 			continue
 		}
 		for _, resp := range responses {
+			if isConfirmationRejection(resp) {
+				continue
+			}
 			delete(toolsToResume, resp.ID)
 		}
 		if len(toolsToResume) == 0 {
 			return
 		}
 	}
+}
+
+func isConfirmationRejection(resp *genai.FunctionResponse) bool {
+	if resp == nil || resp.Response == nil {
+		return false
+	}
+	errText, ok := resp.Response["error"].(string)
+	return ok && strings.HasSuffix(errText, tool.ErrConfirmationRejected.Error())
 }
