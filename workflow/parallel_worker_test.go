@@ -496,7 +496,7 @@ func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
 	// jjsasha63's finding on #1239: runWorker's retry-delay select only
 	// calls reportFailure on the "cannot retry or exhausted attempts" path,
 	// not on the `case <-ctx.Done()` arm inside the delay wait. A worker
-	// parked in that delay when the top-level context is cancelled sends
+	// parked in that delay when the top-level context is canceled sends
 	// workerResult{err: ctx.Err()} straight to resCh without ever setting
 	// firstErr, and the aggregation loop only reads res.ev, never res.err,
 	// so a cancellation that lands here is silently dropped: nil error, nil

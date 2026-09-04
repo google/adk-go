@@ -61,8 +61,8 @@ const (
 	modelTextWaitingForApproval = "waiting for user's approval..."
 	modelTextTaskComplete       = "Task complete!"
 
-	transferToolName      = "transfer_to_agent"
-	// Note: "transfering" matches recorded HTTP cassette; do not edit without re-recording.
+	transferToolName = "transfer_to_agent"
+	// Note: prompt typo matches recorded HTTP cassette; do not edit without re-recording.
 	modelTextRootTransfer = "transfering... please hold... beepboop..."
 )
 

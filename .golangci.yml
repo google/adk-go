@@ -86,3 +86,6 @@ linters:
         linters:
           - revive
         text: '^(exported|package-comments):'
+      - linters:
+          - misspell
+        text: '`CANCELLED` is a misspelling of `CANCELED`'

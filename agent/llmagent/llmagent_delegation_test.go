@@ -742,9 +742,9 @@ contains both. Do not ask the user any questions.`,
 		t.Fatalf("payment_collector: %v", err)
 	}
 	coordinator, err := llmagent.New(llmagent.Config{
-		Name:        "coordinator",
-		// Note: "summarises" matches recorded HTTP cassette; do not edit without re-recording.
-		Description: "Calls order_collector, then payment_collector, then summarises.", 
+		Name: "coordinator",
+		// Note: prompt string matches recorded HTTP cassette; do not edit without re-recording.
+		Description: "Calls order_collector, then payment_collector, then summarises.",
 		Model:       newDelegationModel(t),
 		Mode:        llmagent.ModeChat,
 		SubAgents:   []agent.Agent{orderCollector, paymentCollector},
@@ -767,7 +767,8 @@ always contains everything needed for both steps.`,
 
 	// --- Turn 1: order + payment in one user message ---
 	events1 := dr.turn(
-		"Order 2 pizzas. Pay with card 4111111111111111, cvv 123.")
+		"Order 2 pizzas. Pay with card 4111111111111111, cvv 123.",
+	)
 
 	// Both delegation FCs present.
 	if got := len(collectFCsByName(events1, "order_collector")); got != 1 {
