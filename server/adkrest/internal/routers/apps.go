@@ -39,5 +39,11 @@ func (r *AppsAPIRouter) Routes() Routes {
 			Pattern:     "/list-apps",
 			HandlerFunc: r.appsController.ListAppsHandler,
 		},
+		Route{
+			Name:        "AppInfo",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/app-info",
+			HandlerFunc: r.appsController.AppInfoHandler,
+		},
 	}
 }

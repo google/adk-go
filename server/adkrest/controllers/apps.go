@@ -15,9 +15,13 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 
+	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/server/adkrest/internal/services"
 )
 
 // AppsAPIController is the controller for the Apps API.
@@ -34,4 +38,22 @@ func NewAppsAPIController(agentLoader agent.Loader) *AppsAPIController {
 func (c *AppsAPIController) ListAppsHandler(rw http.ResponseWriter, req *http.Request) {
 	apps := c.agentLoader.ListAgents()
 	EncodeJSONResponse(apps, http.StatusOK, rw)
+}
+
+// AppInfoHandler handles describing an app: its root agent and every agent
+// reachable from it, with each agent's instruction, tools and children.
+func (c *AppsAPIController) AppInfoHandler(rw http.ResponseWriter, req *http.Request) {
+	appName := mux.Vars(req)["app_name"]
+	if appName == "" {
+		http.Error(rw, "app_name is required", http.StatusBadRequest)
+		return
+	}
+
+	rootAgent, err := c.agentLoader.LoadAgent(appName)
+	if err != nil {
+		http.Error(rw, fmt.Sprintf("app not found: %s", appName), http.StatusNotFound)
+		return
+	}
+
+	EncodeJSONResponse(services.GetAppInfo(req.Context(), appName, rootAgent), http.StatusOK, rw)
 }
