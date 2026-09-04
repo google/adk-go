@@ -317,10 +317,10 @@ type A2AConfig struct {
 	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 	// If Run exited due to an error including context cancellation it will be passed as cause.
 	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
-	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
-	// During streaming, if Run is canceled before task information arrives, it may wait up to the same
-	// 5 second cleanup budget. The caller's deadline remains an upper bound for this wait and the default
-	// cancel RPC.
+	// If no callback is provided, the default behavior is to make a CancelTask RPC request.
+	// During streaming, if Run is canceled before task information arrives, it may wait up to five seconds
+	// for that information, bounded by the caller's deadline. CancelTask uses the remainder of that budget
+	// when available; otherwise, it gets a new detached five-second timeout.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
@@ -369,8 +369,8 @@ type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
 }
 
-// remoteTaskCleanupTimeout bounds the total time spent after invocation
-// cancellation waiting for task information and making the default cancel RPC.
+// remoteTaskCleanupTimeout sets the shared streaming cleanup budget and the
+// timeout for a detached default cancel RPC when no shared budget remains.
 const remoteTaskCleanupTimeout = 5 * time.Second
 
 // remoteTaskCleanupBudget detaches cancellation from the invocation while
@@ -512,11 +512,25 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		)
 		rememberCleanupTarget := func(event a2a.Event) bool {
 			target, ok := remoteTaskCleanupTargetFromEvent(event)
-			if !ok {
+			if ok {
+				lastCleanupTarget = &target
+				return true
+			}
+			if lastCleanupTarget != nil {
 				return false
 			}
-			lastCleanupTarget = &target
-			return true
+			artifact, ok := event.(*a2a.TaskArtifactUpdateEvent)
+			if !ok || artifact == nil {
+				return false
+			}
+			taskInfo := artifact.TaskInfo()
+			if taskInfo.TaskID == "" {
+				return false
+			}
+			lastCleanupTarget = &remoteTaskCleanupTarget{taskInfo: taskInfo}
+
+			// During post-cancellation draining, keep waiting for an event carrying task state.
+			return ctx.Err() == nil
 		}
 		defer func() {
 			var cleanupCtx context.Context
@@ -679,13 +693,10 @@ func cleanupRemoteTask(
 	if target.state == a2a.TaskStateInputRequired && cause == nil {
 		return
 	}
-	if cleanupCtx == nil {
+	if cleanupCtx == nil || cleanupCtx.Err() != nil {
 		var cancelTimeout context.CancelFunc
 		cleanupCtx, cancelTimeout = context.WithTimeout(ctx, remoteTaskCleanupTimeout)
 		defer cancelTimeout()
-	}
-	if cleanupCtx.Err() != nil {
-		return
 	}
 	_, err := client.CancelTask(cleanupCtx, &a2a.CancelTaskRequest{ID: target.taskInfo.TaskID})
 	if err != nil {
