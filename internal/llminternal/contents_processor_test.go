@@ -178,6 +178,12 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 					Role: "user",
 				},
 				genai.NewContentFromFunctionCall("func1", nil, "model"),
+				// The turn ended before the tool result was recorded, so the
+				// call reaches the model with a placeholder result.
+				functionResponseContent(&genai.FunctionResponse{
+					Name:     "func1",
+					Response: map[string]any{"result": missingResult},
+				}),
 			},
 		},
 		{
@@ -193,6 +199,12 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 					Role: "user",
 				},
 				genai.NewContentFromFunctionCall("func1", nil, "model"),
+				// The turn ended before the tool result was recorded, so the
+				// call reaches the model with a placeholder result.
+				functionResponseContent(&genai.FunctionResponse{
+					Name:     "func1",
+					Response: map[string]any{"result": missingResult},
+				}),
 			},
 		},
 		{

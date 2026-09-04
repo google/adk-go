@@ -215,6 +215,10 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		contents = append(contents, content)
 	}
 
+	// Ids are read after the conversion so a stripped call id is answered by a
+	// response with the same stripped id.
+	contents = pairUnansweredFunctionCalls(contents, pendingCallIDs(filtered))
+
 	// For scoped agents (task / single_turn), prepend a synthetic user
 	// content built from the originating FC's args. The FC lives in an
 	// UNSCOPED parent event (e.g. the coordinator's task-delegation FC)
