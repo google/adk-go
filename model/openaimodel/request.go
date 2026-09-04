@@ -17,7 +17,9 @@ package openaimodel
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -45,11 +47,19 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	}
 
 	// We convert the generic content parts into OpenAI's input format.
-	input, err := convertContents(req.Contents)
+	input, droppedReasoning, err := convertContents(req.Contents)
 	if err != nil {
 		return responses.ResponseNewParams{}, err
 	}
 	if len(input) == 0 {
+		if droppedReasoning {
+			// The drop is what emptied the request; don't report it as a
+			// caller who sent nothing. Gated on a part actually having been
+			// dropped, so a request that was empty on arrival still returns
+			// the bare sentinel a caller may compare against directly.
+			return responses.ResponseNewParams{}, fmt.Errorf(
+				"%w: every part was dropped as replayed reasoning", ErrNoContents)
+		}
 		return responses.ResponseNewParams{}, ErrNoContents
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{
@@ -84,12 +94,16 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	return params, nil
 }
 
-func convertContents(contents []*genai.Content) (responses.ResponseInputParam, error) {
+// convertContents converts contents into Responses API input items, reporting
+// separately whether any part was dropped as replayed reasoning. The caller
+// needs that to tell a request the drop emptied from one that arrived empty.
+func convertContents(contents []*genai.Content) (responses.ResponseInputParam, bool, error) {
 	var (
-		items     responses.ResponseInputParam
-		tracker   callTracker
-		textParts []string
-		curRole   genai.Role = genai.RoleUser
+		items            responses.ResponseInputParam
+		tracker          callTracker
+		textParts        []string
+		droppedReasoning bool
+		curRole          genai.Role = genai.RoleUser
 		// flushText is a helper function that takes any accumulated text parts
 		// and converts them into a message, then appends it to our items.
 		flushText = func() error {
@@ -122,42 +136,125 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 		}
 		curRole = genai.Role(content.Role)
 		for _, part := range content.Parts {
-			switch {
-			case part == nil:
+			if part == nil {
 				continue
-			case part.Text != "":
+			}
+			// A part is read field by field rather than as one choice among
+			// alternatives, because it can carry several at once. Anything
+			// this package cannot send is reported first and on its own, so
+			// that something sendable elsewhere on the same part — text, or a
+			// function call — cannot carry it out of the request unannounced.
+			if field := unsupportedPayload(part); field != "" {
+				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
+			}
+			sendText := part.Text != "" && !part.Thought
+			switch {
+			case sendText:
 				textParts = append(textParts, part.Text)
+			case part.Text != "" || replayedReasoning(part):
+				// Reasoning is dropped, but the role it arrived under is still
+				// checked, on a bare thought as much as on one carrying text:
+				// dropping a part must not silence an error the same turn
+				// would have raised had it been an answer.
+				droppedReasoning = true
+				if _, err := normalizeRole(curRole); err != nil {
+					return nil, false, err
+				}
+			}
+			switch {
 			case part.FunctionCall != nil:
-				// If we encounter a function call, we first flush any accumulated text.
+				// Flush first so buffered text keeps its place ahead of the call.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				callParam, err := tracker.newFunctionCall(part.FunctionCall)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
 				// Similarly, for a function response, we flush text before adding the response.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				respParam, err := tracker.newFunctionResponse(part.FunctionResponse)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			default:
-				return nil, fmt.Errorf("openai: unsupported content part %T", part)
+			case !sendText && !replayedReasoning(part):
+				// The part put no text in the buffer, carries no call or
+				// response, and is not reasoning worth dropping: nothing in it
+				// reaches the request, so say so rather than let an empty part
+				// pass for a converted one.
+				return nil, false, errors.New("openai: content part carries nothing to send")
 			}
 		}
 		// After processing all parts in a content block, we flush any remaining text.
 		if err := flushText(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
-	return items, nil
+	return items, droppedReasoning, nil
+}
+
+// replayedReasoning reports whether part is reasoning carried over from an
+// earlier turn that carries nothing else, so dropping it loses nothing.
+//
+// The Responses API takes reasoning back only as an input item referencing the
+// id of the item that produced it, and ADK carries no such ids; sent as
+// ordinary assistant text it becomes words the model appears to have said.
+//
+// Whether to send a part's text is decided by part.Thought alone: a part can
+// carry both reasoning text and a call, and the call must survive.
+func replayedReasoning(part *genai.Part) bool {
+	if part == nil {
+		return false
+	}
+	// A signature can arrive on a part of its own with the marker unset; there
+	// is nowhere to put it in a Responses request either way.
+	if !part.Thought && len(part.ThoughtSignature) == 0 {
+		return false
+	}
+	// Text on a part not marked as a thought is an answer, signature or not.
+	if part.Text != "" && !part.Thought {
+		return false
+	}
+	// Marking a call or anything else as a thought must not make it vanish.
+	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		unsupportedPayload(part) == ""
+}
+
+// unsupportedPayload names the first field on part that this package has no way
+// to send, or "" when the part holds nothing beyond what convertContents
+// accounts for.
+//
+// The test is stated as the absence of anything unaccounted for rather than as
+// a list of the fields that disqualify a part, so that a field added to
+// genai.Part by a later release is reported here by default instead of leaving
+// the request unnoticed.
+func unsupportedPayload(part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
+	rest := *part
+	rest.Text = ""              // sent, or dropped when it is reasoning
+	rest.Thought = false        // the marker deciding which
+	rest.ThoughtSignature = nil // no Responses input item can carry one
+	rest.FunctionCall = nil     // sent as a function_call item
+	rest.FunctionResponse = nil // sent as a function_call_output item
+	rest.VideoMetadata = nil    // qualifies media carried in another field
+	rest.MediaResolution = nil  // likewise
+	rest.PartMetadata = nil     // caller bookkeeping, never content
+
+	v := reflect.ValueOf(rest)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return v.Type().Field(i).Name
+		}
+	}
+	return ""
 }
 
 // newMessage builds an easy input message for an already-normalized role.

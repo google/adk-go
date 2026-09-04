@@ -17,6 +17,7 @@ package openaimodel
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -458,6 +459,121 @@ func newLocalhostServer(t *testing.T, handler http.Handler) *httptest.Server {
 	server.Listener = ln
 	server.Start()
 	return server
+}
+
+// TestModel_GenerateContent_DoesNotSendReplayedReasoning asserts the drop on
+// the bytes that leave the process rather than on the converted params, and on
+// both code paths: blocking and streaming build the request through the same
+// conversion, but only an end-to-end assertion proves nothing downstream puts
+// the reasoning back.
+func TestModel_GenerateContent_DoesNotSendReplayedReasoning(t *testing.T) {
+	contents := []*genai.Content{
+		genai.NewContentFromText("what is 2+2?", genai.RoleUser),
+		{Role: string(genai.RoleModel), Parts: []*genai.Part{
+			{Text: "the user must not see this scratchpad", Thought: true},
+			{Text: "4"},
+		}},
+		genai.NewContentFromText("and 3+3?", genai.RoleUser),
+	}
+
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var body string
+			server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("reading request body: %v", err)
+				}
+				body = string(raw)
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					for _, evt := range []string{evCreated, evCompleted, "[DONE]"} {
+						_, _ = fmt.Fprintf(w, "data: %s\n\n", evt)
+					}
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, bodyCompleted)
+			}))
+			defer server.Close()
+
+			ctx := t.Context()
+			llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+				APIKey:     "test",
+				BaseURL:    server.URL + "/v1",
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			for _, err := range llm.GenerateContent(ctx, &model.LLMRequest{Contents: contents}, stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent() err = %v", err)
+				}
+			}
+
+			if strings.Contains(body, "scratchpad") {
+				t.Errorf("request body replayed the model's reasoning:\n%s", body)
+			}
+			// Assert the answer survived, so the test cannot pass by sending
+			// nothing at all.
+			for _, want := range []string{"what is 2+2?", `"4"`, "and 3+3?"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("request body is missing %q:\n%s", want, body)
+				}
+			}
+		})
+	}
+}
+
+// TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending checks the
+// other end of the drop: when it empties the request there is nothing to send,
+// and the caller learns that instead of the model being called with nothing.
+func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				t.Errorf("model was called with an emptied request")
+			}))
+			defer server.Close()
+
+			ctx := t.Context()
+			llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+				APIKey:     "test",
+				BaseURL:    server.URL + "/v1",
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "still thinking", Thought: true}}},
+			}}
+
+			var gotErr error
+			for _, err := range llm.GenerateContent(ctx, req, stream) {
+				if err != nil && gotErr == nil {
+					gotErr = err
+				}
+			}
+			if !errors.Is(gotErr, ErrNoContents) {
+				t.Errorf("GenerateContent() err = %v, want it to wrap %v", gotErr, ErrNoContents)
+			}
+			if calls != 0 {
+				t.Errorf("model was called %d times, want 0", calls)
+			}
+		})
+	}
 }
 
 func TestModel_ValidateModelNameInput(t *testing.T) {

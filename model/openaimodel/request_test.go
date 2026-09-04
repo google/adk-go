@@ -251,8 +251,12 @@ func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 }
 
 func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
+	// The leading turn is what makes this test bite: on its own the
+	// unsupported part leaves the request empty, so a build that skipped it
+	// silently would still fail with ErrNoContents and look like a rejection.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
+			genai.NewContentFromText("q", genai.RoleUser),
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
@@ -261,8 +265,625 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 			},
 		},
 	}
-	if _, err := buildOpenAIParams("fallback", req); err == nil {
+	_, err := buildOpenAIParams("fallback", req)
+	if err == nil {
 		t.Fatalf("expected error for inline data part")
+	}
+	if errors.Is(err, ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
+		t.Errorf("buildOpenAIParams() err = %v, want an unsupported-content-part error", err)
+	}
+}
+
+// describeInput renders converted input items compactly, so a table case can
+// state the entire request body: "in/user:hi", "out/assistant:A|B" for an
+// assistant output message carrying two text items, "call:name/id",
+// "output:id".
+//
+// Input and output messages are rendered distinctly on purpose. They differ in
+// the content type they carry — "input_text" against "output_text" — and the
+// Responses API rejects the former on the assistant role, so a replayed
+// assistant turn emitted as an input message would be a real defect that a
+// shared "assistant:" rendering would hide.
+func describeInput(items responses.ResponseInputParam) []string {
+	got := make([]string, 0, len(items))
+	for _, item := range items {
+		switch {
+		case item.OfMessage != nil:
+			texts := make([]string, 0, len(item.OfMessage.Content.OfInputItemContentList))
+			for _, c := range item.OfMessage.Content.OfInputItemContentList {
+				if c.OfInputText == nil {
+					texts = append(texts, "<non-text>")
+					continue
+				}
+				texts = append(texts, c.OfInputText.Text)
+			}
+			got = append(got, "in/"+string(item.OfMessage.Role)+":"+strings.Join(texts, "|"))
+		case item.OfOutputMessage != nil:
+			texts := make([]string, 0, len(item.OfOutputMessage.Content))
+			for _, c := range item.OfOutputMessage.Content {
+				if c.OfOutputText == nil {
+					texts = append(texts, "<non-text>")
+					continue
+				}
+				texts = append(texts, c.OfOutputText.Text)
+			}
+			got = append(got, "out/assistant:"+strings.Join(texts, "|"))
+		case item.OfFunctionCall != nil:
+			got = append(got, "call:"+item.OfFunctionCall.Name+"/"+item.OfFunctionCall.CallID)
+		case item.OfFunctionCallOutput != nil:
+			got = append(got, "output:"+item.OfFunctionCallOutput.CallID.Or(""))
+		default:
+			got = append(got, "<unrecognized item>")
+		}
+	}
+	return got
+}
+
+func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
+	thought := func(text string) *genai.Part { return &genai.Part{Text: text, Thought: true} }
+	modelTurn := func(parts ...*genai.Part) *genai.Content {
+		return &genai.Content{Role: string(genai.RoleModel), Parts: parts}
+	}
+	userTurn := func(parts ...*genai.Part) *genai.Content {
+		return &genai.Content{Role: string(genai.RoleUser), Parts: parts}
+	}
+
+	tests := []struct {
+		name        string
+		contents    []*genai.Content
+		want        []string
+		wantErr     error
+		wantErrText string
+	}{
+		{
+			name: "thought_before_answer",
+			contents: []*genai.Content{
+				genai.NewContentFromText("what is 2+2?", genai.RoleUser),
+				modelTurn(thought("do not reveal the scratchpad"), &genai.Part{Text: "4"}),
+				genai.NewContentFromText("and 3+3?", genai.RoleUser),
+			},
+			want: []string{"in/user:what is 2+2?", "out/assistant:4", "in/user:and 3+3?"},
+		},
+		{
+			// A turn that produced only reasoning contributes nothing, rather
+			// than an assistant message the model never said.
+			name: "thought_only_turn",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(thought("still thinking")),
+				genai.NewContentFromText("q2", genai.RoleUser),
+			},
+			want: []string{"in/user:q", "in/user:q2"},
+		},
+		{
+			name:     "thought_between_answers",
+			contents: []*genai.Content{modelTurn(&genai.Part{Text: "A"}, thought("T"), &genai.Part{Text: "B"})},
+			want:     []string{"out/assistant:A|B"},
+		},
+		{
+			// Sub-agents and A2A peers can hand back a thought on a user turn.
+			name:     "thought_in_user_turn",
+			contents: []*genai.Content{userTurn(thought("leaked"), &genai.Part{Text: "real"})},
+			want:     []string{"in/user:real"},
+		},
+		{
+			// A thought carrying only a signature has no text to leak, but it
+			// used to reach the default arm and fail the whole request.
+			name: "signature_only_thought",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(&genai.Part{Thought: true, ThoughtSignature: []byte("sig")}),
+			},
+			want: []string{"in/user:q"},
+		},
+		{
+			// Dropping a thought-marked call would strand its response and
+			// fail the request in callTracker.
+			name: "thought_marked_call_and_response_survive",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{
+					Thought:      true,
+					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+				}),
+				userTurn(&genai.Part{
+					Thought:          true,
+					FunctionResponse: &genai.FunctionResponse{Name: "lookup", ID: "c1", Response: map[string]any{"ok": true}},
+				}),
+			},
+			want: []string{"call:lookup/c1", "output:c1"},
+		},
+		{
+			// One part carrying both: the reasoning must not reach the wire and
+			// the call must still be emitted.
+			name: "thought_text_riding_on_a_call",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(&genai.Part{
+					Thought:      true,
+					Text:         "scratchpad",
+					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+				}),
+				userTurn(&genai.Part{
+					FunctionResponse: &genai.FunctionResponse{Name: "lookup", ID: "c1", Response: map[string]any{"ok": true}},
+				}),
+			},
+			want: []string{"in/user:q", "call:lookup/c1", "output:c1"},
+		},
+		{
+			// Same shape on the response side: the reasoning is dropped and the
+			// tool output survives, rather than the reverse.
+			name: "thought_text_riding_on_a_response",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}}),
+				userTurn(&genai.Part{
+					Thought:          true,
+					Text:             "scratchpad",
+					FunctionResponse: &genai.FunctionResponse{Name: "lookup", ID: "c1", Response: map[string]any{"ok": true}},
+				}),
+			},
+			want: []string{"call:lookup/c1", "output:c1"},
+		},
+		{
+			// Ordinary text riding on a call is not reasoning, so nothing is
+			// dropped: the text keeps its place ahead of the call.
+			name: "plain_text_riding_on_a_call_keeps_both",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{
+					Text:         "on it",
+					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+				}),
+			},
+			want: []string{"out/assistant:on it", "call:lookup/c1"},
+		},
+		{
+			// A bare thought signature has nowhere to go in a Responses
+			// request, but it is not a reason to fail the conversation.
+			name: "signature_without_thought_marker_is_dropped",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(&genai.Part{ThoughtSignature: []byte("sig")}),
+			},
+			want: []string{"in/user:q"},
+		},
+		{
+			// Marking media as a thought must not smuggle it past the
+			// unsupported-part check and out of the request unannounced.
+			name: "thought_marked_media_is_still_rejected",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{
+					Thought:    true,
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			wantErrText: "unsupported content part",
+		},
+		{
+			// The same part with reasoning text riding on it. Suppressing the
+			// text must not also suppress the rejection, or the image leaves
+			// the request unannounced — the arm keys on what the part
+			// contributed, not on whether it had text.
+			name: "thought_text_riding_on_media_is_still_rejected",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{
+					Thought:    true,
+					Text:       "scratch",
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			wantErrText: "unsupported content part",
+		},
+		{
+			name: "thought_text_riding_on_code_is_still_rejected",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				modelTurn(&genai.Part{
+					Thought:        true,
+					Text:           "scratch",
+					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
+				}),
+			},
+			wantErrText: "unsupported content part",
+		},
+		{
+			// Dropping the reasoning must not swallow the role error the same
+			// turn would have raised had its text been an answer: nothing
+			// buffers, so flushText returns before normalizeRole runs.
+			name: "unsupported_role_still_reported_on_a_thought_only_turn",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{thought("scratch")}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// The same turn with the marker off, showing the error is reported
+			// identically either way.
+			name: "unsupported_role_reported_on_an_ordinary_turn",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{Text: "answer"}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// And on a thought with no text to drop: the part still leaves the
+			// request, so the turn is still one the package cannot send.
+			name: "unsupported_role_still_reported_on_a_textless_thought",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{Thought: true}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// Same for a bare signature, which reaches the drop by the other
+			// door — the marker unset, the signature alone.
+			name: "unsupported_role_still_reported_on_a_bare_signature",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// Not a thought at all: an image riding on ordinary text used to
+			// leave the request silently, because the text matched an arm and
+			// the rejection never ran. The check is independent of what the
+			// part contributed, so it is reported here too.
+			name: "media_riding_on_plain_text_is_rejected",
+			contents: []*genai.Content{
+				userTurn(&genai.Part{
+					Text:       "describe this",
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			wantErrText: "unsupported content part: InlineData",
+		},
+		{
+			// Same hole on the call arm.
+			name: "media_riding_on_a_call_is_rejected",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{
+					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+					InlineData:   &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			wantErrText: "unsupported content part: InlineData",
+		},
+		{
+			// A part that carries only bookkeeping reaches nothing: it is not
+			// reasoning, so it is reported rather than dropped.
+			name: "metadata_only_part_is_reported",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{PartMetadata: map[string]any{"src": "a"}}),
+			},
+			wantErrText: "carries nothing to send",
+		},
+		{
+			// buildContentsDefault filters these out upstream, so this is the
+			// contract for a caller reaching convertContents directly: an
+			// empty part is reported, not quietly skipped.
+			name: "empty_part_is_reported",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				userTurn(&genai.Part{}),
+			},
+			wantErrText: "carries nothing to send",
+		},
+		{
+			// Text riding on a response that pairs with nothing. The response
+			// used to be discarded because the text matched an arm first, so
+			// the pairing the API requires went unchecked; it is now enforced
+			// wherever the response appears.
+			name: "orphan_response_riding_on_text_is_reported",
+			contents: []*genai.Content{
+				userTurn(&genai.Part{
+					Text:             "here you go",
+					FunctionResponse: &genai.FunctionResponse{Name: "lookup"},
+				}),
+			},
+			wantErrText: "missing call id",
+		},
+		{
+			// Same shape on the call arm: a call with no name is unsendable,
+			// and riding on text no longer hides it.
+			name: "nameless_call_riding_on_text_is_reported",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{
+					Text:         "on it",
+					FunctionCall: &genai.FunctionCall{},
+				}),
+			},
+			wantErr: ErrFunctionCallMissingName,
+		},
+		{
+			// A request left empty by the drop is reported rather than sent,
+			// and says the drop emptied it rather than that nothing was sent.
+			name:        "only_thoughts",
+			contents:    []*genai.Content{modelTurn(thought("scratch"))},
+			wantErr:     ErrNoContents,
+			wantErrText: "every part was dropped as replayed reasoning",
+		},
+		{
+			// The wrap is keyed on a part having been dropped, not on the
+			// request being empty for any reason, so a turn that mixes the two
+			// still reports the drop.
+			name:        "thought_and_blank_answer",
+			contents:    []*genai.Content{modelTurn(thought("scratch"), &genai.Part{Text: "   "})},
+			wantErr:     ErrNoContents,
+			wantErrText: "every part was dropped as replayed reasoning",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildOpenAIParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if tt.wantErr != nil || tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("buildOpenAIParams() err = nil, want an error")
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Fatalf("buildOpenAIParams() err = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("buildOpenAIParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildOpenAIParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildOpenAIParams_NoContentsSentinelIdentity pins which requests get the
+// bare ErrNoContents and which get it wrapped. The distinction is not cosmetic:
+// a caller comparing with == rather than errors.Is sees only the bare one, so
+// wrapping a request that arrived empty would silently stop matching. Only the
+// drop emptying a request the caller did fill earns the wrap.
+func TestBuildOpenAIParams_NoContentsSentinelIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		wantBare bool
+	}{
+		{"nil_contents", nil, true},
+		{"empty_contents", []*genai.Content{}, true},
+		{"content_with_no_parts", []*genai.Content{{Role: string(genai.RoleUser)}}, true},
+		{"content_with_only_nil_parts", []*genai.Content{
+			{Role: string(genai.RoleUser), Parts: []*genai.Part{nil}},
+		}, true},
+		{
+			// Nothing was dropped as reasoning here: the text was accepted and
+			// then skipped as blank, exactly as it is without this change.
+			"only_blank_text",
+			[]*genai.Content{{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "   "}}}},
+			true,
+		},
+		{
+			"only_reasoning",
+			[]*genai.Content{{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "scratch", Thought: true}}}},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildOpenAIParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if !errors.Is(err, ErrNoContents) {
+				t.Fatalf("buildOpenAIParams() err = %v, want it to wrap %v", err, ErrNoContents)
+			}
+			//nolint:errorlint // the point of the test is the identity, not the chain.
+			if gotBare := err == ErrNoContents; gotBare != tt.wantBare {
+				t.Errorf("err == ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
+			}
+		})
+	}
+}
+
+func TestReplayedReasoning(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+		want bool
+	}{
+		{"nil_part", nil, false},
+		// Nothing marks these as reasoning, so there is no reason to drop
+		// them: convertContents reports them instead.
+		{"empty_part", &genai.Part{}, false},
+		{"metadata_only", &genai.Part{PartMetadata: map[string]any{"src": "a"}}, false},
+		{"thought_text", &genai.Part{Text: "scratch", Thought: true}, true},
+		{"thought_signature_only", &genai.Part{Thought: true, ThoughtSignature: []byte("sig")}, true},
+		{"bare_thought", &genai.Part{Thought: true}, true},
+		{"signature_without_thought_marker", &genai.Part{ThoughtSignature: []byte("sig")}, true},
+		{"plain_text", &genai.Part{Text: "answer"}, false},
+		{"signature_on_answer", &genai.Part{Text: "answer", ThoughtSignature: []byte("sig")}, false},
+		// Marking content as a thought must not make it vanish.
+		{
+			"thought_marked_inline_data",
+			&genai.Part{Thought: true, InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			false,
+		},
+		{
+			"thought_marked_file_data",
+			&genai.Part{Thought: true, FileData: &genai.FileData{FileURI: "gs://b/o"}},
+			false,
+		},
+		{
+			"thought_marked_executable_code",
+			&genai.Part{Thought: true, ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+			false,
+		},
+		{
+			"thought_marked_code_result",
+			&genai.Part{Thought: true, CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}},
+			false,
+		},
+		{
+			"thought_marked_call",
+			&genai.Part{Thought: true, FunctionCall: &genai.FunctionCall{Name: "f"}},
+			false,
+		},
+		{
+			"thought_marked_response",
+			&genai.Part{Thought: true, FunctionResponse: &genai.FunctionResponse{Name: "f"}},
+			false,
+		},
+		// Server-side tool traffic and transcription are payload too, even
+		// though nothing in the repo populates them today.
+		{
+			"thought_marked_tool_call",
+			&genai.Part{Thought: true, ToolCall: &genai.ToolCall{ID: "t1"}},
+			false,
+		},
+		{
+			"thought_marked_tool_response",
+			&genai.Part{Thought: true, ToolResponse: &genai.ToolResponse{ID: "t1"}},
+			false,
+		},
+		{
+			"thought_marked_audio_transcription",
+			&genai.Part{Thought: true, AudioTranscription: &genai.Transcription{Text: "hello"}},
+			false,
+		},
+		// These three only qualify media carried in another field, so on a
+		// thought they hold nothing back.
+		{
+			"thought_with_video_metadata",
+			&genai.Part{Thought: true, Text: "scratch", VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(2.0)}},
+			true,
+		},
+		{
+			"thought_with_media_resolution",
+			&genai.Part{Thought: true, Text: "scratch", MediaResolution: &genai.PartMediaResolution{
+				Level: genai.PartMediaResolutionLevelMediaResolutionLow,
+			}},
+			true,
+		},
+		{
+			"thought_with_part_metadata",
+			&genai.Part{Thought: true, Text: "scratch", PartMetadata: map[string]any{"src": "a"}},
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replayedReasoning(tt.part); got != tt.want {
+				t.Errorf("replayedReasoning() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// accountedForFields is the specification unsupportedPayload implements: the
+// genai.Part fields convertContents knows what to do with, and why. Every other
+// field must be reported rather than dropped, which is what the walk below
+// asserts field by field.
+//
+// The list is deliberately restated here instead of derived from the production
+// code, so that widening what the package silently accepts has to be written
+// down twice. A field genai adds later is absent from it by construction, so
+// the walk demands it be reported — the failure a denylist would not produce.
+var accountedForFields = map[string]string{
+	"Text":             "sent, or dropped when it is reasoning",
+	"Thought":          "the marker deciding which",
+	"ThoughtSignature": "no Responses input item can carry one",
+	"FunctionCall":     "sent as a function_call item",
+	"FunctionResponse": "sent as a function_call_output item",
+	"VideoMetadata":    "qualifies media carried in another field",
+	"MediaResolution":  "qualifies media carried in another field",
+	"PartMetadata":     "caller bookkeeping, never content",
+}
+
+func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			if !field.IsExported() {
+				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
+					"check by hand whether unsupportedPayload should report it", field.Name)
+			}
+			part := &genai.Part{}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+
+			got := unsupportedPayload(part)
+			if why, accounted := accountedForFields[field.Name]; accounted {
+				if got != "" {
+					t.Errorf("unsupportedPayload() = %q for a part carrying only %s, want %q: %s",
+						got, field.Name, "", why)
+				}
+				return
+			}
+			if got != field.Name {
+				t.Fatalf("unsupportedPayload() = %q for a part carrying only %s, want %q: "+
+					"a field the package cannot send must be reported, not dropped",
+					got, field.Name, field.Name)
+			}
+			// The predicate agreeing is not enough: the caller has to see the
+			// error. Building the request proves convertContents does not
+			// swallow it on the way out.
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: string(genai.RoleUser), Parts: []*genai.Part{part}},
+			}}
+			_, err := buildOpenAIParams("fallback", req)
+			want := "unsupported content part: " + field.Name
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("buildOpenAIParams() err = %v, want it to mention %q", err, want)
+			}
+		})
+	}
+}
+
+// TestReplayedReasoning_EveryUnaccountedFieldDisqualifies is the same walk seen
+// from the drop: reasoning is droppable only when the part holds nothing else,
+// so a field the package cannot send has to keep the part out of the drop and
+// on to the rejection.
+func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		if _, accounted := accountedForFields[field.Name]; accounted || !field.IsExported() {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			part := &genai.Part{Thought: true, Text: "scratch"}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+			if replayedReasoning(part) {
+				t.Errorf("replayedReasoning() = true for a thought carrying %s; "+
+					"it would be dropped instead of rejected as unsupported", field.Name)
+			}
+		})
+	}
+}
+
+// nonZero builds a non-zero value of typ, for the field walk above.
+func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
+	t.Helper()
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return reflect.New(typ.Elem())
+	case reflect.Map:
+		return reflect.MakeMap(typ)
+	case reflect.Slice:
+		return reflect.MakeSlice(typ, 1, 1)
+	case reflect.String:
+		return reflect.ValueOf("x").Convert(typ)
+	case reflect.Bool:
+		return reflect.ValueOf(true).Convert(typ)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return reflect.ValueOf(int64(1)).Convert(typ)
+	case reflect.Float32, reflect.Float64:
+		return reflect.ValueOf(1.0).Convert(typ)
+	default:
+		t.Fatalf("genai.Part gained a %s field; teach nonZero how to fill it", typ.Kind())
+		return reflect.Value{}
 	}
 }
 
