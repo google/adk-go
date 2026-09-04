@@ -1691,6 +1691,17 @@ func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 // first one had already cancelled, failing instantly and for a reason the
 // caller could not see.
 func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) { assertReRangeable(t, stream) })
+	}
+}
+
+func assertReRangeable(t *testing.T, stream bool) {
+	t.Helper()
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -1711,7 +1722,7 @@ func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
 		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
 	}
 
-	seq := m.GenerateContent(context.Background(), req, false)
+	seq := m.GenerateContent(context.Background(), req, stream)
 	for pass := 1; pass <= 2; pass++ {
 		var got error
 		for _, err := range seq {
