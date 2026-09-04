@@ -123,14 +123,16 @@ type TraceGenerateContentResultParams struct {
 // TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
+	// Record a finish reason when the call produced a response or an error; a
+	// nil response and nil error means there is no result to describe.
+	if params.Response != nil || params.Error != nil {
+		span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
+	}
 	if params.Response == nil {
 		return
 	}
-	span.SetAttributes(
-		gcpVertexAgentEventID.String(params.EventID),
-		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
-	)
-	span.SetAttributes(responseContentAttributes(params.Response)...)
+	span.SetAttributes(gcpVertexAgentEventID.String(params.EventID))
+	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),

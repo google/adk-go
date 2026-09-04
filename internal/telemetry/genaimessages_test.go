@@ -344,7 +344,7 @@ func TestContentAttributes_OptInIsOffByDefault(t *testing.T) {
 		t.Errorf("request attributes with capture off = %v, want none", attrs)
 	}
 	resp := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "secret answer"}}}}
-	if attrs := responseContentAttributes(resp); len(attrs) != 0 {
+	if attrs := responseContentAttributes(resp, nil); len(attrs) != 0 {
 		t.Errorf("response attributes with capture off = %v, want none", attrs)
 	}
 }
@@ -358,7 +358,7 @@ func TestResponseContentAttributes(t *testing.T) {
 		Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is rainy."}}},
 		FinishReason: genai.FinishReasonStop,
 	}
-	got, ok := attrString(responseContentAttributes(resp), genAIOutputMessages)
+	got, ok := attrString(responseContentAttributes(resp, nil), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set")
 	}
@@ -379,7 +379,7 @@ func TestResponseContentAttributes_SkipsStreamingChunks(t *testing.T) {
 		Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is ra"}}},
 		Partial: true,
 	}
-	if attrs := responseContentAttributes(partial); len(attrs) != 0 {
+	if attrs := responseContentAttributes(partial, nil); len(attrs) != 0 {
 		t.Errorf("attributes for a partial chunk = %v, want none", attrs)
 	}
 
@@ -387,7 +387,7 @@ func TestResponseContentAttributes_SkipsStreamingChunks(t *testing.T) {
 		Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is rainy."}}},
 		FinishReason: genai.FinishReasonStop,
 	}
-	got, ok := attrString(responseContentAttributes(settled), genAIOutputMessages)
+	got, ok := attrString(responseContentAttributes(settled, nil), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set for the settled response")
 	}
@@ -403,7 +403,7 @@ func TestResponseContentAttributes_EmptyContent(t *testing.T) {
 	captureContent(t)
 
 	resp := &model.LLMResponse{FinishReason: genai.FinishReasonSafety}
-	got, ok := attrString(responseContentAttributes(resp), genAIOutputMessages)
+	got, ok := attrString(responseContentAttributes(resp, nil), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set")
 	}
@@ -416,24 +416,28 @@ func TestResponseContentAttributes_EmptyContent(t *testing.T) {
 
 func TestSchemaFinishReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		resp     *model.LLMResponse
-		toolCall bool
-		want     string
+		name string
+		resp *model.LLMResponse
+		want string
 	}{
-		{"stop", &model.LLMResponse{FinishReason: genai.FinishReasonStop}, false, "stop"},
-		{"stop with a tool call", &model.LLMResponse{FinishReason: genai.FinishReasonStop}, true, "tool_call"},
-		{"unset", &model.LLMResponse{}, false, "stop"},
-		{"unset with a tool call", &model.LLMResponse{}, true, "tool_call"},
-		{"unspecified", &model.LLMResponse{FinishReason: genai.FinishReasonUnspecified}, false, "stop"},
-		{"max tokens", &model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens}, false, "length"},
-		{"safety", &model.LLMResponse{FinishReason: genai.FinishReasonSafety}, false, "content_filter"},
-		{"recitation", &model.LLMResponse{FinishReason: genai.FinishReasonRecitation}, false, "content_filter"},
-		{"blocklist", &model.LLMResponse{FinishReason: genai.FinishReasonBlocklist}, false, "content_filter"},
-		{"spii", &model.LLMResponse{FinishReason: genai.FinishReasonSPII}, false, "content_filter"},
-		{"malformed function call", &model.LLMResponse{FinishReason: genai.FinishReasonMalformedFunctionCall}, false, "error"},
-		{"too many tool calls", &model.LLMResponse{FinishReason: genai.FinishReasonTooManyToolCalls}, false, "error"},
-		{"other", &model.LLMResponse{FinishReason: genai.FinishReasonOther}, false, "error"},
+		{"stop", &model.LLMResponse{FinishReason: genai.FinishReasonStop}, "stop"},
+		{"stop with a tool call", &model.LLMResponse{
+			Content:      &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{}}}},
+			FinishReason: genai.FinishReasonStop,
+		}, "tool_call"},
+		{"unset", &model.LLMResponse{}, "stop"},
+		{"unset with a tool call", &model.LLMResponse{
+			Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{}}}},
+		}, "tool_call"},
+		{"unspecified", &model.LLMResponse{FinishReason: genai.FinishReasonUnspecified}, "stop"},
+		{"max tokens", &model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens}, "length"},
+		{"safety", &model.LLMResponse{FinishReason: genai.FinishReasonSafety}, "content_filter"},
+		{"recitation", &model.LLMResponse{FinishReason: genai.FinishReasonRecitation}, "content_filter"},
+		{"blocklist", &model.LLMResponse{FinishReason: genai.FinishReasonBlocklist}, "content_filter"},
+		{"spii", &model.LLMResponse{FinishReason: genai.FinishReasonSPII}, "content_filter"},
+		{"malformed function call", &model.LLMResponse{FinishReason: genai.FinishReasonMalformedFunctionCall}, "error"},
+		{"too many tool calls", &model.LLMResponse{FinishReason: genai.FinishReasonTooManyToolCalls}, "error"},
+		{"other", &model.LLMResponse{FinishReason: genai.FinishReasonOther}, "error"},
 		{
 			name: "error code beats a successful finish reason",
 			resp: &model.LLMResponse{FinishReason: genai.FinishReasonStop, ErrorCode: "429"},
@@ -445,15 +449,17 @@ func TestSchemaFinishReason(t *testing.T) {
 			want: "error",
 		},
 		{
-			name:     "error code beats a tool call",
-			resp:     &model.LLMResponse{ErrorCode: "500"},
-			toolCall: true,
-			want:     "error",
+			name: "error code beats a tool call",
+			resp: &model.LLMResponse{
+				Content:   &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{}}}},
+				ErrorCode: "500",
+			},
+			want: "error",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := schemaFinishReason(tc.resp, tc.toolCall); got != tc.want {
+			if got := schemaFinishReason(tc.resp, nil); got != tc.want {
 				t.Errorf("schemaFinishReason() = %q, want %q", got, tc.want)
 			}
 		})
@@ -474,13 +480,13 @@ func TestSchemaFinishReason_EveryGenaiValue(t *testing.T) {
 		genai.FinishReasonImageRecitation, genai.FinishReasonImageOther,
 	}
 	for _, fr := range all {
-		got := schemaFinishReason(&model.LLMResponse{FinishReason: fr}, false)
+		got := schemaFinishReason(&model.LLMResponse{FinishReason: fr}, nil)
 		if !schemaFinishReasons[got] {
 			t.Errorf("genai %s maps to %q, which the schema does not define", fr, got)
 		}
 	}
 	// An unknown future value is lowercased rather than passed through.
-	if got := schemaFinishReason(&model.LLMResponse{FinishReason: "BRAND_NEW_REASON"}, false); got != "brand_new_reason" {
+	if got := schemaFinishReason(&model.LLMResponse{FinishReason: "BRAND_NEW_REASON"}, nil); got != "brand_new_reason" {
 		t.Errorf("unknown finish reason = %q, want brand_new_reason", got)
 	}
 }
@@ -776,7 +782,7 @@ func TestTruthyValueDoesNotPutContentOnSpans(t *testing.T) {
 		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
 	}
 	resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "canary"}}}}
-	for _, attr := range responseContentAttributes(resp) {
+	for _, attr := range responseContentAttributes(resp, nil) {
 		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
 	}
 }

@@ -45,7 +45,7 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gen_ai.request.model":           "mock",
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
-				"gen_ai.response.finish_reasons": []string{""},
+				"gen_ai.response.finish_reasons": []string{"tool_call"},
 				"gen_ai.system_instructions":     systemInstructionsJSON,
 				"gen_ai.input.messages":          `[{"role":"user","parts":[{"type":"text","content":"hello"}]}]`,
 				// The mock model reports no finish reason, so the tool call
@@ -111,7 +111,7 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gen_ai.request.model":           "mock",
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
-				"gen_ai.response.finish_reasons": []string{""},
+				"gen_ai.response.finish_reasons": []string{"stop"},
 				"gen_ai.system_instructions":     systemInstructionsJSON,
 				// The history now carries all three turns. genai labels the
 				// tool result "user"; the schema calls it "tool".
