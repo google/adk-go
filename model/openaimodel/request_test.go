@@ -906,7 +906,7 @@ func TestCallerAuthorizationHeaderDisplacesTheAPIKey(t *testing.T) {
 // against main keeps working here. What must never happen is forwarding them:
 // TestCallerAuthorizationHeaderDisplacesTheAPIKey shows what an Authorization header
 // would do, and a Gemini credential would simply reach the wrong provider.
-func TestRequestOptionsIgnoresHeaders(t *testing.T) {
+func TestHeadersAffectNeitherValidationNorTimeout(t *testing.T) {
 	headers := []http.Header{
 		{"Authorization": []string{"Bearer caller"}},
 		{"authorization": []string{"Bearer lowercase"}},
@@ -1541,11 +1541,12 @@ func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 	}
 }
 
-// The timeout has to reach the HTTP request, not merely be turned into an
-// option and dropped on the floor. Asserting that requestOptions returns one
-// option proves nothing about the wiring in GenerateContent: deleting `opts...`
-// from the two client calls leaves such a test passing, and Timeout is the only
-// thing HTTPOptions still does, so that wiring is its entire value.
+// The timeout has to reach the HTTP request, not merely be computed and left
+// on the floor. Asserting that requestTimeout returns the right duration proves
+// nothing about the wiring in GenerateContent: deleting the context.WithTimeout
+// block from generate and generateStream leaves such a test passing, and
+// Timeout is the only thing HTTPOptions still does, so that wiring is its
+// entire value.
 //
 // The server answers slowly but successfully. A wired timeout therefore fails
 // the call quickly, while an unwired one waits and succeeds — so the two
@@ -1663,7 +1664,7 @@ func redact(v string) string {
 	return fmt.Sprintf("<%d-byte value>", len(v))
 }
 
-// requestOptions must be safe on its own terms. applyGenerationConfig rejects a
+// requestTimeout must be safe on its own terms. applyGenerationConfig rejects a
 // non-positive timeout before any request is built, so this guard is defense in
 // depth — but the header bug got through two rounds precisely because safety
 // rested on call ordering promised by a comment, so the guard is tested here

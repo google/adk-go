@@ -50,16 +50,13 @@
 // forwarded, since it would read as no deadline at all and lift the caller's
 // bound instead of applying it.
 //
-// Headers do not cross. They are ignored rather than rejected, because they
-// have always been ignored for this backend and refusing them now would break
-// applications that set a header once on a config shared with a Gemini agent.
-// Forwarding them is not the alternative: HTTPOptions describes a call to
-// Gemini, so a credential in it — x-goog-api-key, say — would reach OpenAI
-// verbatim, and an Authorization header would be worse than useless, because
-// openai-go treats one as an override and then declines to attach the
-// configured API key, leaving the request authenticated by the caller's header
-// alone. Headers intended for OpenAI belong on ClientConfig.Options, which is
-// scoped to the backend that receives them.
+// Headers do not cross, and are ignored rather than rejected. Forwarding them
+// would send a credential meant for Gemini to OpenAI, and an Authorization
+// header among them would displace the configured API key rather than
+// accompany it; refusing them would fail configs that ADK itself filled in.
+// The full reasoning is on ignoredHTTPOptionFields, beside the code that
+// enforces it. Headers intended for OpenAI belong on ClientConfig.Options,
+// which is scoped to the backend that receives them.
 //
 // The endpoint and credentials likewise come from ClientConfig, so BaseURL,
 // BaseURLResourceScope and APIVersion are rejected rather than fighting it, as

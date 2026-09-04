@@ -585,7 +585,7 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
 	}
 	// HTTPOptions is taken field by field rather than whole. Timeout is
-	// translated by requestOptions, Headers is deliberately ignored for the
+	// extracted by requestTimeout, Headers is deliberately ignored for the
 	// compatibility reason in ignoredHTTPOptionFields, and what is left
 	// describes the Gemini wire format and is named here.
 	if cfg.HTTPOptions != nil {
