@@ -17,7 +17,9 @@ package agentanalytics
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
@@ -102,6 +104,10 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 		err = tableRef.Create(ctx, &bq.TableMetadata{
 			Schema: EventsSchema(),
+			TimePartitioning: &bq.TimePartitioning{
+				Field: "timestamp",
+				Type:  bq.DayPartitioningType,
+			},
 			Clustering: &bq.Clustering{
 				Fields: config.ClusteringFields,
 			},
@@ -232,6 +238,74 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		},
 		OnEventCallback: func(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
 			attrs := map[string]any{"event_author": ev.Author}
+
+			// 1. State Delta Logging
+			if len(ev.Actions.StateDelta) > 0 {
+				stateAttrs := map[string]any{
+					"state_delta": ev.Actions.StateDelta,
+				}
+				for k, v := range attrs {
+					stateAttrs[k] = v
+				}
+				logEvent(ctx, "STATE_DELTA", nil, stateAttrs)
+			}
+
+			// 2. HITL Logging (Injected synthetic tools calls & responses)
+			if ev.Content != nil {
+				for _, part := range ev.Content.Parts {
+					if part.FunctionCall != nil {
+						switch part.FunctionCall.Name {
+						case "adk_request_credential":
+							logEvent(ctx, "HITL_CREDENTIAL_REQUEST", map[string]any{"tool": part.FunctionCall.Name, "args": part.FunctionCall.Args}, attrs)
+						case "adk_request_confirmation":
+							logEvent(ctx, "HITL_CONFIRMATION_REQUEST", map[string]any{"tool": part.FunctionCall.Name, "args": part.FunctionCall.Args}, attrs)
+						case "adk_request_input":
+							logEvent(ctx, "HITL_INPUT_REQUEST", map[string]any{"tool": part.FunctionCall.Name, "args": part.FunctionCall.Args}, attrs)
+						}
+					}
+					if part.FunctionResponse != nil {
+						switch part.FunctionResponse.Name {
+						case "adk_request_credential":
+							logEvent(ctx, "HITL_CREDENTIAL_REQUEST_COMPLETED", map[string]any{"tool": part.FunctionResponse.Name, "result": part.FunctionResponse.Response}, attrs)
+						case "adk_request_confirmation":
+							logEvent(ctx, "HITL_CONFIRMATION_REQUEST_COMPLETED", map[string]any{"tool": part.FunctionResponse.Name, "result": part.FunctionResponse.Response}, attrs)
+						case "adk_request_input":
+							logEvent(ctx, "HITL_INPUT_REQUEST_COMPLETED", map[string]any{"tool": part.FunctionResponse.Name, "result": part.FunctionResponse.Response}, attrs)
+						}
+					}
+				}
+			}
+
+			// 3. A2A Interaction Logging
+			if ev.CustomMetadata != nil {
+				a2aKeys := make(map[string]any)
+				for k, v := range ev.CustomMetadata {
+					if strings.HasPrefix(k, "a2a:") {
+						a2aKeys[k] = v
+					}
+				}
+				if len(a2aKeys) > 0 {
+					a2aTruncatedRaw, _, _ := SmartTruncate(a2aKeys, config.MaxContentLen)
+					var a2aTruncated map[string]any
+					_ = json.Unmarshal(a2aTruncatedRaw, &a2aTruncated)
+
+					responsePayload := a2aKeys["a2a:response"]
+					var contentDict any
+					if responsePayload != nil {
+						contentTruncRaw, _, _ := SmartTruncate(responsePayload, config.MaxContentLen)
+						_ = json.Unmarshal(contentTruncRaw, &contentDict)
+					}
+
+					stateAttrs := map[string]any{
+						"a2a_metadata": a2aTruncated,
+					}
+					for k, v := range attrs {
+						stateAttrs[k] = v
+					}
+					logEvent(ctx, "A2A_INTERACTION", contentDict, stateAttrs)
+				}
+			}
+
 			logEvent(ctx, "EVENT", ev.Content, attrs)
 			return ev, nil
 		},
