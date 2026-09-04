@@ -150,22 +150,20 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 
 - **LLM traffic is replayed, not live.** A package with `testdata/*.httprr`
   replays through `internal/httprr` with no flags and no credentials. Each of
-  those files is a **cassette**: one recorded request-and-response exchange,
+  those files is an **HTTP recording**: one request-and-response exchange,
   captured once against a real model and replayed on every run afterwards, so
-  tests stay deterministic and need no API key. (The term is used throughout
-  this section and in the test name
-  `TestHTTPRecordDirectivesPartitionCassettes`, though the `httprr` package
-  itself never uses the word.) `session/vertexai` uses a second, unrelated
-  system: `rpcreplay` with `testdata/*.replay` files, refreshed by
-  `UPDATE_REPLAYS=true`. Never add a live model or network call to a test.
-- `-httprecord` takes a **regexp matched against the cassette's file path**,
-  not a `-run` test-name filter. Keep it as narrow as the set of cassettes you
+  tests stay deterministic and need no API key. `session/vertexai` uses a
+  second, unrelated system for **RPC recordings** — `rpcreplay` with
+  `testdata/*.replay` files, refreshed by `UPDATE_REPLAYS=true`. Never add a
+  live model or network call to a test.
+- `-httprecord` takes a **regexp matched against the recording's file path**,
+  not a `-run` test-name filter. Keep it as narrow as the set of recordings you
   mean to replace: recording against a live model produces a different response
-  every time, so a broad pattern rewrites unrelated cassettes and buries the
+  every time, so a broad pattern rewrites unrelated recordings and buries the
   intended change.
-- To re-record **one** cassette — the normal case — supply real credentials
-  (e.g. `GOOGLE_API_KEY`) and name **the cassette file**, which is often not
-  the name of a top-level test. Most cassettes here are subtest-derived, so a
+- To re-record **one** exchange — the normal case — supply real credentials
+  (e.g. `GOOGLE_API_KEY`) and name **the recording file**, which is often not
+  the name of a top-level test. Most recordings here are subtest-derived, so a
   pattern built from the top-level test name matches nothing, records nothing,
   and still exits 0. List the directory first, then name the file exactly:
   ```bash
@@ -176,8 +174,9 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
   Commit only that `testdata/*.httprr`.
 - To re-record a whole package, run `go generate ./<pkg>/...`; each package's
   `//go:generate go test -httprecord=…` directives are scoped so that every
-  cassette is recorded exactly once (enforced by
-  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`).
+  recording is captured exactly once. The test that enforces this,
+  `TestHTTPRecordDirectivesPartitionCassettes` in `internal`, keeps an older
+  name for the same thing.
 - Prefer table-driven tests; shared helpers live in `internal/testutil`.
 
 ## Boundaries
