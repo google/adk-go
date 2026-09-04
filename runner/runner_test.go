@@ -17,7 +17,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -641,53 +640,7 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 	}
 }
 
-func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
-	nilAgent, err := agent.New(agent.Config{
-		Name: "nil_yielder",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				if !yield(nil, nil) {
-					return
-				}
-				event := session.NewEvent(ctx, ctx.InvocationID())
-				yield(event, nil)
-			}
-		},
-	})
-	if err != nil {
-		t.Fatalf("agent.New() error = %v", err)
-	}
-
-	sessionService := session.InMemoryService()
-	r, err := New(Config{
-		AppName:           "test_app",
-		Agent:             nilAgent,
-		SessionService:    sessionService,
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var count int
-	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
-	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if ev == nil {
-			t.Errorf("unexpected nil event")
-		}
-		count++
-	}
-	if count != 1 {
-		t.Errorf("expected 1 event, got %d", count)
-	}
-}
-
-func TestRunner_NilEventYieldedRespectsContextCancellation(t *testing.T) {
+func TestRunner_NilEventYieldedTerminatesRun(t *testing.T) {
 	nilAgent, err := agent.New(agent.Config{
 		Name: "nil_flood",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -704,8 +657,6 @@ func TestRunner_NilEventYieldedRespectsContextCancellation(t *testing.T) {
 		t.Fatalf("agent.New() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	sessionService := session.InMemoryService()
 	_, err = sessionService.Create(context.Background(), &session.CreateRequest{
 		AppName:   "test_app",
@@ -725,24 +676,33 @@ func TestRunner_NilEventYieldedRespectsContextCancellation(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	cancel()
-	done := make(chan error, 1)
+	type result struct {
+		err        error
+		iterations int
+	}
+	done := make(chan result, 1)
 	go func() {
-		var gotErr error
-		for _, err := range r.Run(ctx, "user1", "session1", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
-			if err != nil {
-				gotErr = err
-			}
+		got := result{}
+		for _, err := range r.Run(context.Background(), "user1", "session1", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
+			got.err = err
+			got.iterations++
+			break
 		}
-		done <- gotErr
+		done <- got
 	}()
 
 	select {
-	case gotErr := <-done:
-		if !errors.Is(gotErr, context.Canceled) {
-			t.Fatalf("Run() error = %v, want context.Canceled", gotErr)
+	case got := <-done:
+		if got.iterations != 1 {
+			t.Fatalf("Run() iterations = %d, want 1", got.iterations)
+		}
+		if got.err == nil {
+			t.Fatal("Run() yielded no error for a nil event")
+		}
+		if !strings.Contains(got.err.Error(), "nil_flood") {
+			t.Fatalf("Run() error = %v, want the agent name", got.err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Run() did not return after context cancellation")
+		t.Fatal("Run() did not terminate after a nil event")
 	}
 }
