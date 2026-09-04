@@ -91,6 +91,102 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 		},
 		{
+			name: "find events next to punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						ID:          "event1",
+						Author:      "test-bot",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("The agent works great!", genai.RoleModel)},
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+					{
+						ID:          "event2",
+						Author:      "test-bot",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("regions: us-east1,us-west1", genai.RoleModel)},
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "great us-west1",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						ID:        "event1",
+						Content:   genai.NewContentFromText("The agent works great!", genai.RoleModel),
+						Author:    "test-bot",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+					{
+						ID:        "event2",
+						Content:   genai.NewContentFromText("regions: us-east1,us-west1", genai.RoleModel),
+						Author:    "test-bot",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
+					},
+				},
+			},
+		},
+		{
+			name: "find events separated by non-space whitespace",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						ID:          "event1",
+						Author:      "test-bot",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("first line\nsecond\tline", genai.RoleModel)},
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "second",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						ID:        "event1",
+						Content:   genai.NewContentFromText("first line\nsecond\tline", genai.RoleModel),
+						Author:    "test-bot",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				},
+			},
+		},
+		{
+			name: "find events for a query containing punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						ID:          "event1",
+						Author:      "test-bot",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("the deploy step timed out", genai.RoleModel)},
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "Why timed-out?",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						ID:        "event1",
+						Content:   genai.NewContentFromText("the deploy step timed out", genai.RoleModel),
+						Author:    "test-bot",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				},
+			},
+		},
+		{
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"google.golang.org/genai"
 
@@ -167,12 +168,19 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
-			continue
-		}
+	// Split on runs of non-word characters so that punctuation and non-space
+	// whitespace are not folded into a token: without this, "great!" is stored
+	// as-is and a search for "great" misses it. This mirrors the `\w+`
+	// tokenization used by adk-python's in-memory memory service.
+	for _, s := range strings.FieldsFunc(text, isNotWord) {
 		res[strings.ToLower(s)] = struct{}{}
 	}
 
 	return res
+}
+
+// isNotWord reports whether r separates two words, i.e. whether it is neither a
+// letter, a digit nor an underscore.
+func isNotWord(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
 }
