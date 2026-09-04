@@ -149,10 +149,15 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 ## Testing
 
 - **LLM traffic is replayed, not live.** A package with `testdata/*.httprr`
-  replays through `internal/httprr` with no flags and no credentials.
-  `session/vertexai` uses a second, unrelated system: `rpcreplay` with
-  `testdata/*.replay` files, refreshed by `UPDATE_REPLAYS=true`. Never add a
-  live model or network call to a test.
+  replays through `internal/httprr` with no flags and no credentials. Each of
+  those files is a **cassette**: one recorded request-and-response exchange,
+  captured once against a real model and replayed on every run afterwards, so
+  tests stay deterministic and need no API key. (The term is used throughout
+  this section and in the test name
+  `TestHTTPRecordDirectivesPartitionCassettes`, though the `httprr` package
+  itself never uses the word.) `session/vertexai` uses a second, unrelated
+  system: `rpcreplay` with `testdata/*.replay` files, refreshed by
+  `UPDATE_REPLAYS=true`. Never add a live model or network call to a test.
 - `-httprecord` takes a **regexp matched against the cassette's file path**,
   not a `-run` test-name filter. Keep it as narrow as the set of cassettes you
   mean to replace: recording against a live model produces a different response
