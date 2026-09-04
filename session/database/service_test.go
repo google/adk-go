@@ -105,6 +105,51 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDatabaseService_AppendEventIfAbsentIsIdempotent(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var appender session.EventAppender = s
+	claim := session.NewEvent(ctx, "invocation")
+	claim.ID = "confirmation-claim"
+	claim.Author = "agent"
+	claim.Actions.ConfirmationClaim = &session.ConfirmationClaim{
+		ConfirmationID: "confirmation",
+		FunctionCallID: "function-call",
+	}
+
+	inserted, err := appender.AppendEventIfAbsent(ctx, created.Session, claim)
+	if err != nil {
+		t.Fatalf("first AppendEventIfAbsent: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first AppendEventIfAbsent inserted = false, want true")
+	}
+	inserted, err = appender.AppendEventIfAbsent(ctx, created.Session, claim)
+	if err != nil {
+		t.Fatalf("second AppendEventIfAbsent: %v", err)
+	}
+	if inserted {
+		t.Fatal("second AppendEventIfAbsent inserted = true, want false")
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Session.Events().Len() != 1 {
+		t.Fatalf("stored events = %d, want 1", got.Session.Events().Len())
+	}
+	storedClaim := got.Session.Events().At(0).Actions.ConfirmationClaim
+	if storedClaim == nil || storedClaim.FunctionCallID != "function-call" {
+		t.Fatalf("stored confirmation claim = %#v, want function-call", storedClaim)
+	}
+}
+
 // TestDatabaseService_AppendEvent_StaleErrorFormatsTimestamps guards that the
 // stale-session error renders human-readable wall-clock timestamps rather than
 // ~1970 dates. The values compared are UnixMicro() microseconds, so formatting

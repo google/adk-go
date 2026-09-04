@@ -220,7 +220,47 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendEventLocked(ctx, curSession, sess, event)
+}
 
+func (s *inMemoryService) AppendEventIfAbsent(ctx context.Context, curSession Session, event *Event) (bool, error) {
+	if curSession == nil {
+		return false, fmt.Errorf("session is nil")
+	}
+	if event == nil {
+		return false, fmt.Errorf("event is nil")
+	}
+	if event.Partial {
+		return false, nil
+	}
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
+
+	sess, ok := curSession.(*session)
+	if !ok {
+		return false, fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored_session, ok := s.sessions.Get(sess.id.Encode())
+	if !ok {
+		return false, fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
+	}
+	for _, storedEvent := range stored_session.events {
+		if storedEvent.ID == event.ID {
+			return false, nil
+		}
+	}
+	if err := s.appendEventLocked(ctx, curSession, sess, event); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *inMemoryService) appendEventLocked(ctx context.Context, curSession Session, sess *session, event *Event) error {
 	stored_session, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
 		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
@@ -242,6 +282,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			ConfirmationClaim:          cloneConfirmationClaim(event.Actions.ConfirmationClaim),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
@@ -265,6 +306,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		maps.Copy(stored_session.state, sessionDelta)
 	}
 	return nil
+}
+
+func cloneConfirmationClaim(claim *ConfirmationClaim) *ConfirmationClaim {
+	if claim == nil {
+		return nil
+	}
+	copy := *claim
+	return &copy
 }
 
 func (s *inMemoryService) updateAppState(appDelta stateMap, appName string) stateMap {
