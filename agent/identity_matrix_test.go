@@ -770,12 +770,14 @@ func TestAnUnmarkedContextCanAnswerTheKeyItself(t *testing.T) {
 	}
 }
 
-// forgingInvocationValue swaps the identity on its way past without naming the
-// key, which is the shape that actually matters: it forwards everything, leaves
-// every other value untouched, and needs to know nothing about how the key is
-// spelled. A wrapper answering EVERY key with an Identity would be a far cruder
-// thing and would break its own context, so modelling that instead would suggest
-// forging costs more than it does.
+// forgingInvocationValue substitutes the identity on its way past without naming
+// the key, which is the shape that actually matters: it forwards keys and swaps
+// only what comes back an Identity. A wrapper answering EVERY key with an
+// Identity would be a far cruder thing and would break its own context, so
+// modelling that instead would suggest forging costs more than it does. Matching
+// on the type is what lets this fixture stay short — it does also catch an
+// Identity stored under some other key, which a real one aiming to be quiet
+// would avoid, and which is beside the point being pinned here.
 type forgingInvocationValue struct {
 	InvocationContext
 	id Identity
