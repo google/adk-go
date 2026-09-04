@@ -461,15 +461,14 @@ func (c *commonContext) Value(key any) any {
 // than inheriting one. That covers a nil session as well as a broken one: a nil
 // interface is indistinguishable from the session-less view a tool context is,
 // so for a type we do not control the two must fail the same way.
-//
-// A commonContext speaking for no invocation at all is the one case that consults
-// its own parent, since there is nothing else it could answer for.
 func (c *commonContext) identity() any {
 	if c.invocationContext == nil {
-		if c.Context == nil {
-			return nil
-		}
-		return identityFrom(c.Context)
+		// Speaking for no invocation, it has no acting user of its own, and the
+		// parent it would otherwise pass through to is a different call. No
+		// constructor in this package produces this shape — every one sets the
+		// invocation — so failing closed costs nothing and keeps one rule for the
+		// whole procedure.
+		return nil
 	}
 	if _, ours := c.invocationContext.(adkcontext.Source); ours {
 		return identityFrom(c.invocationContext)

@@ -49,15 +49,16 @@ func TestInvocationContextIdentityIsOwned(t *testing.T) {
 	}
 }
 
-// TestCommonContextWithoutInvocation pins the guard for a commonContext that
-// speaks for no invocation: it has nothing to answer the identity key with, so it
-// delegates, and a nil parent on top of that must not panic — Value is a
-// context.Context method and runs inside an http.RoundTripper.
+// TestCommonContextWithoutInvocation pins that a commonContext speaking for no
+// invocation reports no identity rather than its parent's. The parent is a
+// different call, so passing its user through would be the same fail-open every
+// other arm of this procedure refuses. A nil parent on top of that must not panic
+// — Value is a context.Context method and runs inside an http.RoundTripper.
 func TestCommonContextWithoutInvocation(t *testing.T) {
 	owner := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
 	c := &commonContext{Context: owner} // no invocationContext
-	if got, ok := IdentityFromContext(c); !ok || got.UserID != "alice" {
-		t.Errorf("IdentityFromContext() = %+v, %v; want the parent's identity", got, ok)
+	if got, ok := IdentityFromContext(c); ok {
+		t.Errorf("IdentityFromContext() = %+v, true; want no identity, not the parent's", got)
 	}
 	if got := (&commonContext{}).Value(adkcontext.IdentityKey); got != nil {
 		t.Errorf("Value(IdentityKey) with no invocation and no parent = %v, want nil", got)
