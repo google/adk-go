@@ -470,10 +470,6 @@ func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
 	if !strings.Contains(gotErr.Error(), "history") {
 		t.Errorf("surfaced error = %v, want it to mention the history send", gotErr)
 	}
-	if got := connCount.Load(); got != 1 {
-		t.Errorf("connection count = %d, want 1", got)
-	}
-
 	select {
 	case closed := <-clientClosed:
 		if !closed {
@@ -482,6 +478,17 @@ func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
 		}
 	case <-time.After(closeWait + 2*time.Second):
 		t.Fatal("fake server never reported a connection outcome")
+	}
+
+	// Order this read against the handler by keeping it below the receive: the
+	// handler sends on clientClosed only after connCount.Add(1), so receiving
+	// is what makes the increment visible. Reading it above the select instead
+	// leans on Live.Connect blocking until setupComplete, which genai v1.69.0
+	// does and v1.57.0 does not — there Connect returns once the setup frame is
+	// written, the history marshal fails before any reply is read, and the read
+	// races the handler.
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1", got)
 	}
 
 	assertNoRunLiveLeak(t, baseline)
