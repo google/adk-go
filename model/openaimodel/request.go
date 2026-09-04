@@ -412,50 +412,68 @@ var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
 	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
 }
 
-// requestOptions translates the part of HTTPOptions that describes transport
-// rather than the Gemini wire format into openai-go request options.
+// requestOptions translates the one part of HTTPOptions that can cross to the
+// Responses API into openai-go request options.
 //
-// Only Timeout survives the crossing. HTTPOptions is a genai struct describing
-// a call to Gemini, and openaimodel takes its endpoint and credentials from
-// ClientConfig; a duration is the one field that means the same thing to both
-// and can carry nothing sensitive. Headers cannot cross — see
-// unsupportedHTTPOptionFields for why.
+// Only Timeout crosses. HTTPOptions is a genai struct describing a call to
+// Gemini, openaimodel takes its endpoint and credentials from ClientConfig, and
+// a duration is the one field here that carries nothing addressed to a
+// particular backend. Headers are ignored and the rest is rejected; see
+// ignoredHTTPOptionFields and unsupportedHTTPOptionFields for which and why.
 //
-// Called after applyGenerationConfig has accepted the config, which is where
-// everything not translated here is rejected.
+// The bound is per attempt, not per call: openai-go applies it inside its retry
+// loop, so a call retried the default two times can take about three times the
+// duration asked for.
 func requestOptions(cfg *genai.GenerateContentConfig) []option.RequestOption {
 	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
 		return nil
 	}
-	// Non-positive durations were rejected with the config: openai-go reads a
-	// zero timeout as "no deadline", so passing one through would remove the
-	// bound the caller asked for rather than apply it.
+	// Guarded here rather than trusting the caller to have validated first.
+	// openai-go reads a zero timeout as "no deadline", so a non-positive one
+	// would lift the caller's bound instead of applying it — the inverse of
+	// what they asked for. applyGenerationConfig rejects these before a request
+	// is built; this makes the function safe on its own terms regardless.
+	if *cfg.HTTPOptions.Timeout <= 0 {
+		return nil
+	}
 	return []option.RequestOption{option.WithRequestTimeout(*cfg.HTTPOptions.Timeout)}
 }
 
-// unsupportedHTTPOptionFields lists the HTTPOptions fields that cannot cross to
-// Responses, either because they describe the Gemini wire format or because
-// forwarding them would move a credential.
+// ignoredHTTPOptionFields lists the HTTPOptions fields this package neither
+// translates nor rejects, with the reason each is left alone.
+//
+// This is the one deliberate silent drop in the config surface, and it is a
+// compatibility choice rather than an oversight: HTTPOptions.Headers has always
+// been ignored for this backend, so refusing it now would break applications
+// that set headers once on a config shared with a Gemini agent — a break the
+// bug this change fixes never asked for.
+//
+// Forwarding them is not the alternative. Two things go wrong. An Authorization
+// header does not join the client's credentials, it replaces them: openai-go
+// records any case-insensitive "Authorization" as an override and ApplySecurity
+// then returns before attaching the configured API key, so the request would go
+// out authenticated by the caller's header alone. And a credential meant for
+// Gemini, x-goog-api-key most obviously, would reach api.openai.com verbatim.
+// A denylist of credential-bearing header names is not a defense worth
+// trusting, since every name it misses is a leak.
+//
+// Headers meant for OpenAI belong on ClientConfig.Options, which is scoped to
+// the one backend that sees them.
+var ignoredHTTPOptionFields = []struct {
+	name   string
+	reason string
+}{
+	{"Headers", "addressed to the backend HTTPOptions was written for; set ClientConfig.Options for OpenAI"},
+}
+
+// unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
+// Gemini wire format rather than transport, and so cannot cross to Responses.
+// Unlike ignoredHTTPOptionFields these have never been accepted here, so naming
+// them costs no compatibility.
 var unsupportedHTTPOptionFields = []struct {
 	name  string
 	isSet func(*genai.HTTPOptions) bool
 }{
-	// Headers are addressed to whatever backend HTTPOptions was written for,
-	// and this package sends them somewhere else. Two ways that goes wrong:
-	//
-	// An Authorization header does not join the client's credentials, it
-	// replaces them. openai-go records any case-insensitive "Authorization"
-	// as an override and ApplySecurity then returns before attaching the
-	// configured API key, so a caller who sets one silently unauthenticates
-	// every request — including via WithHeaderAdd, whose name suggests
-	// otherwise. TestRequestOptionsCannotDisplaceTheAPIKey pins this.
-	//
-	// And a credential meant for Gemini, x-goog-api-key most obviously, would
-	// be sent verbatim to api.openai.com. A denylist of credential-bearing
-	// header names is not a defense worth trusting, since every name it misses
-	// is a leak, so no header crosses. Headers meant for OpenAI belong on
-	// ClientConfig.Options, which is scoped to the one backend that sees them.
-	{"Headers", func(o *genai.HTTPOptions) bool { return o.Headers != nil }},
 	// The endpoint belongs to ClientConfig, which is also the only place it can
 	// be set coherently alongside the API key that authenticates against it.
 	{"BaseURL", func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
@@ -570,9 +588,10 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 		// the single candidate Responses returns. Below zero means nothing.
 		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
 	}
-	// HTTPOptions is honored field by field rather than whole: the transport
-	// parts are translated by requestOptions, and only the Gemini-shaped
-	// remainder has nowhere to go.
+	// HTTPOptions is taken field by field rather than whole. Timeout is
+	// translated by requestOptions, Headers is deliberately ignored for the
+	// compatibility reason in ignoredHTTPOptionFields, and what is left
+	// describes the Gemini wire format and is named here.
 	if cfg.HTTPOptions != nil {
 		for _, field := range unsupportedHTTPOptionFields {
 			if field.isSet(cfg.HTTPOptions) {

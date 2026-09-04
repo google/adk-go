@@ -43,22 +43,29 @@
 // equivalent, with genai's "standard" reaching OpenAI as "default".
 //
 // HTTPOptions is transport rather than generation, and only its Timeout
-// crosses, bounding the request when positive. A non-positive one is rejected,
-// since openai-go reads a zero timeout as no deadline at all and would lift the
-// caller's bound instead of applying it.
+// crosses. It bounds each attempt rather than the call: openai-go applies it
+// inside its retry loop, so a call that retries the default two times can take
+// about three times the duration given. A non-positive timeout is rejected,
+// since openai-go reads zero as no deadline at all and would lift the caller's
+// bound instead of applying it.
 //
-// Headers do not cross, and that is a deliberate refusal rather than an
-// omission. HTTPOptions describes a call to Gemini, so a credential in it —
-// x-goog-api-key, say — would be sent verbatim to OpenAI, and an Authorization
-// header would be worse than useless: openai-go treats one as an override and
-// then declines to attach the configured API key, so the request would go out
-// authenticated by the caller's header alone. Headers intended for OpenAI
-// belong on ClientConfig.Options, which is scoped to the backend that receives
-// them. The endpoint and credentials likewise come from ClientConfig, so
-// BaseURL, BaseURLResourceScope and APIVersion are rejected rather than
-// fighting it, as are ExtraBody and ExtrasRequestProvider, which shape a Gemini
-// request body this package does not send, and RetryOptions, whose backoff has
-// no faithful equivalent.
+// Headers do not cross. They are ignored rather than rejected, because they
+// have always been ignored for this backend and refusing them now would break
+// applications that set a header once on a config shared with a Gemini agent.
+// Forwarding them is not the alternative: HTTPOptions describes a call to
+// Gemini, so a credential in it — x-goog-api-key, say — would reach OpenAI
+// verbatim, and an Authorization header would be worse than useless, because
+// openai-go treats one as an override and then declines to attach the
+// configured API key, leaving the request authenticated by the caller's header
+// alone. Headers intended for OpenAI belong on ClientConfig.Options, which is
+// scoped to the backend that receives them.
+//
+// The endpoint and credentials likewise come from ClientConfig, so BaseURL,
+// BaseURLResourceScope and APIVersion are rejected rather than fighting it, as
+// are ExtraBody and ExtrasRequestProvider, which shape a Gemini request body
+// this package does not send, and RetryOptions, whose backoff has no faithful
+// equivalent. Those have never been honored here, so naming them costs no
+// compatibility.
 //
 // ThinkingConfig is translated to the Responses API's effort-based reasoning.
 // ThinkingLevel maps to the effort of the same name. A token budget, which

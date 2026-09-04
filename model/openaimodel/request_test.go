@@ -899,96 +899,66 @@ func TestRequestOptionsCannotDisplaceTheAPIKey(t *testing.T) {
 	}
 }
 
-// A caller header must never reach the wire, whatever it is called: the whole
-// field is refused, so there is no name-based hole to slip through.
-func TestApplyGenerationConfigRejectsHTTPOptionsHeaders(t *testing.T) {
+// Headers are ignored rather than refused, so a config that carried them
+// against main keeps working here. What must never happen is forwarding them:
+// TestRequestOptionsCannotDisplaceTheAPIKey shows what an Authorization header
+// would do, and a Gemini credential would simply reach the wrong provider.
+func TestRequestOptionsIgnoresHeaders(t *testing.T) {
 	headers := []http.Header{
 		{"Authorization": []string{"Bearer caller"}},
 		{"authorization": []string{"Bearer lowercase"}},
 		{"X-Goog-Api-Key": []string{"gemini-key"}},
 		{"X-Trace-Id": []string{"harmless"}},
-		{}, // present but empty is still a header map the caller allocated
 	}
 	for _, h := range headers {
-		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-			HTTPOptions: &genai.HTTPOptions{Headers: h},
-		})
-		if !errors.Is(err, ErrUnsupportedConfigField) {
-			t.Fatalf("headers %v: error = %v, want %v", h, err, ErrUnsupportedConfigField)
+		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: h}}
+		if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", h, err)
 		}
-		if !strings.Contains(err.Error(), "Headers") {
-			t.Errorf("headers %v: error = %q, want it to name Headers", h, err)
+		if opts := requestOptions(cfg); len(opts) != 0 {
+			t.Errorf("headers %v: produced %d request options, want none", h, len(opts))
 		}
 	}
 }
 
-// The rest of HTTPOptions describes the Gemini wire format, which is not the
-// request being sent, so it is named rather than quietly doing nothing.
-func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
-	retry := int32(3)
-	tests := []struct {
-		field string
-		opts  *genai.HTTPOptions
-	}{
-		{"BaseURL", &genai.HTTPOptions{BaseURL: "https://example.test"}},
-		{"BaseURLResourceScope", &genai.HTTPOptions{BaseURLResourceScope: genai.ResourceScope("global")}},
-		{"APIVersion", &genai.HTTPOptions{APIVersion: "v1beta"}},
-		{"ExtraBody", &genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}},
-		{"RetryOptions", &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: &retry}}},
-	}
+// The end of that promise, checked where it can actually be observed: no header
+// a caller put in HTTPOptions may appear on the outgoing request.
+func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+			`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+	}))
+	defer srv.Close()
 
-	for _, tc := range tests {
-		t.Run(tc.field, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
-				HTTPOptions: tc.opts,
-			})
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
-			}
-			if !strings.Contains(err.Error(), tc.field) {
-				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
-			}
-		})
+	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "real-key", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
 	}
-}
-
-// An empty HTTPOptions asks for no transport change, which is satisfiable by
-// doing nothing — the same rule the empty ThinkingConfig follows.
-func TestRequestOptionsEmptyHTTPOptions(t *testing.T) {
-	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{}}
-	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
-		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: http.Header{
+			"Authorization":  []string{"Bearer caller"},
+			"X-Goog-Api-Key": []string{"gemini-key"},
+			"X-Trace-Id":     []string{"harmless"},
+		}}},
 	}
-	if opts := requestOptions(cfg); len(opts) != 0 {
-		t.Errorf("requestOptions() produced %d options, want none", len(opts))
-	}
-	if opts := requestOptions(nil); len(opts) != 0 {
-		t.Errorf("requestOptions(nil) produced %d options, want none", len(opts))
-	}
-}
-
-// unsupportedHTTPOptionFields must name real fields, or an entry guards nothing.
-func TestUnsupportedHTTPOptionFieldsAreAccountedFor(t *testing.T) {
-	honored := map[string]bool{"Timeout": true}
-	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
-	for _, field := range unsupportedHTTPOptionFields {
-		rejected[field.name] = true
-	}
-
-	optType := reflect.TypeOf(genai.HTTPOptions{})
-	for i := range optType.NumField() {
-		field := optType.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		if !honored[field.Name] && !rejected[field.Name] {
-			t.Errorf("genai.HTTPOptions.%s is neither honored nor rejected: it would be silently ignored", field.Name)
+	for _, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
 		}
 	}
-	for name := range rejected {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
+	if v := got.Get("Authorization"); v != "Bearer real-key" {
+		t.Errorf("Authorization = %q, want the configured key: a caller header displaced it", v)
+	}
+	if v := got.Get("X-Goog-Api-Key"); v != "" {
+		t.Errorf("X-Goog-Api-Key = %q, want absent: a Gemini credential reached the provider", v)
+	}
+	if v := got.Get("X-Trace-Id"); v != "" {
+		t.Errorf("X-Trace-Id = %q, want absent: headers are not forwarded", v)
 	}
 }
 
@@ -1544,5 +1514,117 @@ func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 	}
 	if got, want := string(data), `"minimum":9007199254740993`; !strings.Contains(got, want) {
 		t.Fatalf("json.Marshal(params) = %s, want exact integer constraint %s", got, want)
+	}
+}
+
+// The timeout has to reach the HTTP request, not merely be turned into an
+// option and dropped on the floor. Asserting that requestOptions returns one
+// option proves nothing about the wiring in GenerateContent: deleting `opts...`
+// from the two client calls leaves such a test passing, and Timeout is the only
+// thing HTTPOptions still does, so that wiring is its entire value.
+//
+// The server answers slowly but successfully. A wired timeout therefore fails
+// the call quickly, while an unwired one waits and succeeds — so the two
+// outcomes differ in kind, not just in timing, and neither depends on how
+// loaded the machine is.
+func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
+	const serverDelay = 3 * time.Second
+
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Closed before the server is, so a handler still sleeping when the
+			// caller has already given up does not hold up srv.Close.
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-time.After(serverDelay):
+				case <-r.Context().Done():
+					return
+				case <-release:
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+					`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+					`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+			}))
+			defer srv.Close()
+			defer close(release)
+
+			timeout := 100 * time.Millisecond
+			m, err := NewModel(context.Background(), "gpt-4o-mini",
+				&ClientConfig{APIKey: "test", BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+				Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+			}
+
+			start := time.Now()
+			var got error
+			for _, err := range m.GenerateContent(context.Background(), req, stream) {
+				if err != nil {
+					got = err
+					break
+				}
+			}
+			elapsed := time.Since(start)
+
+			if got == nil {
+				t.Fatalf("call succeeded after %v with a %v timeout configured: "+
+					"the timeout never reached the request", elapsed, timeout)
+			}
+			if elapsed >= serverDelay {
+				t.Errorf("call took %v, i.e. it waited for the server rather than for its %v timeout", elapsed, timeout)
+			}
+		})
+	}
+}
+
+// ignoredHTTPOptionFields is part of the contract, so it has to name a real
+// field, and every field has to be accounted for in exactly one of the three
+// categories the package documents.
+func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
+	honored := map[string]bool{"Timeout": true}
+	ignored := make(map[string]bool, len(ignoredHTTPOptionFields))
+	for _, field := range ignoredHTTPOptionFields {
+		ignored[field.name] = true
+	}
+	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
+	for _, field := range unsupportedHTTPOptionFields {
+		rejected[field.name] = true
+	}
+
+	optType := reflect.TypeOf(genai.HTTPOptions{})
+	for i := range optType.NumField() {
+		field := optType.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		n := 0
+		for _, in := range []bool{honored[field.Name], ignored[field.Name], rejected[field.Name]} {
+			if in {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("genai.HTTPOptions.%s is in %d of {honored, ignored, rejected}, want exactly 1", field.Name, n)
+		}
+	}
+	for name := range ignored {
+		if _, ok := optType.FieldByName(name); !ok {
+			t.Errorf("ignoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+		}
+	}
+	for name := range rejected {
+		if _, ok := optType.FieldByName(name); !ok {
+			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+		}
 	}
 }
