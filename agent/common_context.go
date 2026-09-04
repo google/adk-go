@@ -105,10 +105,32 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     [InvocationContext.WithContext] and [InvocationContext.WithICDelta] on
 //     [InvocationContext], plus [Context.WithDelta], [Context.WithAgentContext],
 //     [Context.WithAgentTimeout] and [Context.WithAgentCancel] on [Context].
-//     [PromoteWithDelta] reaches WithICDelta for an InvocationContext and
-//     WithDelta for a Context, so overriding only the former is not enough for
-//     the latter. One exception is worth knowing: a delta carrying no
+//     One exception is worth knowing: a delta carrying no
 //     [InvocationContextDelta] leaves the invocation alone, so it is safe.
+//   - Promoting it first shelters it from three of those four. [Promote] holds
+//     the decorator in a commonContext, and WithAgentContext, WithAgentTimeout
+//     and WithAgentCancel re-parent only the context.Context above it, so the
+//     decorator still answers. WithDelta is the exception: it forwards to the
+//     held invocation's WithICDelta, so it drops the decorator through the
+//     promotion, exactly as [PromoteWithDelta] does. Both reach WithICDelta and
+//     neither reaches WithDelta, so overriding WithICDelta alone is enough for
+//     them — it is a direct call on the decorator that WithDelta must also cover.
+//
+// Two further things a decorator cannot fix by overriding the methods above:
+//
+//   - [Context.WithContext], and [Context.WithAgentContext] it delegates to,
+//     rebind the invocation when handed an [InvocationContext] rather than a
+//     plain context.Context. The result then reports the ARGUMENT's user, by
+//     design and whoever the receiver spoke for. It is the one derivation that
+//     legitimately changes who a context speaks for, so do not hand it another
+//     call's invocation.
+//   - [Context.SubScheduler] returns a scheduler, not a context, so the
+//     return-type rule above does not reach it — but the scheduler captured the
+//     context it was built from and derives every child from that. A decorator
+//     that does not override it hands back the embedded context's scheduler, and
+//     workflow.RunNode asks for one on entry, so the whole child subtree then
+//     runs as the enclosing invocation. Overriding it does not help either: the
+//     captured context is unexported and RunNode takes none.
 //
 // None of this is avoidable by discipline alone — [agent.Run] applies a delta on
 // every run, and the workflow schedulers call WithAgentCancel and
@@ -512,6 +534,19 @@ var (
 	_ Context           = (*commonContext)(nil)
 	_ InvocationContext = (*commonContext)(nil)
 	_ ReadonlyContext   = (*commonContext)(nil)
+)
+
+// Every context type in this package that answers the identity key for the
+// invocation it speaks for, asserted rather than left to the [adkcontext.Marker]
+// embed. A type whose only other use of that package is the embed loses the
+// import along with it, so removing it breaks the build for an unrelated reason
+// and reads like a guard while guarding nothing. These fail on the type, which
+// is what was meant.
+var (
+	_ adkcontext.Source = (*commonContext)(nil)
+	_ adkcontext.Source = (*invocationContext)(nil)
+	_ adkcontext.Source = (*toolContextWrapper)(nil)
+	_ adkcontext.Source = (*callbackContextWrapper)(nil)
 )
 
 // --- Tool-context extensions ----------------------------------------------

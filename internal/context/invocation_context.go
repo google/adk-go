@@ -180,3 +180,9 @@ func (c *InvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.I
 
 	return &res
 }
+
+// Asserted rather than left to the [adkcontext.Marker] embed: a type whose only
+// other use of the package is that embed loses the import along with it, so the
+// build breaks for an unrelated reason and reads like a guard while guarding
+// nothing. This fails on the type, which is what was meant.
+var _ adkcontext.Source = (*InvocationContext)(nil)
