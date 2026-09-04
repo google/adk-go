@@ -318,3 +318,100 @@ func (*safeNilSession) UserID() string  { return "user-nil" }
 func (s *ptrSession) ID() string      { return s.id }
 func (s *ptrSession) AppName() string { return s.app }
 func (s *ptrSession) UserID() string  { return s.user }
+
+// crossPackageDecorator is the shape written outside package agent: embed the
+// invocation you were derived from, to inherit cancellation, and carry your own
+// session. It cannot override the identity key, because it cannot name it.
+type crossPackageDecorator struct {
+	agent.InvocationContext
+	own session.Session
+}
+
+func (d crossPackageDecorator) Session() session.Session { return d.own }
+
+// TestIdentityDecisionMatrixCrossPackage is the other half of
+// agent.TestIdentityDecisionMatrix. The derivations that live here cannot be
+// tabulated there, because package agent cannot import this one — and the
+// column that was missing is exactly where the defect was: ReadonlyContext
+// embeds the invocation as its own context.Context, so before it answered the
+// key for itself it forwarded, and a decorator's parent replied with a
+// different call's user.
+func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
+	enclosingSession := valueSession{id: "sid-enclosing", app: "app", user: "enclosing"}
+	enclosing := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: enclosingSession})
+	own := valueSession{id: "sid-u", app: "app", user: "u"}
+
+	rows := []struct {
+		name string
+		ic   func() agent.InvocationContext
+		want string // "" means no identity, and ok must be false
+	}{
+		{name: "in-module invocation with its own session", want: "u", ic: func() agent.InvocationContext {
+			return icontext.NewInvocationContext(enclosing, icontext.InvocationContextParams{Session: own})
+		}},
+		{name: "in-module invocation with no session", ic: func() agent.InvocationContext {
+			return icontext.NewInvocationContext(enclosing, icontext.InvocationContextParams{})
+		}},
+		{name: "decorated, own session", want: "u", ic: func() agent.InvocationContext {
+			return crossPackageDecorator{InvocationContext: enclosing, own: own}
+		}},
+		{name: "decorated, nil session", ic: func() agent.InvocationContext {
+			return crossPackageDecorator{InvocationContext: enclosing, own: nil}
+		}},
+		{name: "decorated, typed-nil session", ic: func() agent.InvocationContext {
+			return crossPackageDecorator{InvocationContext: enclosing, own: (*ptrSession)(nil)}
+		}},
+		{name: "decorated, session wrapping a nil session", ic: func() agent.InvocationContext {
+			return crossPackageDecorator{InvocationContext: enclosing, own: &wrapperSession{}}
+		}},
+	}
+
+	type probeKey struct{}
+	cols := []struct {
+		name string
+		of   func(agent.InvocationContext) context.Context
+	}{
+		{"NewReadonlyContext", func(ic agent.InvocationContext) context.Context {
+			return icontext.NewReadonlyContext(ic)
+		}},
+		{"NewCallbackContext", func(ic agent.InvocationContext) context.Context {
+			return icontext.NewCallbackContext(ic)
+		}},
+		{"NewCallbackContextWithDelta", func(ic agent.InvocationContext) context.Context {
+			return icontext.NewCallbackContextWithDelta(ic, nil, nil)
+		}},
+		{"readonly context of a callback context", func(ic agent.InvocationContext) context.Context {
+			return icontext.NewReadonlyContext(icontext.NewCallbackContext(ic))
+		}},
+		{"behind a non-ADK wrapper", func(ic agent.InvocationContext) context.Context {
+			return context.WithValue(icontext.NewReadonlyContext(ic), wrapKey{}, "x")
+		}},
+	}
+
+	for _, r := range rows {
+		for _, c := range cols {
+			t.Run(r.name+" / "+c.name, func(t *testing.T) {
+				defer func() {
+					if p := recover(); p != nil {
+						t.Fatalf("Value panicked: %v", p)
+					}
+				}()
+				ctx := c.of(r.ic())
+				var got string
+				id, ok := agent.IdentityFromContext(ctx)
+				if ok {
+					got = id.UserID
+				}
+				if got != r.want {
+					t.Errorf("IdentityFromContext() user = %q, want %q", got, r.want)
+				}
+				if ok != (r.want != "") {
+					t.Errorf("IdentityFromContext() ok = %v, want %v", ok, r.want != "")
+				}
+				if v := ctx.Value(probeKey{}); v != nil {
+					t.Errorf("Value(probeKey{}) = %v, want nil: only the identity key reads the session", v)
+				}
+			})
+		}
+	}
+}

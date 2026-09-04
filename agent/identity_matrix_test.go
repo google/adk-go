@@ -107,11 +107,14 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 	rows := []struct {
 		name string
 		ic   func() InvocationContext
-		want string // "" means no identity
-		// outsideModule marks an invocation that cannot override the identity key,
-		// so asking it directly answers with whatever it embeds. That is the
-		// documented limit of the mechanism; the derivations are what fix it.
+		want string // "" means no identity, and ok must be false
+		// outsideModule marks an invocation that cannot override the identity key.
+		// The derivations answer for it correctly; asking it *directly* cannot be
+		// made to, because the parent it embeds serves a key it cannot name. That
+		// is the documented limit of the mechanism, so wantDirect records what the
+		// limit costs rather than skipping the cell and hiding it.
 		outsideModule bool
+		wantDirect    string
 	}{
 		{name: "pointer session", want: "u", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: matrixOwner("u")}
@@ -134,24 +137,36 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		{name: "session accessor panics", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: panickingAccessorSession{}}
 		}},
-		{name: "Session() panics", outsideModule: true, ic: func() InvocationContext {
+		{name: "Session() panics", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return panickingSessionInvocation{InvocationContext: enclosing}
 		}},
+		// A permissive Value hands back something that is not an Identity, so the
+		// direct cell yields nothing rather than the parent's user.
 		{name: "permissive Value, own session", want: "u", outsideModule: true, ic: func() InvocationContext {
 			return permissiveInvocationValue{InvocationContext: &invocationContext{Context: enclosing, session: matrixOwner("u")}}
 		}},
-		{name: "decorated outside the module", want: "u", outsideModule: true, ic: func() InvocationContext {
+		{name: "permissive Value, no session", outsideModule: true, ic: func() InvocationContext {
+			return permissiveInvocationValue{InvocationContext: &invocationContext{Context: enclosing}}
+		}},
+		{name: "decorated outside the module", want: "u", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: matrixOwner("u")}
 		}},
 		// The two axes have to be crossed, not just walked. An invocation that owns
 		// a session fails closed on its own, so an unreadable session only reaches
 		// the delegation through a decorator — where inheriting is a live user's
 		// credential minted for someone else's call.
-		{name: "decorated, typed-nil session", outsideModule: true, ic: func() InvocationContext {
+		{name: "decorated, typed-nil session", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: (*matrixSession)(nil)}
 		}},
-		{name: "decorated, session accessor panics", outsideModule: true, ic: func() InvocationContext {
+		{name: "decorated, session accessor panics", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: panickingAccessorSession{}}
+		}},
+		// A nil session field is what a decorator author gets by default, and it is
+		// the shape that used to fail OPEN: a nil interface reads exactly like the
+		// session-less view a tool context is, so the procedure delegated to the
+		// decorator and its parent answered with a live user who made no such call.
+		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
+			return decoratedInvocationValue{InvocationContext: enclosing, own: nil}
 		}},
 	}
 
@@ -184,8 +199,9 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 
 	for _, r := range rows {
 		for _, c := range cols {
+			want := r.want
 			if c.name == "the invocation itself" && r.outsideModule {
-				continue
+				want = r.wantDirect
 			}
 			t.Run(r.name+" / "+c.name, func(t *testing.T) {
 				defer func() {
@@ -195,11 +211,18 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 				}()
 				ctx := c.of(r.ic())
 				var got string
-				if id, ok := IdentityFromContext(ctx); ok {
+				id, ok := IdentityFromContext(ctx)
+				if ok {
 					got = id.UserID
 				}
-				if got != r.want {
-					t.Errorf("IdentityFromContext() user = %q, want %q", got, r.want)
+				if got != want {
+					t.Errorf("IdentityFromContext() user = %q, want %q", got, want)
+				}
+				// Reported separately from the user: returning a zero Identity where
+				// none exists would satisfy every want:"" row while telling the
+				// provider the invocation has an identity that merely carries no user.
+				if ok != (want != "") {
+					t.Errorf("IdentityFromContext() ok = %v, want %v", ok, want != "")
 				}
 				// An invocation that hijacks every key is answering for itself.
 				if _, hijacks := r.ic().(permissiveInvocationValue); hijacks {

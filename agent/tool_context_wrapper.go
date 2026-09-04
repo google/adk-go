@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -242,6 +243,18 @@ func (c *toolContextWrapper) UserID() string {
 // Value implements [Context].
 func (c *toolContextWrapper) Value(key any) any {
 	return c.context.Value(key)
+}
+
+// adkIdentity implements identitySource. A tool context holds no session of its
+// own, so the invocation underneath answers.
+//
+// Recovered even though the inner context is one of ours: a hand-built wrapper
+// can hold a nil one, and this runs inside http.RoundTripper on the caller's
+// goroutine, where net/http does not recover.
+func (c *toolContextWrapper) adkIdentity() (Identity, bool) {
+	v, _ := adkcontext.Recovered(func() any { return c.context.Value(adkcontext.IdentityKey) })
+	id, ok := v.(Identity)
+	return id, ok
 }
 
 var _ Context = (*toolContextWrapper)(nil)

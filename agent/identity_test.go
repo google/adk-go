@@ -15,7 +15,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/internal/adkcontext"
@@ -148,3 +151,56 @@ func (otherUserSession) UserID() string  { return "bob" }
 type permissiveInvocation struct{ InvocationContext }
 
 func (permissiveInvocation) Value(any) any { return "something that is not an Identity" }
+
+// TestIdentityFromBrokenWrapper pins the recover inside the wrappers'
+// adkIdentity. The tool and callback wrappers are this package's own types, so
+// the identity procedure trusts them to answer — but a hand-built one can hold a
+// nil inner context, and Value runs inside http.RoundTripper on the caller's
+// goroutine, where net/http does not recover. Losing the identity is the
+// intended cost; losing the process is not.
+func TestIdentityFromBrokenWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ic   InvocationContext
+	}{
+		{"tool context wrapper with no inner context", &toolContextWrapper{}},
+		{"callback context wrapper with no inner context", &callbackContextWrapper{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("IdentityFromContext panicked: %v", p)
+				}
+			}()
+			if id, ok := IdentityFromContext(Promote(tc.ic)); ok {
+				t.Errorf("IdentityFromContext() = %+v, true; want no identity", id)
+			}
+		})
+	}
+}
+
+// TestIdentityThroughWrapperDoesNotLogPerLookup pins that resolving an identity
+// through a tool or callback context does not call the wrapper's Session().
+// auth.Transport resolves a credential per outbound request, and those wrappers
+// log on every Session() call, so reading the session to find the identity would
+// put one log line on every authenticated request.
+func TestIdentityThroughWrapperDoesNotLogPerLookup(t *testing.T) {
+	var buf bytes.Buffer
+	out := log.Writer()
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(out); log.SetFlags(flags) })
+
+	ic := &invocationContext{Context: t.Context(), session: matrixOwner("u")}
+	// A tool context re-derived from a tool context: the outer one's invocation
+	// is the inner wrapper, which is the shape that reads a wrapper's session.
+	toolCtx := NewToolContext(NewToolContext(ic, "a", nil, nil), "b", nil, nil)
+
+	if _, ok := IdentityFromContext(toolCtx); !ok {
+		t.Fatal("IdentityFromContext() ok = false, want the invocation's identity")
+	}
+	if got := buf.String(); strings.Contains(got, "Session()") {
+		t.Errorf("resolving the identity logged %q; it must not read a wrapper's session", got)
+	}
+}

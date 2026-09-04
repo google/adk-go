@@ -45,8 +45,13 @@ const IdentityKey ctxKey = 0
 // rather than a stack trace — deliberate, since the alternative here is killing
 // the process, and the credential path fails closed either way.
 //
-// It contains a panic, not every way out: an accessor that calls runtime.Goexit
-// ends the calling goroutine, which no recover can undo.
+// It contains a panic, and only a panic. An accessor that calls runtime.Goexit
+// ends the calling goroutine, which no recover can undo, and a runtime throw —
+// "concurrent map read and map write", say, from a session whose accessors read
+// state another goroutine is writing — is not recoverable at all. Both end the
+// process, so the containment this offers is narrower than "a broken session
+// cannot bring us down": it covers a session that panics, not one that is
+// unsafe to read from the goroutine holding the context.
 func Recovered[T any](read func() T) (v T, ok bool) {
 	defer func() {
 		if recover() != nil {
