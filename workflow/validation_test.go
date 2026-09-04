@@ -16,6 +16,7 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -447,6 +448,163 @@ func TestValidateFanIn(t *testing.T) {
 				t.Errorf("expected no error, got %v", err)
 			}
 		})
+	}
+}
+
+// violations flattens a validation error into the individual findings
+// it carries. A phase joins the results of its checks, each of which is
+// itself a join, so the tree has to be walked to the leaves — unwrapping
+// one level would count failing checks, not violations.
+func violations(err error) []error {
+	if err == nil {
+		return nil
+	}
+	multi, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return []error{err}
+	}
+	var leaves []error
+	for _, e := range multi.Unwrap() {
+		leaves = append(leaves, violations(e)...)
+	}
+	return leaves
+}
+
+func violationMessages(err error) []string {
+	var msgs []string
+	for _, e := range violations(err) {
+		msgs = append(msgs, e.Error())
+	}
+	return msgs
+}
+
+func TestValidateNodes_ReportsEveryViolation(t *testing.T) {
+	// Two pairs of same-named nodes and two edges back into Start:
+	// two checks, each with two findings, all from one call.
+	a1, a2 := newDummyNode("A"), newDummyNode("A")
+	b1, b2 := newDummyNode("B"), newDummyNode("B")
+	c, d := newDummyNode("C"), newDummyNode("D")
+	err := validateNodes([]Edge{
+		{From: Start, To: a1},
+		{From: a1, To: a2},
+		{From: a2, To: b1},
+		{From: b1, To: b2},
+		{From: c, To: Start},
+		{From: d, To: Start},
+	})
+	want := []string{
+		"duplicate node name: A",
+		"duplicate node name: B",
+		"node points to start node: C",
+		"node points to start node: D",
+	}
+	if diff := cmp.Diff(want, violationMessages(err)); diff != "" {
+		t.Errorf("validateNodes() violations mismatch (-want +got):\n%s", diff)
+	}
+	for _, sentinel := range []error{ErrDuplicateNodeName, ErrNodePointsToStart} {
+		if !errors.Is(err, sentinel) {
+			t.Errorf("validateNodes() = %v, want it to match %v", err, sentinel)
+		}
+	}
+}
+
+// A single violation must come back exactly as it did before validation
+// started aggregating: unjoined, one line, same message.
+func TestNew_SingleViolationUnchanged(t *testing.T) {
+	a, b := newDummyNode("A"), newDummyNode("B")
+	_, err := New("wf", []Edge{{From: a, To: b}})
+	if !errors.Is(err, ErrNoStartNode) {
+		t.Fatalf("New() = %v, want it to match ErrNoStartNode", err)
+	}
+	if got, want := err.Error(), ErrNoStartNode.Error(); got != want {
+		t.Errorf("New() error = %q, want %q (a lone violation must not be wrapped)", got, want)
+	}
+}
+
+// Every back-edge into a node closing a cycle used to add a line, so a
+// dense graph produced O(edges) identical findings.
+func TestValidateCycles_OneFindingPerNode(t *testing.T) {
+	// Complete graph: every node is on an unconditional cycle.
+	const n = 20
+	nodes := make([]Node, n)
+	for i := range nodes {
+		nodes[i] = newDummyNode(fmt.Sprintf("N%02d", i))
+	}
+	var edges []Edge
+	for i, from := range nodes {
+		for j, to := range nodes {
+			if i != j {
+				edges = append(edges, Edge{From: from, To: to})
+			}
+		}
+	}
+	got := len(violations(validateCycles(newGraph(edges))))
+	if got == 0 || got > n {
+		t.Errorf("validateCycles() reported %d findings for a %d-node complete graph, want 1..%d", got, n, n)
+	}
+}
+
+func TestValidateWorkflow_ReportsEveryViolation(t *testing.T) {
+	a, b, c := newDummyNode("A"), newDummyNode("B"), newDummyNode("C")
+	d, e := newDummyNode("D"), newDummyNode("E")
+	g := newGraph([]Edge{
+		{From: Start, To: a},
+		{From: a, To: b, Route: Default},
+		{From: a, To: c, Route: Default}, // two default routes out of A
+		{From: d, To: e},                 // unreachable pair, unconditionally cyclic
+		{From: e, To: d},
+	})
+	err := validateWorkflow(g, nil)
+	for _, want := range []error{ErrMultipleDefaultRoutes, ErrNodesNotReachable, ErrUnconditionalCycle} {
+		if !errors.Is(err, want) {
+			t.Errorf("validateWorkflow() = %v, want it to match %v", err, want)
+		}
+	}
+	if got, want := len(violations(err)), 3; got != want {
+		t.Errorf("validateWorkflow() reported %d violations, want %d: %v", got, want, err)
+	}
+}
+
+// A failing phase stops the next one: later phases assume the earlier
+// ones hold, so their findings would be noise.
+func TestNew_StopsAfterFailingPhase(t *testing.T) {
+	a1, a2, b := newDummyNode("A"), newDummyNode("A"), newDummyNode("B")
+	_, err := New("wf", []Edge{
+		{From: Start, To: a1},
+		{From: a1, To: a2},
+		{From: a1, To: b},
+		{From: a1, To: b}, // duplicate edge: a later-phase violation
+	})
+	if !errors.Is(err, ErrDuplicateNodeName) {
+		t.Fatalf("New() = %v, want it to match ErrDuplicateNodeName", err)
+	}
+	if errors.Is(err, ErrDuplicateEdge) {
+		t.Errorf("New() = %v, want no graph-phase findings while the node phase fails", err)
+	}
+}
+
+// Graph-level checks walk maps, so they sort by node name; without that
+// the reported order (and for New, the error string) would vary per run.
+func TestValidateWorkflow_StableViolationOrder(t *testing.T) {
+	var edges []Edge
+	for _, name := range []string{"C", "A", "D", "B"} {
+		src := newDummyNode(name)
+		edges = append(edges,
+			Edge{From: src, To: newDummyNode(name + "1"), Route: Default},
+			Edge{From: src, To: newDummyNode(name + "2"), Route: Default},
+		)
+	}
+	want := []string{
+		`node has more than one default route: "A"`,
+		`node has more than one default route: "B"`,
+		`node has more than one default route: "C"`,
+		`node has more than one default route: "D"`,
+	}
+	for range 50 {
+		got := violationMessages(validateDefaultRoute(newGraph(edges)))
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("validateDefaultRoute() violations mismatch (-want +got):\n%s", diff)
+		}
 	}
 }
 

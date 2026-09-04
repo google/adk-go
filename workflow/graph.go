@@ -14,6 +14,11 @@
 
 package workflow
 
+import (
+	"slices"
+	"strings"
+)
+
 // graph is the precomputed structural view of a workflow's edges.
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
@@ -37,13 +42,23 @@ func newGraph(edges []Edge) *graph {
 	return &graph{successors: succ, predecessors: pred}
 }
 
-// allEdges returns all edges in the graph.
+// allEdges returns all edges in the graph, grouped by source node in
+// name order.
 func (g *graph) allEdges() []Edge {
 	var edges []Edge
-	for _, succs := range g.successors {
-		edges = append(edges, succs...)
+	for _, n := range g.sortedNodes() {
+		edges = append(edges, g.successors[n]...)
 	}
 	return edges
+}
+
+// sortedNodes returns all nodes ordered by name. Callers that report
+// findings to the user (graph validation) use it so the output does not
+// inherit Go's randomized map iteration order.
+func (g *graph) sortedNodes() []Node {
+	nodes := g.allNodes()
+	slices.SortFunc(nodes, func(a, b Node) int { return strings.Compare(a.Name(), b.Name()) })
+	return nodes
 }
 
 // successorsOf returns the outgoing edges for a node.

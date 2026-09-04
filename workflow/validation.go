@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 
@@ -64,73 +65,98 @@ var ErrSubWorkflowNameCollision = errors.New("sub-workflow name collision")
 // safely. Use a JoinNode to converge multiple branches.
 var ErrUnsupportedFanIn = errors.New("non-JoinNode fan-in is not yet supported")
 
-// validateNodes executes a set of edges validation checks.
+// validateNodes executes a set of edges validation checks. Every check
+// runs and all violations are reported together, so a caller with
+// several mistakes can fix them in one pass.
 func validateNodes(edges []Edge) error {
-	if err := validateUniqueNames(edges); err != nil {
-		return err
+	return joinViolations(
+		validateUniqueNames(edges),
+		validateStartNodePresent(edges),
+		validateStartNodeNoIncoming(edges),
+		validateNoTaskModeGraphNodes(edges),
+		validateChatModeWiring(edges),
+	)
+}
+
+// joinViolations reports errs as a single error, skipping nils and
+// messages already reported (two edges violating one rule the same way
+// read as one problem to the user). A lone violation is returned as-is,
+// unjoined, so it keeps the exact identity and message it had before
+// validation started aggregating.
+func joinViolations(errs ...error) error {
+	var kept []error
+	seen := make(map[string]bool)
+	for _, err := range errs {
+		if err == nil || seen[err.Error()] {
+			continue
+		}
+		seen[err.Error()] = true
+		kept = append(kept, err)
 	}
-	if err := validateStartNodePresent(edges); err != nil {
-		return err
+	if len(kept) == 1 {
+		return kept[0]
 	}
-	if err := validateStartNodeNoIncoming(edges); err != nil {
-		return err
+	return errors.Join(kept...)
+}
+
+// distinctNodes yields each node of edges once, in first-appearance
+// order, so validation reports violations in the order the caller
+// declared them.
+func distinctNodes(edges []Edge) iter.Seq[Node] {
+	return func(yield func(Node) bool) {
+		seen := make(map[Node]bool)
+		for _, edge := range edges {
+			for _, node := range [2]Node{edge.From, edge.To} {
+				if seen[node] {
+					continue
+				}
+				seen[node] = true
+				if !yield(node) {
+					return
+				}
+			}
+		}
 	}
-	if err := validateNoTaskModeGraphNodes(edges); err != nil {
-		return err
-	}
-	if err := validateChatModeWiring(edges); err != nil {
-		return err
-	}
-	return nil
 }
 
 // validateSubWorkflowNames checks that no sub-workflow has the same name as the parent workflow.
 func validateSubWorkflowNames(workflowName string, edges []Edge) error {
-	for _, edge := range edges {
-		if err := checkSubWorkflowName(edge.From, workflowName); err != nil {
-			return err
-		}
-		if err := checkSubWorkflowName(edge.To, workflowName); err != nil {
-			return err
+	var errs []error
+	for node := range distinctNodes(edges) {
+		if err := checkSubWorkflowName(node, workflowName); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // checkSubWorkflowName checks if the node is a WorkflowNode and if its sub-workflow has the same name as the parent workflow.
 func checkSubWorkflowName(node Node, workflowName string) error {
 	if wfNode, ok := node.(*WorkflowNode); ok {
 		if wfNode.subWorkflow.Name() == workflowName {
-			return fmt.Errorf("%w: %q", ErrSubWorkflowNameCollision, workflowName)
+			return fmt.Errorf("%w: %q (node %q)", ErrSubWorkflowNameCollision, workflowName, node.Name())
 		}
 	}
 	return nil
 }
 
 // validateUniqueNames checks that all nodes in the edge set have unique names.
-// If duplicate node names are found, it returns an error. The equality between
-// nodes is checked by comparing the nodes directly.
+// It reports every duplicated name, once each. The equality between nodes is
+// checked by comparing the nodes directly.
 func validateUniqueNames(edges []Edge) error {
 	names := make(map[string]Node)
-	checkNode := func(node Node) error {
-		if storedNode, ok := names[node.Name()]; ok {
-			if storedNode != node {
-				return fmt.Errorf("%w: %s", ErrDuplicateNodeName, node.Name())
-			}
-		} else {
+	var errs []error
+	for node := range distinctNodes(edges) {
+		storedNode, ok := names[node.Name()]
+		if !ok {
 			names[node.Name()] = node
+			continue
 		}
-		return nil
-	}
-	for _, edge := range edges {
-		if err := checkNode(edge.From); err != nil {
-			return err
-		}
-		if err := checkNode(edge.To); err != nil {
-			return err
+		if storedNode != node {
+			errs = append(errs, fmt.Errorf("%w: %s", ErrDuplicateNodeName, node.Name()))
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // validateStartNodePresent checks that there is at least one edge starting from the start node.
@@ -145,38 +171,27 @@ func validateStartNodePresent(edges []Edge) error {
 
 // validateStartNodeNoIncoming checks that no node points to the start node.
 func validateStartNodeNoIncoming(edges []Edge) error {
+	var errs []error
 	for _, edge := range edges {
 		if edge.To == Start {
-			return fmt.Errorf("%w: %s", ErrNodePointsToStart, edge.From.Name())
+			errs = append(errs, fmt.Errorf("%w: %s", ErrNodePointsToStart, edge.From.Name()))
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
-// validateWorkflow executes a set of workflow validation checks.
+// validateWorkflow executes a set of workflow validation checks. Every
+// check runs and all violations are reported together.
 func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
-	if err := validateUniqueEdges(workflow); err != nil {
-		return err
-	}
-	if err := validateDefaultRoute(workflow); err != nil {
-		return err
-	}
-	if err := validateConnectivity(workflow); err != nil {
-		return err
-	}
-	if err := validateCycles(workflow); err != nil {
-		return err
-	}
-	if err := validateFanIn(workflow); err != nil {
-		return err
-	}
-	if err := validateStaticSchemas(workflow); err != nil {
-		return err
-	}
-	if err := validateStateSchemaConsistency(workflow, schema); err != nil {
-		return err
-	}
-	return nil
+	return joinViolations(
+		validateUniqueEdges(workflow),
+		validateDefaultRoute(workflow),
+		validateConnectivity(workflow),
+		validateCycles(workflow),
+		validateFanIn(workflow),
+		validateStaticSchemas(workflow),
+		validateStateSchemaConsistency(workflow, schema),
+	)
 }
 
 // validateNoTaskModeGraphNodes rejects task-mode LlmAgents that appear
@@ -195,23 +210,17 @@ func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
 //   - dispatched dynamically via workflow.RunNode from a function/
 //     dynamic node — never as static graph nodes.
 func validateNoTaskModeGraphNodes(edges []Edge) error {
-	allNodes := make(map[Node]bool)
-	for _, e := range edges {
-		allNodes[e.From] = true
-		allNodes[e.To] = true
-	}
-
-	for node := range allNodes {
+	var errs []error
+	for node := range distinctNodes(edges) {
 		if mode, ok := agentNodeMode(node); ok && mode == llminternal.ModeTask {
-			return fmt.Errorf(
+			errs = append(errs, fmt.Errorf(
 				"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
 					"dispatch dynamically via RunNode from a function node",
 				node.Name(),
-			)
+			))
 		}
 	}
-
-	return nil
+	return joinViolations(errs...)
 }
 
 // validateChatModeWiring rejects a chat-mode LlmAgent that is reached from
@@ -220,18 +229,19 @@ func validateNoTaskModeGraphNodes(edges []Edge) error {
 // down an edge, so feeding it from a predecessor silently drops that
 // predecessor's output. Mirrors adk-python's _validate_chat_agent_wiring.
 func validateChatModeWiring(edges []Edge) error {
+	var errs []error
 	for _, e := range edges {
 		if e.From == Start {
 			continue
 		}
 		if mode, ok := agentNodeMode(e.To); ok && mode == llminternal.ModeChat {
-			return fmt.Errorf(
+			errs = append(errs, fmt.Errorf(
 				"Agent %q has mode='chat' and cannot follow node %q: chat agents rely on conversation history and cannot consume a predecessor's node input. Use mode='single_turn', or wire the agent directly from Start",
 				e.To.Name(), e.From.Name(),
-			)
+			))
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // agentNodeMode returns the LlmAgent mode of node, or ok=false when node
@@ -252,31 +262,35 @@ func agentNodeMode(node Node) (llminternal.Mode, bool) {
 // Two edges with the same (From, To) are rejected regardless of Route; use
 // MultiRoute to express alternatives to the same target.
 func validateUniqueEdges(workflow *graph) error {
-	for node, edges := range workflow.successors {
-		uniqueEdges := make(map[Node]struct{})
-		for _, edge := range edges {
-			if _, ok := uniqueEdges[edge.To]; ok {
-				return fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, node.Name(), edge.To.Name())
+	var errs []error
+	for _, node := range workflow.sortedNodes() {
+		seen := make(map[Node]bool)
+		for _, edge := range workflow.successorsOf(node) {
+			if seen[edge.To] {
+				errs = append(errs, fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, node.Name(), edge.To.Name()))
+				continue
 			}
-			uniqueEdges[edge.To] = struct{}{}
+			seen[edge.To] = true
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // validateDefaultRoute checks that there are no multiple default routes for one node.
 func validateDefaultRoute(workflow *graph) error {
-	for node, edges := range workflow.successors {
-		hasDefault := false
-		for _, edge := range edges {
-			if edge.Route == Default && !hasDefault {
-				hasDefault = true
-			} else if edge.Route == Default && hasDefault {
-				return fmt.Errorf("%w: %q", ErrMultipleDefaultRoutes, node.Name())
+	var errs []error
+	for _, node := range workflow.sortedNodes() {
+		defaults := 0
+		for _, edge := range workflow.successorsOf(node) {
+			if edge.Route == Default {
+				defaults++
 			}
 		}
+		if defaults > 1 {
+			errs = append(errs, fmt.Errorf("%w: %q", ErrMultipleDefaultRoutes, node.Name()))
+		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // validateConnectivity checks that all nodes in the edge set are reachable from the start node.
@@ -320,42 +334,44 @@ func validateConnectivity(workflow *graph) error {
 // and are ignored during unconditional cycle detection.
 func validateCycles(workflow *graph) error {
 	visited := make(map[Node]struct{})
+	reported := make(map[Node]struct{})
+	var errs []error
 
-	var traverse func(n Node, inStack map[Node]struct{}) error
-	traverse = func(n Node, inStack map[Node]struct{}) error {
+	var traverse func(n Node, inStack map[Node]struct{})
+	traverse = func(n Node, inStack map[Node]struct{}) {
 		if _, ok := inStack[n]; ok {
-			return fmt.Errorf("%w: %q", ErrUnconditionalCycle, n.Name())
+			// One error per node a cycle closes on: a dense graph has
+			// O(edges) back-edges, and repeating them helps nobody.
+			if _, done := reported[n]; !done {
+				reported[n] = struct{}{}
+				errs = append(errs, fmt.Errorf("%w: %q", ErrUnconditionalCycle, n.Name()))
+			}
+			return
 		}
 
 		if _, ok := visited[n]; ok {
-			return nil
+			return
 		}
 
 		inStack[n] = struct{}{}
 		visited[n] = struct{}{}
 
-		for _, edge := range workflow.successors[n] {
+		for _, edge := range workflow.successorsOf(n) {
 			if edge.Route == nil {
-				if err := traverse(edge.To, inStack); err != nil {
-					return err
-				}
+				traverse(edge.To, inStack)
 			}
 		}
 
 		delete(inStack, n)
-		return nil
 	}
 
-	for node := range workflow.successors {
+	for _, node := range workflow.sortedNodes() {
 		if _, ok := visited[node]; !ok {
-			inStack := make(map[Node]struct{})
-			if err := traverse(node, inStack); err != nil {
-				return err
-			}
+			traverse(node, make(map[Node]struct{}))
 		}
 	}
 
-	return nil
+	return joinViolations(errs...)
 }
 
 // validateFanIn rejects a non-JoinNode target that has two or more
@@ -367,22 +383,23 @@ func validateCycles(workflow *graph) error {
 // back-edges — where the predecessors don't all fire together — are not
 // rejected.
 func validateFanIn(workflow *graph) error {
-	for node, edges := range workflow.predecessors {
+	var errs []error
+	for _, node := range workflow.sortedNodes() {
 		if _, isJoin := node.(*JoinNode); isJoin {
 			continue
 		}
 		unconditional := 0
-		for _, edge := range edges {
+		for _, edge := range workflow.predecessorsOf(node) {
 			if edge.Route == nil {
 				unconditional++
 			}
 		}
 		if unconditional > 1 {
-			return fmt.Errorf("%w: node %q has %d unconditional incoming edges; "+
-				"use a JoinNode to converge branches", ErrUnsupportedFanIn, node.Name(), unconditional)
+			errs = append(errs, fmt.Errorf("%w: node %q has %d unconditional incoming edges; "+
+				"use a JoinNode to converge branches", ErrUnsupportedFanIn, node.Name(), unconditional))
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 // defaultValidateInput validates data against schema. When data is a
@@ -454,7 +471,8 @@ func validateStateSchemaConsistency(g *graph, schema *jsonschema.Resolved) error
 	}
 	schemaFields := extractFieldNames(schema)
 
-	for _, n := range g.allNodes() {
+	var errs []error
+	for _, n := range g.sortedNodes() {
 		spa, ok := n.(StateParamsAware)
 		if !ok {
 			continue
@@ -466,11 +484,11 @@ func validateStateSchemaConsistency(g *graph, schema *jsonschema.Resolved) error
 				continue
 			}
 			if !slices.Contains(schemaFields, fieldName) {
-				return fmt.Errorf("node %q references state field %q which is not declared in StateSchema (declared: %v)", n.Name(), fieldName, schemaFields)
+				errs = append(errs, fmt.Errorf("node %q references state field %q which is not declared in StateSchema (declared: %v)", n.Name(), fieldName, schemaFields))
 			}
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 func extractFieldNames(schema *jsonschema.Resolved) []string {
@@ -485,6 +503,7 @@ func extractFieldNames(schema *jsonschema.Resolved) []string {
 }
 
 func validateStaticSchemas(g *graph) error {
+	var errs []error
 	for _, edge := range g.allEdges() {
 		outResolved := edge.From.OutputSchema()
 		inResolved := edge.To.InputSchema()
@@ -493,15 +512,16 @@ func validateStaticSchemas(g *graph) error {
 		}
 		eq, err := schemasEqualCanonical(outResolved.Schema(), inResolved.Schema())
 		if err != nil {
-			return fmt.Errorf("comparing schemas on edge %s->%s: %w",
-				edge.From.Name(), edge.To.Name(), err)
+			errs = append(errs, fmt.Errorf("comparing schemas on edge %s->%s: %w",
+				edge.From.Name(), edge.To.Name(), err))
+			continue
 		}
 		if !eq {
-			return fmt.Errorf("graph validation failed: schema mismatch on edge %s -> %s",
-				edge.From.Name(), edge.To.Name())
+			errs = append(errs, fmt.Errorf("graph validation failed: schema mismatch on edge %s -> %s",
+				edge.From.Name(), edge.To.Name()))
 		}
 	}
-	return nil
+	return joinViolations(errs...)
 }
 
 func schemasEqualCanonical(a, b *jsonschema.Schema) (bool, error) {
