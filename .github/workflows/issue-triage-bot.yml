@@ -1,0 +1,151 @@
+# Runs the issue-triage agent in examples/githubbots/issue-triage.
+#
+# The agent reads an issue's title and body -- text any stranger can write --
+# and sets the issue type and one categorization label. The authority limits
+# live in the Go code (per-session issue scoping, an atomic need-claim, and a
+# value allow-list on both fields), not in the prompt. This workflow's job is to
+# hand the process the narrowest possible token and a bounded amount of time.
+name: Issue Triage Bot
+
+on:
+  issues:
+    types: [opened]
+  schedule:
+    # Backstop. The concurrency group below is constant, so GitHub keeps at most
+    # one run queued and a burst of newly opened issues can drop some of them.
+    # This sweep collects whatever the event runs missed.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number to triage. Leave blank to sweep the backlog.'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 'Log the intended actions without modifying any issue.'
+        type: boolean
+        required: false
+        default: true
+
+# Nothing at workflow level, so a job added later starts with no token scopes
+# and has to ask. Granting issues:write here instead would be equivalent today,
+# with one job, and would silently widen the moment there are two.
+permissions: {}
+
+# Constant on purpose, NOT keyed on the issue number. Keying it on the number
+# would put a scheduled sweep in a different group from an event run for an
+# issue that sweep is already processing, and the bot's no-double-action guard
+# (the need-claim) lives in process memory: two concurrent processes each read
+# an unset field and both write it.
+concurrency:
+  group: issue-triage-bot
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    # A fork inherits the schedule, and its token cannot write here anyway.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    # The agent sets an issue type and adds a label; contents:read is what
+    # checkout needs and nothing else is granted.
+    permissions:
+      contents: read
+      issues: write
+    # Must stay above SWEEP_TIMEOUT below, with room for the cold `go run`
+    # compile that precedes it. Hitting this limit kills the process without a
+    # word; the process-side budget is what makes an overrun report instead.
+    timeout-minutes: 25
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/githubbots/issue-triage/go.mod
+          cache-dependency-path: examples/githubbots/issue-triage/go.sum
+
+      - name: Triage issues
+        working-directory: examples/githubbots/issue-triage
+        env:
+          # The default job token, scoped by the permissions block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Pinned rather than left to the code's default, which is a floating
+          # alias. An alias makes the deployed model an invisible choice that
+          # can change under a scheduled job nobody is watching, and here it
+          # was already broken: on this key path gemini-flash-latest returned
+          # 503 on 3 of 3 calls measured for this repository, and on 6 of 6 and
+          # 5 of 6 in two independent checks, while gemini-3.6-flash answered
+          # every time on both this path and Vertex. The sibling adk-python and
+          # adk-java bots pin too. Changing this line is a reviewable diff.
+          # The Go default stays as it is, so the example still runs unset.
+          LLM_MODEL_NAME: gemini-3.6-flash
+          GH_REPOSITORY: ${{ github.repository }}
+          # Reaches the script only as an environment variable, never
+          # interpolated into the script text, and validated below before use.
+          ISSUE_INPUT: ${{ github.event.issue.number || inputs.issue }}
+          # Resolved in the script below, not here. A `${{ a && b || c }}`
+          # expression cannot express "default to true" safely: GitHub applies
+          # the input's declared default only when the key is ABSENT, so a REST
+          # dispatch carrying "dry_run": "" is present-but-falsy, falls through
+          # to the `|| false` arm, and mutates live issues for an operator whose
+          # payload asked for a rehearsal.
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          # These three must satisfy ISSUE_COUNT x ISSUE_TIMEOUT plus the one
+          # minute for choosing the work set <= SWEEP_TIMEOUT, or an ordinary
+          # busy sweep exhausts its budget and the job goes red on a run that
+          # behaved exactly as designed. 5 x 3m + 1m = 16m, inside 18m. The bot
+          # refuses to start on a configuration that fails this.
+          ISSUE_COUNT: '5'
+          ISSUE_TIMEOUT: 3m
+          # The process-side budget: below timeout-minutes above, so the sweep
+          # stops and names what it left rather than being killed mid-run.
+          SWEEP_TIMEOUT: 18m
+        run: |
+          set -euo pipefail
+
+          OWNER=${GH_REPOSITORY%%/*}
+          REPO=${GH_REPOSITORY##*/}
+          export OWNER REPO
+
+          # Manual runs are a rehearsal unless the operator says otherwise; the
+          # issue and schedule triggers are the bot doing its job. Anything that
+          # is neither "true" nor "false" -- including the empty string a REST
+          # dispatch can deliver -- is refused rather than guessed at.
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${DRY_RUN_INPUT}" in
+              true)  DRY_RUN=true  ;;
+              false) DRY_RUN=false ;;
+              "")    DRY_RUN=true  ;;
+              *)
+                echo "::error::dry_run must be true or false"
+                exit 1
+                ;;
+            esac
+          else
+            DRY_RUN=false
+          fi
+          export DRY_RUN
+
+          # Digits only. A grep would match per LINE, so "12\nwhatever" would
+          # pass it; this rejects any non-digit character, newlines included. The
+          # value is never echoed back -- a rejected input is by definition not a
+          # number, and printing it would let an ::error:: line carry text the
+          # runner parses as another workflow command.
+          args=()
+          if [ -n "${ISSUE_INPUT}" ]; then
+            case "${ISSUE_INPUT}" in
+              *[!0-9]*)
+                echo "::error::the issue input must be a number"
+                exit 1
+                ;;
+            esac
+            args+=(-issue "${ISSUE_INPUT}")
+          fi
+
+          go run . ${args[@]+"${args[@]}"}
