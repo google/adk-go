@@ -360,6 +360,8 @@ func TestModel_GenerateStream_MatchesBlocking(t *testing.T) {
 	}
 }
 
+// TestModel_GenerateStream_Refusal verifies that non-empty streamed refusals
+// reach callers as non-thought text and final content matches blocking output.
 func TestModel_GenerateStream_Refusal(t *testing.T) {
 	const (
 		refusalOnlyDelta1 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"I cannot ","sequence_number":1}`
@@ -367,6 +369,8 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 		refusalOnlyDone   = `{"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"I cannot help with that.","sequence_number":3}`
 		refusalOnlyBody   = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
 		refusalOnlyFinal  = `{"type":"response.completed","sequence_number":4,"response":` + refusalOnlyBody + `}`
+		emptyRefusalDelta = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"","sequence_number":1}`
+		emptyRefusalFinal = `{"type":"response.completed","sequence_number":2,"response":` + refusalOnlyBody + `}`
 
 		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request","sequence_number":1}`
 		mixedDelta1    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"I cannot ","sequence_number":2}`
@@ -377,19 +381,28 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 	)
 
 	tests := []struct {
-		name         string
-		events       []string
-		blockingBody string
+		name                string
+		events              []string
+		blockingBody        string
+		wantStreamedRefusal string
 	}{
 		{
-			name:         "refusal only",
-			events:       []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
-			blockingBody: refusalOnlyBody,
+			name:                "refusal only",
+			events:              []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "I cannot help with that.",
 		},
 		{
-			name:         "refusal after reasoning",
-			events:       []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
-			blockingBody: mixedBody,
+			name:                "empty delta falls back to terminal response",
+			events:              []string{evCreated, emptyRefusalDelta, emptyRefusalFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "",
+		},
+		{
+			name:                "refusal after reasoning",
+			events:              []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
+			blockingBody:        mixedBody,
+			wantStreamedRefusal: "I cannot help with that.",
 		},
 	}
 
@@ -419,7 +432,7 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 					}
 				}
 			}
-			if got, want := streamedRefusal.String(), "I cannot help with that."; got != want {
+			if got, want := streamedRefusal.String(), tc.wantStreamedRefusal; got != want {
 				t.Errorf("streamed refusal = %q, want %q", got, want)
 			}
 
