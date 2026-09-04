@@ -83,6 +83,21 @@ type deployCloudRunFlags struct {
 
 var flags deployCloudRunFlags
 
+// validateServiceName rejects a --service_name value that gcloud would consume
+// as a flag. gcloudDeployToCloudRun and runGcloudProxy place this value in
+// gcloud's positional SERVICE slot, which accepts either a service ID or a
+// fully qualified identifier; gcloud validates the exact form itself. We only
+// reject a value beginning with '-', which gcloud would otherwise parse as a
+// flag rather than a service name (argument injection, CWE-88) — this also
+// catches the common typo of omitting the service and leaving a flag in its
+// place.
+func validateServiceName(name string) error {
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("invalid --service_name %q: a Cloud Run service name must not begin with '-'", name)
+	}
+	return nil
+}
+
 // cloudrunCmd represents the cloudrun command
 var cloudrunCmd = &cobra.Command{
 	Use:   "cloudrun",
@@ -133,6 +148,15 @@ func (f *deployCloudRunFlags) computeFlags() error {
 		func(p util.Printer) error {
 			if f.cloudRun.debugAPI && !f.cloudRun.api {
 				return fmt.Errorf("cannot enable Debug API without having enabled API")
+			}
+
+			// Validate the service name before any work: it is passed to gcloud
+			// in the positional SERVICE slot by gcloudDeployToCloudRun and
+			// runGcloudProxy, where a '-'-prefixed value would be parsed as a
+			// flag rather than a service name (CWE-88). Checking here also means
+			// a rejected value leaves no temporary directory behind.
+			if err := validateServiceName(f.cloudRun.serviceName); err != nil {
+				return err
 			}
 
 			// Checked before the temp dir is created so a rejected value does
