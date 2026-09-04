@@ -18,11 +18,14 @@ package agentanalytics
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -31,6 +34,98 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
+
+const (
+	schemaVersion         = "1"
+	schemaVersionLabelKey = "adk_schema_version"
+	viewSQLTemplate       = "CREATE OR REPLACE VIEW `%s.%s.%s` AS\nSELECT\n  %s\nFROM\n  `%s.%s.%s`\nWHERE\n  event_type = '%s'"
+)
+
+var viewCommonColumns = []string{
+	"timestamp",
+	"event_type",
+	"agent",
+	"session_id",
+	"invocation_id",
+	"user_id",
+	"trace_id",
+	"span_id",
+	"parent_span_id",
+	"status",
+	"error_message",
+	"is_truncated",
+}
+
+var eventViewDefs = map[string][]string{
+	"USER_MESSAGE": {},
+	"MODEL_REQUEST": {
+		"JSON_VALUE(attributes, '$.model') AS model",
+		"content AS request_content",
+		"JSON_QUERY(attributes, '$.llm_config') AS llm_config",
+		"JSON_QUERY(attributes, '$.tools') AS tools",
+	},
+	"MODEL_RESPONSE": {
+		"JSON_QUERY(content, '$.response') AS response",
+		"CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64) AS usage_prompt_tokens",
+		"CAST(JSON_VALUE(content, '$.usage.completion') AS INT64) AS usage_completion_tokens",
+		"CAST(JSON_VALUE(content, '$.usage.total') AS INT64) AS usage_total_tokens",
+		"CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+		"CAST(JSON_VALUE(latency_ms, '$.time_to_first_token_ms') AS INT64) AS ttft_ms",
+		"JSON_VALUE(attributes, '$.model_version') AS model_version",
+		"JSON_QUERY(attributes, '$.usage_metadata') AS usage_metadata",
+	},
+	"MODEL_ERROR": {
+		"CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+	},
+	"TOOL_START": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.args') AS tool_args",
+		"JSON_VALUE(content, '$.tool_origin') AS tool_origin",
+	},
+	"TOOL_END": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.result') AS tool_result",
+		"JSON_VALUE(content, '$.tool_origin') AS tool_origin",
+		"CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+	},
+	"TOOL_ERROR": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.args') AS tool_args",
+		"JSON_VALUE(content, '$.tool_origin') AS tool_origin",
+		"CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+	},
+	"AGENT_START": {
+		"JSON_VALUE(content, '$.text_summary') AS agent_instruction",
+	},
+	"AGENT_END": {
+		"CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+	},
+	"INVOCATION_START": {},
+	"INVOCATION_END":   {},
+	"EVENT":            {},
+	"STATE_DELTA": {
+		"JSON_QUERY(attributes, '$.state_delta') AS state_delta",
+	},
+	"HITL_CREDENTIAL_REQUEST": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.args') AS tool_args",
+	},
+	"HITL_CONFIRMATION_REQUEST": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.args') AS tool_args",
+	},
+	"HITL_INPUT_REQUEST": {
+		"JSON_VALUE(content, '$.tool') AS tool_name",
+		"JSON_QUERY(content, '$.args') AS tool_args",
+	},
+	"A2A_INTERACTION": {
+		"content AS response_content",
+		"JSON_VALUE(attributes, '$.a2a_metadata.\"a2a:task_id\"') AS a2a_task_id",
+		"JSON_VALUE(attributes, '$.a2a_metadata.\"a2a:context_id\"') AS a2a_context_id",
+		"JSON_QUERY(attributes, '$.a2a_metadata.\"a2a:request\"') AS a2a_request",
+		"JSON_QUERY(attributes, '$.a2a_metadata.\"a2a:response\"') AS a2a_response",
+	},
+}
 
 // NewBigQueryAgentAnalyticsPlugin creates a newly configured analytics plugin with default config.
 func NewBigQueryAgentAnalyticsPlugin(
@@ -95,21 +190,42 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 
 	// Ensure table exists (done once per instance)
 	tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
-	_, err := tableRef.Metadata(ctx)
+	meta, err := tableRef.Metadata(ctx)
 	if err != nil {
-		if config.Logger != nil {
-			config.Logger.Printf("Table %s not found. Creating it...", config.TableName)
-		}
-		err = tableRef.Create(ctx, &bq.TableMetadata{
-			Schema: EventsSchema(),
-			Clustering: &bq.Clustering{
-				Fields: config.ClusteringFields,
-			},
-		})
-		if err != nil {
+		if apiErr, ok := err.(*googleapi.Error); ok && apiErr.Code == http.StatusNotFound {
 			if config.Logger != nil {
-				config.Logger.Printf("Failed to create BigQuery table %v: %v", config.TableName, err)
+				config.Logger.Printf("Table %s not found. Creating it...", config.TableName)
 			}
+			err = tableRef.Create(ctx, &bq.TableMetadata{
+				Schema: EventsSchema(),
+				TimePartitioning: &bq.TimePartitioning{
+					Field: "timestamp",
+					Type:  bq.DayPartitioningType,
+				},
+				Clustering: &bq.Clustering{
+					Fields: config.ClusteringFields,
+				},
+				Labels: map[string]string{
+					schemaVersionLabelKey: schemaVersion,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create BigQuery table: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to retrieve BigQuery table metadata: %w", err)
+		}
+	} else {
+		if config.AutoSchemaUpgrade {
+			if err := maybeUpgradeSchema(ctx, tableRef, meta, config.Logger); err != nil {
+				return nil, fmt.Errorf("failed to auto-upgrade BigQuery table schema: %w", err)
+			}
+		}
+	}
+
+	if config.CreateViews {
+		if err := createAnalyticsViews(ctx, bqClient, config); err != nil && config.Logger != nil {
+			config.Logger.Printf("Views creation failed: %v", err)
 		}
 	}
 
@@ -299,4 +415,157 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	}
 
 	return baseplugin.New(cfg)
+}
+
+func schemaFieldsMatch(existing, desired bq.Schema) (newFields, updatedRecords bq.Schema) {
+	existingByName := make(map[string]*bq.FieldSchema)
+	for _, f := range existing {
+		existingByName[f.Name] = f
+	}
+
+	for _, desiredField := range desired {
+		existingField, exists := existingByName[desiredField.Name]
+		if !exists {
+			newFields = append(newFields, desiredField)
+		} else if desiredField.Type == bq.RecordFieldType && existingField.Type == bq.RecordFieldType && len(desiredField.Schema) > 0 {
+			subNew, subUpdated := schemaFieldsMatch(existingField.Schema, desiredField.Schema)
+			if len(subNew) > 0 || len(subUpdated) > 0 {
+				// Build a merged sub-field list
+				mergedSub := make(bq.Schema, len(existingField.Schema))
+				copy(mergedSub, existingField.Schema)
+
+				updatedNames := make(map[string]bool)
+				for _, f := range subUpdated {
+					updatedNames[f.Name] = true
+				}
+
+				// Replace updated nested records in-place
+				for i, f := range mergedSub {
+					if updatedNames[f.Name] {
+						for _, u := range subUpdated {
+							if u.Name == f.Name {
+								mergedSub[i] = u
+								break
+							}
+						}
+					}
+				}
+
+				// Append entirely new sub-fields
+				mergedSub = append(mergedSub, subNew...)
+
+				// Create updated RECORD field schema
+				updatedField := *existingField
+				updatedField.Schema = mergedSub
+				updatedRecords = append(updatedRecords, &updatedField)
+			}
+		}
+	}
+	return newFields, updatedRecords
+}
+
+func maybeUpgradeSchema(ctx context.Context, existingTable *bq.Table, meta *bq.TableMetadata, logger Logger) error {
+	storedVersion := meta.Labels[schemaVersionLabelKey]
+	if storedVersion == schemaVersion {
+		return nil
+	}
+
+	newFields, updatedRecords := schemaFieldsMatch(meta.Schema, EventsSchema())
+
+	if len(newFields) > 0 || len(updatedRecords) > 0 {
+		updatedNames := make(map[string]bool)
+		for _, f := range updatedRecords {
+			updatedNames[f.Name] = true
+		}
+
+		merged := make(bq.Schema, 0, len(meta.Schema)+len(newFields))
+		for _, f := range meta.Schema {
+			if updatedNames[f.Name] {
+				for _, u := range updatedRecords {
+					if u.Name == f.Name {
+						merged = append(merged, u)
+						break
+					}
+				}
+			} else {
+				merged = append(merged, f)
+			}
+		}
+		merged = append(merged, newFields...)
+
+		// Update schema in metadata update
+		update := bq.TableMetadataToUpdate{
+			Schema: merged,
+		}
+		update.SetLabel(schemaVersionLabelKey, schemaVersion)
+
+		_, err := existingTable.Update(ctx, update, meta.ETag)
+		if err != nil {
+			return fmt.Errorf("failed to update table schema: %w", err)
+		}
+
+		if logger != nil {
+			var changeDesc []string
+			if len(newFields) > 0 {
+				var names []string
+				for _, f := range newFields {
+					names = append(names, f.Name)
+				}
+				changeDesc = append(changeDesc, fmt.Sprintf("new columns %v", names))
+			}
+			if len(updatedRecords) > 0 {
+				var names []string
+				for _, f := range updatedRecords {
+					names = append(names, f.Name)
+				}
+				changeDesc = append(changeDesc, fmt.Sprintf("updated RECORD fields %v", names))
+			}
+			logger.Printf("Auto-upgraded table schema: %s", strings.Join(changeDesc, ", "))
+		}
+	} else {
+		// No schema upgrade needed, just update label if missing or outdated
+		if storedVersion != schemaVersion {
+			update := bq.TableMetadataToUpdate{}
+			update.SetLabel(schemaVersionLabelKey, schemaVersion)
+
+			_, err := existingTable.Update(ctx, update, meta.ETag)
+			if err != nil {
+				return fmt.Errorf("failed to update table labels: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func createAnalyticsViews(ctx context.Context, client *bq.Client, config Config) error {
+	for eventType, extraCols := range eventViewDefs {
+		viewName := fmt.Sprintf("%s_%s", config.ViewPrefix, strings.ToLower(eventType))
+
+		allCols := make([]string, 0, len(viewCommonColumns)+len(extraCols))
+		allCols = append(allCols, viewCommonColumns...)
+		allCols = append(allCols, extraCols...)
+		columnsStr := strings.Join(allCols, ",\n  ")
+
+		sql := fmt.Sprintf(
+			viewSQLTemplate,
+			config.ProjectID, config.DatasetID, viewName,
+			columnsStr,
+			config.ProjectID, config.DatasetID, config.TableName,
+			eventType,
+		)
+
+		q := client.Query(sql)
+		job, err := q.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to run view creation query for %s: %w", viewName, err)
+		}
+		status, err := job.Wait(ctx)
+		if err != nil {
+			return fmt.Errorf("view creation query failed for %s: %w", viewName, err)
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("view creation query execution failed for %s: %w", viewName, err)
+		}
+	}
+	return nil
 }
