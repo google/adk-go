@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
@@ -34,11 +35,10 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 		return nil, err
 	}
 	return &genai.GenerateContentResponse{
-		Candidates:     []*genai.Candidate{candidate},
-		ModelVersion:   string(resp.Model),
-		ResponseID:     resp.ID,
-		UsageMetadata:  convertUsage(resp.Usage),
-		PromptFeedback: promptFeedback(resp),
+		Candidates:    []*genai.Candidate{candidate},
+		ModelVersion:  string(resp.Model),
+		ResponseID:    resp.ID,
+		UsageMetadata: convertUsage(resp.Usage),
 	}, nil
 }
 
@@ -52,7 +52,9 @@ func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
 			Role:  string(genai.RoleModel),
 			Parts: parts,
 		},
-		FinishReason:   finishReason(resp),
+		// No event announced this response, so its own payload is all there is
+		// to read the finish reason from.
+		FinishReason:   finishReason(resp, false),
 		LogprobsResult: convertLogprobs(resp.Output),
 	}, nil
 }
@@ -162,7 +164,11 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 	return args, nil
 }
 
-func finishReason(resp *responses.Response) genai.FinishReason {
+// finishReason reports why the model stopped generating. incompleteEvent says
+// the terminal streaming event was a "response.incomplete" (see
+// generateStream); blocking, having no event to read, passes false. Both paths
+// otherwise decide from the same payload.
+func finishReason(resp *responses.Response, incompleteEvent bool) genai.FinishReason {
 	if resp == nil {
 		return genai.FinishReasonUnspecified
 	}
@@ -172,10 +178,67 @@ func finishReason(resp *responses.Response) genai.FinishReason {
 	case "content_filter":
 		return genai.FinishReasonSafety
 	case "":
+		if truncated(resp, incompleteEvent) {
+			return genai.FinishReasonOther
+		}
 		return genai.FinishReasonStop
 	default:
 		return genai.FinishReasonOther
 	}
+}
+
+// truncated reports whether a turn that named no incomplete reason nonetheless
+// ended before it was done; calling one a clean stop would have a caller that
+// retries on anything but STOP accept a partial answer as final.
+//
+// openai-go marks incomplete_details required but neither its reason nor the
+// status, so a provider may declare a turn truncated and leave either empty.
+// Every signal that survives that is read here.
+func truncated(resp *responses.Response, incompleteEvent bool) bool {
+	if incompleteEvent {
+		// The event stands in for "response.completed", so its name is the
+		// provider's verdict, and it outranks a payload that says otherwise.
+		return true
+	}
+	switch resp.Status {
+	case responses.ResponseStatusCompleted:
+		return false
+	case "":
+		// A finished turn carries incomplete_details as null.
+		return resp.JSON.IncompleteDetails.Valid()
+	default:
+		// failed, cancelled, incomplete, in_progress and queued all describe an
+		// unfinished turn. Enumerating the finished states instead keeps a
+		// status added later from defaulting to a clean stop.
+		return true
+	}
+}
+
+// finishMessage is the provider's own account of why a turn ended, which the
+// finish reason flattens away: an unmapped incomplete reason and a failure both
+// arrive as OTHER.
+func finishMessage(resp *responses.Response, incompleteEvent bool) string {
+	if resp == nil {
+		return ""
+	}
+	if msg := resp.Error.Message; msg != "" {
+		return msg
+	}
+	if reason := resp.IncompleteDetails.Reason; reason != "" {
+		return reason
+	}
+	// The contradiction truncated() resolves, resolved the same way: the event's
+	// name outranks a payload calling the turn completed. Every other status is
+	// still the provider's own wording for why.
+	if resp.Status != "" && (!incompleteEvent || resp.Status != responses.ResponseStatusCompleted) {
+		return string(resp.Status)
+	}
+	if truncated(resp, incompleteEvent) {
+		// No usable reason or status, yet the turn did not finish: the event's
+		// name, or a bare incomplete_details, is all the provider said.
+		return string(responses.ResponseStatusIncomplete)
+	}
+	return ""
 }
 
 func safeInt32(v int64) int32 {
@@ -201,14 +264,38 @@ func convertUsage(usage responses.ResponseUsage) *genai.GenerateContentResponseU
 	}
 }
 
-func promptFeedback(resp *responses.Response) *genai.GenerateContentResponsePromptFeedback {
-	if resp == nil || resp.IncompleteDetails.Reason != "content_filter" {
+// logprobsFor returns a response's logprobs only when they describe the text
+// given, which is what the caller reports them alongside. A streamed turn takes
+// its content from the deltas and its logprobs from the terminal event, and the
+// two disagree on a provider that resends different output; probabilities read
+// against text they do not belong to are worse than none.
+func logprobsFor(resp *responses.Response, text string) *genai.LogprobsResult {
+	if resp == nil || outputText(resp.Output) != text {
 		return nil
 	}
-	return &genai.GenerateContentResponsePromptFeedback{
-		BlockReason:        genai.BlockedReasonSafety,
-		BlockReasonMessage: resp.IncompleteDetails.Reason,
+	return convertLogprobs(resp.Output)
+}
+
+// outputText concatenates the text of a response's message items, the only
+// items logprobs are attached to. It must agree with convertOutputItems on what
+// a message's text is, refusals included, or the two paths would disagree over
+// whether the logprobs describe the same answer.
+func outputText(items []responses.ResponseOutputItemUnion) string {
+	var text strings.Builder
+	for _, item := range items {
+		if item.Type != "message" {
+			continue
+		}
+		for _, content := range item.Content {
+			switch content.Type {
+			case "output_text":
+				text.WriteString(content.Text)
+			case "refusal":
+				text.WriteString(content.Refusal)
+			}
+		}
 	}
+	return text.String()
 }
 
 func convertLogprobs(items []responses.ResponseOutputItemUnion) *genai.LogprobsResult {
