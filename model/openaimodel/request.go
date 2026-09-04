@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
@@ -382,6 +383,256 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	}
 	if cfg.SafetySettings != nil {
 		return ErrSafetySettingsNotSupported
+	}
+	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
+		return err
+	}
+	if cfg.ServiceTier != "" {
+		tier, ok := serviceTiers[cfg.ServiceTier]
+		if !ok {
+			return fmt.Errorf("%w: ServiceTier %q", ErrUnsupportedConfigField, cfg.ServiceTier)
+		}
+		params.ServiceTier = tier
+	}
+	if err := rejectUntranslatableValues(cfg); err != nil {
+		return err
+	}
+	// Last, so the named errors above win when a caller sets both.
+	return rejectUnsupportedConfigFields(cfg)
+}
+
+// serviceTiers maps genai's processing tiers onto the Responses equivalents.
+// OpenAI offers more tiers than genai can name; the ones genai has all
+// correspond. An explicit "unspecified" is the caller asking not to choose,
+// which is what auto means.
+var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
+	genai.ServiceTierUnspecified: responses.ResponseNewParamsServiceTierAuto,
+	genai.ServiceTierStandard:    responses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierFlex:        responses.ResponseNewParamsServiceTierFlex,
+	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
+}
+
+// requestTimeout reports the bound the caller asked for, or zero for none.
+//
+// It is applied as a deadline on the whole call rather than through openai-go's
+// per-request timeout option, because those two mean different things: the SDK
+// applies its option inside the retry loop, so with the default of two retries
+// a caller asking for five seconds could wait fifteen. genai documents this
+// field as the timeout for the request, and a deadline on the context bounds
+// the request including whatever retrying it takes.
+//
+// Zero and negative are treated as unset, which applyGenerationConfig rejects
+// before a request is built. The guard is repeated here rather than assumed,
+// because a non-positive value means "no deadline at all" and would lift the
+// caller's bound instead of applying it, and a function this small should not
+// depend on being called in the right order to be safe.
+func requestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
+	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
+		return 0
+	}
+	if *cfg.HTTPOptions.Timeout <= 0 {
+		return 0
+	}
+	return *cfg.HTTPOptions.Timeout
+}
+
+// ignoredHTTPOptionFields names the HTTPOptions fields this package neither
+// translates nor rejects. It is the one deliberate silent drop in the config
+// surface, and both halves of that — dropping rather than forwarding, and
+// dropping rather than refusing — are deliberate.
+//
+// Not forwarded, because two things go wrong. An Authorization header does not
+// join the client's credentials, it replaces them: openai-go records any
+// case-insensitive "Authorization" as an override and ApplySecurity then
+// returns before attaching the configured API key, so the request would go out
+// authenticated by the caller's header alone. And a credential meant for
+// Gemini, x-goog-api-key most obviously, would reach api.openai.com verbatim.
+// A denylist of credential-bearing header names is not a defense worth
+// trusting, since every name it misses is a leak.
+//
+// Not refused, because the caller is often not the one who filled this in.
+// model/gemini allocates Config.HTTPOptions.Headers and writes x-goog-api-client
+// and user-agent into it on every request, and the compaction summarizer
+// forwards the field onward (session/compaction/llm_summarizer.go), so a config
+// reaching this package can carry headers the application never set. Refusing
+// them would turn ADK's own version strings into a hard error on a config
+// nobody wrote by hand.
+//
+// Headers meant for OpenAI belong on ClientConfig.Options, which is scoped to
+// the one backend that sees them.
+var ignoredHTTPOptionFields = []string{"Headers"}
+
+// unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
+// Gemini wire format rather than transport, and so cannot cross to Responses.
+// Unlike ignoredHTTPOptionFields these have never been accepted here, so naming
+// them costs no compatibility.
+var unsupportedHTTPOptionFields = []struct {
+	name  string
+	isSet func(*genai.HTTPOptions) bool
+}{
+	// The endpoint belongs to ClientConfig, which is also the only place it can
+	// be set coherently alongside the API key that authenticates against it.
+	{"BaseURL", func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
+	{"BaseURLResourceScope", func(o *genai.HTTPOptions) bool { return o.BaseURLResourceScope != "" }},
+	{"APIVersion", func(o *genai.HTTPOptions) bool { return o.APIVersion != "" }},
+	// Both shape a Gemini request body, which is not the body being sent.
+	{"ExtraBody", func(o *genai.HTTPOptions) bool { return o.ExtraBody != nil }},
+	{"ExtrasRequestProvider", func(o *genai.HTTPOptions) bool { return o.ExtrasRequestProvider != nil }},
+	// openai-go retries too, but on its own schedule; honoring only the retry
+	// count would quietly discard the backoff the caller asked for.
+	{"RetryOptions", func(o *genai.HTTPOptions) bool { return o.RetryOptions != nil }},
+}
+
+// reasoningEfforts maps every genai thinking level onto a Responses reasoning
+// effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
+// still asks the model to think, so it resolves to medium.
+var reasoningEfforts = map[genai.ThinkingLevel]shared.ReasoningEffort{
+	genai.ThinkingLevelUnspecified: shared.ReasoningEffortMedium,
+	genai.ThinkingLevelMinimal:     shared.ReasoningEffortMinimal,
+	genai.ThinkingLevelLow:         shared.ReasoningEffortLow,
+	genai.ThinkingLevelMedium:      shared.ReasoningEffortMedium,
+	genai.ThinkingLevelHigh:        shared.ReasoningEffortHigh,
+}
+
+// dynamicThinkingBudget is genai's "let the model size its own thinking".
+const dynamicThinkingBudget = -1
+
+// applyThinkingConfig maps genai's thinking config onto effort-based reasoning.
+// Responses has no token-budget knob, so a budget survives only as the
+// distinction between none, some, and the model's own choice.
+//
+// Summary is sent only when the caller sets IncludeThoughts. Reasoning
+// summaries require a verified OpenAI organization, so requesting one
+// unprompted would fail every reasoning call made by an unverified org — the
+// reason adk-python's unconditional summary is not copied here.
+func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget < dynamicThinkingBudget {
+		// Rejected up here rather than in the branch that reads the budget,
+		// because a level set alongside it wins and would otherwise carry the
+		// request through with the nonsense value unmentioned.
+		return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
+	}
+	// A level outranks a budget, but only when it names one: UNSPECIFIED is the
+	// caller declining to choose, so a budget they did set is the more specific
+	// instruction and takes over.
+	level := cfg.ThinkingLevel
+	if level == genai.ThinkingLevelUnspecified && cfg.ThinkingBudget != nil {
+		level = ""
+	}
+
+	var reasoning shared.ReasoningParam
+	switch {
+	case level != "":
+		effort, ok := reasoningEfforts[level]
+		if !ok {
+			// A level genai grew after this map was written: better an error
+			// naming it than an effort string the API will reject obscurely.
+			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
+		}
+		reasoning.Effort = effort
+	case cfg.ThinkingBudget != nil:
+		// Anything below dynamicThinkingBudget was rejected above, so what is
+		// left is none of it, the model's choice, or some positive amount.
+		switch *cfg.ThinkingBudget {
+		case 0:
+			// "Do not think" is what the none effort says. Not minimal: minimal
+			// is the least thinking rather than none of it, and models are
+			// dropping it — gpt-5.4-nano rejects minimal while accepting none.
+			reasoning.Effort = shared.ReasoningEffortNone
+		case dynamicThinkingBudget:
+			// The caller asked the model to decide, so no effort is sent and it
+			// does. Pinning a number here would be us deciding instead.
+		default:
+			reasoning.Effort = shared.ReasoningEffortMedium
+		}
+	case !cfg.IncludeThoughts:
+		// Nothing on the struct is set, so nothing was asked for and nothing is
+		// dropped by sending no reasoning block. IncludeThoughts false is a
+		// request this package satisfies rather than one it cannot honor.
+		return nil
+	}
+	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
+	// asks only for the summaries that response.go surfaces as thought parts.
+	if cfg.IncludeThoughts {
+		reasoning.Summary = shared.ReasoningSummaryAuto
+	}
+	params.Reasoning = reasoning
+	return nil
+}
+
+// rejectUntranslatableValues catches the settings whose field is translated but
+// whose particular value is not, which the presence check below cannot see.
+//
+// It runs after every named error so that a caller who set one of those too
+// gets the error they have always got, rather than this sentinel jumping the
+// queue and breaking their errors.Is.
+func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
+	switch {
+	case cfg.Logprobs != nil && !cfg.ResponseLogprobs:
+		// Logprobs only sizes the list ResponseLogprobs asks for, so alone it
+		// reaches neither params nor the wire.
+		return fmt.Errorf("%w: Logprobs without ResponseLogprobs", ErrUnsupportedConfigField)
+	case cfg.MaxOutputTokens < 0:
+		// Only a positive cap is translated. A negative one is neither a cap
+		// nor the absence of one, so it would otherwise vanish.
+		return fmt.Errorf("%w: negative MaxOutputTokens", ErrUnsupportedConfigField)
+	case cfg.CandidateCount < 0:
+		// Above one is ErrMultipleCandidatesNotSupported; zero and one both mean
+		// the single candidate Responses returns. Below zero means nothing.
+		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
+	}
+	// HTTPOptions is taken field by field rather than whole. Timeout is
+	// extracted by requestTimeout, Headers is deliberately ignored for the
+	// compatibility reason in ignoredHTTPOptionFields, and what is left
+	// describes the Gemini wire format and is named here.
+	if cfg.HTTPOptions != nil {
+		for _, field := range unsupportedHTTPOptionFields {
+			if field.isSet(cfg.HTTPOptions) {
+				return fmt.Errorf("%w: HTTPOptions.%s", ErrUnsupportedConfigField, field.name)
+			}
+		}
+		// openai-go treats a zero timeout as "no deadline", so forwarding a
+		// non-positive one would lift the caller's bound rather than apply it —
+		// the inverse of what they asked for, and worse than not asking.
+		if cfg.HTTPOptions.Timeout != nil && *cfg.HTTPOptions.Timeout <= 0 {
+			return fmt.Errorf("%w: non-positive HTTPOptions.Timeout %v", ErrUnsupportedConfigField, *cfg.HTTPOptions.Timeout)
+		}
+	}
+	return nil
+}
+
+// unsupportedConfigFields lists the GenerateContentConfig fields this package
+// cannot translate, each with a predicate reporting whether the caller set it.
+// Presence, not value: setting a knob at all means the caller expected an effect.
+var unsupportedConfigFields = []struct {
+	name  string
+	isSet func(*genai.GenerateContentConfig) bool
+}{
+	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
+	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
+	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
+	{"CachedContent", func(c *genai.GenerateContentConfig) bool { return c.CachedContent != "" }},
+	{"ResponseModalities", func(c *genai.GenerateContentConfig) bool { return c.ResponseModalities != nil }},
+	{"MediaResolution", func(c *genai.GenerateContentConfig) bool { return c.MediaResolution != "" }},
+	{"SpeechConfig", func(c *genai.GenerateContentConfig) bool { return c.SpeechConfig != nil }},
+	{"AudioTimestamp", func(c *genai.GenerateContentConfig) bool { return c.AudioTimestamp }},
+	{"ImageConfig", func(c *genai.GenerateContentConfig) bool { return c.ImageConfig != nil }},
+	{"EnableEnhancedCivicAnswers", func(c *genai.GenerateContentConfig) bool {
+		return c.EnableEnhancedCivicAnswers != nil
+	}},
+	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
+	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+}
+
+// rejectUnsupportedConfigFields reports the first unsupported field the caller set.
+func rejectUnsupportedConfigFields(cfg *genai.GenerateContentConfig) error {
+	for _, field := range unsupportedConfigFields {
+		if field.isSet(cfg) {
+			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.name)
+		}
 	}
 	return nil
 }

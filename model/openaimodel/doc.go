@@ -21,6 +21,12 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// Every top-level field of genai.GenerateContentConfig is either translated to
+// the Responses API or rejected with an error naming it, and the pre-existing
+// errors are checked first so existing errors.Is call sites are unaffected.
+// The single exception is HTTPOptions.Headers, ignored rather than forwarded
+// because headers addressed to another backend must not reach OpenAI.
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()

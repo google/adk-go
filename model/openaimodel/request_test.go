@@ -15,12 +15,21 @@
 package openaimodel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -404,6 +413,712 @@ func TestApplyGenerationConfig(t *testing.T) {
 				t.Errorf("applyGenerationConfig() params = %+v, want %+v", params, tc.wantParams)
 			}
 		})
+	}
+}
+
+// Each case sets exactly one previously-dropped field and expects the request
+// to fail naming it.
+func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Seed", &genai.GenerateContentConfig{Seed: genai.Ptr(int32(7))}},
+		{"RoutingConfig", &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}},
+		{"ModelSelectionConfig", &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}},
+		{"CachedContent", &genai.GenerateContentConfig{CachedContent: "cached"}},
+		{"ResponseModalities", &genai.GenerateContentConfig{ResponseModalities: []string{"AUDIO"}}},
+		{"MediaResolution", &genai.GenerateContentConfig{MediaResolution: genai.MediaResolutionLow}},
+		{"SpeechConfig", &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}},
+		{"AudioTimestamp", &genai.GenerateContentConfig{AudioTimestamp: true}},
+		{"ImageConfig", &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}},
+		{"EnableEnhancedCivicAnswers", &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}},
+		{"ModelArmorConfig", &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}},
+		{"AudioTranscriptionConfig", &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
+			}
+		})
+	}
+}
+
+// ThinkingConfig is honored rather than rejected, mapping onto effort-based
+// reasoning. Summary rides on IncludeThoughts alone: it requires a verified
+// OpenAI organization, so sending it unasked would fail every reasoning call an
+// unverified org makes.
+func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+		want     shared.ReasoningParam
+	}{
+		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningParam{Effort: shared.ReasoningEffortLow}},
+		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+		// Explicitly unspecified is distinct from unset, and resolves to medium.
+		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		// Responses has no token budget, so only zero/non-zero survives. Zero is
+		// none rather than minimal: minimal is the least thinking, not none of it.
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		// -1 is genai's "you decide", and the way to say that to Responses is to
+		// send no effort at all rather than to pick one on the caller's behalf.
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}, shared.ReasoningParam{}},
+		{"dynamic budget with thoughts", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(dynamicThinkingBudget)),
+			IncludeThoughts: true,
+		}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+		// A level wins over a budget, so an explicit MINIMAL still means minimal
+		// even alongside the zero budget that would otherwise mean none.
+		{"level wins over budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelMinimal,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		// IncludeThoughts is what asks for summaries, and only it.
+		{"thoughts with level", &genai.ThinkingConfig{
+			ThinkingLevel:   genai.ThinkingLevelHigh,
+			IncludeThoughts: true,
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh, Summary: shared.ReasoningSummaryAuto}},
+		{"thoughts with budget", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(2048)),
+			IncludeThoughts: true,
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium, Summary: shared.ReasoningSummaryAuto}},
+		// Thoughts alone leave the effort to the model rather than inventing one.
+		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(params.Reasoning, tc.want) {
+				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, tc.want)
+			}
+		})
+	}
+}
+
+// A summary costs a verified organization, so no caller gets one without
+// asking. This is the regression guard for the unconditional summary that made
+// every translated ThinkingConfig a 400.
+func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(4096))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}},
+		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if params.Reasoning.Summary != "" {
+				t.Errorf("applyGenerationConfig() set Summary = %q, want it unset", params.Reasoning.Summary)
+			}
+		})
+	}
+}
+
+// A budget below the dynamic sentinel means nothing in genai and cannot be
+// translated, so it is named rather than rounded into some effort.
+func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"budget alone", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))}},
+		// A level wins over a budget, and must not carry a nonsense one past
+		// unmentioned on its way through.
+		{"budget behind a winning level", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelLow,
+			ThinkingBudget: genai.Ptr(int32(-2)),
+		}},
+		{"budget behind thoughts", &genai.ThinkingConfig{
+			ThinkingBudget:  genai.Ptr(int32(-100)),
+			IncludeThoughts: true,
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+				ThinkingConfig: tc.thinking,
+			})
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), "ThinkingBudget") {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
+			}
+		})
+	}
+}
+
+// THINKING_LEVEL_UNSPECIFIED is the caller declining to name a level, so it
+// stands in for medium only when no budget says something more specific. Alone
+// it still means "think", which is why it is not simply treated as unset.
+func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+		want     shared.ReasoningParam
+	}{
+		{"unspecified alone", &genai.ThinkingConfig{
+			ThinkingLevel: genai.ThinkingLevelUnspecified,
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"unspecified yields to zero budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelUnspecified,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelUnspecified,
+			ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget)),
+		}, shared.ReasoningParam{}},
+		// A named level is a choice, so it keeps winning.
+		{"named level still wins over zero budget", &genai.ThinkingConfig{
+			ThinkingLevel:  genai.ThinkingLevelHigh,
+			ThinkingBudget: genai.Ptr(int32(0)),
+		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(params.Reasoning, tc.want) {
+				t.Errorf("params.Reasoning = %+v, want %+v", params.Reasoning, tc.want)
+			}
+		})
+	}
+}
+
+// A thinking level genai grows later must be named in an error, not lowercased
+// into an effort string the API rejects with a message pointing nowhere useful.
+func TestApplyGenerationConfigRejectsUnknownThinkingLevel(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("EXHAUSTIVE")},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "EXHAUSTIVE") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name the level", err)
+	}
+}
+
+// Every level genai declares today maps to an effort, so a caller setting a
+// valid level gets reasoning rather than an error.
+//
+// Go cannot enumerate the constants of a string enum, so this list is written
+// out and cannot notice a level genai adds later. It does not need to: an
+// unmapped level is rejected by name at runtime, which is a diagnosable failure
+// rather than the silent drop this package exists to avoid. The length check
+// below only catches the opposite drift — an entry added to the map that is not
+// a level, or one this list forgot.
+func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
+	levels := []genai.ThinkingLevel{
+		genai.ThinkingLevelUnspecified,
+		genai.ThinkingLevelMinimal,
+		genai.ThinkingLevelLow,
+		genai.ThinkingLevelMedium,
+		genai.ThinkingLevelHigh,
+	}
+	for _, level := range levels {
+		if _, ok := reasoningEfforts[level]; !ok {
+			t.Errorf("reasoningEfforts is missing genai.ThinkingLevel %q", level)
+		}
+	}
+	if len(reasoningEfforts) != len(levels) {
+		t.Errorf("reasoningEfforts has %d entries, want %d: it gained one this test does not list", len(reasoningEfforts), len(levels))
+	}
+
+	// And the mapping is reachable end to end, not just present in the map: a
+	// map entry nothing reads would pass the loop above and still drop the level.
+	for _, level := range levels {
+		params := &responses.ResponseNewParams{}
+		cfg := &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: level}}
+		if err := applyGenerationConfig(params, cfg); err != nil {
+			t.Errorf("applyGenerationConfig(ThinkingLevel %q) error = %v, want nil", level, err)
+			continue
+		}
+		if params.Reasoning.Effort != reasoningEfforts[level] {
+			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, reasoningEfforts[level])
+		}
+	}
+}
+
+// A ThinkingConfig with nothing set asks for nothing, so nothing is sent and
+// nothing is dropped. IncludeThoughts false in particular is a request this
+// package satisfies — by not including thoughts — rather than one it cannot
+// honor, so erroring would fail a caller who got precisely what they asked for.
+func TestApplyGenerationConfigAcceptsEmptyThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking *genai.ThinkingConfig
+	}{
+		{"zero value", &genai.ThinkingConfig{}},
+		{"thoughts explicitly off", &genai.ThinkingConfig{IncludeThoughts: false}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+				t.Errorf("params.Reasoning = %+v, want zero: nothing was asked for", params.Reasoning)
+			}
+		})
+	}
+}
+
+// Reasoning stays unset when the caller asks for nothing, so non-reasoning
+// models are not sent a reasoning block they would reject.
+func TestApplyGenerationConfigOmitsReasoningByDefault(t *testing.T) {
+	params := &responses.ResponseNewParams{}
+	if err := applyGenerationConfig(params, &genai.GenerateContentConfig{}); err != nil {
+		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+		t.Errorf("params.Reasoning = %+v, want zero", params.Reasoning)
+	}
+}
+
+// A field can be translated and still be handed a value that is not. These are
+// the values that would otherwise slip through the presence check, since the
+// field they belong to is one the package does support.
+func TestApplyGenerationConfigRejectsUntranslatableValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   *genai.GenerateContentConfig
+		names string
+	}{
+		// Logprobs only sizes the list ResponseLogprobs asks for.
+		{"orphan Logprobs", &genai.GenerateContentConfig{Logprobs: genai.Ptr(int32(5))}, "Logprobs"},
+		{"negative MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: -1}, "MaxOutputTokens"},
+		{"negative CandidateCount", &genai.GenerateContentConfig{CandidateCount: -1}, "CandidateCount"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.names)
+			}
+		})
+	}
+}
+
+// The values either side of the rejected ones still work, so tightening the
+// check did not turn ordinary configs into errors.
+func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+	}{
+		{"unset MaxOutputTokens", &genai.GenerateContentConfig{}},
+		{"positive MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: 1}},
+		{"unset CandidateCount", &genai.GenerateContentConfig{}},
+		// Zero and one both mean the single candidate Responses returns.
+		{"single CandidateCount", &genai.GenerateContentConfig{CandidateCount: 1}},
+		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
+			ResponseLogprobs: true,
+			Logprobs:         genai.Ptr(int32(5)),
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg); err != nil {
+				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// Presence, not value: an off value still means the caller expected the knob to
+// be wired up. Sniffing for no-op values would need re-deciding per new field.
+func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		EnableEnhancedCivicAnswers: genai.Ptr(false),
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "EnableEnhancedCivicAnswers") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name EnableEnhancedCivicAnswers", err)
+	}
+}
+
+// Every tier genai names has a Responses equivalent, so setting one is honored
+// rather than refused. OpenAI offers tiers genai cannot name; that is fine, the
+// mapping only has to be total in this direction.
+func TestApplyGenerationConfigServiceTier(t *testing.T) {
+	tests := []struct {
+		tier genai.ServiceTier
+		want responses.ResponseNewParamsServiceTier
+	}{
+		{genai.ServiceTierFlex, responses.ResponseNewParamsServiceTierFlex},
+		{genai.ServiceTierPriority, responses.ResponseNewParamsServiceTierPriority},
+		// genai's "standard" is what OpenAI calls "default".
+		{genai.ServiceTierStandard, responses.ResponseNewParamsServiceTierDefault},
+		// Explicitly declining to choose is what auto means.
+		{genai.ServiceTierUnspecified, responses.ResponseNewParamsServiceTierAuto},
+	}
+
+	for _, tc := range tests {
+		t.Run(string(tc.tier), func(t *testing.T) {
+			params := &responses.ResponseNewParams{}
+			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ServiceTier: tc.tier}); err != nil {
+				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
+			}
+			if params.ServiceTier != tc.want {
+				t.Errorf("params.ServiceTier = %q, want %q", params.ServiceTier, tc.want)
+			}
+		})
+	}
+
+	// A tier genai adds later is named rather than passed through as a string
+	// the API would refuse for reasons the caller cannot act on.
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ServiceTier: genai.ServiceTier("platinum"),
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("unknown tier: error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "platinum") {
+		t.Errorf("unknown tier: error = %q, want it to name the tier", err)
+	}
+}
+
+// serviceTiers must cover every tier genai declares, or a caller setting a
+// valid one gets an error instead of the tier they asked for.
+func TestServiceTiersCoverEveryGenaiTier(t *testing.T) {
+	tiers := []genai.ServiceTier{
+		genai.ServiceTierUnspecified,
+		genai.ServiceTierStandard,
+		genai.ServiceTierFlex,
+		genai.ServiceTierPriority,
+	}
+	for _, tier := range tiers {
+		if _, ok := serviceTiers[tier]; !ok {
+			t.Errorf("serviceTiers is missing genai.ServiceTier %q", tier)
+		}
+	}
+	if len(serviceTiers) != len(tiers) {
+		t.Errorf("serviceTiers has %d entries, want %d: it gained one this test does not list", len(serviceTiers), len(tiers))
+	}
+}
+
+// A positive Timeout is the one part of HTTPOptions that crosses to Responses:
+// a duration means the same thing to any HTTP client and can carry nothing
+// sensitive. Headers cannot, which the tests below cover.
+func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
+	timeout := 45 * time.Second
+	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
+	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+		t.Fatalf("applyGenerationConfig() error = %v, want nil: a timeout is honored", err)
+	}
+	if got := requestTimeout(cfg); got != timeout {
+		t.Errorf("requestTimeout() = %v, want %v", got, timeout)
+	}
+}
+
+// openai-go reads a zero timeout as "no deadline", so forwarding a non-positive
+// one would lift the caller's bound instead of applying it.
+func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		timeout := d
+		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
+		})
+		if !errors.Is(err, ErrUnsupportedConfigField) {
+			t.Fatalf("timeout %v: error = %v, want %v", d, err, ErrUnsupportedConfigField)
+		}
+		if !strings.Contains(err.Error(), "Timeout") {
+			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
+		}
+	}
+}
+
+// The reason no header crosses, pinned against the SDK rather than asserted in
+// prose: openai-go records any case-insensitive Authorization as an override and
+// then skips attaching the configured API key, so forwarding a caller's header
+// would replace the real credential rather than accompany it. WithHeaderAdd is
+// no safer than WithHeader here, despite the name.
+//
+// This drives openai-go directly. If a future version stops treating the header
+// as an override, this test fails and Headers can be reconsidered — until then
+// it documents why applyGenerationConfig refuses them.
+func TestCallerAuthorizationHeaderDisplacesTheAPIKey(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed","output":[]}`))
+	}))
+	defer srv.Close()
+
+	client := openai.NewClient(option.WithAPIKey("real-key"), option.WithBaseURL(srv.URL))
+	params := responses.ResponseNewParams{Model: shared.ResponsesModel("m")}
+
+	// Only the header the stub saw matters here, never the decoded response.
+	_, _ = client.Responses.New(context.Background(), params)
+	if got != "Bearer real-key" {
+		t.Fatalf("baseline Authorization = %s, want the configured key", redact(got))
+	}
+	_, _ = client.Responses.New(context.Background(), params,
+		option.WithHeaderAdd("Authorization", "Bearer caller"))
+	if got == "Bearer real-key" {
+		t.Fatal("openai-go now keeps the configured key alongside a caller Authorization header; " +
+			"the reason HTTPOptions.Headers is rejected no longer holds, so revisit it")
+	}
+	if got != "Bearer caller" {
+		t.Errorf("Authorization = %s, want the caller header to have displaced the key", redact(got))
+	}
+}
+
+// Headers are ignored rather than refused, so a config that carried them
+// against main keeps working here. What must never happen is forwarding them:
+// TestCallerAuthorizationHeaderDisplacesTheAPIKey shows what an Authorization header
+// would do, and a Gemini credential would simply reach the wrong provider.
+func TestHeadersAffectNeitherValidationNorTimeout(t *testing.T) {
+	headers := []http.Header{
+		{"Authorization": []string{"Bearer caller"}},
+		{"authorization": []string{"Bearer lowercase"}},
+		{"X-Goog-Api-Key": []string{"gemini-key"}},
+		{"X-Trace-Id": []string{"harmless"}},
+	}
+	// Names, never values: a header value is exactly the thing not to log.
+	for _, h := range headers {
+		names := slices.Sorted(maps.Keys(h))
+		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: h}}
+		if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", names, err)
+		}
+		if got := requestTimeout(cfg); got != 0 {
+			t.Errorf("headers %v: produced a %v timeout, want none", names, got)
+		}
+	}
+}
+
+// The end of that promise, checked where it can actually be observed: no header
+// a caller put in HTTPOptions may appear on the outgoing request.
+func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) { assertNoHeaderReachesTheWire(t, stream) })
+	}
+}
+
+func assertNoHeaderReachesTheWire(t *testing.T, stream bool) {
+	t.Helper()
+	wireTimeout := 30 * time.Second
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+			`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+	}))
+	defer srv.Close()
+
+	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "real-key", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		// A timeout is set deliberately. Without one the translation returns
+		// early, so header forwarding reintroduced after that point would
+		// never run here and the test would pass vacuously.
+		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
+			Timeout: &wireTimeout,
+			Headers: http.Header{
+				"Authorization":  []string{"Bearer caller"},
+				"X-Goog-Api-Key": []string{"gemini-key"},
+				"X-Trace-Id":     []string{"harmless"},
+			},
+		}},
+	}
+	for _, err := range m.GenerateContent(context.Background(), req, stream) {
+		if err != nil && !stream {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+	if v := got.Get("Authorization"); v != "Bearer real-key" {
+		t.Errorf("Authorization = %s, want the configured key: a caller header displaced it", redact(v))
+	}
+	if v := got.Get("X-Goog-Api-Key"); v != "" {
+		t.Errorf("X-Goog-Api-Key = %s, want absent: a Gemini credential reached the provider", redact(v))
+	}
+	if v := got.Get("X-Trace-Id"); v != "" {
+		t.Errorf("X-Trace-Id = %q, want absent: headers are not forwarded", v)
+	}
+}
+
+// A slice can tell an explicit empty from unset, so it should: asking for no
+// modalities at all is still a request this package cannot honor.
+func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
+	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		ResponseModalities: []string{},
+	})
+	if !errors.Is(err, ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	}
+	if !strings.Contains(err.Error(), "ResponseModalities") {
+		t.Errorf("applyGenerationConfig() error = %q, want it to name ResponseModalities", err)
+	}
+}
+
+// Every named error is checked before the sentinel, so an errors.Is call site
+// that worked before ErrUnsupportedConfigField existed still works when the
+// caller happens to set one of the newly-rejected fields as well.
+func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
+	topK := float32(5)
+	// Each case pairs a named error with a field that returns the sentinel; the
+	// named error must win. Logprobs is here because it is rejected from within
+	// the translation order rather than from the trailing sweep, which is
+	// exactly where a sentinel can get in front of a named error by accident.
+	tests := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+		want error
+	}{
+		{"TopK over Seed", &genai.GenerateContentConfig{
+			TopK: &topK,
+			Seed: genai.Ptr(int32(7)),
+		}, ErrTopKNotSupported},
+		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs: genai.Ptr(int32(5)),
+			Labels:   map[string]string{"team": "search"},
+		}, ErrLabelsNotSupported},
+		{"SafetySettings over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs:       genai.Ptr(int32(5)),
+			SafetySettings: []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment}},
+		}, ErrSafetySettingsNotSupported},
+		{"MIME type over orphan Logprobs", &genai.GenerateContentConfig{
+			Logprobs:         genai.Ptr(int32(5)),
+			ResponseMIMEType: "text/csv",
+		}, ErrUnsupportedMIMEType},
+		{"StopSequences over ThinkingConfig", &genai.GenerateContentConfig{
+			StopSequences:  []string{"STOP"},
+			ThinkingConfig: &genai.ThinkingConfig{},
+		}, ErrStopSequencesNotSupported},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// Guards against the bug returning as genai grows fields: every exported field
+// must be translated, covered by a named error, or in unsupportedConfigFields.
+// When this fails, add the new field to whichever of the three it belongs in —
+// not to this test alone, which would only re-hide the drop.
+func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
+	// Fields applyGenerationConfig, convertTools or convertToolChoice translate.
+	translated := map[string]bool{
+		"SystemInstruction":  true,
+		"Temperature":        true,
+		"TopP":               true,
+		"MaxOutputTokens":    true,
+		"ResponseLogprobs":   true,
+		"Logprobs":           true,
+		"ResponseSchema":     true,
+		"ResponseJsonSchema": true,
+		"ThinkingConfig":     true,
+		"ServiceTier":        true,
+		"HTTPOptions":        true,
+		"Tools":              true,
+		"ToolConfig":         true,
+	}
+	// Fields rejected with their own error, predating ErrUnsupportedConfigField.
+	namedError := map[string]bool{
+		"TopK":             true,
+		"StopSequences":    true,
+		"CandidateCount":   true,
+		"FrequencyPenalty": true,
+		"PresencePenalty":  true,
+		"Labels":           true,
+		"SafetySettings":   true,
+		"ResponseMIMEType": true,
+	}
+	rejected := make(map[string]bool, len(unsupportedConfigFields))
+	for _, field := range unsupportedConfigFields {
+		rejected[field.name] = true
+	}
+
+	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
+	for i := range cfgType.NumField() {
+		name := cfgType.Field(i).Name
+		if cfgType.Field(i).PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		if !translated[name] && !namedError[name] && !rejected[name] {
+			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
+		}
+	}
+
+	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
+	for name := range rejected {
+		if _, ok := cfgType.FieldByName(name); !ok {
+			t.Errorf("unsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
+		}
+	}
+}
+
+// ThinkingConfig is the one nested type this package claims to read in full, so
+// a field added to it must be translated rather than dropped like the parts of
+// Tools and the schema types that doc.go still excludes from the guarantee.
+func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
+	read := map[string]bool{
+		"IncludeThoughts": true,
+		"ThinkingBudget":  true,
+		"ThinkingLevel":   true,
+	}
+	cfgType := reflect.TypeOf(genai.ThinkingConfig{})
+	for i := range cfgType.NumField() {
+		field := cfgType.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		if !read[field.Name] {
+			t.Errorf("genai.ThinkingConfig.%s is not read by applyThinkingConfig: it would be silently ignored", field.Name)
+		}
 	}
 }
 
@@ -822,5 +1537,205 @@ func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 	}
 	if got, want := string(data), `"minimum":9007199254740993`; !strings.Contains(got, want) {
 		t.Fatalf("json.Marshal(params) = %s, want exact integer constraint %s", got, want)
+	}
+}
+
+// The timeout has to reach the HTTP request, not merely be computed and left
+// on the floor. Asserting that requestTimeout returns the right duration proves
+// nothing about the wiring in GenerateContent: deleting the context.WithTimeout
+// block from generate and generateStream leaves such a test passing, and
+// Timeout is the only thing HTTPOptions still does, so that wiring is its
+// entire value.
+//
+// The server answers slowly but successfully. A wired timeout therefore fails
+// the call quickly, while an unwired one waits and succeeds — so the two
+// outcomes differ in kind, not just in timing, and neither depends on how
+// loaded the machine is.
+func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
+	const serverDelay = 3 * time.Second
+
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Closed before the server is, so a handler still sleeping when the
+			// caller has already given up does not hold up srv.Close.
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-time.After(serverDelay):
+				case <-r.Context().Done():
+					return
+				case <-release:
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+					`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+					`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+			}))
+			defer srv.Close()
+			defer close(release)
+
+			timeout := 100 * time.Millisecond
+			m, err := NewModel(context.Background(), "gpt-4o-mini",
+				&ClientConfig{APIKey: "test", BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+				Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+			}
+
+			start := time.Now()
+			var got error
+			for _, err := range m.GenerateContent(context.Background(), req, stream) {
+				if err != nil {
+					got = err
+					break
+				}
+			}
+			elapsed := time.Since(start)
+
+			if got == nil {
+				t.Fatalf("call succeeded after %v with a %v timeout configured: "+
+					"the timeout never reached the request", elapsed, timeout)
+			}
+			if elapsed >= serverDelay {
+				t.Errorf("call took %v, i.e. it waited for the server rather than for its %v timeout", elapsed, timeout)
+			}
+		})
+	}
+}
+
+// ignoredHTTPOptionFields is part of the contract, so it has to name a real
+// field, and every field has to be accounted for in exactly one of the three
+// categories the package documents.
+func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
+	honored := map[string]bool{"Timeout": true}
+	ignored := make(map[string]bool, len(ignoredHTTPOptionFields))
+	for _, name := range ignoredHTTPOptionFields {
+		ignored[name] = true
+	}
+	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
+	for _, field := range unsupportedHTTPOptionFields {
+		rejected[field.name] = true
+	}
+
+	optType := reflect.TypeOf(genai.HTTPOptions{})
+	for i := range optType.NumField() {
+		field := optType.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported, not settable by callers
+		}
+		n := 0
+		for _, in := range []bool{honored[field.Name], ignored[field.Name], rejected[field.Name]} {
+			if in {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("genai.HTTPOptions.%s is in %d of {honored, ignored, rejected}, want exactly 1", field.Name, n)
+		}
+	}
+	for name := range ignored {
+		if _, ok := optType.FieldByName(name); !ok {
+			t.Errorf("ignoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+		}
+	}
+	for name := range rejected {
+		if _, ok := optType.FieldByName(name); !ok {
+			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+		}
+	}
+}
+
+// redact describes a header value without reproducing it. These assertions run
+// against stub credentials, but a maintainer debugging a live problem may well
+// have swapped a real key in, and a failing test should not put it in the log.
+func redact(v string) string {
+	if v == "" {
+		return "empty"
+	}
+	return fmt.Sprintf("<%d-byte value>", len(v))
+}
+
+// requestTimeout must be safe on its own terms. applyGenerationConfig rejects a
+// non-positive timeout before any request is built, so this guard is defense in
+// depth — and it is tested directly rather than assumed unreachable, because a
+// guard that only holds while callers keep the right order is not a guard.
+func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		timeout := d
+		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
+		if got := requestTimeout(cfg); got != 0 {
+			t.Errorf("requestTimeout(%v) = %v, want 0: a non-positive bound must not become a deadline", d, got)
+		}
+	}
+	// The positive case still comes through, so the guard is not simply off.
+	positive := time.Second
+	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
+	if got := requestTimeout(cfg); got != positive {
+		t.Errorf("requestTimeout(%v) = %v, want it unchanged", positive, got)
+	}
+}
+
+// An iter.Seq2 may be ranged more than once, and each range is its own call.
+// The timeout is applied inside the returned closure, so it must derive from
+// the context the caller passed rather than overwrite it: assigning to the
+// captured variable would leave the second range starting from the deadline the
+// first one had already cancelled, failing instantly and for a reason the
+// caller could not see.
+func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) { assertReRangeable(t, stream) })
+	}
+}
+
+func assertReRangeable(t *testing.T, stream bool) {
+	t.Helper()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+			`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+	}))
+	defer srv.Close()
+
+	timeout := 30 * time.Second
+	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "test", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+	}
+
+	seq := m.GenerateContent(context.Background(), req, stream)
+	for pass := 1; pass <= 2; pass++ {
+		var got error
+		for _, err := range seq {
+			if err != nil {
+				got = err
+				break
+			}
+		}
+		if got != nil {
+			t.Fatalf("pass %d: error = %v, want nil: the sequence is not reusable, "+
+				"which happens when the timeout overwrites the captured context", pass, got)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("server saw %d calls, want 2: the second range did not reach it", calls)
 	}
 }

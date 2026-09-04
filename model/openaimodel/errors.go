@@ -39,6 +39,8 @@ var (
 	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
+	// ErrUnsupportedConfigField is returned when a generation config field has no Responses API equivalent; the message names it.
+	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
