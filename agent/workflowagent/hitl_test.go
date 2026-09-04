@@ -27,6 +27,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
@@ -328,6 +329,78 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	}
 	if want := "Hello, Wolo!"; got != want {
 		t.Errorf("orchestrator output = %v, want %q", got, want)
+	}
+}
+
+// TestWorkflowAgent_AgentNode_CredentialResume pins resume for interactive
+// consent inside a workflow: an AgentNode whose agent pauses on a long-running
+// tool request (adk_request_credential — NOT the workflow's own
+// adk_request_input) must, on the follow-up turn, RESUME the paused node rather
+// than restart the graph or hand off. Concretely:
+//
+//   - the consent FunctionResponse (a non-adk_request_input name) is detected
+//     as a resume (name-agnostic detectResume);
+//   - the paused node re-enters and its agent finishes (AgentNode defaults to
+//     RerunOnResume, so Resume re-runs it instead of the handoff path);
+//   - the upstream node does NOT re-run (a fresh Workflow.Run would replay it);
+//   - the resumed agent is not re-fed its node input (it continues from
+//     history, so a single_turn/task agent would not re-call the tool).
+func TestWorkflowAgent_AgentNode_CredentialResume(t *testing.T) {
+	const fcID = "cred-1"
+
+	var upstreamRuns atomic.Int32
+	upstream := workflow.NewFunctionNode("upstream",
+		func(_ agent.Context, _ any) (string, error) {
+			upstreamRuns.Add(1)
+			return "upstream-out", nil
+		}, workflow.NodeConfig{})
+
+	var workerRuns atomic.Int32
+	var resumeGotInput atomic.Bool
+	// The fake isn't an LlmAgent, so opt into RerunOnResume explicitly (a
+	// real LlmAgent node gets it by default).
+	worker, err := workflow.NewAgentNode(
+		newConsentAgent(t, "worker", fcID, &workerRuns, &resumeGotInput),
+		workflow.NodeConfig{RerunOnResume: ptrTrue()},
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	a := makeAgent(t, workflow.Chain(workflow.Start, upstream, worker))
+	sess := newFakeSession()
+
+	// Turn 1: fresh run. upstream runs, then worker's tool needs consent, so
+	// the node pauses on the long-running request.
+	turn1 := runFreshTurn(t, sess, a, "start")
+	if !hasLongRunning(turn1, fcID) {
+		t.Fatalf("turn 1 did not pause on the long-running consent request %q", fcID)
+	}
+	if got := upstreamRuns.Load(); got != 1 {
+		t.Fatalf("upstream runs after turn 1 = %d, want 1", got)
+	}
+	if got := workerRuns.Load(); got != 1 {
+		t.Fatalf("worker runs after turn 1 = %d, want 1", got)
+	}
+
+	// Turn 2: the user grants consent. The name is adk_request_credential, so
+	// this also exercises the name-agnostic resume dispatch.
+	turn2 := drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), nil)
+
+	if hasAnyLongRunning(turn2) {
+		t.Errorf("turn 2 paused again instead of completing: %v", turn2)
+	}
+	if !hasOutput(turn2, "done") {
+		t.Errorf("turn 2 did not produce the worker's completion output %q", "done")
+	}
+	if got := upstreamRuns.Load(); got != 1 {
+		t.Errorf("upstream runs after resume = %d, want 1 (upstream must NOT re-run)", got)
+	}
+	if got := workerRuns.Load(); got != 2 {
+		t.Errorf("worker runs = %d, want 2 (paused once, resumed once)", got)
+	}
+	if resumeGotInput.Load() {
+		t.Error("worker was re-fed its node input on resume; it must continue from history")
 	}
 }
 
@@ -660,5 +733,179 @@ func approvalSchema() *jsonschema.Schema {
 			"approved": {Type: "boolean"},
 		},
 		Required: []string{"approved"},
+	}
+}
+
+// newConsentAgent builds a fake agent that, on its first activation, emits a
+// long-running adk_request_credential request (a tool needing interactive
+// consent) and pauses; once that request is answered in history it completes
+// with output "done". It records its activation count and whether it was given
+// node input on the resume activation.
+func newConsentAgent(t *testing.T, name, fcID string, runs *atomic.Int32, gotInputOnResume *atomic.Bool) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				runs.Add(1)
+				if answeredInHistory(ctx.Session(), fcID) {
+					if ctx.UserContent() != nil {
+						gotInputOnResume.Store(true)
+					}
+					done := session.NewEvent(ctx, ctx.InvocationID())
+					done.Author = name
+					done.Output = "done"
+					done.LLMResponse = model.LLMResponse{Content: &genai.Content{
+						Role:  genai.RoleModel,
+						Parts: []*genai.Part{{Text: "done"}},
+					}}
+					yield(done, nil)
+					return
+				}
+				req := session.NewEvent(ctx, ctx.InvocationID())
+				req.Author = name
+				req.LongRunningToolIDs = []string{fcID}
+				req.LLMResponse = model.LLMResponse{Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID:   fcID,
+						Name: "adk_request_credential",
+					}}},
+				}}
+				yield(req, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	return a
+}
+
+// credentialResume builds a user message carrying a consent FunctionResponse.
+// The name is adk_request_credential (not adk_request_input) to exercise the
+// name-agnostic resume dispatch.
+func credentialResume(fcID string) *genai.Content {
+	return &genai.Content{
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       fcID,
+				Name:     "adk_request_credential",
+				Response: map[string]any{"status": "approved"},
+			},
+		}},
+	}
+}
+
+// answeredInHistory reports whether a FunctionResponse with the given id is in
+// session history.
+func answeredInHistory(sess session.Session, id string) bool {
+	events := sess.Events()
+	if events == nil {
+		return false
+	}
+	for i := 0; i < events.Len(); i++ {
+		for _, fr := range utils.FunctionResponses(utils.Content(events.At(i))) {
+			if fr != nil && fr.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasLongRunning reports whether any event carries id in LongRunningToolIDs.
+func hasLongRunning(events []*session.Event, id string) bool {
+	for _, ev := range events {
+		for _, x := range ev.LongRunningToolIDs {
+			if x == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAnyLongRunning reports whether any event carries a long-running interrupt.
+func hasAnyLongRunning(events []*session.Event) bool {
+	for _, ev := range events {
+		if len(ev.LongRunningToolIDs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOutput reports whether any event carries the given Output value.
+func hasOutput(events []*session.Event, want any) bool {
+	for _, ev := range events {
+		if ev.Output == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWorkflowAgent_UnmatchedFunctionResponseRunsFresh pins that dropping the
+// function-name filter did not turn every function-response turn into a resume.
+// A reply that answers no waiting interrupt must fall through to a fresh
+// Workflow.Run, as it did before the ID-keyed matching landed — the runner
+// deliberately allows a turn to carry both text and a function response
+// (see runner.buildResumeResponses, which filters the same way).
+func TestWorkflowAgent_UnmatchedFunctionResponseRunsFresh(t *testing.T) {
+	var upstream atomic.Int32
+	asker := newAskerNode("approval", "decide", nil)
+	a := makeAgent(t, workflow.Chain(workflow.Start,
+		newCountingHandlerNode("upstream", &upstream), asker))
+	sess := newFakeSession()
+
+	runFreshTurn(t, sess, a, "start")
+	if got := upstream.Load(); got != 1 {
+		t.Fatalf("upstream runs after turn 1 = %d, want 1", got)
+	}
+
+	// A function response that answers nothing, alongside real user text.
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "forget it, start over"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: "unrelated-call", Name: "get_weather", Response: map[string]any{"temp": 20},
+		}},
+	}}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, msg)), nil)
+
+	if got := upstream.Load(); got != 2 {
+		t.Errorf("upstream runs after the unmatched reply = %d, want 2 (a fresh run); "+
+			"the turn was misrouted to Resume and the user's text was dropped", got)
+	}
+}
+
+// TestWorkflowAgent_Resume_ReentryIsIdempotent is the re-entry twin of
+// TestWorkflowAgent_Resume_Idempotent, which only covers handoff. Re-entry is
+// now the default for LlmAgent nodes, so a replayed approval must not re-run
+// the node — otherwise a double-submit re-executes whatever the human approved.
+func TestWorkflowAgent_Resume_ReentryIsIdempotent(t *testing.T) {
+	const fcID = "cred-1"
+	var runs atomic.Int32
+	var gotInput atomic.Bool
+	worker, err := workflow.NewAgentNode(
+		newConsentAgent(t, "worker", fcID, &runs, &gotInput),
+		workflow.NodeConfig{RerunOnResume: ptrTrue()},
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, worker))
+	sess := newFakeSession()
+
+	runFreshTurn(t, sess, a, "start")
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), nil)
+	afterFirst := runs.Load()
+
+	// Byte-identical replay of the same approval.
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), workflow.ErrNothingToResume)
+
+	if got := runs.Load(); got != afterFirst {
+		t.Errorf("worker runs = %d after a replayed approval, want %d "+
+			"(a duplicate resume must reschedule nothing)", got, afterFirst)
 	}
 }

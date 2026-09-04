@@ -15,13 +15,13 @@
 package workflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -40,6 +40,12 @@ type nodeScanState struct {
 	// duplicate resume replayed an already-consumed response. Lets
 	// Resume tell a genuine first resume from an idempotent no-op.
 	resolvedCount map[string]int
+	// consumed marks an interrupt whose answer the node has already
+	// acted on: it emitted an event after that answer first appeared.
+	// Counting responses cannot express this — a retry after a
+	// rejected payload and a duplicate replay both leave two responses
+	// in history, but only the replay follows a run of the node.
+	consumed map[string]bool
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
@@ -127,7 +133,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 	scanFor := func(name string) *nodeScanState {
 		s := scans[name]
 		if s == nil {
-			s = &nodeScanState{resolved: map[string]any{}, resolvedCount: map[string]int{}, schemas: map[string]*jsonschema.Schema{}}
+			s = &nodeScanState{resolved: map[string]any{}, resolvedCount: map[string]int{}, consumed: map[string]bool{}, schemas: map[string]*jsonschema.Schema{}}
 			scans[name] = s
 		}
 		return s
@@ -158,7 +164,14 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
+				if _, first := sf.resolved[fr.ID]; !first {
+					// First answer for this interrupt: nothing has run
+					// on it yet. A later answer does not reset that —
+					// the node either acted after the first one or it
+					// did not.
+					sf.consumed[fr.ID] = false
+				}
+				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
 			continue
@@ -172,6 +185,13 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
+		// The node produced this event, so it has acted on every answer
+		// already in history. Recorded per interrupt, not per node: a
+		// node that re-entered on one answer and paused again must still
+		// act on the answer to the new interrupt.
+		for id := range s.resolved {
+			s.consumed[id] = true
+		}
 		if ev.Output != nil {
 			s.branch = ev.Branch
 		}
@@ -348,6 +368,10 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
 		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		// Unless the node already ran on every one of them, in which
+		// case this turn is a replay and re-running would re-do
+		// whatever the human approved.
+		ns.reentryConsumed = len(resumed) > 0 && allConsumed(scan, resumed)
 	default:
 		// All resolved, handoff: the node is done; its output is the
 		// response, which Resume forwards to successors. Keep the
@@ -367,6 +391,17 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		}
 	}
 	return ns, nil
+}
+
+// allConsumed reports whether the node has already acted on every one of the
+// given resolved interrupts.
+func allConsumed(scan *nodeScanState, resumed map[string]any) bool {
+	for id := range resumed {
+		if !scan.consumed[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // predecessorInput walks incoming edges backward to find a resuming
@@ -499,31 +534,4 @@ func schemaFromEvent(ev *session.Event, id string) *jsonschema.Schema {
 		}
 	}
 	return nil
-}
-
-// unwrapResponse extracts the original value from a FunctionResponse
-// payload. A sole single-key wrapper — {"result": v} (adk-python),
-// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with
-// string values JSON-parsed when possible; anything else passes
-// through. Mirrors adk-python _unwrap_response, extended with the
-// adk-go keys for cross-runtime sessions.
-func unwrapResponse(data map[string]any) any {
-	if len(data) != 1 {
-		return data
-	}
-	for _, key := range []string{"result", "response", "payload"} {
-		v, ok := data[key]
-		if !ok {
-			continue
-		}
-		if s, isStr := v.(string); isStr {
-			var parsed any
-			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-				return parsed
-			}
-			return s
-		}
-		return v
-	}
-	return data
 }

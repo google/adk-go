@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -50,18 +51,7 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-	}
-
-	// The wrapped agent's Run already emits an invoke_agent span, so
-	// the scheduler must not add a redundant invoke_node wrapper —
-	// whether this node is activated by a static edge or delegated to
-	// via RunNode. Mirrors runner.newAgentNode.
-	cfg.EmitsOwnSpan = true
+	cfg = applyAgentNodeDefaults(a, cfg)
 
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
@@ -69,20 +59,56 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}, nil
 }
 
+// applyAgentNodeDefaults fills in the AgentNode config defaults, mirroring
+// applyDynamicDefaults. EmitsOwnSpan is always set: the agent's Run already
+// emits invoke_agent, so the scheduler must not add a redundant invoke_node
+// wrapper. LlmAgent nodes additionally default to single_turn mode and to
+// re-entry on resume (so a paused agent finishes instead of handing off),
+// matching runner.newAgentNode and the mode/rerun_on_resume defaults of
+// adk-python's build_node; other kinds keep the engine default and an explicit
+// RerunOnResume always wins.
+//
+// The mode default is a write to the wrapped agent's own state, not to cfg.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+	cfg.EmitsOwnSpan = true
+
+	llmA, ok := a.(llminternal.Agent)
+	if !ok {
+		return cfg
+	}
+	if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
+		state.Mode = llminternal.ModeSingleTurn
+	}
+	if cfg.RerunOnResume == nil {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+	return cfg
+}
+
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
-// It uses explicitly provided schemas for both input and output.
+// It uses explicitly provided schemas for both input and output, and applies
+// the same LlmAgent defaults as [NewAgentNode].
 func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[any, any](a, inputSchema, outputSchema, cfg)
 }
 
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
+// It applies the same LlmAgent defaults as [NewAgentNode].
 func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
 // are inferred as `any`.
+//
+// When a is an LlmAgent, its mode defaults to single_turn and
+// cfg.RerunOnResume defaults to &true, so a node paused on a long-running tool
+// request re-enters and finishes instead of handing the raw reply to its
+// successor. An explicit RerunOnResume is respected, and other agent kinds
+// keep the engine default (handoff). The mode default is applied to the agent
+// itself, so wrapping one agent in several nodes settles its mode once.
 func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
@@ -90,6 +116,12 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		// On resume, re-feeding the input would make a single_turn/task
+		// LlmAgent re-call the still-pending tool and pause again; drop it
+		// so the agent continues from history. Mirrors runner.runAgentNodeBody.
+		if n.isResuming(ctx) {
+			input = nil
+		}
 		userContent, err := nodeInputToContent(input)
 		if err != nil {
 			yield(nil, err)
@@ -161,6 +193,87 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			}
 		}
 	}
+}
+
+// isResuming reports whether this activation resumes a pause of THIS node, in
+// which case Run drops the node input so the agent continues from history.
+//
+// Both signals are needed. The scheduler's per-activation resume flag alone
+// over-fires: a dynamic child inherits the resume context of the ancestor that
+// paused, so a freshly delegated child would lose its input. A history scan
+// alone latches: history never un-answers an interrupt, so a later loop-back,
+// retry or per-item activation of the same node would lose its input too.
+//
+// Interrupts are attributed by the activation's node PATH ("orch@1/child@2"),
+// which the scheduler stamps on every event leaving a node. The path, not the
+// node name, is the identity that matters: an orchestrator delegating the same
+// child twice produces child@1 and child@2, and only the delegation that
+// paused may drop its input. A pause raised by a sub-agent the node's agent
+// delegated to carries the node's own path, so it still counts as this node's
+// — matching the engine, which parks and re-enters the node on exactly those
+// interrupts.
+func (n *AgentNode) isResuming(ctx agent.Context) bool {
+	ra, ok := ctx.(interface{ IsResumeActivation() bool })
+	if !ok || !ra.IsResumeActivation() {
+		return false
+	}
+	return raisedInterrupt(ctx.Session(), ctx.InvocationID(), ctx.Path(), n.Name())
+}
+
+// raisedInterrupt reports whether the activation at nodePath raised a
+// long-running interrupt in invocationID. Runs only on a resume activation,
+// keeping the scan off the normal path.
+//
+// nodePath is empty for a root-wrapper activation, where the scheduler stamps
+// the bare node name instead. An event carrying no path at all is attributed by
+// Author, the same fallback rehydration's eventNodeName uses.
+func raisedInterrupt(sess session.Session, invocationID, nodePath, nodeName string) bool {
+	if sess == nil || nodeName == "" {
+		return false
+	}
+	events := sess.Events()
+	if events == nil {
+		return false
+	}
+	want := nodePath
+	if want == "" {
+		want = nodeName
+	}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
+			if samePathActivation(ev.NodeInfo.Path, want) {
+				return true
+			}
+			continue
+		}
+		if ev.Author == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// samePathActivation reports whether an event's node path names the same
+// activation as nodePath. It compares trailing segments rather than the whole
+// string: a workflow agent records its events under its own prefix
+// ("wf@1/worker@1") while a later Resume rebuilds the node path without it
+// ("worker@1"), so exact equality would miss a node's own pause across the
+// turn boundary.
+func samePathActivation(evPath, nodePath string) bool {
+	if evPath == nodePath {
+		return true
+	}
+	if evPath == "" || nodePath == "" {
+		return false
+	}
+	return strings.HasSuffix(evPath, "/"+nodePath) || strings.HasSuffix(nodePath, "/"+evPath)
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model

@@ -243,3 +243,54 @@ func assertSubAgentOutputsNotSynthesized(t *testing.T, node workflow.Node, nodeN
 		}
 	}
 }
+
+// TestNewAgentNode_RerunOnResumeDefault pins the isLlmAgent-gated default: an
+// LlmAgent node re-enters on resume so its paused agent can finish, other agent
+// kinds keep the engine default (handoff), and an explicit value always wins.
+func TestNewAgentNode_RerunOnResumeDefault(t *testing.T) {
+	t.Parallel()
+	llmA, err := llmagent.New(llmagent.Config{Name: "llm"})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	plain, err := agent.New(agent.Config{
+		Name: "plain",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	rerunTrue, rerunFalse := true, false
+
+	tests := []struct {
+		name  string
+		agent agent.Agent
+		cfg   workflow.NodeConfig
+		want  *bool
+	}{
+		{name: "LlmAgent defaults to re-entry", agent: llmA, cfg: workflow.NodeConfig{}, want: &rerunTrue},
+		{name: "non-LlmAgent gets no default", agent: plain, cfg: workflow.NodeConfig{}, want: nil},
+		{name: "explicit false wins over the LlmAgent default", agent: llmA, cfg: workflow.NodeConfig{RerunOnResume: &rerunFalse}, want: &rerunFalse},
+		{name: "explicit true wins", agent: plain, cfg: workflow.NodeConfig{RerunOnResume: &rerunTrue}, want: &rerunTrue},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := workflow.NewAgentNode(tc.agent, tc.cfg)
+			if err != nil {
+				t.Fatalf("NewAgentNode: %v", err)
+			}
+			switch got := node.Config().RerunOnResume; {
+			case tc.want == nil:
+				if got != nil {
+					t.Errorf("RerunOnResume = %v, want nil", *got)
+				}
+			case got == nil:
+				t.Errorf("RerunOnResume = nil, want %v", *tc.want)
+			case *got != *tc.want:
+				t.Errorf("RerunOnResume = %v, want %v", *got, *tc.want)
+			}
+		})
+	}
+}

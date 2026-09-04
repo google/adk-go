@@ -135,6 +135,14 @@ type NodeState struct {
 	// duplicates (idempotency).
 	answeredThisTurn bool
 
+	// reentryConsumed is true when every response this node resumed on
+	// has already been acted on by a later activation of the node —
+	// i.e. the answers are replays, not new. Not persisted; rebuilt
+	// each turn from event history. Only meaningful for re-entry
+	// nodes, whose reschedule is otherwise driven by ResumedInputs,
+	// which history never un-answers.
+	reentryConsumed bool
+
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`
 
