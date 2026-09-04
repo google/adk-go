@@ -355,7 +355,9 @@ SearchLoop: // A label to allow breaking out of the nested loop
 // pair function calls with their corresponding responses, which is especially
 // useful for histories involving long running tool calls where
 // responses may not have originally been consecutive. It preserves all
-// non-tool-call events (like user messages) in their original order.
+// non-tool-call events (like user messages) in their original order relative
+// to one another. Their position relative to the surrounding tool exchanges
+// can change, because a pair routed to the tail moves past them.
 //
 // Adjacency alone is not enough. When the last event is a function response —
 // a long running tool completing after unrelated tool exchanges were already
@@ -410,8 +412,10 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 		}
 
 		// This is a function call event. The call and its consolidated
-		// response move together as one unit.
-		pair := []*session.Event{event}
+		// response move together as one unit, so the pair holds at most two
+		// events.
+		pair := make([]*session.Event, 0, 2)
+		pair = append(pair, event)
 
 		// Find the unique indices of all corresponding response events.
 		// Using a map[int]struct{} as a set.
@@ -434,6 +438,15 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 			}
 		default:
 			// Multiple response events exist for that function call so we merge them.
+			//
+			// This branch never coincides with the tail routing below. For a
+			// well-formed parallel call whose siblings are answered in two
+			// different events, rearrangeEventsForLatestFunctionResponse merges
+			// them before this runs, so only case 1 is reached. Getting here
+			// with the last event among the indices needs one call ID shared by
+			// two call events, which PopulateClientFunctionCallID cannot
+			// produce because it assigns a fresh ID to every call.
+			//
 			// Collect and sort the indices to process events in order.
 			var sortedIndices []int
 			for index := range responseEventIndicesSet {

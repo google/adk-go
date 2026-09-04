@@ -1270,6 +1270,13 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still running.", "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
 			},
+			// Nine events produce five contents. The three text turns between
+			// the async call and its completion — including the user asking
+			// "What is the status?" — are dropped by
+			// rearrangeEventsForLatestFunctionResponse, whose preservation loop
+			// keeps only events carrying calls or responses. That is
+			// pre-existing behavior, identical on main, and not what this row
+			// is testing.
 			want: []*genai.Content{
 				genai.NewContentFromText("Plan how to add feature Q", "user"),
 				NewContentFromFunctionCall(fcAsyncStatus, "model"),
@@ -1281,8 +1288,18 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			// A call that never receives a response is reachable: base_flow
 			// creates no response event for a long-running tool or a deferring
-			// ResponseDeferrer. The unanswered call keeps its place in history
-			// and the completed pair still ends the contents.
+			// ResponseDeferrer. Such a call has an empty responseEventIndicesSet,
+			// so it is never routed to the tail. It keeps its order relative to
+			// the other events that stay put, which leaves it ahead of the
+			// completed pair that does move to the tail.
+			//
+			// This also changes what the model is asked to do while a call is
+			// pending. On main the contents ended on the unanswered call, a
+			// model turn, so a synthetic "Continue processing..." user turn was
+			// appended. They now end on the real tool result instead:
+			//
+			//	main: user text | CALL(plan) | RESP(plan) | CALL(unanswered) | "Continue processing..."
+			//	now:  user text | CALL(unanswered) | CALL(plan) | RESP(plan)
 			name: "Late async completion stays final with an unanswered call in history",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
