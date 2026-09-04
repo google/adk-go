@@ -21,92 +21,11 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
-// # Generation config
-//
 // Every top-level field of genai.GenerateContentConfig is either translated to
-// the Responses API or rejected with an error naming it. Nothing is dropped in
-// silence except where this list says so.
-//
-//	Translated  Temperature, TopP, MaxOutputTokens, SystemInstruction,
-//	            ResponseMIMEType, ResponseSchema, ResponseJsonSchema,
-//	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
-//	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
-//	Rejected    TopK, StopSequences, CandidateCount above one, the penalties,
-//	            Labels, SafetySettings, an unsupported ResponseMIMEType, Seed,
-//	            CachedContent, ResponseModalities, MediaResolution,
-//	            SpeechConfig, AudioTimestamp, ImageConfig, RoutingConfig,
-//	            ModelSelectionConfig, ModelArmorConfig,
-//	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
-//	            HTTPOptions apart from Timeout and Headers
-//	Ignored     HTTPOptions.Headers
-//
-// The long-standing rejections (TopK, StopSequences, multiple candidates, the
-// penalties, Labels, SafetySettings, and an unsupported ResponseMIMEType) keep
-// their own errors and are checked first, so an existing errors.Is call site is
-// unaffected; everything else returns ErrUnsupportedConfigField.
-//
-// For a field with no equivalent at all, rejection keys on presence rather than
-// value: setting the knob is itself the request. Presence is only observable
-// where the zero value cannot be a setting — a pointer, slice, map or struct.
-// A plain bool or string cannot tell its zero from unset, so AudioTimestamp
-// false, and CachedContent or MediaResolution left empty, pass unremarked.
-// A field that is translated can also be handed a value that is not — a
-// negative MaxOutputTokens or CandidateCount, or Logprobs without
-// ResponseLogprobs — and those are rejected too. What is never rejected is a
-// setting that asks for nothing: an empty ThinkingConfig or HTTPOptions
-// requests no behavior, and is satisfied by sending none.
-//
-// ServiceTier is translated; every tier genai names has a Responses
-// equivalent, with genai's "standard" reaching OpenAI as "default".
-//
-// HTTPOptions is transport rather than generation, and only its Timeout
-// crosses. It bounds the whole call, retries included, because that is what
-// genai documents it to mean; openai-go's own per-request timeout applies
-// inside its retry loop instead, so using that would let a caller asking for
-// five seconds wait fifteen. A non-positive timeout is rejected rather than
-// forwarded, since it would read as no deadline at all and lift the caller's
-// bound instead of applying it.
-//
-// Headers do not cross, and are ignored rather than rejected. Forwarding them
-// would send a credential meant for Gemini to OpenAI, and an Authorization
-// header among them would displace the configured API key rather than
-// accompany it; refusing them would fail configs that ADK itself filled in.
-// The full reasoning sits beside the code that enforces it. Headers intended
-// for OpenAI belong on ClientConfig.Options,
-// which is scoped to the backend that receives them.
-//
-// The endpoint and credentials likewise come from ClientConfig, so BaseURL,
-// BaseURLResourceScope and APIVersion are rejected rather than fighting it, as
-// are ExtraBody and ExtrasRequestProvider, which shape a Gemini request body
-// this package does not send, and RetryOptions, whose backoff has no faithful
-// equivalent. Those have never been honored here, so naming them costs no
-// compatibility.
-//
-// ThinkingConfig is translated to the Responses API's effort-based reasoning.
-// ThinkingLevel maps to the effort of the same name. A token budget, which
-// Responses has no knob for, survives only as the distinction between none of
-// it (zero, the none effort), some of it (positive, medium), and the model's
-// own choice (-1, no effort sent). Models differ in which efforts they accept —
-// gpt-5.4-nano takes none but not minimal, the o-series takes neither — so
-// asking for one a model lacks draws a 400 naming reasoning.effort and listing
-// what it does take. That is deliberate: quietly substituting a neighboring
-// effort would bill the caller for thinking they asked not to do.
-// A ThinkingConfig with nothing set asks for nothing and is accepted as such.
-// IncludeThoughts asks for reasoning summaries, which arrive as parts with
-// Thought set. It is off by default because summaries require a verified
-// OpenAI organization, and that is enforced per model rather than per account:
-// the same key that gets summaries from gpt-5.4-nano is refused by o4-mini. So
-// asking for one unprompted would break reasoning on the older models for
-// callers who never wanted summaries at all.
-//
-// Two of those differ from adk-python's OpenAI Responses support, which sends
-// a summary unconditionally and maps a zero budget to minimal. Both were
-// measured to fail against live models, so parity is broken deliberately here.
-//
-// The guarantee stops at the top level: within Tools, ToolConfig and the schema
-// types, the parts this package does not read are still dropped quietly. It is
-// also stricter than adk-python, which drops these settings in silence, so a
-// config ported from Python may need fields removed before it is accepted.
+// the Responses API or rejected with an error naming it, and the pre-existing
+// errors are checked first so existing errors.Is call sites are unaffected.
+// The single exception is HTTPOptions.Headers, ignored rather than forwarded
+// because headers addressed to another backend must not reach OpenAI.
 //
 // Clients construct a ClientConfig and pass it to NewModel:
 //

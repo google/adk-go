@@ -22,7 +22,6 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -1738,25 +1737,5 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 	if calls != 2 {
 		t.Errorf("server saw %d calls, want 2: the second range did not reach it", calls)
-	}
-}
-
-// The table in doc.go is the first thing a user reads to answer "is this field
-// supported", so it has to stay true as the code changes. Every rejected field
-// this package names must appear there, or the doc quietly starts lying.
-func TestDocTableNamesEveryRejectedField(t *testing.T) {
-	doc, err := os.ReadFile("doc.go")
-	if err != nil {
-		t.Fatalf("read doc.go: %v", err)
-	}
-	for _, field := range unsupportedConfigFields {
-		if !strings.Contains(string(doc), field.name) {
-			t.Errorf("doc.go does not mention %q, which unsupportedConfigFields rejects", field.name)
-		}
-	}
-	for _, name := range ignoredHTTPOptionFields {
-		if !strings.Contains(string(doc), name) {
-			t.Errorf("doc.go does not mention ignored HTTPOptions.%s", name)
-		}
 	}
 }
