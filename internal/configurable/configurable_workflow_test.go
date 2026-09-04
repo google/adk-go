@@ -16,6 +16,7 @@ package configurable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -585,5 +586,149 @@ edges:
 
 	if val, ok := toolOut["result"].(string); !ok || val != "tool_output" {
 		t.Errorf("expected tool output result 'tool_output', got %v", toolOut["result"])
+	}
+}
+
+// newWorkflowDir lays out a workflow directory with an in-directory node config,
+// a node config outside the directory, and a symlink inside the directory that
+// points at the outside one. It returns the base directory and the workflow
+// directory.
+func newWorkflowDir(t *testing.T) (base, workflowDir string) {
+	t.Helper()
+
+	base = t.TempDir()
+	// Resolve the temporary directory itself, since on some platforms it is
+	// reached through a symlink (for example /var -> /private/var on macOS).
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+
+	workflowDir = filepath.Join(base, "agents", "root")
+	if err := os.MkdirAll(filepath.Join(workflowDir, "nodes"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) failed: %v", workflowDir, err)
+	}
+
+	const joinNode = "name: join_node\nagent_class: JoinNode\n"
+	if err := os.WriteFile(filepath.Join(workflowDir, "nodes", "join.yaml"), []byte(joinNode), 0o644); err != nil {
+		t.Fatalf("WriteFile(nodes/join.yaml) failed: %v", err)
+	}
+
+	outside := filepath.Join(base, "outside.yaml")
+	if err := os.WriteFile(outside, []byte(joinNode), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) failed: %v", outside, err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workflowDir, "link.yaml")); err != nil {
+		t.Skipf("symlinks are not supported in this environment: %v", err)
+	}
+
+	return base, workflowDir
+}
+
+// writeWorkflow writes a workflow config in dir whose single edge targets ref.
+func writeWorkflow(t *testing.T, dir, name, ref string) string {
+	t.Helper()
+
+	yaml := fmt.Sprintf("name: %s\nagent_class: Workflow\nedges:\n  - - START\n    - %s\n", name, ref)
+	path := filepath.Join(dir, name+".yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) failed: %v", path, err)
+	}
+	return path
+}
+
+// TestWorkflowNodeReferenceRejectsEscapingPath covers workflow edge refs with the
+// same containment rules ResolveAgentReference applies to agent refs. Node refs
+// are read straight off disk by resolveNodeFromYAML, so without the check a
+// workflow config can instantiate a node from anywhere on the filesystem.
+func TestWorkflowNodeReferenceRejectsEscapingPath(t *testing.T) {
+	base, workflowDir := newWorkflowDir(t)
+
+	tests := []struct {
+		name    string
+		ref     string
+		wantErr error
+	}{
+		{
+			name:    "absolute path",
+			ref:     filepath.Join(base, "outside.yaml"),
+			wantErr: errConfigReferenceNotLocal,
+		},
+		{
+			name:    "parent traversal",
+			ref:     filepath.Join("..", "..", "outside.yaml"),
+			wantErr: errConfigReferenceNotLocal,
+		},
+		{
+			name:    "symlink escaping the workflow directory",
+			ref:     "link.yaml",
+			wantErr: errConfigReferenceSymlink,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each case gets its own workflow file so that the resolved-node cache,
+			// which is keyed by absolute path, cannot mask a later case.
+			workflowPath := writeWorkflow(t, workflowDir, fmt.Sprintf("wf_%d", i), tc.ref)
+
+			// The reference must be rejected by the containment check itself, not
+			// merely fail later while the node config is being loaded.
+			_, err := FromConfig(context.Background(), workflowPath)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("FromConfig(_, %q) with node ref %q = %v, want %v", workflowPath, tc.ref, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestWorkflowNodeReferenceAllowsPathsInsideWorkflowDir guards against the
+// containment check rejecting legitimate references, including ones in a
+// subdirectory of the workflow's own directory.
+func TestWorkflowNodeReferenceAllowsPathsInsideWorkflowDir(t *testing.T) {
+	_, workflowDir := newWorkflowDir(t)
+
+	for i, ref := range []string{
+		filepath.Join("nodes", "join.yaml"),
+		filepath.Join("nodes", "..", "nodes", "join.yaml"),
+	} {
+		t.Run(ref, func(t *testing.T) {
+			workflowPath := writeWorkflow(t, workflowDir, fmt.Sprintf("wf_ok_%d", i), ref)
+
+			ag, err := FromConfig(context.Background(), workflowPath)
+			if err != nil {
+				t.Fatalf("FromConfig(_, %q) with node ref %q failed: %v", workflowPath, ref, err)
+			}
+			if ag == nil {
+				t.Fatal("FromConfig returned a nil agent")
+			}
+		})
+	}
+}
+
+// TestWorkflowNodeReferenceCacheDoesNotBypassCheck pins the order of the
+// containment check against the resolved-node cache. The cache is a package
+// global keyed by absolute path, so if it were consulted before the check, a
+// node legitimately loaded by one workflow could be served to another workflow
+// that must not reach it.
+func TestWorkflowNodeReferenceCacheDoesNotBypassCheck(t *testing.T) {
+	base, workflowDir := newWorkflowDir(t)
+
+	// First, load the node legitimately so that it is in the cache.
+	okPath := writeWorkflow(t, workflowDir, "wf_cache_ok", filepath.Join("nodes", "join.yaml"))
+	if _, err := FromConfig(context.Background(), okPath); err != nil {
+		t.Fatalf("FromConfig(_, %q) failed: %v", okPath, err)
+	}
+
+	// Now reference that same, already-cached node from a workflow that sits
+	// outside its directory. It must still be rejected.
+	otherDir := filepath.Join(base, "other")
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) failed: %v", otherDir, err)
+	}
+	escaping := filepath.Join("..", "agents", "root", "nodes", "join.yaml")
+	escapingPath := writeWorkflow(t, otherDir, "wf_cache_escape", escaping)
+
+	if _, err := FromConfig(context.Background(), escapingPath); !errors.Is(err, errConfigReferenceNotLocal) {
+		t.Errorf("FromConfig(_, %q) with cached node ref %q = %v, want %v", escapingPath, escaping, err, errConfigReferenceNotLocal)
 	}
 }
