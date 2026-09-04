@@ -77,24 +77,31 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 //
-// An invocation ADK itself built always reports its own user. An
-// [InvocationContext] implemented OUTSIDE the module is where that stops, in two
-// ways a caller acting on the identity has to know about:
+// An invocation ADK itself built always reports its own user, however a context
+// is derived from it. An [InvocationContext] implemented OUTSIDE the module is
+// where that stops, and one rule covers every way it does.
 //
-//   - [Promote], [NewContext], [NewToolContext], [NewCallbackContext] and a
-//     readonly context report such an invocation's own user, or none at all if it
-//     has no readable session. Passing it *as the context itself* instead reports
-//     whatever it embeds, because the key is unnameable outside the module, so a
-//     decorator cannot override it and its parent answers. Promote it first.
-//   - Deriving through [CommonContextDelta] — [PromoteWithDelta],
-//     [Context.WithDelta], [InvocationContext.WithICDelta] — reports whatever it
-//     embeds even after promoting. WithICDelta is inherited by promotion too, so
-//     the promoted method hands back the invocation the decorator embeds and the
-//     decorator is dropped outright: Session, UserID and AppName report the
-//     enclosing invocation as well, not just the identity. An invocation from
-//     outside the module must override WithICDelta, returning a delta'd copy of
-//     itself, or it will not survive a delta at all — and [agent.Run] applies one
-//     on every run.
+// Such a type is a decorator over the invocation it embeds, and Go promotes
+// every method it does not override. Each of [InvocationContext]'s
+// context-producing methods returns the receiver's own derived copy, so a
+// promoted one hands back the EMBEDDED invocation and the decorator is gone —
+// its session with it. That is not confined to the identity: Session, UserID and
+// AppName then report the enclosing invocation too.
+//
+// So an invocation written outside the module reports its own user only where it
+// answers for itself:
+//
+//   - Derive it — [Promote], [NewContext], [NewToolContext], [NewCallbackContext],
+//     a readonly context — and the derived context reports its user, or none at
+//     all if it has no readable session. Passing it *as the context itself*
+//     reports whatever it embeds, because the key is unnameable outside the
+//     module, so it cannot override the key and its parent answers.
+//   - Call any context-producing method on it — [InvocationContext.WithContext],
+//     [InvocationContext.WithICDelta], and through the latter
+//     [PromoteWithDelta] and [Context.WithDelta] — and it is dropped, promoting
+//     or not. It must override each of those, returning a derived copy of
+//     ITSELF, to survive them. This is not avoidable by discipline alone:
+//     [agent.Run] applies a delta on every run.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok

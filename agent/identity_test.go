@@ -388,3 +388,38 @@ func TestDeltaReachesTheInvocation(t *testing.T) {
 		})
 	}
 }
+
+// TestNilDeltaKeepsTheContextUsable pins that a delta carrying nothing about the
+// invocation leaves a context ADK built exactly as usable as before.
+//
+// It exists because skipping the call for everyone broke that: the tool and
+// callback wrappers do real work for a nil delta — they forward to the
+// commonContext they hold, which hands back that inner context — so keeping the
+// wrapper left a context whose Session() is nil by design, and UserID() panicked.
+func TestNilDeltaKeepsTheContextUsable(t *testing.T) {
+	ic := &invocationContext{Context: t.Context(), session: matrixOwner("u"), agent: &agent{name: "a"}}
+	path := "n@1"
+	for _, tc := range []struct {
+		name string
+		ic   InvocationContext
+	}{
+		{"a tool context re-derived from a tool context", NewToolContext(NewToolContext(ic, "a", nil, nil), "b", nil, nil)},
+		{"a callback context re-derived from a tool context", NewCallbackContext(NewToolContext(ic, "a", nil, nil), nil)},
+		{"a plain invocation", Promote(ic)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("panicked after a nil delta: %v", p)
+				}
+			}()
+			c := tc.ic.(Context).WithDelta(&CommonContextDelta{Path: &path})
+			if got := c.UserID(); got != "u" {
+				t.Errorf("UserID() = %q, want %q", got, "u")
+			}
+			if id, ok := IdentityFromContext(c); !ok || id.UserID != "u" {
+				t.Errorf("IdentityFromContext() = %+v, %v; want %q", id, ok, "u")
+			}
+		})
+	}
+}

@@ -195,10 +195,10 @@ func TestIdentityDoesNotInheritEnclosingInvocation(t *testing.T) {
 		// Reparented onto a plain context that happens to carry the enclosing
 		// invocation. The derived context still speaks for the nested invocation,
 		// so the parent must not supply a user that invocation refused.
-		// (WithContext given an InvocationContext is different on the two
-		// implementations that rebind on it — agent.commonContext and
-		// agent.callbackContextWrapper — where it deliberately changes which
-		// invocation the context speaks for.)
+		// (WithContext given an InvocationContext is different on the one
+		// implementation that rebinds on it, agent.commonContext, where it
+		// deliberately changes which invocation the context speaks for. The two
+		// wrappers log and return nil instead.)
 		{"nested, reparented onto a plain carrier of the enclosing invocation", agent.Promote(nested).WithContext(context.WithValue(outer, wrapKey{}, "x"))},
 	} {
 		if id, ok := agent.IdentityFromContext(tc.ctx); ok {
@@ -337,6 +337,14 @@ func (d crossPackageDecorator) Session() session.Session { return d.own }
 // key for itself it forwarded, and a decorator's parent replied with a
 // different call's user.
 func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
+	// The full Identity is compared, not just the user: reading two of the three
+	// fields off the wrong session would otherwise pass every cell, exactly as it
+	// would in the sibling table in package agent.
+	full := map[string]agent.Identity{
+		"":          {},
+		"u":         {UserID: "u", AppName: "app", SessionID: "sid-u"},
+		"enclosing": {UserID: "enclosing", AppName: "app", SessionID: "sid-enclosing"},
+	}
 	enclosingSession := valueSession{id: "sid-enclosing", app: "app", user: "enclosing"}
 	enclosing := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: enclosingSession})
 	own := valueSession{id: "sid-u", app: "app", user: "u"}
@@ -421,6 +429,9 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 				}
 				if ok != (want != "") {
 					t.Errorf("IdentityFromContext() ok = %v, want %v", ok, want != "")
+				}
+				if id != full[want] {
+					t.Errorf("IdentityFromContext() = %+v, want %+v", id, full[want])
 				}
 				if v := ctx.Value(probeKey{}); v != nil {
 					t.Errorf("Value(probeKey{}) = %v, want nil: only the identity key reads the session", v)

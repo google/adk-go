@@ -115,14 +115,14 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		// limit costs rather than skipping the cell and hiding it.
 		outsideModule bool
 		wantDirect    string
-		// wantAfterDelta is what a delta derivation answers. WithICDelta is
-		// inherited by promotion, so for an invocation from outside the module the
-		// promoted method hands back the one it embeds and the decorator is dropped
-		// — session and all, not just the identity. That cannot be repaired from
-		// inside the derivation, so it is asserted rather than assumed. Defaults to
-		// want.
-		wantAfterDelta string
-		hasAfterDelta  bool
+		// wantPromoted is what a context-producing method called ON the invocation
+		// answers. Those methods are inherited by promotion, so for one written
+		// outside the module the promoted method hands back the invocation it
+		// embeds and the decorator is dropped — session and all, not just the
+		// identity. It cannot be repaired from inside the derivation, so it is
+		// asserted rather than assumed. Defaults to want.
+		wantPromoted    string
+		hasWantPromoted bool
 	}{
 		{name: "pointer session", want: "u", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: matrixOwner("u")}
@@ -145,7 +145,7 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		{name: "session accessor panics", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: panickingAccessorSession{}}
 		}},
-		{name: "Session() panics", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "Session() panics", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return panickingSessionInvocation{InvocationContext: enclosing}
 		}},
 		// A permissive Value hands back something that is not an Identity, so the
@@ -156,24 +156,24 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		{name: "permissive Value, no session", outsideModule: true, ic: func() InvocationContext {
 			return permissiveInvocationValue{InvocationContext: &invocationContext{Context: enclosing}}
 		}},
-		{name: "decorated outside the module", want: "u", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated outside the module", want: "u", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: matrixOwner("u")}
 		}},
 		// The two axes have to be crossed, not just walked. An invocation that owns
 		// a session fails closed on its own, so an unreadable session only reaches
 		// the delegation through a decorator — where inheriting is a live user's
 		// credential minted for someone else's call.
-		{name: "decorated, typed-nil session", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, typed-nil session", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: (*matrixSession)(nil)}
 		}},
-		{name: "decorated, session accessor panics", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, session accessor panics", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: panickingAccessorSession{}}
 		}},
 		// A nil session field is what a decorator author gets by default, and it is
 		// the shape that used to fail OPEN: a nil interface reads exactly like the
 		// session-less view a tool context is, so the procedure delegated to the
 		// decorator and its parent answered with a live user who made no such call.
-		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: nil}
 		}},
 	}
@@ -183,9 +183,12 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 	type unrelatedKey struct{}
 	type probeKey struct{}
 	cols := []struct {
-		name    string
-		isDelta bool
-		of      func(InvocationContext) context.Context
+		name string
+		// promoted marks a column that calls a context-producing method ON the
+		// invocation, where an out-of-module decorator is dropped by its own
+		// promoted method before the derivation is even reached.
+		promoted bool
+		of       func(InvocationContext) context.Context
 	}{
 		{"the invocation itself", false, func(ic InvocationContext) context.Context { return ic }},
 		{"Promote", false, func(ic InvocationContext) context.Context { return Promote(ic) }},
@@ -220,6 +223,11 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 			branch := "br"
 			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})
 		}},
+		// WithContext is the other context-producing method on the interface, and
+		// it is inherited exactly as WithICDelta is.
+		{"WithContext called on the invocation", true, func(ic InvocationContext) context.Context {
+			return Promote(ic.WithContext(t.Context()))
+		}},
 	}
 
 	// The full Identity is compared, not just the user: reading two of the three
@@ -239,8 +247,8 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 			switch {
 			case c.name == "the invocation itself" && r.outsideModule:
 				want = r.wantDirect
-			case c.isDelta && r.hasAfterDelta:
-				want = r.wantAfterDelta
+			case c.promoted && r.hasWantPromoted:
+				want = r.wantPromoted
 			}
 			t.Run(r.name+" / "+c.name, func(t *testing.T) {
 				defer func() {

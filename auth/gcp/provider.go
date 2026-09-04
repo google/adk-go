@@ -86,7 +86,8 @@ const defaultInitTimeout = 30 * time.Second
 // The acting user is taken from the ADK context ([agent.IdentityFromContext]) at
 // resolve time, so the provider must run within an agent invocation. Two
 // requirements then fall on the transport that carries the authenticated
-// requests, neither of which this package can enforce:
+// requests and the context they run under, none of which this package can
+// enforce:
 //
 //   - Every request must descend from the invoking user's context. A transport
 //     that shares one connection across invocations does not qualify —
@@ -98,11 +99,13 @@ const defaultInitTimeout = 30 * time.Second
 //     re-applies the end user's credential to the redirect target. Set
 //     CheckRedirect on the http.Client that carries the transport; the
 //     ADC-backed client [NewClient] builds for itself does the same.
-//   - Requests must run under a context ADK derived. An agent.InvocationContext
-//     implemented outside the ADK module answers the identity key with whatever
-//     it embeds, since it cannot override a key it cannot name — so making a
-//     request directly under one mints the credential of the invocation it wraps.
-//     Promote it first. [agent.IdentityFromContext] states the limit in full.
+//   - Requests must run under a context ADK derived, and an
+//     agent.InvocationContext implemented outside the ADK module must override
+//     every context-producing method on that interface. Otherwise it is dropped
+//     by its own promoted methods and the credential is minted for the invocation
+//     it wraps. Deriving it is necessary and is not sufficient on its own:
+//     agent.Run applies a delta on every run, which is one of those methods.
+//     [agent.IdentityFromContext] states the limits in full.
 //
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.

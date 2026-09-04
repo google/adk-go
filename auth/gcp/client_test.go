@@ -458,10 +458,9 @@ func TestMapCredential(t *testing.T) {
 	}
 }
 
-// TestRetrieveContextCanceledWhilePending verifies that canceling the context
-// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
-// The rejected header name is service-controlled and reaches the error by a
-// third path, separate from a response body and an operation message.
+// TestMapCredentialCapsHeaderNameInError pins the cap on a rejected header name.
+// It is service-controlled and reaches the error by a third path, separate from
+// a response body and an operation message.
 func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	_, err := mapCredential(strings.Repeat("x", 900_000)+": Token", "SECRET-TOKEN")
 	if err == nil {
@@ -475,6 +474,8 @@ func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	}
 }
 
+// TestRetrieveContextCanceledWhilePending verifies that canceling the context
+// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
 func TestRetrieveContextCanceledWhilePending(t *testing.T) {
 	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
 	defer srv.Close()

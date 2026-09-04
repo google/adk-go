@@ -18,6 +18,8 @@ import (
 	"context"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/adkcontext"
 )
 
 // CommonContextDelta holds all the changes which should be applied to a new child context based on agent.Context.
@@ -105,13 +107,20 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 // site reconstructs what it should have returned. It predates the identity key
 // and is documented on IdentityFromContext instead.
 func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
-	// A delta with nothing to say about the invocation must not touch it. ADK's
-	// own types return the receiver for a nil delta, but a promoted WithICDelta
+	if ic == nil {
+		return nil
+	}
+	// A delta with nothing to say about the invocation must not cost an
+	// invocation from outside the module its identity. A promoted WithICDelta
 	// hands back the invocation the decorator embeds whatever the delta says, so
-	// asking at all is what costs an out-of-module caller its identity — and
-	// entering a workflow does exactly this, with a delta that carries only Path
-	// and RunID.
-	if ic == nil || d == nil {
+	// merely asking is what drops the decorator — and entering a workflow does
+	// exactly that, with a delta carrying only Path and RunID.
+	//
+	// Ours are still asked, because for them a nil delta is not a no-op: the tool
+	// and callback wrappers forward to the commonContext they hold, which returns
+	// that inner context, and skipping the call would leave the wrapper in place
+	// with the nil session it reports by design.
+	if _, ours := ic.(adkcontext.Source); d == nil && !ours {
 		return ic
 	}
 	if next := ic.WithICDelta(d); next != nil {
