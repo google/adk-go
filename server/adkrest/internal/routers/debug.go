@@ -31,8 +31,31 @@ func NewDebugAPIRouter(controller *controllers.DebugAPIController) *DebugAPIRout
 }
 
 // Routes returns the routes for the Debug API.
+//
+// Each endpoint is registered twice: once under [DevPrefix], which is where the
+// ADK web UI looks, and once at its pre-v2 path so existing clients keep
+// working. The dev paths carry an app_name segment these handlers do not need;
+// they ignore it.
 func (r *DebugAPIRouter) Routes() Routes {
 	return Routes{
+		Route{
+			Name:        "GetSessionTraceDev",
+			Methods:     []string{http.MethodGet},
+			Pattern:     DevPrefix + "/debug/trace/session/{session_id}",
+			HandlerFunc: r.runtimeController.SessionSpansHandler,
+		},
+		Route{
+			Name:        "GetTraceDictDev",
+			Methods:     []string{http.MethodGet},
+			Pattern:     DevPrefix + "/debug/trace/{event_id}",
+			HandlerFunc: r.runtimeController.EventSpanHandler,
+		},
+		Route{
+			Name:        "GetEventGraphDev",
+			Methods:     []string{http.MethodGet},
+			Pattern:     DevPrefix + "/users/{user_id}/sessions/{session_id}/events/{event_id}/graph",
+			HandlerFunc: r.runtimeController.EventGraphHandler,
+		},
 		Route{
 			Name:        "GetTraceDict",
 			Methods:     []string{http.MethodGet},

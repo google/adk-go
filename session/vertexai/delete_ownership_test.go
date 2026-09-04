@@ -43,13 +43,48 @@ import (
 type fakeSessions struct {
 	aiplatformpb.UnimplementedSessionServiceServer
 	deletes atomic.Int32
+	// appends counts AppendEvent RPCs, so a test can tell a backend error
+	// apart from a local short-circuit that never reached the server.
+	appends atomic.Int32
 }
 
 func (f *fakeSessions) GetSession(_ context.Context, req *aiplatformpb.GetSessionRequest) (*aiplatformpb.Session, error) {
-	if strings.HasSuffix(req.GetName(), "/sessions/owned") {
+	switch {
+	case strings.HasSuffix(req.GetName(), "/sessions/owned"):
 		return &aiplatformpb.Session{Name: req.GetName(), UserId: "user1", UpdateTime: timestamppb.Now()}, nil
+	// "denied" stands for any backend refusal that is not a missing session.
+	// It must not come back as session.ErrNotFound.
+	case strings.HasSuffix(req.GetName(), "/sessions/denied"):
+		return nil, status.Errorf(codes.PermissionDenied, "caller cannot read %s", req.GetName())
+	default:
+		return nil, status.Errorf(codes.NotFound, "Session %s not found.", req.GetName())
 	}
-	return nil, status.Errorf(codes.NotFound, "Session %s not found.", req.GetName())
+}
+
+func (f *fakeSessions) ListEvents(_ context.Context, req *aiplatformpb.ListEventsRequest) (*aiplatformpb.ListEventsResponse, error) {
+	// Get fetches the session and its events concurrently, so this has to agree
+	// with GetSession about which sessions exist. Leaving it unimplemented lets
+	// a gRPC Unimplemented error win the race and mask the real not-found.
+	switch {
+	case strings.HasSuffix(req.GetParent(), "/sessions/owned"):
+		return &aiplatformpb.ListEventsResponse{}, nil
+	case strings.HasSuffix(req.GetParent(), "/sessions/denied"):
+		return nil, status.Errorf(codes.PermissionDenied, "caller cannot read %s", req.GetParent())
+	default:
+		return nil, status.Errorf(codes.NotFound, "Session %s not found.", req.GetParent())
+	}
+}
+
+func (f *fakeSessions) AppendEvent(_ context.Context, req *aiplatformpb.AppendEventRequest) (*aiplatformpb.AppendEventResponse, error) {
+	f.appends.Add(1)
+	switch {
+	case strings.HasSuffix(req.GetName(), "/sessions/owned"):
+		return &aiplatformpb.AppendEventResponse{}, nil
+	case strings.HasSuffix(req.GetName(), "/sessions/denied"):
+		return nil, status.Errorf(codes.PermissionDenied, "caller cannot write %s", req.GetName())
+	default:
+		return nil, status.Errorf(codes.NotFound, "Session %s not found.", req.GetName())
+	}
 }
 
 func (f *fakeSessions) DeleteSession(_ context.Context, req *aiplatformpb.DeleteSessionRequest) (*longrunningpb.Operation, error) {

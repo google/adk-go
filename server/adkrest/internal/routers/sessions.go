@@ -52,8 +52,16 @@ func (r *SessionsAPIRouter) Routes() Routes {
 			HandlerFunc: r.sessionController.CreateSessionHandler,
 		},
 		Route{
+			// The web UI PATCHes this route to rename a session and to edit its
+			// state by hand.
+			Name:        "UpdateSession",
+			Methods:     []string{http.MethodPatch},
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
+			HandlerFunc: r.sessionController.UpdateSessionHandler,
+		},
+		Route{
 			Name:        "DeleteSession",
-			Methods:     []string{http.MethodDelete, http.MethodOptions},
+			Methods:     []string{http.MethodDelete},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
 			HandlerFunc: r.sessionController.DeleteSessionHandler,
 		},
