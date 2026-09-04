@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"iter"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -122,9 +123,10 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			ctx := &invocationContext{
-				Context: t.Context(),
-				agent:   testAgent,
-				session: &mockSession{sessionID: "test-session"},
+				Context:       t.Context(),
+				agent:         testAgent,
+				session:       &mockSession{sessionID: "test-session"},
+				endInvocation: new(atomic.Bool),
 			}
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
@@ -168,10 +170,13 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
+	endedBool := new(atomic.Bool)
+	endedBool.Store(true)
+
 	ctx := &invocationContext{
 		Context:       t.Context(),
 		agent:         testAgent,
-		endInvocation: true,
+		endInvocation: endedBool,
 		session:       &mockSession{sessionID: "test-session"},
 	}
 	for _, err := range testAgent.Run(ctx) {
@@ -204,9 +209,10 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
-		Context: t.Context(),
-		agent:   testAgent,
-		session: &mockSession{sessionID: "test-session"},
+		Context:       t.Context(),
+		agent:         testAgent,
+		session:       &mockSession{sessionID: "test-session"},
+		endInvocation: new(atomic.Bool),
 	}
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
@@ -262,9 +268,10 @@ type testKey struct{}
 func TestWithContext(t *testing.T) {
 	baseCtx := t.Context()
 	inv := &invocationContext{
-		Context:      baseCtx,
-		invocationID: "test",
-		branch:       "branch",
+		Context:       baseCtx,
+		invocationID:  "test",
+		branch:        "branch",
+		endInvocation: new(atomic.Bool),
 	}
 
 	key := testKey{}
@@ -274,7 +281,13 @@ func TestWithContext(t *testing.T) {
 	if got.Value(key) != val {
 		t.Errorf("WithContext() did not update context")
 	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
+	atomicBoolComparer := cmp.Comparer(func(a, b *atomic.Bool) bool {
+		if a == nil || b == nil {
+			return a == b
+		}
+		return a.Load() == b.Load()
+	})
+	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context"), atomicBoolComparer); diff != "" {
 		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -349,5 +362,77 @@ func TestFindAgent(t *testing.T) {
 				t.Errorf("FindAgent(%q) = %v, want %v", tt.agentName, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSubAgentCallbackEndInvocationPropagated(t *testing.T) {
+	t.Parallel()
+
+	subAgentCalled := false
+
+	subAgent, err := New(Config{
+		Name: "sub_agent",
+		BeforeAgentCallbacks: []BeforeAgentCallback{
+			func(ctx Context) (*genai.Content, error) {
+				subAgentCalled = true
+				return genai.NewContentFromText("sub agent ended", genai.RoleModel), nil
+			},
+		},
+		Run: func(InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create sub_agent: %v", err)
+	}
+
+	parentRunCalled := false
+	parentEndedAfterSubAgent := false
+
+	parentAgent, err := New(Config{
+		Name:      "parent_agent",
+		SubAgents: []Agent{subAgent},
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			parentRunCalled = true
+			return func(yield func(*session.Event, error) bool) {
+				for _, sa := range ctx.Agent().SubAgents() {
+					for event, err := range sa.Run(ctx) {
+						if !yield(event, err) {
+							return
+						}
+					}
+				}
+				// Demonstrates that when sub-agent BeforeAgentCallback returns non-nil content
+				// (which calls ctx.EndInvocation() on the sub-agent context), the endInvocation
+				// flag propagates to the parent context via *atomic.Bool.
+				parentEndedAfterSubAgent = ctx.Ended()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create parent_agent: %v", err)
+	}
+
+	parentCtx := &invocationContext{
+		Context:       t.Context(),
+		agent:         parentAgent,
+		session:       &mockSession{sessionID: "test-session"},
+		endInvocation: new(atomic.Bool),
+	}
+
+	for _, err := range parentAgent.Run(parentCtx) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if !parentRunCalled {
+		t.Error("expected parent run to be called")
+	}
+	if !subAgentCalled {
+		t.Error("expected sub_agent BeforeAgentCallback to be called")
+	}
+	if !parentEndedAfterSubAgent {
+		t.Error("expected parentEndedAfterSubAgent to be true after sub-agent callback ended invocation")
 	}
 }

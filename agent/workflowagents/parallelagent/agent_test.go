@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
@@ -644,5 +645,69 @@ func TestParallelAgent_StateSync(t *testing.T) {
 	}
 	if gotValue != "test_value" {
 		t.Fatalf("expected state value 'test_value', got %v", gotValue)
+	}
+}
+
+func TestParallelAgent_IsolatedEndInvocation(t *testing.T) {
+	enderAgent, err := agent.New(agent.Config{
+		Name: "ender",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ctx.EndInvocation()
+				yield(&session.Event{Author: "ender"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workerAgent, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				time.Sleep(1000 * time.Millisecond)
+				if ctx.Ended() {
+					t.Errorf("worker's ctx.Ended() should be false even if ender called EndInvocation")
+					return
+				}
+				yield(&session.Event{Author: "worker"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "parallel",
+			SubAgents: []agent.Agent{enderAgent, workerAgent},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: parallelAgent,
+	})
+
+	var authors []string
+	for event, err := range parallelAgent.Run(parentCtx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		authors = append(authors, event.Author)
+	}
+
+	slices.Sort(authors)
+	wantAuthors := []string{"ender", "worker"}
+	if !slices.Equal(authors, wantAuthors) {
+		t.Fatalf("got authors %v, want %v", authors, wantAuthors)
+	}
+
+	if !parentCtx.Ended() {
+		t.Fatalf("expected parentCtx.Ended() to be true after parallelAgent completed")
 	}
 }
