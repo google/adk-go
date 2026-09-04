@@ -372,7 +372,15 @@ SearchLoop: // A label to allow breaking out of the nested loop
 // pair function calls with their corresponding responses, which is especially
 // useful for histories involving long running tool calls where
 // responses may not have originally been consecutive. It preserves all
-// non-tool-call events (like user messages) in their original order.
+// non-tool-call events (like user messages) in their original order relative
+// to one another. Their position relative to the surrounding tool exchanges
+// can change, because a pair routed to the tail moves past them.
+//
+// Adjacency alone is not enough. When the last event is a function response —
+// a long running tool completing after unrelated tool exchanges were already
+// recorded — pairing it with its much earlier call would bury it mid-history
+// and leave a stale exchange as the final content, which is what the model
+// answers. So the pair(s) answered by the last event are emitted last.
 //
 // It returns a new, correctly ordered slice of events or an error if the
 // history is malformed (e.g., a response is found without a corresponding call).
@@ -393,8 +401,18 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 		}
 	}
 
-	// Rebuild the event list
-	var resultEvents []*session.Event
+	// Index of the last event when it is a function response, otherwise -1.
+	// Only a response event's index can appear in callIDToResponseEventIndex,
+	// so leaving this at -1 makes the relocation below a no-op for every
+	// history that does not end on a function response.
+	lastResponseEventIdx := -1
+	if len(utils.FunctionResponses(events[len(events)-1].Content)) > 0 {
+		lastResponseEventIdx = len(events) - 1
+	}
+
+	// Rebuild the event list. tailEvents holds the call/response pair(s)
+	// answered by the last event; it is appended after everything else.
+	var resultEvents, tailEvents []*session.Event
 
 	for _, event := range events {
 		// If the event contains responses, skip it. It will be handled
@@ -407,55 +425,74 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 		if len(calls) == 0 {
 			// This is a regular event (e.g., user message). Just append it.
 			resultEvents = append(resultEvents, event)
+			continue
+		}
+
+		// This is a function call event. The call and its consolidated
+		// response move together as one unit, so the pair holds at most two
+		// events.
+		pair := make([]*session.Event, 0, 2)
+		pair = append(pair, event)
+
+		// Find the unique indices of all corresponding response events.
+		// Using a map[int]struct{} as a set.
+		responseEventIndicesSet := make(map[int]struct{})
+		for _, call := range calls {
+			if index, found := callIDToResponseEventIndex[call.ID]; found {
+				responseEventIndicesSet[index] = struct{}{}
+			}
+		}
+
+		switch len(responseEventIndicesSet) {
+		case 0:
+			// No responses were found for any call in this event. This is
+			// reachable: a long running tool or a deferring ResponseDeferrer
+			// produces a call with no response event of its own.
+		case 1:
+			// A single unique response event, so use it directly.
+			for index := range responseEventIndicesSet { // A trick to get the single key
+				pair = append(pair, events[index])
+			}
+		default:
+			// Multiple response events exist for that function call so we merge them.
+			//
+			// This branch never coincides with the tail routing below. For a
+			// well-formed parallel call whose siblings are answered in two
+			// different events, rearrangeEventsForLatestFunctionResponse merges
+			// them before this runs, so only case 1 is reached. Getting here
+			// with the last event among the indices needs one call ID shared by
+			// two call events, which PopulateClientFunctionCallID cannot
+			// produce because it assigns a fresh ID to every call.
+			//
+			// Collect and sort the indices to process events in order.
+			var sortedIndices []int
+			for index := range responseEventIndicesSet {
+				sortedIndices = append(sortedIndices, index)
+			}
+			sort.Ints(sortedIndices)
+
+			// Collect the actual event objects to be merged.
+			eventsToMerge := make([]*session.Event, len(sortedIndices))
+			for i, index := range sortedIndices {
+				eventsToMerge[i] = events[index]
+			}
+
+			// Merge the events into a single response.
+			mergedEvent, err := mergeFunctionResponseEvents(eventsToMerge)
+			if err != nil {
+				return nil, fmt.Errorf("failed to merge response events: %w", err)
+			}
+			pair = append(pair, mergedEvent)
+		}
+
+		if _, answeredByLastEvent := responseEventIndicesSet[lastResponseEventIdx]; answeredByLastEvent {
+			tailEvents = append(tailEvents, pair...)
 		} else {
-			// This is a function call event, append it and search for responses
-			resultEvents = append(resultEvents, event)
-
-			// Find the unique indices of all corresponding response events.
-			// Using a map[int]struct{} as a set.
-			responseEventIndicesSet := make(map[int]struct{})
-			for _, call := range calls {
-				if index, found := callIDToResponseEventIndex[call.ID]; found {
-					responseEventIndicesSet[index] = struct{}{}
-				}
-			}
-
-			// If no responses were found for any calls in this event, continue.
-			if len(responseEventIndicesSet) == 0 {
-				continue
-			}
-
-			// If there's only one unique response event, append it directly.
-			if len(responseEventIndicesSet) == 1 {
-				for index := range responseEventIndicesSet { // A trick to get the single key
-					resultEvents = append(resultEvents, events[index])
-				}
-			} else {
-				// Multiple response events exist for that function call so we merge them.
-				// Collect and sort the indices to process events in order.
-				var sortedIndices []int
-				for index := range responseEventIndicesSet {
-					sortedIndices = append(sortedIndices, index)
-				}
-				sort.Ints(sortedIndices)
-
-				// Collect the actual event objects to be merged.
-				eventsToMerge := make([]*session.Event, len(sortedIndices))
-				for i, index := range sortedIndices {
-					eventsToMerge[i] = events[index]
-				}
-
-				// Merge the events and append the single result.
-				mergedEvent, err := mergeFunctionResponseEvents(eventsToMerge)
-				if err != nil {
-					return nil, fmt.Errorf("failed to merge response events: %w", err)
-				}
-				resultEvents = append(resultEvents, mergedEvent)
-			}
+			resultEvents = append(resultEvents, pair...)
 		}
 	}
 
-	return resultEvents, nil
+	return append(resultEvents, tailEvents...), nil
 }
 
 // mergeFunctionResponseEvents merges a list of function response events into one.
