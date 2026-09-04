@@ -929,6 +929,17 @@ func TestRequestOptionsIgnoresHeaders(t *testing.T) {
 // The end of that promise, checked where it can actually be observed: no header
 // a caller put in HTTPOptions may appear on the outgoing request.
 func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "blocking"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) { assertNoHeaderReachesTheWire(t, stream) })
+	}
+}
+
+func assertNoHeaderReachesTheWire(t *testing.T, stream bool) {
+	t.Helper()
 	wireTimeout := 30 * time.Second
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -959,8 +970,8 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 			},
 		}},
 	}
-	for _, err := range m.GenerateContent(context.Background(), req, false) {
-		if err != nil {
+	for _, err := range m.GenerateContent(context.Background(), req, stream) {
+		if err != nil && !stream {
 			t.Fatalf("GenerateContent() error = %v", err)
 		}
 	}
@@ -1670,5 +1681,51 @@ func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
 	if got := requestTimeout(cfg); got != positive {
 		t.Errorf("requestTimeout(%v) = %v, want it unchanged", positive, got)
+	}
+}
+
+// An iter.Seq2 may be ranged more than once, and each range is its own call.
+// The timeout is applied inside the returned closure, so it must derive from
+// the context the caller passed rather than overwrite it: assigning to the
+// captured variable would leave the second range starting from the deadline the
+// first one had already cancelled, failing instantly and for a reason the
+// caller could not see.
+func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
+			`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+	}))
+	defer srv.Close()
+
+	timeout := 30 * time.Second
+	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "test", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+	}
+
+	seq := m.GenerateContent(context.Background(), req, false)
+	for pass := 1; pass <= 2; pass++ {
+		var got error
+		for _, err := range seq {
+			if err != nil {
+				got = err
+				break
+			}
+		}
+		if got != nil {
+			t.Fatalf("pass %d: error = %v, want nil: the sequence is not reusable, "+
+				"which happens when the timeout overwrites the captured context", pass, got)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("server saw %d calls, want 2: the second range did not reach it", calls)
 	}
 }

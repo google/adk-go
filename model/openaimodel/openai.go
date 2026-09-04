@@ -94,6 +94,10 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 
 func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Shadowed, not reassigned: the closure captures ctx by reference, so
+		// assigning to it would leave the second range over this sequence
+		// starting from the deadline the first one already cancelled.
+		ctx := ctx
 		// Bounds the call, retries included, and is released when the caller
 		// stops consuming.
 		if timeout > 0 {
@@ -119,6 +123,9 @@ func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNew
 
 func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Shadowed for the same reason as in generate: reassigning the captured
+		// ctx would poison a second range with the first one's cancellation.
+		ctx := ctx
 		// Bounds the whole stream, not just its first byte.
 		if timeout > 0 {
 			var cancel context.CancelFunc
