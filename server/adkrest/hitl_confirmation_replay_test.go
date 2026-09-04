@@ -90,6 +90,27 @@ func TestRESTHITLConfirmationApprovalSurvivesUserFunctionResponse(t *testing.T) 
 	recorder.want(t, 1, `{"approved_scope":"low-risk"}`)
 }
 
+func TestRESTHITLConfirmationRejectionCanBeApprovedAgain(t *testing.T) {
+	recorder := &confirmationReplayRecorder{}
+	srv := httptest.NewServer(newConfirmationReplayServer(t, recorder))
+	defer srv.Close()
+
+	sid := createConfirmationReplaySession(t, srv.URL)
+	paused := runConfirmationReplayTurn(t, srv.URL, sid, genai.NewContentFromText("approve transfer", genai.RoleUser))
+	confirmationID := confirmationReplayID(paused)
+	if confirmationID == "" {
+		t.Fatalf("fresh turn did not request tool confirmation; events = %+v", paused)
+	}
+
+	runConfirmationReplayTurn(t, srv.URL, sid, confirmationReplayDecision(t, confirmationID, false, nil))
+	recorder.want(t, 0, "")
+
+	runConfirmationReplayTurn(t, srv.URL, sid, confirmationReplayResponse(t, confirmationID, map[string]any{
+		"approved_scope": "low-risk",
+	}))
+	recorder.want(t, 1, `{"approved_scope":"low-risk"}`)
+}
+
 type confirmationReplayArgs struct {
 	Target string `json:"target"`
 }
@@ -230,8 +251,12 @@ func confirmationReplayID(events []confirmationReplayEvent) string {
 }
 
 func confirmationReplayResponse(t *testing.T, confirmationID string, payload map[string]any) *genai.Content {
+	return confirmationReplayDecision(t, confirmationID, true, payload)
+}
+
+func confirmationReplayDecision(t *testing.T, confirmationID string, confirmed bool, payload map[string]any) *genai.Content {
 	t.Helper()
-	confirmation := toolconfirmation.ToolConfirmation{Confirmed: true, Payload: payload}
+	confirmation := toolconfirmation.ToolConfirmation{Confirmed: confirmed, Payload: payload}
 	raw, err := json.Marshal(confirmation)
 	if err != nil {
 		t.Fatalf("marshal confirmation: %v", err)
