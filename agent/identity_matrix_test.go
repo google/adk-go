@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -116,13 +115,6 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		// limit costs rather than skipping the cell and hiding it.
 		outsideModule bool
 		wantDirect    string
-		// wantAfterDelta is the answer once a delta derivation has run. WithICDelta
-		// is a method on the public InvocationContext interface, so an out-of-module
-		// decorator inherits it by promotion, and the promoted method returns the
-		// invocation it embeds — discarding the decorator, and with it the session
-		// it was carrying. Defaults to want.
-		wantAfterDelta string
-		hasAfterDelta  bool
 	}{
 		{name: "pointer session", want: "u", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: matrixOwner("u")}
@@ -145,7 +137,7 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		{name: "session accessor panics", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: panickingAccessorSession{}}
 		}},
-		{name: "Session() panics", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "Session() panics", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return panickingSessionInvocation{InvocationContext: enclosing}
 		}},
 		// A permissive Value hands back something that is not an Identity, so the
@@ -156,24 +148,24 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		{name: "permissive Value, no session", outsideModule: true, ic: func() InvocationContext {
 			return permissiveInvocationValue{InvocationContext: &invocationContext{Context: enclosing}}
 		}},
-		{name: "decorated outside the module", want: "u", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated outside the module", want: "u", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: matrixOwner("u")}
 		}},
 		// The two axes have to be crossed, not just walked. An invocation that owns
 		// a session fails closed on its own, so an unreadable session only reaches
 		// the delegation through a decorator — where inheriting is a live user's
 		// credential minted for someone else's call.
-		{name: "decorated, typed-nil session", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, typed-nil session", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: (*matrixSession)(nil)}
 		}},
-		{name: "decorated, session accessor panics", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, session accessor panics", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: panickingAccessorSession{}}
 		}},
 		// A nil session field is what a decorator author gets by default, and it is
 		// the shape that used to fail OPEN: a nil interface reads exactly like the
 		// session-less view a tool context is, so the procedure delegated to the
 		// decorator and its parent answered with a live user who made no such call.
-		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", wantAfterDelta: "enclosing", hasAfterDelta: true, ic: func() InvocationContext {
+		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: nil}
 		}},
 	}
@@ -206,6 +198,8 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		// The delta derivations. WithICDelta is on the public InvocationContext
 		// interface, so these columns are as much a way of deriving a context as
 		// the constructors above, and agent.Run takes this exact path on every run.
+		// They must answer exactly as the plain derivations do: applying a delta
+		// says nothing about which invocation a context speaks for.
 		{"PromoteWithDelta", func(ic InvocationContext) context.Context {
 			branch := "br"
 			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
@@ -233,11 +227,8 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 	for _, r := range rows {
 		for _, c := range cols {
 			want := r.want
-			switch {
-			case c.name == "the invocation itself" && r.outsideModule:
+			if c.name == "the invocation itself" && r.outsideModule {
 				want = r.wantDirect
-			case strings.Contains(c.name, "Delta") && r.hasAfterDelta:
-				want = r.wantAfterDelta
 			}
 			t.Run(r.name+" / "+c.name, func(t *testing.T) {
 				defer func() {

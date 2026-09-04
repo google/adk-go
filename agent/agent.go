@@ -436,6 +436,9 @@ func (c *invocationContext) Session() session.Session {
 // owns its session, so no session means no identity — never the enclosing
 // invocation's, whose user made no such call.
 func (c *invocationContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
 	if key == adkcontext.IdentityKey {
 		if id, ok := identityOf(func() session.Session { return c.session }); ok {
 			return id

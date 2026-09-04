@@ -132,6 +132,9 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 // invocation's, whose user made no such call and whose credential would
 // otherwise be minted for it.
 func (c *InvocationContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
 	if key == adkcontext.IdentityKey {
 		if id, ok := adkcontext.Recovered(func() agent.Identity {
 			s := c.params.Session

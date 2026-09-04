@@ -16,7 +16,6 @@ package context_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -387,10 +386,9 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 		{"behind a non-ADK wrapper", func(ic agent.InvocationContext) context.Context {
 			return context.WithValue(icontext.NewReadonlyContext(ic), wrapKey{}, "x")
 		}},
-		// A readonly context over a delta-derived one. WithICDelta is promoted for
-		// an out-of-module decorator, so it returns the invocation the decorator
-		// embeds and the decorator is dropped — session and all, not just the
-		// identity. Recorded here so the limit is asserted rather than assumed.
+		// A readonly context over a delta-derived one. A delta must not change
+		// which invocation the context speaks for, so this answers as the plain
+		// readonly column does.
 		{"readonly context over a delta-derived context", func(ic agent.InvocationContext) context.Context {
 			branch := "br"
 			return icontext.NewReadonlyContext(agent.PromoteWithDelta(ic,
@@ -408,9 +406,6 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 				}()
 				ctx := c.of(r.ic())
 				want := r.want
-				if strings.Contains(c.name, "delta-derived") && strings.HasPrefix(r.name, "decorated") {
-					want = "enclosing"
-				}
 				var got string
 				id, ok := agent.IdentityFromContext(ctx)
 				if ok {

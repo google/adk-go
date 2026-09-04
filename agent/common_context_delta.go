@@ -17,6 +17,8 @@ package agent
 import (
 	"context"
 
+	"google.golang.org/adk/v2/internal/adkcontext"
+
 	"google.golang.org/genai"
 )
 
@@ -46,7 +48,7 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.WithICDelta(d.InvocationContextDelta)
+	res.invocationContext = withICDelta(res.invocationContext, d.InvocationContextDelta)
 
 	if d.InvocationContextDelta != nil {
 		if d.InvocationContextDelta.Context != nil {
@@ -78,6 +80,37 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.WithICDelta(d)
+	res.invocationContext = withICDelta(res.invocationContext, d)
 	return &res
+}
+
+// withICDelta applies d to the invocation this context speaks for, and refuses to
+// let that application change WHICH invocation it is.
+//
+// An InvocationContext written outside the module cannot override WithICDelta
+// for a key it cannot name — but it inherits the method by promotion, and the
+// promoted method hands back the invocation it EMBEDS. The decorator, and the
+// session naming its own user, are dropped, and the context goes on to speak for
+// the enclosing call. A per-user credential minted under it then belongs to
+// someone who made no such call.
+//
+// The signature of that drop is precise: a value that could not answer for
+// itself has turned into one that can. Anything else — an invocation of ours, or
+// one from elsewhere that really did return a delta'd copy of itself — is left
+// alone, so this costs nothing for a type that implements WithICDelta properly.
+// A decorator that cannot have the delta applied to it correctly is better left
+// un-delta'd than replaced by a different call's invocation.
+func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
+	next := ic.WithICDelta(d)
+	if next == nil {
+		// It lost its invocation, and a context with none falls back to asking its
+		// parent — the enclosing call again.
+		return ic
+	}
+	if _, wasOurs := ic.(adkcontext.Source); !wasOurs {
+		if _, isOurs := next.(adkcontext.Source); isOurs {
+			return ic
+		}
+	}
+	return next
 }

@@ -77,24 +77,17 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 //
-// An invocation ADK itself built always reports its own user, whichever way a
-// context is derived from it. An [InvocationContext] implemented OUTSIDE this
-// module is where the guarantee stops, and a caller deciding whether it may act
-// on the answer needs both halves of that:
+// Any context DERIVED through this package reports the user of the invocation it
+// speaks for, or none at all, and never substitutes an enclosing invocation's —
+// including one derived from an [InvocationContext] implemented outside the
+// module, and including the delta derivations, which refuse to let applying a
+// delta change which invocation a context speaks for.
 //
-//   - [Promote], [NewContext], [NewToolContext], [NewCallbackContext], a
-//     readonly context and their children report such an invocation's own user,
-//     or none at all if it has no readable session of its own. They never
-//     substitute the enclosing invocation's.
-//   - Passing one *as the context itself*, or deriving through [CommonContextDelta]
-//     — [PromoteWithDelta], [Context.WithDelta], [InvocationContext.WithICDelta] —
-//     reports whatever it embeds. The key is unnameable outside the module, so a
-//     decorator cannot override it and its parent answers. The delta case is
-//     wider than identity: WithICDelta is promoted too, so the decorator is
-//     dropped outright and Session, UserID and AppName report the parent as well.
-//
-// So an invocation from elsewhere must be promoted before anything acts on its
-// identity, and must override WithICDelta if it is to survive a delta at all.
+// One case is not a derivation and cannot be fixed from here: an
+// [InvocationContext] implemented outside the module and passed *as the context
+// itself*. It answers with whatever it embeds, because the key is unnameable
+// outside the module, so a decorator cannot override it and its parent answers.
+// [Promote] it before anything acts on the identity.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok
@@ -424,6 +417,9 @@ func (c *commonContext) UserID() string {
 // Only the identity key touches the invocation, so no other key is affected by
 // its state, and a session that panics costs the identity, not the process.
 func (c *commonContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
 	if key == adkcontext.IdentityKey {
 		return c.identity()
 	}
@@ -455,9 +451,6 @@ func (c *commonContext) Value(key any) any {
 // A commonContext speaking for no invocation at all is the one case that consults
 // its own parent, since there is nothing else it could answer for.
 func (c *commonContext) identity() any {
-	if c == nil {
-		return nil
-	}
 	if c.invocationContext == nil {
 		if c.Context == nil {
 			return nil

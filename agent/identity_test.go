@@ -152,8 +152,7 @@ type permissiveInvocation struct{ InvocationContext }
 
 func (permissiveInvocation) Value(any) any { return "something that is not an Identity" }
 
-// TestIdentityFromBrokenWrapper pins the recover inside the wrappers'
-// adkIdentity. The tool and callback wrappers are this package's own types, so
+// TestIdentityFromBrokenWrapper pins the recover inside identityFrom. The tool and callback wrappers are this package's own types, so
 // the identity procedure trusts them to answer — but a hand-built one can hold a
 // nil inner context, and Value runs inside http.RoundTripper on the caller's
 // goroutine, where net/http does not recover. Losing the identity is the
@@ -255,6 +254,66 @@ func TestIdentityFromUserlessSession(t *testing.T) {
 			}
 			if want := (Identity{AppName: "app", SessionID: "sid"}); id != want {
 				t.Errorf("IdentityFromContext() = %+v, want %+v", id, want)
+			}
+		})
+	}
+}
+
+// nilDeltaInvocation is a partial implementation of the kind an embedder writes:
+// it returns nil from WithICDelta rather than a derived invocation. ADK's own
+// ContextMock returns nil from WithContext, WithBranch and WithAgentContext, so
+// the shape is not exotic.
+type nilDeltaInvocation struct {
+	InvocationContext
+	own session.Session
+}
+
+func (d nilDeltaInvocation) Session() session.Session                            { return d.own }
+func (nilDeltaInvocation) WithICDelta(*InvocationContextDelta) InvocationContext { return nil }
+
+// TestDeltaOnInvocationThatReturnsNil pins that losing the invocation to a delta
+// does not fail open. A commonContext with no invocation asks its parent, and the
+// parent here is the enclosing call — so adopting the nil would report a user who
+// made no such call, with ok true.
+func TestDeltaOnInvocationThatReturnsNil(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+	ic := nilDeltaInvocation{InvocationContext: enclosing, own: matrixOwner("u")}
+	branch := "br"
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"PromoteWithDelta", PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})},
+		{"WithICDelta", Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := IdentityFromContext(tc.ctx)
+			if !ok || id.UserID != "u" {
+				t.Errorf("IdentityFromContext() = %+v, %v; want the invocation's own user %q", id, ok, "u")
+			}
+		})
+	}
+}
+
+// TestIdentityThroughNestedSessionlessContexts pins the marker on commonContext
+// itself. A promoted tool context is a commonContext whose own invocation is a
+// session-less wrapper, so if it could not answer for itself the outer context
+// would read that wrapper's nil session and report no user at all.
+func TestIdentityThroughNestedSessionlessContexts(t *testing.T) {
+	ic := &invocationContext{Context: t.Context(), session: matrixOwner("u")}
+	promotedTool := Promote(NewToolContext(ic, "fc", nil, nil))
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"callback context over a promoted tool context", NewCallbackContext(promotedTool, nil)},
+		{"tool context over a promoted tool context", NewToolContext(promotedTool, "fc2", nil, nil)},
+		{"context over a promoted tool context", NewContext(promotedTool)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := IdentityFromContext(tc.ctx)
+			if !ok || id.UserID != "u" {
+				t.Errorf("IdentityFromContext() = %+v, %v; want %q", id, ok, "u")
 			}
 		})
 	}

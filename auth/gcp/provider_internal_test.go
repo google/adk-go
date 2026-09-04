@@ -237,7 +237,7 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 	}
 }
 
-// TestResolveClientFailFastAfterBlownBound pins that a stuck lookup costs the
+// TestResolveClientFailsFastOnceTheAttemptBoundPasses pins that a stuck lookup costs the
 // bound once, not once per request. The attempt is deliberately kept running, so
 // without the latch every outbound request would re-pay the full initTimeout for
 // as long as the lookup is stuck.

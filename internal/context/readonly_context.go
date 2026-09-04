@@ -50,6 +50,9 @@ type ReadonlyContext struct {
 // agent itself owns. It returns the argument unchanged when it is already one of
 // those, so the copy is made only where it is needed.
 func (c *ReadonlyContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
 	if key == adkcontext.IdentityKey {
 		if c.InvocationContext == nil {
 			return nil

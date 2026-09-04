@@ -341,6 +341,9 @@ func (p *provider) publish(in *clientInit) {
 		p.client = in.client
 	}
 	p.pending = nil
-	p.mu.Unlock()
+	// Closed inside the critical section: a waiter that has already sampled
+	// p.client would otherwise be able to observe neither it nor a closed done,
+	// and report a failure for an attempt that had succeeded.
 	close(in.done)
+	p.mu.Unlock()
 }
