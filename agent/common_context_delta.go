@@ -105,6 +105,15 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 // site reconstructs what it should have returned. It predates the identity key
 // and is documented on IdentityFromContext instead.
 func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
+	// A delta with nothing to say about the invocation must not touch it. ADK's
+	// own types return the receiver for a nil delta, but a promoted WithICDelta
+	// hands back the invocation the decorator embeds whatever the delta says, so
+	// asking at all is what costs an out-of-module caller its identity — and
+	// entering a workflow does exactly this, with a delta that carries only Path
+	// and RunID.
+	if ic == nil || d == nil {
+		return ic
+	}
 	if next := ic.WithICDelta(d); next != nil {
 		return next
 	}

@@ -1110,6 +1110,12 @@ func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
 }
 
 func (c *cancelledToolContext) Value(key any) any {
+	// Fails closed rather than dereferencing: this type carries the identity
+	// marker, so the identity procedure asks it directly, and that ask can arrive
+	// from inside http.RoundTripper where net/http does not recover.
+	if c == nil || c.cancelCtx == nil {
+		return nil
+	}
 	return c.cancelCtx.Value(key)
 }
 

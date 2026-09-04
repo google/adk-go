@@ -211,7 +211,9 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 			branch := "br"
 			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
 		}},
-		{"PromoteWithDelta, nil InvocationContextDelta", true, func(ic InvocationContext) context.Context {
+		// A delta that says nothing about the invocation does not touch it, so this
+		// column is safe where the two below are not.
+		{"PromoteWithDelta, nil InvocationContextDelta", false, func(ic InvocationContext) context.Context {
 			return PromoteWithDelta(ic, &CommonContextDelta{})
 		}},
 		{"WithICDelta on a promoted context", true, func(ic InvocationContext) context.Context {
