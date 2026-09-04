@@ -246,11 +246,15 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 			if remaining <= 0 {
 				return nil, ErrPollTimeout
 			}
-			wait := min(backoff, remaining)
+			// A timer rather than time.After: the caller giving up is an ordinary
+			// way out of this loop, and time.After holds the runtime timer until
+			// it fires whether anyone is still waiting or not.
+			timer := time.NewTimer(min(backoff, remaining))
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			backoff = min(backoff*2, maxBackoff)
 		default:
