@@ -21,6 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/session"
 )
@@ -703,6 +706,63 @@ func TestPromotedColumnsCallTheMethodTheyName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDecoratorAnswersForItselfWhileReadingTheEnclosingUsersData pins the claim
+// the rule makes about Artifacts, Memory and SearchMemory.
+//
+// It was asserted in the doc and in a reason string in the classification map,
+// and nothing checked it. That is the shape of every defect this file exists to
+// catch, so the claim gets a test: one context, answering "u" to the credential
+// path and addressing "enclosing" on the artifact path at the same time.
+func TestDecoratorAnswersForItselfWhileReadingTheEnclosingUsersData(t *testing.T) {
+	enclosing := &invocationContext{
+		Context:   t.Context(),
+		session:   matrixOwner("enclosing"),
+		artifacts: artifactsOf("enclosing"),
+	}
+	// Overrides Session, as the rule instructs, and not Artifacts.
+	d := bareContextDecorator{Context: Promote(enclosing), own: matrixOwner("u")}
+	tc := NewToolContext(d, "fc", nil, nil)
+
+	if id, ok := IdentityFromContext(tc); !ok || id.UserID != "u" {
+		t.Fatalf("IdentityFromContext() = %q, %v; want \"u\", true", id.UserID, ok)
+	}
+	// A tool context wraps the handle for save tracking; the handle underneath is
+	// the one carrying the user.
+	a := tc.Artifacts()
+	if tracked, ok := a.(*trackedArtifacts); ok {
+		a = tracked.Artifacts
+	}
+	got, ok := a.(interface{ owner() string })
+	if !ok {
+		t.Fatalf("Artifacts() = %T, want the test handle", a)
+	}
+	if got.owner() != "enclosing" {
+		t.Errorf("Artifacts() addresses %q, want \"enclosing\"", got.owner())
+	}
+	// Stated as a test rather than left implied: the two disagree, deliberately
+	// and by promotion, and that is what the rule warns a decorator author about.
+}
+
+func artifactsOf(user string) Artifacts { return userArtifacts(user) }
+
+// userArtifacts stands in for internal/artifact.Artifacts, which carries
+// AppName/UserID/SessionID and sends them as the storage key.
+type userArtifacts string
+
+func (a userArtifacts) owner() string { return string(a) }
+
+func (a userArtifacts) Save(context.Context, string, *genai.Part) (*artifact.SaveResponse, error) {
+	return nil, nil
+}
+func (a userArtifacts) List(context.Context) (*artifact.ListResponse, error) { return nil, nil }
+func (a userArtifacts) Load(context.Context, string) (*artifact.LoadResponse, error) {
+	return nil, nil
+}
+
+func (a userArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+	return nil, nil
 }
 
 // selectiveDecorator intercepts exactly one context-producing method and lets
