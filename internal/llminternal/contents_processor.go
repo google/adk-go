@@ -45,7 +45,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		}
 		state := llmAgent.internal()
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" {
+		if state.IncludeContents == IncludeContentsNone {
 			// Include current turn context only (no conversation history)
 			fn = buildContentsCurrentTurnContextOnly
 		}

@@ -82,7 +82,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		}
 
 		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
+			state.IncludeContents = llminternal.IncludeContentsNone
 		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
