@@ -47,16 +47,18 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	}
 
 	// We convert the generic content parts into OpenAI's input format.
-	input, err := convertContents(req.Contents)
+	input, droppedReasoning, err := convertContents(req.Contents)
 	if err != nil {
 		return responses.ResponseNewParams{}, err
 	}
 	if len(input) == 0 {
-		if len(req.Contents) > 0 {
-			// Conversion emptied a non-empty request; don't report it as a
-			// caller who sent nothing.
+		if droppedReasoning {
+			// The drop is what emptied the request; don't report it as a
+			// caller who sent nothing. Gated on a part actually having been
+			// dropped, so a request that was empty on arrival still returns
+			// the bare sentinel a caller may compare against directly.
 			return responses.ResponseNewParams{}, fmt.Errorf(
-				"%w: every part was dropped as replayed reasoning or blank text", ErrNoContents)
+				"%w: every part was dropped as replayed reasoning", ErrNoContents)
 		}
 		return responses.ResponseNewParams{}, ErrNoContents
 	}
@@ -92,12 +94,16 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	return params, nil
 }
 
-func convertContents(contents []*genai.Content) (responses.ResponseInputParam, error) {
+// convertContents converts contents into Responses API input items, reporting
+// separately whether any part was dropped as replayed reasoning. The caller
+// needs that to tell a request the drop emptied from one that arrived empty.
+func convertContents(contents []*genai.Content) (responses.ResponseInputParam, bool, error) {
 	var (
-		items     responses.ResponseInputParam
-		tracker   callTracker
-		textParts []string
-		curRole   genai.Role = genai.RoleUser
+		items            responses.ResponseInputParam
+		tracker          callTracker
+		textParts        []string
+		droppedReasoning bool
+		curRole          genai.Role = genai.RoleUser
 		// flushText is a helper function that takes any accumulated text parts
 		// and converts them into a message, then appends it to our items.
 		flushText = func() error {
@@ -139,38 +145,41 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 			// that something sendable elsewhere on the same part — text, or a
 			// function call — cannot carry it out of the request unannounced.
 			if field := unsupportedPayload(part); field != "" {
-				return nil, fmt.Errorf("openai: unsupported content part: %s", field)
+				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
 			sendText := part.Text != "" && !part.Thought
-			if sendText {
+			switch {
+			case sendText:
 				textParts = append(textParts, part.Text)
-			} else if part.Text != "" {
-				// The reasoning text is dropped, but the role it arrived under
-				// is still checked: dropping it must not silence the error
-				// flushText would otherwise have raised.
+			case part.Text != "" || replayedReasoning(part):
+				// Reasoning is dropped, but the role it arrived under is still
+				// checked, on a bare thought as much as on one carrying text:
+				// dropping a part must not silence an error the same turn
+				// would have raised had it been an answer.
+				droppedReasoning = true
 				if _, err := normalizeRole(curRole); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 			}
 			switch {
 			case part.FunctionCall != nil:
 				// Flush first so buffered text keeps its place ahead of the call.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				callParam, err := tracker.newFunctionCall(part.FunctionCall)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
 				// Similarly, for a function response, we flush text before adding the response.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				respParam, err := tracker.newFunctionResponse(part.FunctionResponse)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
 			case !sendText && !replayedReasoning(part):
@@ -178,16 +187,16 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 				// response, and is not reasoning worth dropping: nothing in it
 				// reaches the request, so say so rather than let an empty part
 				// pass for a converted one.
-				return nil, errors.New("openai: content part carries nothing to send")
+				return nil, false, errors.New("openai: content part carries nothing to send")
 			}
 		}
 		// After processing all parts in a content block, we flush any remaining text.
 		if err := flushText(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
-	return items, nil
+	return items, droppedReasoning, nil
 }
 
 // replayedReasoning reports whether part is reasoning carried over from an

@@ -508,6 +508,26 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: `unsupported role "assistant"`,
 		},
 		{
+			// And on a thought with no text to drop: the part still leaves the
+			// request, so the turn is still one the package cannot send.
+			name: "unsupported_role_still_reported_on_a_textless_thought",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{Thought: true}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
+			// Same for a bare signature, which reaches the drop by the other
+			// door — the marker unset, the signature alone.
+			name: "unsupported_role_still_reported_on_a_bare_signature",
+			contents: []*genai.Content{
+				genai.NewContentFromText("q", genai.RoleUser),
+				{Role: "assistant", Parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}},
+			},
+			wantErrText: `unsupported role "assistant"`,
+		},
+		{
 			// Not a thought at all: an image riding on ordinary text used to
 			// leave the request silently, because the text matched an arm and
 			// the rejection never ran. The check is independent of what the
@@ -554,20 +574,47 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: "carries nothing to send",
 		},
 		{
+			// Text riding on a response that pairs with nothing. The response
+			// used to be discarded because the text matched an arm first, so
+			// the pairing the API requires went unchecked; it is now enforced
+			// wherever the response appears.
+			name: "orphan_response_riding_on_text_is_reported",
+			contents: []*genai.Content{
+				userTurn(&genai.Part{
+					Text:             "here you go",
+					FunctionResponse: &genai.FunctionResponse{Name: "lookup"},
+				}),
+			},
+			wantErrText: "missing call id",
+		},
+		{
+			// Same shape on the call arm: a call with no name is unsendable,
+			// and riding on text no longer hides it.
+			name: "nameless_call_riding_on_text_is_reported",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{
+					Text:         "on it",
+					FunctionCall: &genai.FunctionCall{},
+				}),
+			},
+			wantErr: ErrFunctionCallMissingName,
+		},
+		{
 			// A request left empty by the drop is reported rather than sent,
 			// and says the drop emptied it rather than that nothing was sent.
 			name:        "only_thoughts",
 			contents:    []*genai.Content{modelTurn(thought("scratch"))},
 			wantErr:     ErrNoContents,
-			wantErrText: "every part was dropped",
+			wantErrText: "every part was dropped as replayed reasoning",
 		},
 		{
-			// The same, reached the other way: a blank answer buffers text
-			// that newOutputMessage then skips, so nothing is emitted.
-			name:        "only_blank_text",
-			contents:    []*genai.Content{modelTurn(&genai.Part{Text: "   "})},
+			// The wrap is keyed on a part having been dropped, not on the
+			// request being empty for any reason, so a turn that mixes the two
+			// still reports the drop.
+			name:        "thought_and_blank_answer",
+			contents:    []*genai.Content{modelTurn(thought("scratch"), &genai.Part{Text: "   "})},
 			wantErr:     ErrNoContents,
-			wantErrText: "every part was dropped",
+			wantErrText: "every part was dropped as replayed reasoning",
 		},
 	}
 
@@ -591,6 +638,50 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			}
 			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildOpenAIParams_NoContentsSentinelIdentity pins which requests get the
+// bare ErrNoContents and which get it wrapped. The distinction is not cosmetic:
+// a caller comparing with == rather than errors.Is sees only the bare one, so
+// wrapping a request that arrived empty would silently stop matching. Only the
+// drop emptying a request the caller did fill earns the wrap.
+func TestBuildOpenAIParams_NoContentsSentinelIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		wantBare bool
+	}{
+		{"nil_contents", nil, true},
+		{"empty_contents", []*genai.Content{}, true},
+		{"content_with_no_parts", []*genai.Content{{Role: string(genai.RoleUser)}}, true},
+		{"content_with_only_nil_parts", []*genai.Content{
+			{Role: string(genai.RoleUser), Parts: []*genai.Part{nil}},
+		}, true},
+		{
+			// Nothing was dropped as reasoning here: the text was accepted and
+			// then skipped as blank, exactly as it is without this change.
+			"only_blank_text",
+			[]*genai.Content{{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "   "}}}},
+			true,
+		},
+		{
+			"only_reasoning",
+			[]*genai.Content{{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "scratch", Thought: true}}}},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildOpenAIParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if !errors.Is(err, ErrNoContents) {
+				t.Fatalf("buildOpenAIParams() err = %v, want it to wrap %v", err, ErrNoContents)
+			}
+			//nolint:errorlint // the point of the test is the identity, not the chain.
+			if gotBare := err == ErrNoContents; gotBare != tt.wantBare {
+				t.Errorf("err == ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
 			}
 		})
 	}
