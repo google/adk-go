@@ -151,17 +151,17 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			state := llminternal.Reveal(llmAgent)
 			// Reveal returns the sub-agent's shared, persistent State, so
 			// concurrent live sessions driving one agent tree would race
-			// this read-then-append on Tools/Instruction. The guard lives
-			// on State (see llminternal.State.TaskCompletedInjection): the
-			// injection runs exactly once, and every other RunLive caller
-			// for this sub-agent blocks on it before reading Tools rather
-			// than racing its own unsynchronized check.
-			state.TaskCompletedInjection.Do(func() {
+			// this read-then-append on Tools/Instruction. state.LiveInjection
+			// runs it once per agent and gives every other RunLive caller a
+			// happens-before edge before they read Tools.
+			state.LiveInjection.Do(func() {
 				hasTaskCompleted := false
 				for _, t := range state.Tools {
-					// llmagent.New copies cfg.Tools without validating, so a
-					// nil element can reach here; skip it rather than panic
-					// inside sync.Once (which would latch the guard shut).
+					// llmagent.New assigns the caller's cfg.Tools slice
+					// unvalidated (#1490), so a nil element can reach here;
+					// skip an untyped nil. A typed nil still panics in
+					// t.Name() below — on every call, as on main, because
+					// LiveInjection.Do does not latch on panic.
 					if t == nil {
 						continue
 					}

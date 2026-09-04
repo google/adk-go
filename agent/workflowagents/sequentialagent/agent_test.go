@@ -34,7 +34,16 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
+
+// stubTool is a minimal tool.Tool for tests that only need a named entry
+// in state.Tools.
+type stubTool struct{ name string }
+
+func (s stubTool) Name() string        { return s.name }
+func (s stubTool) Description() string { return s.name }
+func (s stubTool) IsLongRunning() bool { return false }
 
 func TestNewSequentialAgent(t *testing.T) {
 	type args struct {
@@ -470,16 +479,16 @@ const taskCompletedInstructionMarker = "call the task_completed function to exit
 // either had written it back.
 //
 // Beyond "injected exactly once", the test pins the ordering guarantee
-// the sync.Once is there for: each goroutine reads state.Tools right
-// after its own RunLive returns and must observe the completed injection
-// (exactly one task_completed tool, never zero). A plain "already done"
-// marker would pass the final count assertion but let a losing caller
-// return before the winner's write is visible -- that read is what fails
-// under -race without the barrier.
+// the LiveInjection latch is there for: each goroutine reads state.Tools
+// right after its own RunLive returns and must observe the completed
+// injection (exactly one task_completed tool, never zero). A plain
+// "already done" marker would pass the final count assertion but let a
+// losing caller return before the winner's write is visible -- that read
+// is what fails under -race without the barrier.
 //
 // The pipeline has three sub-agents so RunLive's injection loop runs more
 // than one iteration, and each sub-agent carries its own State with its own
-// sync.Once: the guard has to hold independently for every one of them.
+// LiveInjection latch: the guard has to hold independently for every one.
 func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
 	subAgents := []agent.Agent{
 		newCustomAgent(t, 1), newCustomAgent(t, 2), newCustomAgent(t, 3),
@@ -560,6 +569,62 @@ func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
 		if n := strings.Count(s.Instruction, taskCompletedInstructionMarker); n != 1 {
 			t.Errorf("sub-agent %d: task_completed instruction suffix appears %d times, want exactly 1", j, n)
 		}
+	}
+}
+
+// TestSequentialAgent_RunLive_PreexistingToolAndNilSkip pins the two
+// branches of RunLive's injection loop that no other test reaches: the
+// idempotence check that leaves a sub-agent's own task_completed tool (and
+// the instruction) alone, and the untyped-nil skip in the same loop.
+// Deleting the "does it already have task_completed" scan and injecting
+// unconditionally otherwise keeps the whole package green, because the
+// LiveInjection guard fires exactly once either way.
+func TestSequentialAgent_RunLive_PreexistingToolAndNilSkip(t *testing.T) {
+	subAgent, err := llmagent.New(llmagent.Config{
+		Name:  "sub_with_task_completed",
+		Model: &FakeLLM{id: 1},
+		Tools: []tool.Tool{nil, stubTool{name: "task_completed"}}, // nil exercises the skip
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq_agent", SubAgents: []agent.Agent{subAgent}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	liveAgent, ok := seq.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	state := llminternal.Reveal(subAgent.(llminternal.Agent))
+	toolsBefore := len(state.Tools)
+	instrBefore := state.Instruction
+
+	_, _, _ = liveAgent.RunLive(&mockInvocationContext{agent: seq, invocationID: "test_id", ctx: t.Context()})
+
+	if len(state.Tools) != toolsBefore {
+		t.Errorf("Tools grew from %d to %d; a pre-existing task_completed must suppress the append", toolsBefore, len(state.Tools))
+	}
+	got := 0
+	for _, tl := range state.Tools {
+		if tl != nil && tl.Name() == "task_completed" {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Errorf("task_completed tool count = %d, want 1 (the sub-agent's own, untouched)", got)
+	}
+	if state.Instruction != instrBefore {
+		t.Errorf("Instruction changed; the hand-off suffix must not be appended when task_completed already exists")
+	}
+	if n := strings.Count(state.Instruction, taskCompletedInstructionMarker); n != 0 {
+		t.Errorf("instruction suffix appears %d times, want 0", n)
 	}
 }
 
