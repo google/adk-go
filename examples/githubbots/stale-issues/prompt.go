@@ -1,0 +1,84 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	_ "embed"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+)
+
+//go:embed prompt_instruction.txt
+var promptTemplate string
+
+// renderPrompt substitutes the configuration placeholders into the embedded
+// prompt and returns a finished instruction string.
+//
+// The placeholders use {NAME} syntax, which is also how llmagent.Config's
+// Instruction field performs session-state templating. We therefore fully
+// resolve every placeholder here, leaving no stray braces, so the rendered
+// string is safe to pass as a plain Instruction.
+func renderPrompt(cfg *Config) string {
+	// Strip braces from config-derived values: llmagent treats { and } as
+	// session-state references, so a brace arriving via a label or OWNER/REPO
+	// (e.g. a label like "needs_{info}") would otherwise inject an unknown state
+	// key and fail every run.
+	r := strings.NewReplacer(
+		"{OWNER}", stripBraces(cfg.Owner),
+		"{REPO}", stripBraces(cfg.Repo),
+		"{STALE_LABEL_NAME}", stripBraces(cfg.StaleLabel),
+		"{REQUEST_CLARIFICATION_LABEL}", stripBraces(cfg.RequestClarificationLabel),
+		"{stale_threshold_days}", formatDays(cfg.StaleAfter),
+		"{close_threshold_days}", formatDays(cfg.CloseAfter),
+	)
+	return r.Replace(promptTemplate)
+}
+
+var braceStripper = strings.NewReplacer("{", "", "}", "")
+
+// stripBraces removes brace characters so a substituted value cannot be parsed
+// as an llmagent session-state placeholder.
+func stripBraces(s string) string { return braceStripper.Replace(s) }
+
+// formatDays renders a duration as a clean day count: whole numbers without a
+// decimal (e.g. "7"), fractional values with one decimal place (e.g. "0.5").
+// humanDays renders a threshold for a comment the bot PUBLISHES, as opposed to
+// formatDays which renders it for the prompt.
+//
+// The difference is the sub-day case. formatDays prints one decimal, so a
+// threshold under about twelve hours renders as "0.0" and the published sentence
+// reads "closed if no further activity occurs within 0.0 days". validate() only
+// requires the thresholds to be positive, so an hour-scale value is accepted and
+// that text reaches a stranger's issue under the company's name.
+func humanDays(d time.Duration) string {
+	switch days := d.Hours() / 24; {
+	case days < 1:
+		return "less than a day"
+	case days == 1:
+		return "1 day"
+	default:
+		return formatDays(d) + " days"
+	}
+}
+
+func formatDays(d time.Duration) string {
+	days := d.Hours() / 24
+	if days == math.Trunc(days) {
+		return strconv.Itoa(int(days))
+	}
+	return strconv.FormatFloat(days, 'f', 1, 64)
+}
