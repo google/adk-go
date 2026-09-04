@@ -489,6 +489,12 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing
 						},
 					},
 					{Name: "no_parameters"},
+					{
+						Name: "json_schema_only",
+						ParametersJsonSchema: map[string]any{
+							"type": "STRING",
+						},
+					},
 				},
 			}},
 		},
@@ -506,13 +512,19 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing
 		{
 			"name":        "both_parameters",
 			"description": "",
-			"parameters":  map[string]any{"type": "string"},
+			"parameters":  map[string]any{"type": "object"},
 			"type":        "function",
 		},
 		{
 			"name":        "no_parameters",
 			"description": "",
 			"parameters":  nil,
+			"type":        "function",
+		},
+		{
+			"name":        "json_schema_only",
+			"description": "",
+			"parameters":  map[string]any{"type": "string"},
 			"type":        "function",
 		},
 	}
