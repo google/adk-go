@@ -658,6 +658,14 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 	}
 }
 
+func TestVertexAiService_GetUserState_NotSupported(t *testing.T) {
+	s := &vertexAiService{}
+	_, err := s.GetUserState(t.Context(), &session.GetUserStateRequest{AppName: "app", UserID: "user"})
+	if err == nil {
+		t.Error("GetUserState() error = nil, want non-nil: VertexAiSessionService does not support GetUserState")
+	}
+}
+
 func TestCreateAiplatformpbMetadata(t *testing.T) {
 	tests := []struct {
 		name        string
