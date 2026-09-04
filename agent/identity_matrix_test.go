@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -99,6 +100,19 @@ type decoratedInvocationValue struct {
 
 func (d decoratedInvocationValue) Session() session.Session { return d.own }
 
+// contextDecorator decorates agent.Context, which is the interface a tool or a
+// workflow node is handed — so it is the shape an author actually writes. It
+// overrides both methods on InvocationContext, which is everything the rule used
+// to name, and is still dropped by the four that Context adds.
+type contextDecorator struct {
+	Context
+	own session.Session
+}
+
+func (d contextDecorator) Session() session.Session                              { return d.own }
+func (d contextDecorator) WithContext(context.Context) InvocationContext         { return d }
+func (d contextDecorator) WithICDelta(*InvocationContextDelta) InvocationContext { return d }
+
 func TestIdentityDecisionMatrix(t *testing.T) {
 	// Every row is nested under this one, so any cell that reports "enclosing" is
 	// serving a user who made no such call.
@@ -123,6 +137,11 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		// asserted rather than assumed. Defaults to want.
 		wantPromoted    string
 		hasWantPromoted bool
+		// wantContextPromoted is the same for the methods Context adds on top of
+		// InvocationContext. A decorator can override one interface's worth and not
+		// the other's, and that is exactly the gap this row set exists to catch.
+		wantContextPromoted    string
+		hasWantContextPromoted bool
 	}{
 		{name: "pointer session", want: "u", ic: func() InvocationContext {
 			return &invocationContext{Context: enclosing, session: matrixOwner("u")}
@@ -173,6 +192,15 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 		// the shape that used to fail OPEN: a nil interface reads exactly like the
 		// session-less view a tool context is, so the procedure delegated to the
 		// decorator and its parent answered with a live user who made no such call.
+		// Decorating agent.Context rather than agent.InvocationContext. This row
+		// overrides both methods the rule used to name and is still dropped by the
+		// four that Context adds, which is what the promoted columns assert.
+		{
+			name: "decorated agent.Context outside the module", want: "u", outsideModule: true, wantDirect: "enclosing",
+			wantContextPromoted: "enclosing", hasWantContextPromoted: true, ic: func() InvocationContext {
+				return contextDecorator{Context: Promote(enclosing), own: matrixOwner("u")}
+			},
+		},
 		{name: "decorated, nil session", outsideModule: true, wantDirect: "enclosing", wantPromoted: "enclosing", hasWantPromoted: true, ic: func() InvocationContext {
 			return decoratedInvocationValue{InvocationContext: enclosing, own: nil}
 		}},
@@ -185,48 +213,72 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 	cols := []struct {
 		name string
 		// promoted marks a column that calls a context-producing method ON the
-		// invocation, where an out-of-module decorator is dropped by its own
-		// promoted method before the derivation is even reached.
+		// invocation. An out-of-module decorator is dropped by its own promoted
+		// method, either before the derivation or inside it.
 		promoted bool
-		of       func(InvocationContext) context.Context
+		// contextOnly marks a column whose method is on Context rather than
+		// InvocationContext, so rows that are only the latter cannot reach it.
+		contextOnly bool
+		of          func(InvocationContext) context.Context
 	}{
-		{"the invocation itself", false, func(ic InvocationContext) context.Context { return ic }},
-		{"Promote", false, func(ic InvocationContext) context.Context { return Promote(ic) }},
-		{"NewContext", false, func(ic InvocationContext) context.Context { return NewContext(ic) }},
-		{"NewToolContext", false, func(ic InvocationContext) context.Context { return NewToolContext(ic, "fc", nil, nil) }},
-		{"NewCallbackContext", false, func(ic InvocationContext) context.Context { return NewCallbackContext(ic, nil) }},
-		{"NewCallbackContextWithArtifactTracking", false, func(ic InvocationContext) context.Context {
+		{"the invocation itself", false, false, func(ic InvocationContext) context.Context { return ic }},
+		{"Promote", false, false, func(ic InvocationContext) context.Context { return Promote(ic) }},
+		{"NewContext", false, false, func(ic InvocationContext) context.Context { return NewContext(ic) }},
+		{"NewToolContext", false, false, func(ic InvocationContext) context.Context { return NewToolContext(ic, "fc", nil, nil) }},
+		{"NewCallbackContext", false, false, func(ic InvocationContext) context.Context { return NewCallbackContext(ic, nil) }},
+		{"NewCallbackContextWithArtifactTracking", false, false, func(ic InvocationContext) context.Context {
 			return NewCallbackContextWithArtifactTracking(ic, nil)
 		}},
-		{"reparented onto a carrier of the enclosing invocation", false, func(ic InvocationContext) context.Context {
+		{"reparented onto a carrier of the enclosing invocation", false, false, func(ic InvocationContext) context.Context {
 			return Promote(ic).WithContext(context.WithValue(context.Context(enclosing), unrelatedKey{}, "x"))
 		}},
-		{"tool context of a tool context", false, func(ic InvocationContext) context.Context {
+		{"tool context of a tool context", false, false, func(ic InvocationContext) context.Context {
 			return NewToolContext(NewToolContext(ic, "a", nil, nil), "b", nil, nil)
 		}},
-		{"behind a non-ADK wrapper", false, func(ic InvocationContext) context.Context {
+		{"behind a non-ADK wrapper", false, false, func(ic InvocationContext) context.Context {
 			return context.WithValue(Promote(ic), unrelatedKey{}, "x")
 		}},
 		// The delta derivations. WithICDelta is on the public InvocationContext
 		// interface, so these columns are as much a way of deriving a context as
 		// the constructors above, and agent.Run takes this exact path on every run.
-		{"PromoteWithDelta", true, func(ic InvocationContext) context.Context {
+		{"PromoteWithDelta", true, false, func(ic InvocationContext) context.Context {
 			branch := "br"
 			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
 		}},
 		// A delta that says nothing about the invocation does not touch it, so this
 		// column is safe where the two below are not.
-		{"PromoteWithDelta, nil InvocationContextDelta", false, func(ic InvocationContext) context.Context {
+		{"PromoteWithDelta, nil InvocationContextDelta", false, false, func(ic InvocationContext) context.Context {
 			return PromoteWithDelta(ic, &CommonContextDelta{})
 		}},
-		{"WithICDelta on a promoted context", true, func(ic InvocationContext) context.Context {
+		{"WithICDelta on a promoted context", true, false, func(ic InvocationContext) context.Context {
 			branch := "br"
 			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})
 		}},
-		// WithContext is the other context-producing method on the interface, and
-		// it is inherited exactly as WithICDelta is.
-		{"WithContext called on the invocation", true, func(ic InvocationContext) context.Context {
+		// WithContext is inherited exactly as WithICDelta is.
+		{"WithContext called on the invocation", true, false, func(ic InvocationContext) context.Context {
 			return Promote(ic.WithContext(t.Context()))
+		}},
+		// The four that agent.Context adds. A row that is only an
+		// InvocationContext cannot reach them, so these columns exercise the
+		// contextDecorator row and are skipped elsewhere.
+		{"WithAgentCancel called on the context", true, true, func(ic InvocationContext) context.Context {
+			c, cancel := ic.(Context).WithAgentCancel()
+			t.Cleanup(cancel)
+			return Promote(c)
+		}},
+		{"WithAgentTimeout called on the context", true, true, func(ic InvocationContext) context.Context {
+			c, cancel := ic.(Context).WithAgentTimeout(time.Minute)
+			t.Cleanup(cancel)
+			return Promote(c)
+		}},
+		{"WithAgentContext called on the context", true, true, func(ic InvocationContext) context.Context {
+			return Promote(ic.(Context).WithAgentContext(t.Context()))
+		}},
+		{"WithDelta called on the context", true, true, func(ic InvocationContext) context.Context {
+			branch := "br"
+			return Promote(ic.(Context).WithDelta(&CommonContextDelta{
+				InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+			}))
 		}},
 	}
 
@@ -243,10 +295,17 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 
 	for _, r := range rows {
 		for _, c := range cols {
+			if c.contextOnly {
+				if _, isContext := r.ic().(Context); !isContext {
+					continue
+				}
+			}
 			want := r.want
 			switch {
 			case c.name == "the invocation itself" && r.outsideModule:
 				want = r.wantDirect
+			case c.contextOnly && r.hasWantContextPromoted:
+				want = r.wantContextPromoted
 			case c.promoted && r.hasWantPromoted:
 				want = r.wantPromoted
 			}
@@ -282,6 +341,50 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 					t.Errorf("Value(probeKey{}) = %v, want nil: only the identity key reads the session", v)
 				}
 			})
+		}
+	}
+}
+
+// TestEveryContextProducingMethodIsTabulated is the guard on the table itself.
+//
+// Three rounds of review in a row found the identity rule short by a method: the
+// enumeration was written from the methods someone had thought of, and a
+// context-producing method nobody listed is a way to drop a decorator that
+// nothing tests. So the list is derived here instead of trusted — every method on
+// Context or InvocationContext that RETURNS one of them must appear in a matrix
+// column, and adding a new one fails this until it does.
+func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
+	// The columns exercise these by calling them on the invocation. Promote,
+	// NewToolContext and the rest are package functions, not interface methods,
+	// and are covered by their own columns.
+	tabulated := map[string]bool{
+		"WithContext":      true,
+		"WithICDelta":      true,
+		"WithDelta":        true,
+		"WithAgentContext": true,
+		"WithAgentTimeout": true,
+		"WithAgentCancel":  true,
+	}
+	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
+	icType := reflect.TypeOf((*InvocationContext)(nil)).Elem()
+	produces := func(m reflect.Method) bool {
+		for i := range m.Type.NumOut() {
+			if out := m.Type.Out(i); out == ctxType || out == icType {
+				return true
+			}
+		}
+		return false
+	}
+	for _, iface := range []reflect.Type{ctxType, icType} {
+		for i := range iface.NumMethod() {
+			m := iface.Method(i)
+			if !produces(m) || tabulated[m.Name] {
+				continue
+			}
+			t.Errorf("%s.%s returns a context and has no matrix column: an invocation "+
+				"written outside the module inherits it by promotion, so it is a way to "+
+				"drop the decorator. Add a column, and name it in IdentityFromContext's doc.",
+				iface.Name(), m.Name)
 		}
 	}
 }

@@ -84,9 +84,9 @@ const defaultInitTimeout = 30 * time.Second
 // cfg.Scheme via the Agent Identity / IAM Connector services.
 //
 // The acting user is taken from the ADK context ([agent.IdentityFromContext]) at
-// resolve time, so the provider must run within an agent invocation. Two
+// resolve time, so the provider must run within an agent invocation. Three
 // requirements then fall on the transport that carries the authenticated
-// requests and the context they run under, none of which this package can
+// requests and on the context they run under, none of which this package can
 // enforce:
 //
 //   - Every request must descend from the invoking user's context. A transport
@@ -100,11 +100,13 @@ const defaultInitTimeout = 30 * time.Second
 //     CheckRedirect on the http.Client that carries the transport; the
 //     ADC-backed client [NewClient] builds for itself does the same.
 //   - Requests must run under a context ADK derived, and an
-//     agent.InvocationContext implemented outside the ADK module must override
-//     every context-producing method on that interface. Otherwise it is dropped
-//     by its own promoted methods and the credential is minted for the invocation
-//     it wraps. Deriving it is necessary and is not sufficient on its own:
-//     agent.Run applies a delta on every run, which is one of those methods.
+//     agent.InvocationContext or agent.Context implemented outside the ADK module
+//     must override every method on those interfaces that returns one of them.
+//     Otherwise it is dropped by its own promoted methods and the credential is
+//     minted for the invocation it wraps. Deriving it is necessary and is not
+//     sufficient on its own: agent.Run applies a delta on every run, and the
+//     workflow schedulers call WithAgentCancel and WithAgentTimeout on the
+//     context a node was handed.
 //     [agent.IdentityFromContext] states the limits in full.
 //
 // Wiring this up also means trusting the embedding server: ADK does not

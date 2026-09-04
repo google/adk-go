@@ -82,9 +82,9 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // where that stops, and one rule covers every way it does.
 //
 // Such a type is a decorator over the invocation it embeds, and Go promotes
-// every method it does not override. Each of [InvocationContext]'s
-// context-producing methods returns the receiver's own derived copy, so a
-// promoted one hands back the EMBEDDED invocation and the decorator is gone —
+// every method it does not override. Every method on [InvocationContext] and
+// [Context] that RETURNS one of them returns the receiver's own derived copy, so
+// a promoted one hands back the EMBEDDED invocation and the decorator is gone —
 // its session with it. That is not confined to the identity: Session, UserID and
 // AppName then report the enclosing invocation too.
 //
@@ -92,16 +92,27 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // answers for itself:
 //
 //   - Derive it — [Promote], [NewContext], [NewToolContext], [NewCallbackContext],
-//     a readonly context — and the derived context reports its user, or none at
-//     all if it has no readable session. Passing it *as the context itself*
-//     reports whatever it embeds, because the key is unnameable outside the
-//     module, so it cannot override the key and its parent answers.
-//   - Call any context-producing method on it — [InvocationContext.WithContext],
-//     [InvocationContext.WithICDelta], and through the latter
-//     [PromoteWithDelta] and [Context.WithDelta] — and it is dropped, promoting
-//     or not. It must override each of those, returning a derived copy of
-//     ITSELF, to survive them. This is not avoidable by discipline alone:
-//     [agent.Run] applies a delta on every run.
+//     [NewCallbackContextWithArtifactTracking], a readonly context — and the
+//     derived context reports its user, or none at all if it has no readable
+//     session. Passing it *as the context itself* reports whatever it embeds,
+//     because the key is unnameable outside the module, so it cannot override the
+//     key and its parent answers — unless its own Value intercepts the key, in
+//     which case it reports nothing.
+//   - Call a context-producing method ON it and it is dropped, promoting or not,
+//     because the promoted method belongs to what it embeds. It must override
+//     every one of them, returning a derived copy of ITSELF. The rule is the
+//     return type, not the list: as of writing that is
+//     [InvocationContext.WithContext] and [InvocationContext.WithICDelta] on
+//     [InvocationContext], plus [Context.WithDelta], [Context.WithAgentContext],
+//     [Context.WithAgentTimeout] and [Context.WithAgentCancel] on [Context].
+//     [PromoteWithDelta] reaches WithICDelta for an InvocationContext and
+//     WithDelta for a Context, so overriding only the former is not enough for
+//     the latter. One exception is worth knowing: a delta carrying no
+//     [InvocationContextDelta] leaves the invocation alone, so it is safe.
+//
+// None of this is avoidable by discipline alone — [agent.Run] applies a delta on
+// every run, and the workflow schedulers call WithAgentCancel and
+// WithAgentTimeout on the context a node was handed.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok
