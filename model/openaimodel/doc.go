@@ -21,12 +21,29 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// # Generation config
+//
 // Every top-level field of genai.GenerateContentConfig is either translated to
-// the Responses API or rejected with an error naming it. The long-standing
-// rejections (TopK, StopSequences, multiple candidates, the penalties, Labels,
-// SafetySettings, and an unsupported ResponseMIMEType) keep their own errors
-// and are checked first, so an existing errors.Is call site is unaffected;
-// everything else returns ErrUnsupportedConfigField.
+// the Responses API or rejected with an error naming it. Nothing is dropped in
+// silence except where this list says so.
+//
+//	Translated  Temperature, TopP, MaxOutputTokens, SystemInstruction,
+//	            ResponseMIMEType, ResponseSchema, ResponseJsonSchema,
+//	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
+//	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
+//	Rejected    TopK, StopSequences, CandidateCount above one, the penalties,
+//	            Labels, SafetySettings, an unsupported ResponseMIMEType, Seed,
+//	            CachedContent, ResponseModalities, MediaResolution,
+//	            SpeechConfig, AudioTimestamp, ImageConfig, RoutingConfig,
+//	            ModelSelectionConfig, ModelArmorConfig,
+//	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
+//	            HTTPOptions apart from Timeout and Headers
+//	Ignored     HTTPOptions.Headers
+//
+// The long-standing rejections (TopK, StopSequences, multiple candidates, the
+// penalties, Labels, SafetySettings, and an unsupported ResponseMIMEType) keep
+// their own errors and are checked first, so an existing errors.Is call site is
+// unaffected; everything else returns ErrUnsupportedConfigField.
 //
 // For a field with no equivalent at all, rejection keys on presence rather than
 // value: setting the knob is itself the request. Presence is only observable
@@ -54,8 +71,8 @@
 // would send a credential meant for Gemini to OpenAI, and an Authorization
 // header among them would displace the configured API key rather than
 // accompany it; refusing them would fail configs that ADK itself filled in.
-// The full reasoning is on ignoredHTTPOptionFields, beside the code that
-// enforces it. Headers intended for OpenAI belong on ClientConfig.Options,
+// The full reasoning sits beside the code that enforces it. Headers intended
+// for OpenAI belong on ClientConfig.Options,
 // which is scoped to the backend that receives them.
 //
 // The endpoint and credentials likewise come from ClientConfig, so BaseURL,

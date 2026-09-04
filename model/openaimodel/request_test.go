@@ -22,6 +22,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -957,10 +958,9 @@ func assertNoHeaderReachesTheWire(t *testing.T, stream bool) {
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
-		// A timeout is set deliberately. Without one the timeout path returns
-		// early, and header forwarding reintroduced after that point would
-		// never run during this test — which is exactly how a mutation
-		// re-adding it survived a previous round.
+		// A timeout is set deliberately. Without one the translation returns
+		// early, so header forwarding reintroduced after that point would
+		// never run here and the test would pass vacuously.
 		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
 			Timeout: &wireTimeout,
 			Headers: http.Header{
@@ -1666,9 +1666,8 @@ func redact(v string) string {
 
 // requestTimeout must be safe on its own terms. applyGenerationConfig rejects a
 // non-positive timeout before any request is built, so this guard is defense in
-// depth — but the header bug got through two rounds precisely because safety
-// rested on call ordering promised by a comment, so the guard is tested here
-// directly rather than assumed unreachable.
+// depth — and it is tested directly rather than assumed unreachable, because a
+// guard that only holds while callers keep the right order is not a guard.
 func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		timeout := d
@@ -1739,5 +1738,25 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 	if calls != 2 {
 		t.Errorf("server saw %d calls, want 2: the second range did not reach it", calls)
+	}
+}
+
+// The table in doc.go is the first thing a user reads to answer "is this field
+// supported", so it has to stay true as the code changes. Every rejected field
+// this package names must appear there, or the doc quietly starts lying.
+func TestDocTableNamesEveryRejectedField(t *testing.T) {
+	doc, err := os.ReadFile("doc.go")
+	if err != nil {
+		t.Fatalf("read doc.go: %v", err)
+	}
+	for _, field := range unsupportedConfigFields {
+		if !strings.Contains(string(doc), field.name) {
+			t.Errorf("doc.go does not mention %q, which unsupportedConfigFields rejects", field.name)
+		}
+	}
+	for _, name := range ignoredHTTPOptionFields {
+		if !strings.Contains(string(doc), name) {
+			t.Errorf("doc.go does not mention ignored HTTPOptions.%s", name)
+		}
 	}
 }

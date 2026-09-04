@@ -423,9 +423,9 @@ var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
 //
 // Zero and negative are treated as unset, which applyGenerationConfig rejects
 // before a request is built. The guard is repeated here rather than assumed,
-// because a non-positive value handed to openai-go means "no deadline at all"
-// and would lift the caller's bound instead of applying it — and safety that
-// rests only on call ordering is what let a header bug through twice.
+// because a non-positive value means "no deadline at all" and would lift the
+// caller's bound instead of applying it, and a function this small should not
+// depend on being called in the right order to be safe.
 func requestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
 		return 0
