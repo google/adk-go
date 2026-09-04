@@ -537,9 +537,10 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
+	remoteFCIDs := collectRemoteFunctionCallIDs(events, ctx.Agent().Name())
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1, ctx.Agent().Name()); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := convertParts(ctx, cfg, event)
+		parts, err := convertParts(ctx, cfg, event, remoteFCIDs)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}

@@ -15,6 +15,7 @@
 package remoteagent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -145,6 +146,15 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 			events: []*session.Event{
 				newEventFromParts("coordinator", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
 				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
+			},
+			atIndex: 1,
+			success: false,
+		},
+		{
+			name: "fail if function call ID is empty",
+			events: []*session.Event{
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "", Name: "peer_tool"}}),
+				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "", Name: "peer_tool"}}),
 			},
 			atIndex: 1,
 			success: false,
@@ -370,8 +380,8 @@ func TestProbe_UnmatchedFunctionResponseSentRaw(t *testing.T) {
 		b, _ := json.Marshal(msg.Parts[0])
 		t.Fatalf("part[0] = %s, want text starting with %q", b, wantPrefix)
 	}
-	if !strings.Contains(got0, `"v":1`) && !strings.Contains(got0, `"v": 1`) {
-		t.Fatalf("part[0] text = %q, want JSON response payload", got0)
+	if !strings.Contains(got0, `"v": 1`) {
+		t.Fatalf("part[0] text = %q, want JSON with Python-style separators", got0)
 	}
 	if meta := msg.Parts[0].Metadata; meta != nil {
 		if typ, ok := meta[adka2a.ToA2AMetaKey("type")]; ok && typ == "function_response" {
@@ -408,3 +418,156 @@ func TestToMissingRemoteSessionParts_KeepsMatchedFunctionResponse(t *testing.T) 
 		t.Fatalf("part[1].Text() = %q, want %q", got, "continue")
 	}
 }
+
+func TestToMissingRemoteSessionParts_CoordinatorCallStillRewritten(t *testing.T) {
+	remoteName := "remote-agent"
+	// Coordinator authored the matching call ID — author filter must exclude it
+	// from remoteFCIDs so the response is still rewritten to text.
+	// Place the coordinator call before the last remote event so it stays in
+	// session history for collectRemoteFunctionCallIDs but is not re-emitted.
+	events := []*session.Event{
+		newEventFromParts("coordinator", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-shared", Name: "local_tool"}}),
+		newEventFromParts(remoteName, genai.NewPartFromText("hi")),
+		newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "fc-shared", Name: "local_tool", Response: map[string]any{"v": 1},
+		}}),
+		newEventFromParts("user", genai.NewPartFromText("ask peer")),
+	}
+	ictx := newTestInvocationContext(t, remoteName, events...)
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	if len(gotParts) < 2 {
+		t.Fatalf("len(gotParts) = %d, want >= 2", len(gotParts))
+	}
+	got0 := gotParts[0].Text()
+	wantPrefix := "Tool local_tool returned:"
+	if !strings.HasPrefix(got0, wantPrefix) {
+		b, _ := json.Marshal(gotParts[0])
+		t.Fatalf("part[0] = %s, want text starting with %q (coordinator call must not count as remote)", b, wantPrefix)
+	}
+	if meta := gotParts[0].Metadata; meta != nil {
+		if typ, ok := meta[adka2a.ToA2AMetaKey("type")]; ok && typ == "function_response" {
+			t.Fatalf("part[0] still has function_response metadata: %v", meta)
+		}
+	}
+}
+
+func TestToMissingRemoteSessionParts_EmptyAgentNameKeepsOwnResponse(t *testing.T) {
+	// Anonymous agent (empty name): peer events also use Author "". Own call+response
+	// must stay a function_response, not be flattened.
+	events := []*session.Event{
+		newEventFromParts("", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-own", Name: "peer_tool"}}),
+		newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "fc-own", Name: "peer_tool", Response: map[string]any{"ok": true},
+		}}),
+		newEventFromParts("user", genai.NewPartFromText("continue")),
+	}
+	ictx := newTestInvocationContext(t, "", events...)
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	if len(gotParts) < 2 {
+		t.Fatalf("len(gotParts) = %d, want >= 2", len(gotParts))
+	}
+	meta := gotParts[0].Metadata
+	if meta == nil || meta[adka2a.ToA2AMetaKey("type")] != "function_response" {
+		b, _ := json.Marshal(gotParts[0])
+		t.Fatalf("empty-name own response flattened incorrectly: %s", b)
+	}
+}
+
+func TestToMissingRemoteSessionParts_EmptyCallIDNotCollected(t *testing.T) {
+	remoteName := "remote-agent"
+	events := []*session.Event{
+		newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "", Name: "peer_tool"}}),
+		newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "", Name: "peer_tool", Response: map[string]any{"ok": true},
+		}}),
+		newEventFromParts("user", genai.NewPartFromText("continue")),
+	}
+	ictx := newTestInvocationContext(t, remoteName, events...)
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	if len(gotParts) < 1 {
+		t.Fatalf("len(gotParts) = %d, want >= 1", len(gotParts))
+	}
+	got0 := gotParts[0].Text()
+	if !strings.HasPrefix(got0, "Tool peer_tool returned:") {
+		b, _ := json.Marshal(gotParts[0])
+		t.Fatalf("empty call ID response should be rewritten to text, got %s", b)
+	}
+}
+
+func TestToMissingRemoteSessionParts_MixedFunctionResponseAndSiblingParts(t *testing.T) {
+	remoteName := "remote-agent"
+	events := []*session.Event{
+		newEventFromParts("user",
+			genai.NewPartFromText("before"),
+			&genai.Part{FunctionResponse: &genai.FunctionResponse{
+				ID: "fc-foreign", Name: "local_tool", Response: map[string]any{"x": "y"},
+			}},
+			genai.NewPartFromText("after"),
+		),
+	}
+	ictx := newTestInvocationContext(t, remoteName, events...)
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	if len(gotParts) != 3 {
+		t.Fatalf("len(gotParts) = %d, want 3", len(gotParts))
+	}
+	if got := gotParts[0].Text(); got != "before" {
+		t.Fatalf("part[0].Text() = %q, want %q", got, "before")
+	}
+	got1 := gotParts[1].Text()
+	if !strings.HasPrefix(got1, "Tool local_tool returned:") {
+		t.Fatalf("part[1].Text() = %q, want rewritten tool text", got1)
+	}
+	if !strings.Contains(got1, `"x": "y"`) {
+		t.Fatalf("part[1].Text() = %q, want JSON payload with separators", got1)
+	}
+	if got := gotParts[2].Text(); got != "after" {
+		t.Fatalf("part[2].Text() = %q, want %q", got, "after")
+	}
+}
+
+func TestConvertParts_RewrittenSkipsGenAIPartConverter(t *testing.T) {
+	remoteName := "remote-agent"
+	event := newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: "fc-foreign", Name: "local_tool", Response: map[string]any{"url": "https://x/?a=1&b=2"},
+	}})
+	converterCalls := 0
+	cfg := A2AConfig{
+		GenAIPartConverter: func(ctx context.Context, event *session.Event, p *genai.Part) (*a2a.Part, error) {
+			converterCalls++
+			return a2a.NewTextPart("converter-should-not-run"), nil
+		},
+	}
+	ictx := newTestInvocationContext(t, remoteName)
+	parts, err := convertParts(ictx, cfg, event, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("convertParts() error = %v", err)
+	}
+	if converterCalls != 0 {
+		t.Fatalf("GenAIPartConverter called %d times, want 0 on rewritten path", converterCalls)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1", len(parts))
+	}
+	got := parts[0].Text()
+	if !strings.HasPrefix(got, "Tool local_tool returned:") {
+		t.Fatalf("text = %q, want rewritten tool text", got)
+	}
+	// HTML must not be escaped; Python-style separators preferred.
+	if strings.Contains(got, `\u0026`) || !strings.Contains(got, "&") {
+		t.Fatalf("text = %q, want unescaped & from SetEscapeHTML(false)", got)
+	}
+	if !strings.Contains(got, `"url": "https://x/?a=1&b=2"`) {
+		t.Fatalf("text = %q, want Python-style JSON", got)
+	}
+}
+
+func TestMarshalFunctionResponseJSON(t *testing.T) {
+	got := marshalFunctionResponseJSON(map[string]any{"result": "done", "url": "a&b<c>"})
+	if strings.Contains(got, `\u0026`) || strings.Contains(got, `\u003c`) {
+		t.Fatalf("HTML-escaped unexpectedly: %q", got)
+	}
+	if !strings.Contains(got, ": ") || !strings.Contains(got, ", ") {
+		t.Fatalf("missing Python-style separators: %q", got)
+	}
+}
+
