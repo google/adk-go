@@ -63,18 +63,18 @@ type State struct {
 
 	OutputKey string
 
-	// LiveInjection guards the single live-mode tool injection an agent may
+	// LiveModeInjection guards the single live-mode tool injection an agent may
 	// receive: whichever workflow agent runs this one live first appends its
 	// hand-off tool and instruction suffix to Tools/Instruction, once, and
 	// every concurrent caller blocks until that has finished. Kept on State
 	// so its lifetime is the agent's — collected with the agent, never
 	// accumulated in a process-global map, and only ever used via (*State).
 	// Today sequentialagent.RunLive is the only injector.
-	LiveInjection LiveToolInjection
+	LiveModeInjection LiveModeToolInjection
 }
 
-// LiveToolInjection is a one-shot, panic-safe latch for the single
-// live-mode tool injection an agent may receive (see State.LiveInjection).
+// LiveModeToolInjection is a one-shot, panic-safe latch for the single
+// live-mode tool injection an agent may receive (see State.LiveModeInjection).
 // The first caller to Do performs the injection; concurrent callers block
 // and then observe it as a no-op, with a happens-before edge to the first
 // caller's writes. Unlike sync.Once it does not latch when the injection
@@ -83,17 +83,17 @@ type State struct {
 // silent after the first failure. If a second workflow agent ever adds its
 // own live-mode injection it shares this latch: first write wins, the rest
 // are skipped.
-type LiveToolInjection struct {
+type LiveModeToolInjection struct {
 	mu   sync.Mutex
 	done bool
 }
 
-// Do runs inject at most once for the lifetime of the receiver. It
+// Do runs inject at most once successfully for the lifetime of the receiver. It
 // serialises concurrent callers, gives the ones that lose the race a
 // happens-before edge to the winner's writes, and — because done is set
 // only after inject returns normally — lets a panic propagate without
 // latching, so a later call retries.
-func (l *LiveToolInjection) Do(inject func()) {
+func (l *LiveModeToolInjection) Do(inject func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.done {
