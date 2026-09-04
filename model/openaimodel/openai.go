@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -84,18 +85,23 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if err != nil {
 		return singleErrorSequence(err)
 	}
-	// Safe only because buildOpenAIParams has already rejected the parts of
-	// HTTPOptions that have no equivalent here.
-	opts := requestOptions(req.Config)
+	timeout := requestTimeout(req.Config)
 	if stream {
-		return m.generateStream(ctx, params, opts...)
+		return m.generateStream(ctx, params, timeout)
 	}
-	return m.generate(ctx, params, opts...)
+	return m.generate(ctx, params, timeout)
 }
 
-func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, opts ...option.RequestOption) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		resp, err := m.client.Responses.New(ctx, params, opts...)
+		// Bounds the call, retries included, and is released when the caller
+		// stops consuming.
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		resp, err := m.client.Responses.New(ctx, params)
 		if err != nil {
 			yield(nil, fmt.Errorf("openai: call failed: %w", err))
 			return
@@ -111,9 +117,15 @@ func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNew
 	}
 }
 
-func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, opts ...option.RequestOption) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		stream := m.client.Responses.NewStreaming(ctx, params, opts...)
+		// Bounds the whole stream, not just its first byte.
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		stream := m.client.Responses.NewStreaming(ctx, params)
 		defer func() { _ = stream.Close() }()
 
 		aggregator := llminternal.NewStreamingResponseAggregator()

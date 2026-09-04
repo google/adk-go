@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -835,14 +837,14 @@ func TestServiceTiersCoverEveryGenaiTier(t *testing.T) {
 // A positive Timeout is the one part of HTTPOptions that crosses to Responses:
 // a duration means the same thing to any HTTP client and can carry nothing
 // sensitive. Headers cannot, which the tests below cover.
-func TestRequestOptionsHonorsTimeout(t *testing.T) {
+func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 	timeout := 45 * time.Second
 	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
 	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
 		t.Fatalf("applyGenerationConfig() error = %v, want nil: a timeout is honored", err)
 	}
-	if got := len(requestOptions(cfg)); got != 1 {
-		t.Errorf("requestOptions() produced %d options, want 1", got)
+	if got := requestTimeout(cfg); got != timeout {
+		t.Errorf("requestTimeout() = %v, want %v", got, timeout)
 	}
 }
 
@@ -911,13 +913,15 @@ func TestRequestOptionsIgnoresHeaders(t *testing.T) {
 		{"X-Goog-Api-Key": []string{"gemini-key"}},
 		{"X-Trace-Id": []string{"harmless"}},
 	}
+	// Names, never values: a header value is exactly the thing not to log.
 	for _, h := range headers {
+		names := slices.Sorted(maps.Keys(h))
 		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: h}}
 		if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
-			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", h, err)
+			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", names, err)
 		}
-		if opts := requestOptions(cfg); len(opts) != 0 {
-			t.Errorf("headers %v: produced %d request options, want none", h, len(opts))
+		if got := requestTimeout(cfg); got != 0 {
+			t.Errorf("headers %v: produced a %v timeout, want none", names, got)
 		}
 	}
 }
@@ -925,6 +929,7 @@ func TestRequestOptionsIgnoresHeaders(t *testing.T) {
 // The end of that promise, checked where it can actually be observed: no header
 // a caller put in HTTPOptions may appear on the outgoing request.
 func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
+	wireTimeout := 30 * time.Second
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
@@ -941,11 +946,18 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
-		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: http.Header{
-			"Authorization":  []string{"Bearer caller"},
-			"X-Goog-Api-Key": []string{"gemini-key"},
-			"X-Trace-Id":     []string{"harmless"},
-		}}},
+		// A timeout is set deliberately. Without one the timeout path returns
+		// early, and header forwarding reintroduced after that point would
+		// never run during this test — which is exactly how a mutation
+		// re-adding it survived a previous round.
+		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
+			Timeout: &wireTimeout,
+			Headers: http.Header{
+				"Authorization":  []string{"Bearer caller"},
+				"X-Goog-Api-Key": []string{"gemini-key"},
+				"X-Trace-Id":     []string{"harmless"},
+			},
+		}},
 	}
 	for _, err := range m.GenerateContent(context.Background(), req, false) {
 		if err != nil {
@@ -1036,7 +1048,6 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"MaxOutputTokens":    true,
 		"ResponseLogprobs":   true,
 		"Logprobs":           true,
-		"ResponseMIMEType":   true,
 		"ResponseSchema":     true,
 		"ResponseJsonSchema": true,
 		"ThinkingConfig":     true,
@@ -1054,6 +1065,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"PresencePenalty":  true,
 		"Labels":           true,
 		"SafetySettings":   true,
+		"ResponseMIMEType": true,
 	}
 	rejected := make(map[string]bool, len(unsupportedConfigFields))
 	for _, field := range unsupportedConfigFields {
@@ -1645,19 +1657,18 @@ func redact(v string) string {
 // depth — but the header bug got through two rounds precisely because safety
 // rested on call ordering promised by a comment, so the guard is tested here
 // directly rather than assumed unreachable.
-func TestRequestOptionsGuardsNonPositiveTimeoutItself(t *testing.T) {
+func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		timeout := d
 		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
-		if opts := requestOptions(cfg); len(opts) != 0 {
-			t.Errorf("requestOptions(timeout %v) produced %d options, want none: "+
-				"openai-go reads a non-positive timeout as no deadline at all", d, len(opts))
+		if got := requestTimeout(cfg); got != 0 {
+			t.Errorf("requestTimeout(%v) = %v, want 0: a non-positive bound must not become a deadline", d, got)
 		}
 	}
-	// The positive case still produces one, so the guard is not simply off.
+	// The positive case still comes through, so the guard is not simply off.
 	positive := time.Second
 	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
-	if opts := requestOptions(cfg); len(opts) != 1 {
-		t.Errorf("requestOptions(timeout %v) produced %d options, want 1", positive, len(opts))
+	if got := requestTimeout(cfg); got != positive {
+		t.Errorf("requestTimeout(%v) = %v, want it unchanged", positive, got)
 	}
 }

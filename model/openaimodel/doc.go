@@ -24,9 +24,9 @@
 // Every top-level field of genai.GenerateContentConfig is either translated to
 // the Responses API or rejected with an error naming it. The long-standing
 // rejections (TopK, StopSequences, multiple candidates, the penalties, Labels,
-// SafetySettings) keep their own errors and are checked first, so an existing
-// errors.Is call site is unaffected; everything else returns
-// ErrUnsupportedConfigField.
+// SafetySettings, and an unsupported ResponseMIMEType) keep their own errors
+// and are checked first, so an existing errors.Is call site is unaffected;
+// everything else returns ErrUnsupportedConfigField.
 //
 // For a field with no equivalent at all, rejection keys on presence rather than
 // value: setting the knob is itself the request. Presence is only observable
@@ -43,10 +43,11 @@
 // equivalent, with genai's "standard" reaching OpenAI as "default".
 //
 // HTTPOptions is transport rather than generation, and only its Timeout
-// crosses. It bounds each attempt rather than the call: openai-go applies it
-// inside its retry loop, so a call that retries the default two times can take
-// about three times the duration given. A non-positive timeout is rejected,
-// since openai-go reads zero as no deadline at all and would lift the caller's
+// crosses. It bounds the whole call, retries included, because that is what
+// genai documents it to mean; openai-go's own per-request timeout applies
+// inside its retry loop instead, so using that would let a caller asking for
+// five seconds wait fifteen. A non-positive timeout is rejected rather than
+// forwarded, since it would read as no deadline at all and lift the caller's
 // bound instead of applying it.
 //
 // Headers do not cross. They are ignored rather than rejected, because they

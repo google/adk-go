@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -412,31 +412,28 @@ var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
 	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
 }
 
-// requestOptions translates the one part of HTTPOptions that can cross to the
-// Responses API into openai-go request options.
+// requestTimeout reports the bound the caller asked for, or zero for none.
 //
-// Only Timeout crosses. HTTPOptions is a genai struct describing a call to
-// Gemini, openaimodel takes its endpoint and credentials from ClientConfig, and
-// a duration is the one field here that carries nothing addressed to a
-// particular backend. Headers are ignored and the rest is rejected; see
-// ignoredHTTPOptionFields and unsupportedHTTPOptionFields for which and why.
+// It is applied as a deadline on the whole call rather than through openai-go's
+// per-request timeout option, because those two mean different things: the SDK
+// applies its option inside the retry loop, so with the default of two retries
+// a caller asking for five seconds could wait fifteen. genai documents this
+// field as the timeout for the request, and a deadline on the context bounds
+// the request including whatever retrying it takes.
 //
-// The bound is per attempt, not per call: openai-go applies it inside its retry
-// loop, so a call retried the default two times can take about three times the
-// duration asked for.
-func requestOptions(cfg *genai.GenerateContentConfig) []option.RequestOption {
+// Zero and negative are treated as unset, which applyGenerationConfig rejects
+// before a request is built. The guard is repeated here rather than assumed,
+// because a non-positive value handed to openai-go means "no deadline at all"
+// and would lift the caller's bound instead of applying it — and safety that
+// rests only on call ordering is what let a header bug through twice.
+func requestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
-		return nil
+		return 0
 	}
-	// Guarded here rather than trusting the caller to have validated first.
-	// openai-go reads a zero timeout as "no deadline", so a non-positive one
-	// would lift the caller's bound instead of applying it — the inverse of
-	// what they asked for. applyGenerationConfig rejects these before a request
-	// is built; this makes the function safe on its own terms regardless.
 	if *cfg.HTTPOptions.Timeout <= 0 {
-		return nil
+		return 0
 	}
-	return []option.RequestOption{option.WithRequestTimeout(*cfg.HTTPOptions.Timeout)}
+	return *cfg.HTTPOptions.Timeout
 }
 
 // ignoredHTTPOptionFields names the HTTPOptions fields this package neither
