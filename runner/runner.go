@@ -672,13 +672,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:    artifacts,
-			Memory:       memoryImpl,
-			Session:      storedSession,
-			Agent:        r.rootAgent,
-			UserContent:  msg,
-			RunConfig:    &cfg,
-			InvocationID: resolveInvocationID(storedSession, msg),
+			Artifacts:      artifacts,
+			Memory:         memoryImpl,
+			Session:        storedSession,
+			SessionService: r.sessionService,
+			Agent:          r.rootAgent,
+			UserContent:    msg,
+			RunConfig:      &cfg,
+			InvocationID:   resolveInvocationID(storedSession, msg),
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
@@ -886,11 +887,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	iCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:   artifacts,
-		Memory:      memoryImpl,
-		Session:     storedSession,
-		Agent:       agentToRun,
-		UserContent: nil,
+		Artifacts:      artifacts,
+		Memory:         memoryImpl,
+		Session:        storedSession,
+		SessionService: r.sessionService,
+		Agent:          agentToRun,
+		UserContent:    nil,
 	})
 
 	if r.pluginManager != nil {
