@@ -93,6 +93,21 @@ func TestLLMAgent(t *testing.T) {
 	}
 }
 
+func TestLLMAgentRetryWithoutModelReturnsConfigurationError(t *testing.T) {
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "missing_model",
+		Retry: &model.RetryConfig{},
+	})
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
+	}
+
+	_, runErr := testutil.CollectEvents(testutil.NewTestAgentRunner(t, a).Run(t, "session", "hello"))
+	if runErr == nil || !strings.Contains(runErr.Error(), "model not configured") {
+		t.Fatalf("run error = %v, want model-not-configured error", runErr)
+	}
+}
+
 func TestLLMAgentStreamingModeSSE(t *testing.T) {
 	model := newGeminiModel(t, "gemini-2.5-flash", nil)
 	a, err := llmagent.New(llmagent.Config{
