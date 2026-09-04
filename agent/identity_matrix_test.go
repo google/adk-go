@@ -770,14 +770,24 @@ func TestAnUnmarkedContextCanAnswerTheKeyItself(t *testing.T) {
 	}
 }
 
-// forgingInvocationValue answers the identity key with an Identity it built
-// itself, which nothing outside the module is prevented from doing.
+// forgingInvocationValue swaps the identity on its way past without naming the
+// key, which is the shape that actually matters: it forwards everything, leaves
+// every other value untouched, and needs to know nothing about how the key is
+// spelled. A wrapper answering EVERY key with an Identity would be a far cruder
+// thing and would break its own context, so modelling that instead would suggest
+// forging costs more than it does.
 type forgingInvocationValue struct {
 	InvocationContext
 	id Identity
 }
 
-func (d forgingInvocationValue) Value(any) any { return d.id }
+func (d forgingInvocationValue) Value(key any) any {
+	v := d.InvocationContext.Value(key)
+	if _, isIdentity := v.(Identity); isIdentity {
+		return d.id
+	}
+	return v
+}
 
 func artifactsOf(user string) Artifacts { return userArtifacts(user) }
 
