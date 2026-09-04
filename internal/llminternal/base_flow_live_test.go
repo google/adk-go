@@ -470,10 +470,6 @@ func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
 	if !strings.Contains(gotErr.Error(), "history") {
 		t.Errorf("surfaced error = %v, want it to mention the history send", gotErr)
 	}
-	if got := connCount.Load(); got != 1 {
-		t.Errorf("connection count = %d, want 1", got)
-	}
-
 	select {
 	case closed := <-clientClosed:
 		if !closed {
@@ -482,6 +478,15 @@ func TestRunLiveClosesConnectionOnSendHistoryFailure(t *testing.T) {
 		}
 	case <-time.After(closeWait + 2*time.Second):
 		t.Fatal("fake server never reported a connection outcome")
+	}
+
+	// Read the count only after clientClosed, which the handler sends after it
+	// incremented. On this path the client never waits for setupComplete — the
+	// history marshal fails first — so the "saw setupComplete implies counted"
+	// ordering startFakeLiveServer relies on does not hold, and reading here
+	// would race the handler.
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1", got)
 	}
 
 	assertNoRunLiveLeak(t, baseline)
