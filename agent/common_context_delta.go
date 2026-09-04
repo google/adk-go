@@ -17,8 +17,6 @@ package agent
 import (
 	"context"
 
-	"google.golang.org/adk/v2/internal/adkcontext"
-
 	"google.golang.org/genai"
 )
 
@@ -84,33 +82,31 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 	return &res
 }
 
-// withICDelta applies d to the invocation this context speaks for, and refuses to
-// let that application change WHICH invocation it is.
+// withICDelta applies d to the invocation this context speaks for.
 //
-// An InvocationContext written outside the module cannot override WithICDelta
-// for a key it cannot name — but it inherits the method by promotion, and the
-// promoted method hands back the invocation it EMBEDS. The decorator, and the
-// session naming its own user, are dropped, and the context goes on to speak for
-// the enclosing call. A per-user credential minted under it then belongs to
-// someone who made no such call.
+// It refuses only a nil result. A context that lost its invocation falls back to
+// asking its parent, which is the enclosing call, and would report a user who
+// made no such call.
 //
-// The signature of that drop is precise: a value that could not answer for
-// itself has turned into one that can. Anything else — an invocation of ours, or
-// one from elsewhere that really did return a delta'd copy of itself — is left
-// alone, so this costs nothing for a type that implements WithICDelta properly.
-// A decorator that cannot have the delta applied to it correctly is better left
-// un-delta'd than replaced by a different call's invocation.
+// It does NOT try to detect the larger problem, which is that an
+// InvocationContext written outside the module inherits WithICDelta by
+// promotion, so the promoted method hands back the invocation it embeds and the
+// decorator — with the session naming its own user — is dropped. Two attempts to
+// catch that from here were measured and both were worse than the disease. Keying
+// on "is the receiver one of ours" refuses the delta for an in-module test double
+// that implements WithICDelta perfectly well. Keying on "did a value that could
+// not answer for itself turn into one that can" misses a decorator whose parent
+// is also from outside the module, and where it does fire it discards the whole
+// delta — so agent.Run then reads Agent, Branch and IsolationScope from the
+// enclosing invocation, or nil-panics when there is no enclosing agent.
+//
+// The defect is in the decorator contract, not here: a type that cannot override
+// WithICDelta cannot survive a delta, and no amount of inspection at this call
+// site reconstructs what it should have returned. It predates the identity key
+// and is documented on IdentityFromContext instead.
 func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
-	next := ic.WithICDelta(d)
-	if next == nil {
-		// It lost its invocation, and a context with none falls back to asking its
-		// parent — the enclosing call again.
-		return ic
+	if next := ic.WithICDelta(d); next != nil {
+		return next
 	}
-	if _, wasOurs := ic.(adkcontext.Source); !wasOurs {
-		if _, isOurs := next.(adkcontext.Source); isOurs {
-			return ic
-		}
-	}
-	return next
+	return ic
 }

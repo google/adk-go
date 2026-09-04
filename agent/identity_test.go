@@ -349,3 +349,42 @@ func TestWrapperValueFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestDeltaReachesTheInvocation pins that a delta actually lands on the
+// invocation, for a decorated one as much as an ADK one.
+//
+// It exists because an attempt to stop a delta dropping an out-of-module
+// decorator did stop it — by discarding the delta wholesale, so agent.Run read
+// Agent, Branch and IsolationScope from the enclosing invocation and nil-panicked
+// where there was no enclosing agent. The identity tests could not see that: they
+// assert who the context speaks for, never what the delta was for. Any future
+// attempt on that problem has to keep this green.
+func TestDeltaReachesTheInvocation(t *testing.T) {
+	enclosing := &invocationContext{
+		Context: t.Context(),
+		session: matrixOwner("enclosing"),
+		agent:   &agent{name: "parent"},
+	}
+	var child Agent = &agent{name: "child"}
+	branch := "child-branch"
+	delta := func() *CommonContextDelta {
+		return &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Agent: &child, Branch: &branch}}
+	}
+	for _, tc := range []struct {
+		name string
+		ic   InvocationContext
+	}{
+		{"an ADK invocation", &invocationContext{Context: enclosing, session: matrixOwner("u"), agent: &agent{name: "parent"}}},
+		{"one decorated outside the module", decoratedInvocationValue{InvocationContext: enclosing, own: matrixOwner("u")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := PromoteWithDelta(tc.ic, delta())
+			if got := ctx.(InvocationContext).Agent(); got == nil || got.Name() != "child" {
+				t.Errorf("Agent() = %v, want the agent the delta named", got)
+			}
+			if got := ctx.Branch(); got != branch {
+				t.Errorf("Branch() = %q, want %q", got, branch)
+			}
+		})
+	}
+}

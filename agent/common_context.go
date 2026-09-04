@@ -77,17 +77,24 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 //
-// Any context DERIVED through this package reports the user of the invocation it
-// speaks for, or none at all, and never substitutes an enclosing invocation's —
-// including one derived from an [InvocationContext] implemented outside the
-// module, and including the delta derivations, which refuse to let applying a
-// delta change which invocation a context speaks for.
+// An invocation ADK itself built always reports its own user. An
+// [InvocationContext] implemented OUTSIDE the module is where that stops, in two
+// ways a caller acting on the identity has to know about:
 //
-// One case is not a derivation and cannot be fixed from here: an
-// [InvocationContext] implemented outside the module and passed *as the context
-// itself*. It answers with whatever it embeds, because the key is unnameable
-// outside the module, so a decorator cannot override it and its parent answers.
-// [Promote] it before anything acts on the identity.
+//   - [Promote], [NewContext], [NewToolContext], [NewCallbackContext] and a
+//     readonly context report such an invocation's own user, or none at all if it
+//     has no readable session. Passing it *as the context itself* instead reports
+//     whatever it embeds, because the key is unnameable outside the module, so a
+//     decorator cannot override it and its parent answers. Promote it first.
+//   - Deriving through [CommonContextDelta] — [PromoteWithDelta],
+//     [Context.WithDelta], [InvocationContext.WithICDelta] — reports whatever it
+//     embeds even after promoting. WithICDelta is inherited by promotion too, so
+//     the promoted method hands back the invocation the decorator embeds and the
+//     decorator is dropped outright: Session, UserID and AppName report the
+//     enclosing invocation as well, not just the identity. An invocation from
+//     outside the module must override WithICDelta, returning a delta'd copy of
+//     itself, or it will not survive a delta at all — and [agent.Run] applies one
+//     on every run.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok

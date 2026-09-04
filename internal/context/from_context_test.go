@@ -342,9 +342,10 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 	own := valueSession{id: "sid-u", app: "app", user: "u"}
 
 	rows := []struct {
-		name string
-		ic   func() agent.InvocationContext
-		want string // "" means no identity, and ok must be false
+		name          string
+		ic            func() agent.InvocationContext
+		want          string // "" means no identity, and ok must be false
+		outsideModule bool
 	}{
 		{name: "in-module invocation with its own session", want: "u", ic: func() agent.InvocationContext {
 			return icontext.NewInvocationContext(enclosing, icontext.InvocationContextParams{Session: own})
@@ -352,44 +353,45 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 		{name: "in-module invocation with no session", ic: func() agent.InvocationContext {
 			return icontext.NewInvocationContext(enclosing, icontext.InvocationContextParams{})
 		}},
-		{name: "decorated, own session", want: "u", ic: func() agent.InvocationContext {
+		{name: "decorated, own session", want: "u", outsideModule: true, ic: func() agent.InvocationContext {
 			return crossPackageDecorator{InvocationContext: enclosing, own: own}
 		}},
-		{name: "decorated, nil session", ic: func() agent.InvocationContext {
+		{name: "decorated, nil session", outsideModule: true, ic: func() agent.InvocationContext {
 			return crossPackageDecorator{InvocationContext: enclosing, own: nil}
 		}},
-		{name: "decorated, typed-nil session", ic: func() agent.InvocationContext {
+		{name: "decorated, typed-nil session", outsideModule: true, ic: func() agent.InvocationContext {
 			return crossPackageDecorator{InvocationContext: enclosing, own: (*ptrSession)(nil)}
 		}},
-		{name: "decorated, session wrapping a nil session", ic: func() agent.InvocationContext {
+		{name: "decorated, session wrapping a nil session", outsideModule: true, ic: func() agent.InvocationContext {
 			return crossPackageDecorator{InvocationContext: enclosing, own: &wrapperSession{}}
 		}},
 	}
 
 	type probeKey struct{}
 	cols := []struct {
-		name string
-		of   func(agent.InvocationContext) context.Context
+		name    string
+		isDelta bool
+		of      func(agent.InvocationContext) context.Context
 	}{
-		{"NewReadonlyContext", func(ic agent.InvocationContext) context.Context {
+		{"NewReadonlyContext", false, func(ic agent.InvocationContext) context.Context {
 			return icontext.NewReadonlyContext(ic)
 		}},
-		{"NewCallbackContext", func(ic agent.InvocationContext) context.Context {
+		{"NewCallbackContext", false, func(ic agent.InvocationContext) context.Context {
 			return icontext.NewCallbackContext(ic)
 		}},
-		{"NewCallbackContextWithDelta", func(ic agent.InvocationContext) context.Context {
+		{"NewCallbackContextWithDelta", false, func(ic agent.InvocationContext) context.Context {
 			return icontext.NewCallbackContextWithDelta(ic, nil, nil)
 		}},
-		{"readonly context of a callback context", func(ic agent.InvocationContext) context.Context {
+		{"readonly context of a callback context", false, func(ic agent.InvocationContext) context.Context {
 			return icontext.NewReadonlyContext(icontext.NewCallbackContext(ic))
 		}},
-		{"behind a non-ADK wrapper", func(ic agent.InvocationContext) context.Context {
+		{"behind a non-ADK wrapper", false, func(ic agent.InvocationContext) context.Context {
 			return context.WithValue(icontext.NewReadonlyContext(ic), wrapKey{}, "x")
 		}},
-		// A readonly context over a delta-derived one. A delta must not change
-		// which invocation the context speaks for, so this answers as the plain
-		// readonly column does.
-		{"readonly context over a delta-derived context", func(ic agent.InvocationContext) context.Context {
+		// A readonly context over a delta-derived one. WithICDelta is inherited by
+		// promotion, so an invocation from outside the module is dropped by its own
+		// promoted method and the enclosing one answers.
+		{"readonly context over a delta-derived context", true, func(ic agent.InvocationContext) context.Context {
 			branch := "br"
 			return icontext.NewReadonlyContext(agent.PromoteWithDelta(ic,
 				&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &branch}}))
@@ -406,6 +408,9 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 				}()
 				ctx := c.of(r.ic())
 				want := r.want
+				if c.isDelta && r.outsideModule {
+					want = "enclosing"
+				}
 				var got string
 				id, ok := agent.IdentityFromContext(ctx)
 				if ok {
