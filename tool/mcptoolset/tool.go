@@ -152,16 +152,31 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	textResponse := strings.Builder{}
+	droppedNonText := false
 
 	for _, c := range res.Content {
 		textContent, ok := c.(*mcp.TextContent)
 		if !ok {
+			droppedNonText = true
 			continue
 		}
 
 		if _, err := textResponse.WriteString(textContent.Text); err != nil {
 			return nil, fmt.Errorf("failed to write text response: %w", err)
 		}
+	}
+
+	// A result that yields no text is a valid success (#1352) when there was no
+	// other content to lose: nothing at all, or only empty text blocks. When the
+	// text is empty because every block was non-text, returning {"output": ""}
+	// would report success while discarding the whole payload, so fail loudly
+	// instead.
+	//
+	// TODO(#1401): remove once non-text blocks are rendered rather than skipped.
+	// That also covers the mixed case this deliberately leaves alone, where a
+	// non-text block accompanies real text and is still dropped silently (#1391).
+	if textResponse.Len() == 0 && droppedNonText {
+		return nil, fmt.Errorf("tool %q returned only non-text content, which is not yet supported", t.name)
 	}
 
 	return map[string]any{

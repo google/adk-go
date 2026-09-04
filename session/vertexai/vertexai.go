@@ -75,29 +75,39 @@ func (s *vertexAiService) Get(ctx context.Context, req *session.GetRequest) (*se
 	g, gCtx := errgroup.WithContext(ctx)
 
 	var (
-		sess   *localSession
-		events []*session.Event
+		sess      *localSession
+		events    []*session.Event
+		getErr    error
+		eventsErr error
 	)
 
 	g.Go(func() error {
-		var err error
-		sess, err = s.client.getSession(gCtx, req)
-		if err != nil {
-			return fmt.Errorf("failed to get session: %w", err)
+		sess, getErr = s.client.getSession(gCtx, req)
+		if getErr != nil {
+			return fmt.Errorf("failed to get session: %w", getErr)
 		}
 		return nil
 	})
 
 	g.Go(func() error {
-		var err error
-		events, err = s.client.listSessionEvents(gCtx, req.AppName, req.SessionID, req.After, req.NumRecentEvents)
-		if err != nil {
-			return fmt.Errorf("failed to list session events: %w", err)
+		events, eventsErr = s.client.listSessionEvents(gCtx, req.AppName, req.SessionID, req.After, req.NumRecentEvents)
+		if eventsErr != nil {
+			return fmt.Errorf("failed to list session events: %w", eventsErr)
 		}
 		return nil
 	})
 
 	if err := g.Wait(); err != nil {
+		// Both calls run concurrently against the same session, so a missing
+		// one can surface from either, and whichever loses the race reports the
+		// context cancellation instead. Report the missing session whenever
+		// either call saw it, so callers can rely on
+		// errors.Is(err, session.ErrNotFound).
+		for _, callErr := range []error{getErr, eventsErr} {
+			if callErr != nil && isNotFoundError(callErr) {
+				return nil, fmt.Errorf("%w: %q: %w", session.ErrNotFound, req.SessionID, callErr)
+			}
+		}
 		return nil, err
 	}
 	sess.events = events

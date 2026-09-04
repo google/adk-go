@@ -1,0 +1,125 @@
+name: Require linked issue
+
+# Hourly sweep over recently opened PRs. Comments once on any that has neither
+# a linked issue nor a description of the change, which CONTRIBUTING.md asks
+# for. Doc and typo fixes are exempt, so docs-only PRs are skipped.
+#
+# A schedule rather than pull_request_target: commenting needs a write token,
+# which a pull_request run from a fork does not get, and pull_request_target
+# and workflow_run are both blocked by the Actions security scan.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: require-linked-issue
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # read the PR template
+      pull-requests: write    # post the comment
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const MARKER = '<!-- require-linked-issue -->';
+            const WINDOW_HOURS = 24;   // how far back to look
+            const MAX_COMMENTS = 5;    // stampede guard, per run
+            const MIN_WORDS = 25;      // prose that counts as a description
+
+            const cutoff = Date.now() - WINDOW_HOURS * 3600 * 1000;
+
+            // Fetched once. Its lines are subtracted from each PR body so that
+            // an untouched template does not read as a description.
+            let boilerplate = new Set();
+            try {
+              const { data } = await github.rest.repos.getContent(
+                { ...context.repo, path: '.github/pull_request_template.md' });
+              boilerplate = new Set(Buffer.from(data.content, 'base64').toString('utf8')
+                .split('\n').map(l => l.trim()).filter(Boolean));
+            } catch { /* no template; count the whole body */ }
+
+            const { data: prs } = await github.rest.pulls.list({
+              ...context.repo, state: 'open',
+              sort: 'created', direction: 'desc', per_page: 50,
+            });
+
+            let commented = 0;
+            for (const pr of prs) {
+              if (commented >= MAX_COMMENTS) break;
+              if (Date.parse(pr.created_at) < cutoff) break;  // newest first
+              if (pr.draft || pr.user.type === 'Bot') continue;
+
+              // Maintainers link their own issues. author_association misses
+              // members whose org membership is private, so fall back to the
+              // permission API, which 404s for everyone else.
+              if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association)) continue;
+              const { data: perm } = await github.rest.repos
+                .getCollaboratorPermissionLevel({ ...context.repo, username: pr.user.login })
+                .catch(() => ({ data: { permission: 'none' } }));
+              if (['admin', 'maintain', 'write'].includes(perm.permission)) continue;
+
+              const body = pr.body ?? '';
+
+              // Any bare "#123", so the template's "Related: #123" counts.
+              if (/(^|[\s(])#\d+\b/.test(body)) continue;
+              const res = await github.graphql(`
+                query($owner:String!, $repo:String!, $number:Int!) {
+                  repository(owner:$owner, name:$repo) {
+                    pullRequest(number:$number) {
+                      closingIssuesReferences(first:1) { totalCount }
+                    }
+                  }
+                }`, { owner: context.repo.owner, repo: context.repo.repo, number: pr.number });
+              if (res.repository.pullRequest.closingIssuesReferences.totalCount > 0) continue;
+
+              // CONTRIBUTING exempts small documentation and typo fixes.
+              const files = await github.paginate(github.rest.pulls.listFiles,
+                { ...context.repo, pull_number: pr.number, per_page: 100 });
+              if (files.length > 0 && files.every(
+                    f => f.filename.endsWith('.md') || f.filename.startsWith('docs/'))) continue;
+
+              // Describing the change in the body is the documented
+              // alternative to opening an issue.
+              const written = body.split('\n').map(l => l.trim())
+                .filter(l => l && !boilerplate.has(l))
+                .join(' ').split(/\s+/).filter(Boolean).length;
+              if (written >= MIN_WORDS) continue;
+
+              // The marker is what keeps an hourly sweep from asking twice.
+              const existing = await github.paginate(github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 });
+              if (existing.some(c => (c.body ?? '').includes(MARKER))) continue;
+
+              const newIssue = new URL(
+                `https://github.com/${context.repo.owner}/${context.repo.repo}/issues/new`);
+              newIssue.searchParams.set('template', 'bug_report.md');
+              newIssue.searchParams.set('title', pr.title);
+              newIssue.searchParams.set('body', `Found while preparing #${pr.number}.\n\n`);
+
+              await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
+                body:
+                  `Thanks for the PR, @${pr.user.login}.\n\n` +
+                  'One thing before review. Our [contribution guide]' +
+                  '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#requirement-for-prs) ' +
+                  'asks for an issue behind each change, or, when no issue exists, a description ' +
+                  'of the problem and the solution in the PR description. I could not find ' +
+                  'either here, so whichever suits you:\n\n' +
+                  `- [Open an issue](${newIssue}) — the link prefills the bug template with your ` +
+                  'PR title — then add `Closes: #<number>` to the description.\n' +
+                  '- Or fill in the Problem and Solution sections of the PR template above.\n\n' +
+                  "Happy to open the issue for you if you'd rather — just say so. " +
+                  'If this is a small doc or typo fix, ignore me.\n\n' +
+                  MARKER });
+
+              commented++;
+              core.info(`nudged #${pr.number}`);
+            }
+            core.info(`commented on ${commented} PR(s)`);
