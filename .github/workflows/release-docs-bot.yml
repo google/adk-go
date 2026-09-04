@@ -1,0 +1,155 @@
+name: Release Docs Analysis Bot
+
+# After a release ships, diff it against the previous release and file one issue
+# listing the documentation that may need updating.
+#
+# The bot is idempotent per tag pair: re-running this workflow for a release that
+# already has an issue does nothing. See
+# examples/githubbots/release-docs/README.md.
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      start_tag:
+        description: 'Older release tag (base). Empty = the release published before end_tag.'
+        type: string
+        required: false
+        default: ''
+      end_tag:
+        description: 'Newer release tag (head). Empty = the most recent release.'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 'Render the issue that would be filed without creating it.'
+        type: boolean
+        required: false
+        default: true
+
+# The job reads the repository and writes one issue. Nothing else.
+permissions:
+  contents: read
+
+# Serialize every run of this workflow, so two of them can never analyze the
+# same release concurrently and both observe the issue list empty.
+#
+# The group is deliberately a constant rather than the release tag. The tag pair
+# a run files for is resolved inside the program -- an empty end_tag means "the
+# newest release" -- so a key built from the trigger's inputs does NOT identify
+# the release: a release run would key on `v1.2.0` while a manual dispatch that
+# resolves to the same release keys on `refs/heads/main`, and GitHub would run
+# them side by side. Two runs of different releases queueing behind each other
+# costs minutes and is worth it.
+#
+# This queues rather than cancels, so a retry still completes. It is one of two
+# defenses: the bot also re-runs its duplicate probes inside the claim,
+# immediately before the write, which is what holds if the queue does not.
+concurrency:
+  group: release-docs-bot
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    # Never run on a fork: the analysis would file an issue on somebody else's
+    # repository, or fail noisily trying.
+    #
+    # A prerelease is also skipped. `release: [published]` fires for one, and
+    # analyzing v2.4.0-rc.1 files an issue that the eventual v2.4.0 issue then
+    # duplicates in substance under a different marker, because the base for
+    # both is the last full release. A manual dispatch can still name an rc
+    # explicitly.
+    if: >-
+      github.repository == 'google/adk-go' &&
+      (github.event_name != 'release' || github.event.release.prerelease == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/githubbots/release-docs/go.mod
+
+      - name: Analyze the release for documentation updates
+        working-directory: examples/githubbots/release-docs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # The login the bot's own issues are authored under. It is configured
+          # rather than discovered: GET /user is a user-to-server endpoint and
+          # github.token is an installation token, so the lookup cannot succeed
+          # here. Without this, duplicate detection falls back to "authored by
+          # some GitHub App", which would accept another App's issue.
+          BOT_LOGIN: 'github-actions[bot]'
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Pin the deployed model instead of inheriting the code default.
+          #
+          # The Go default is "gemini-flash-latest", which is right for the
+          # example -- someone copying this should get a maintained alias. It is
+          # wrong for a scheduled job here. Measured 2026-09-01, that alias
+          # returns HTTP 503 "high demand" on 5 of 5 calls over the API-key path
+          # this workflow uses, while serving 3 of 3 through Vertex. The shedding
+          # is a property of the model-and-path PAIRING rather than of either
+          # alone, so pinning the model fixes it without moving off the API key.
+          # gemini-3.6-flash measured 5 of 5 here and 3 of 3 through Vertex.
+          # gemini-3.7-flash was considered and rejected: 0 of 5 on this path.
+          #
+          # An alias can also be repointed at a different model with no change in
+          # this repository, which is not a property to want in a job that files
+          # issues under the project's identity. Pinning here rather than in Go
+          # keeps the example copyable while making the deployed model a
+          # reviewable line in a diff, matching how adk-python's
+          # issue-maintenance workflow sets LLM_MODEL_NAME.
+          LLM_MODEL_NAME: gemini-3.6-flash
+          # github.repository is "owner/name" and is populated on every event, so
+          # it is the single reliable source for both OWNER and REPO.
+          REPO_SLUG: ${{ github.repository }}
+          # Tag values reach the script through env and are never interpolated
+          # into the run block. They are validated below and again in Go, because
+          # a tag is interpolated into the compare API path.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_START_TAG: ${{ inputs.start_tag }}
+          INPUT_END_TAG: ${{ inputs.end_tag }}
+          # A release: published run is a real run. Only a manual dispatch can
+          # ask for a dry run, and that is what it defaults to.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          # Below the job's timeout-minutes, so an overrun reports what it missed
+          # in the issue instead of the job being killed with nothing to show.
+          RUN_BUDGET: 15m
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPO_SLUG%%/*}"
+          REPO="${REPO_SLUG#*/}"
+          START_TAG="${INPUT_START_TAG}"
+          # A manual end_tag wins; otherwise the release that triggered the run.
+          END_TAG="${INPUT_END_TAG:-${RELEASE_TAG}}"
+          export OWNER REPO START_TAG END_TAG
+
+          # Mirrors validTag in release.go, including its ".." rejection: ".."
+          # is the compare endpoint's own separator as well as the traversal
+          # token, and a character class alone does not exclude it.
+          check_tag() {
+            local name="$1" value="$2"
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            if [[ ! "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ || "${value}" == *".."* ]]; then
+              echo "Refusing to run: ${name} is not a valid release tag" >&2
+              exit 1
+            fi
+          }
+          check_tag START_TAG "${START_TAG}"
+          check_tag END_TAG "${END_TAG}"
+
+          go run .
