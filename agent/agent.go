@@ -376,6 +376,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 type invocationContext struct {
 	context.Context
+	adkcontext.Marker
 
 	agent     Agent
 	artifacts Artifacts
@@ -436,7 +437,7 @@ func (c *invocationContext) Session() session.Session {
 // invocation's, whose user made no such call.
 func (c *invocationContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
-		if id, ok := c.adkIdentity(); ok {
+		if id, ok := identityOf(func() session.Session { return c.session }); ok {
 			return id
 		}
 		return nil
@@ -445,12 +446,6 @@ func (c *invocationContext) Value(key any) any {
 		return nil
 	}
 	return c.Context.Value(key)
-}
-
-// adkIdentity implements identitySource. This type owns its session, so it never
-// consults what it wraps.
-func (c *invocationContext) adkIdentity() (Identity, bool) {
-	return identityOf(func() session.Session { return c.session })
 }
 
 func (c *invocationContext) InvocationID() string {

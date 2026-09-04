@@ -98,6 +98,11 @@ const defaultInitTimeout = 30 * time.Second
 //     re-applies the end user's credential to the redirect target. Set
 //     CheckRedirect on the http.Client that carries the transport; the
 //     ADC-backed client [NewClient] builds for itself does the same.
+//   - Requests must run under a context ADK derived. An agent.InvocationContext
+//     implemented outside the ADK module answers the identity key with whatever
+//     it embeds, since it cannot override a key it cannot name — so making a
+//     request directly under one mints the credential of the invocation it wraps.
+//     Promote it first. [agent.IdentityFromContext] states the limit in full.
 //
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
@@ -241,6 +246,12 @@ func (p *provider) attribute(err error) error {
 // it would start a fresh one every initTimeout, each parked in a syscall pinning
 // an OS thread. Waiters get a prompt error instead, and the moment the stuck
 // lookup returns its client is published and callers recover.
+//
+// The bound is charged against elapsed attempt time, not against any one
+// waiter's arrival, so a caller that shows up after it has passed fails at once
+// even if nobody ever waited. That is the deliberate trade for releasing a whole
+// cohort together: the alternative arms a fresh bound per arrival, which is what
+// made a stuck lookup cost every request its own full initTimeout.
 func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	p.mu.Lock()
 	if c := p.client; c != nil {
@@ -255,8 +266,8 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	}
 	p.mu.Unlock()
 
-	// A result that has already landed wins over an expired bound: with both
-	// ready, the select below would choose between them at random.
+	// A result that has already landed wins over an expired bound. This narrows
+	// the window rather than closing it, so the timer arm re-checks too.
 	select {
 	case <-in.done:
 		return in.result()
@@ -269,6 +280,14 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	case <-in.done:
 		return in.result()
 	case <-timer.C:
+		// The bound and the result can be ready at once — for a caller arriving
+		// after the deadline the timer is ready immediately — and select would
+		// then choose between them at random. The result wins.
+		select {
+		case <-in.done:
+			return in.result()
+		default:
+		}
 		// A sentinel of its own, not context.DeadlineExceeded: that is what the
 		// caller-deadline arm below returns, and the two mean different things.
 		return nil, fmt.Errorf("%w: the attempt exceeded %v and is still running", ErrClientUnavailable, p.initTimeout)

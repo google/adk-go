@@ -62,16 +62,6 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 	})
 }
 
-// identitySource is implemented by the context types in this package that answer
-// the ADK identity key. Its method is unexported, so only this package can
-// implement it, and that is the whole point: it is how the identity procedure
-// tells a context of ours — one that will answer for the invocation it speaks
-// for — from an InvocationContext written elsewhere, which cannot override the
-// key and whose Value would answer with the enclosing invocation's user.
-type identitySource interface {
-	adkIdentity() (Identity, bool)
-}
-
 // IdentityFromContext returns the ADK invocation [Identity] carried by ctx, if
 // present.
 //
@@ -87,15 +77,24 @@ type identitySource interface {
 // invocation whose session carries no user yields an empty UserID, so a caller
 // that needs one must check.
 //
-// A context derived through this module — [Promote], [NewContext],
-// [NewToolContext], [NewCallbackContext], a readonly context, or any of their
-// children — never reports an enclosing invocation's user in place of its own.
-// One exception cannot be closed from here, and it decides whether a caller may
-// treat the answer as the acting user: an [InvocationContext] implemented
-// outside this package, passed here *as the context itself* rather than derived
-// from, answers with whatever it embeds, because the key is unnameable outside
-// the module and so its embedded parent serves it. Derive such an invocation
-// before handing it to anything that acts on the identity.
+// An invocation ADK itself built always reports its own user, whichever way a
+// context is derived from it. An [InvocationContext] implemented OUTSIDE this
+// module is where the guarantee stops, and a caller deciding whether it may act
+// on the answer needs both halves of that:
+//
+//   - [Promote], [NewContext], [NewToolContext], [NewCallbackContext], a
+//     readonly context and their children report such an invocation's own user,
+//     or none at all if it has no readable session of its own. They never
+//     substitute the enclosing invocation's.
+//   - Passing one *as the context itself*, or deriving through [CommonContextDelta]
+//     — [PromoteWithDelta], [Context.WithDelta], [InvocationContext.WithICDelta] —
+//     reports whatever it embeds. The key is unnameable outside the module, so a
+//     decorator cannot override it and its parent answers. The delta case is
+//     wider than identity: WithICDelta is promoted too, so the decorator is
+//     dropped outright and Session, UserID and AppName report the parent as well.
+//
+// So an invocation from elsewhere must be promoted before anything acts on its
+// identity, and must override WithICDelta if it is to survive a delta at all.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
 	return id, ok
@@ -231,6 +230,7 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 // Callbacks and Tools
 type commonContext struct {
 	context.Context
+	adkcontext.Marker
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
@@ -425,10 +425,7 @@ func (c *commonContext) UserID() string {
 // its state, and a session that panics costs the identity, not the process.
 func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
-		if id, ok := c.adkIdentity(); ok {
-			return id
-		}
-		return nil
+		return c.identity()
 	}
 	if c.Context == nil {
 		return nil
@@ -436,43 +433,62 @@ func (c *commonContext) Value(key any) any {
 	return c.Context.Value(key)
 }
 
-// adkIdentity implements [identitySource].
+// identity answers the ADK identity key, as an any so it can report "none".
 //
 // A commonContext owns no session, so it speaks for the invocation it wraps, and
-// how it asks depends on whether that invocation is one of this package's own
+// how it asks depends on whether that invocation is one of the module's own
 // context types.
 //
-// One of ours answers for itself. That is what keeps a tool or callback context
-// working: theirs hold no session by design and hand the question down to the
-// invocation underneath.
+// One of ours is asked, and answers for itself. That is what keeps a tool or
+// callback context working: theirs hold no session by design and hand the
+// question down to the invocation underneath.
 //
-// Anything else is read, never asked. An InvocationContext written outside this
-// package embeds the context it was derived from, to inherit cancellation, and
+// Anything else is read, never asked. An InvocationContext written outside the
+// module embeds the context it was derived from, to inherit cancellation, and
 // cannot override a key it cannot name — so its Value answers with the
 // *enclosing* invocation's identity, a live user who made no such call. Only its
 // own session counts, and a session it cannot produce costs the identity rather
-// than inheriting one. Crucially that covers a nil session as well as a broken
-// one: a nil interface is indistinguishable from the session-less view a tool
-// context is, so for a type we do not control the two must fail the same way.
+// than inheriting one. That covers a nil session as well as a broken one: a nil
+// interface is indistinguishable from the session-less view a tool context is,
+// so for a type we do not control the two must fail the same way.
 //
 // A commonContext speaking for no invocation at all is the one case that consults
 // its own parent, since there is nothing else it could answer for.
-func (c *commonContext) adkIdentity() (Identity, bool) {
+func (c *commonContext) identity() any {
+	if c == nil {
+		return nil
+	}
 	if c.invocationContext == nil {
 		if c.Context == nil {
-			return Identity{}, false
+			return nil
 		}
-		// Type-asserted: a permissive parent that answers every key must not have
-		// something that is not an Identity taken for one.
-		id, ok := c.Context.Value(adkcontext.IdentityKey).(Identity)
-		return id, ok
+		return identityFrom(c.Context)
 	}
-	if src, ours := c.invocationContext.(identitySource); ours {
-		return src.adkIdentity()
+	if _, ours := c.invocationContext.(adkcontext.Source); ours {
+		return identityFrom(c.invocationContext)
 	}
 	// Method value and call both inside the recover: Session() is caller-supplied
 	// code and invocationContext can be a typed-nil pointer.
-	return identityOf(func() session.Session { return c.invocationContext.Session() })
+	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
+		return id
+	}
+	return nil
+}
+
+// identityFrom asks src for the identity key and keeps the answer only if it is
+// an [Identity].
+//
+// Type-asserted, not merely checked against nil: a context that answers every
+// key would otherwise hand back something that is not an Identity and have it
+// taken for one. Recovered, because src can be a typed-nil pointer or a wrapper
+// holding one, and this runs inside http.RoundTripper on the caller's goroutine,
+// where net/http does not recover.
+func identityFrom(src interface{ Value(any) any }) any {
+	v, _ := adkcontext.Recovered(func() any { return src.Value(adkcontext.IdentityKey) })
+	if id, ok := v.(Identity); ok {
+		return id
+	}
+	return nil
 }
 
 var (

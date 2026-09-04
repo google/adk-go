@@ -32,6 +32,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -1087,6 +1088,12 @@ Suggested fixes:
 
 type cancelledToolContext struct {
 	agent.Context
+	// Marker: this is one of ADK's own context types, so the identity procedure
+	// asks it rather than reading a session it does not have. Without it the
+	// procedure would fall back to the embedded tool context's Session(), which
+	// is nil by design, and a streaming tool that re-derives its context would
+	// lose the acting user.
+	adkcontext.Marker
 	cancelCtx context.Context
 }
 

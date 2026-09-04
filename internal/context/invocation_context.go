@@ -56,6 +56,7 @@ func NewInvocationContext(ctx context.Context, params InvocationContextParams) a
 
 type InvocationContext struct {
 	context.Context
+	adkcontext.Marker
 
 	params InvocationContextParams
 }

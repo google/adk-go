@@ -16,6 +16,7 @@ package context_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -386,6 +387,15 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 		{"behind a non-ADK wrapper", func(ic agent.InvocationContext) context.Context {
 			return context.WithValue(icontext.NewReadonlyContext(ic), wrapKey{}, "x")
 		}},
+		// A readonly context over a delta-derived one. WithICDelta is promoted for
+		// an out-of-module decorator, so it returns the invocation the decorator
+		// embeds and the decorator is dropped — session and all, not just the
+		// identity. Recorded here so the limit is asserted rather than assumed.
+		{"readonly context over a delta-derived context", func(ic agent.InvocationContext) context.Context {
+			branch := "br"
+			return icontext.NewReadonlyContext(agent.PromoteWithDelta(ic,
+				&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &branch}}))
+		}},
 	}
 
 	for _, r := range rows {
@@ -397,16 +407,20 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 					}
 				}()
 				ctx := c.of(r.ic())
+				want := r.want
+				if strings.Contains(c.name, "delta-derived") && strings.HasPrefix(r.name, "decorated") {
+					want = "enclosing"
+				}
 				var got string
 				id, ok := agent.IdentityFromContext(ctx)
 				if ok {
 					got = id.UserID
 				}
-				if got != r.want {
-					t.Errorf("IdentityFromContext() user = %q, want %q", got, r.want)
+				if got != want {
+					t.Errorf("IdentityFromContext() user = %q, want %q", got, want)
 				}
-				if ok != (r.want != "") {
-					t.Errorf("IdentityFromContext() ok = %v, want %v", ok, r.want != "")
+				if ok != (want != "") {
+					t.Errorf("IdentityFromContext() ok = %v, want %v", ok, want != "")
 				}
 				if v := ctx.Value(probeKey{}); v != nil {
 					t.Errorf("Value(probeKey{}) = %v, want nil: only the identity key reads the session", v)

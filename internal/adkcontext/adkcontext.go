@@ -61,3 +61,25 @@ func Recovered[T any](read func() T) (v T, ok bool) {
 	}()
 	return read(), true
 }
+
+// Source marks a context type that answers [IdentityKey] for the invocation it
+// speaks for, rather than for whatever it happens to be derived from.
+//
+// It is what lets the identity procedure tell one of ADK's own session-less
+// views — a tool context, a callback context, the cancel-scoped context a
+// streaming tool runs under — from an agent.InvocationContext written outside
+// the module. One of ours is asked, because it hands the question down to the
+// invocation underneath. Anything else is only read, because it cannot override
+// a key it cannot name, so its embedded parent would answer with a different
+// call's user.
+//
+// The method comes from embedding [Marker] and this package is internal, so a
+// type outside the module can neither name it nor inherit it, and cannot be
+// mistaken for one of ours.
+type Source interface{ adkIdentitySource() }
+
+// Marker is embedded by the ADK context types that satisfy [Source]. It carries
+// no state.
+type Marker struct{}
+
+func (Marker) adkIdentitySource() {}

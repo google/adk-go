@@ -241,7 +241,7 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 // bound once, not once per request. The attempt is deliberately kept running, so
 // without the latch every outbound request would re-pay the full initTimeout for
 // as long as the lookup is stuck.
-func TestResolveClientFailFastAfterBlownBound(t *testing.T) {
+func TestResolveClientFailsFastOnceTheAttemptBoundPasses(t *testing.T) {
 	p := newTestProvider(t)
 	p.newClient = blockingInit(t)
 	p.initTimeout = 200 * time.Millisecond
@@ -259,9 +259,9 @@ func TestResolveClientFailFastAfterBlownBound(t *testing.T) {
 		t.Fatalf("second resolveClient() error = %v, want ErrClientUnavailable", err)
 	}
 	// The fail-fast path does not wait at all, so a quarter of the bound is a
-	// generous ceiling and still far under the ~200ms a re-paid bound costs.
+	// generous ceiling and still far under the ~200ms a re-armed bound costs.
 	if second > p.initTimeout/4 {
-		t.Errorf("second caller waited %v against a %v bound (first paid %v): the blown bound must be latched", second, p.initTimeout, first)
+		t.Errorf("second caller waited %v against a %v bound (first paid %v): once the attempt's bound has passed, a later caller must not wait again", second, p.initTimeout, first)
 	}
 }
 
@@ -411,15 +411,26 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 	p.newClient = blockingInit(t)
 	p.initTimeout = 400 * time.Millisecond
 
+	// Wait for the first caller to have created the attempt rather than sleeping
+	// on it: under -race on a loaded machine the goroutine can be scheduled late,
+	// and this caller would then create the attempt itself and time its own bound.
 	first := make(chan time.Duration, 1)
 	start := time.Now()
 	go func() {
 		_, _ = p.resolveClient(t.Context())
 		first <- time.Since(start)
 	}()
+	for {
+		p.mu.Lock()
+		started := p.pending != nil
+		p.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 
-	// Arrive at the halfway mark: inside the first bound, so this caller shares
-	// the attempt rather than starting one.
+	// Arrive partway through the attempt's bound, so this caller shares it.
 	time.Sleep(p.initTimeout / 2)
 	lateStart := time.Now()
 	_, err := p.resolveClient(t.Context())

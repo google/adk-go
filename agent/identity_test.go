@@ -204,3 +204,58 @@ func TestIdentityThroughWrapperDoesNotLogPerLookup(t *testing.T) {
 		t.Errorf("resolving the identity logged %q; it must not read a wrapper's session", got)
 	}
 }
+
+// TestIdentityFromNilContexts pins that a typed-nil receiver costs the identity
+// and not the process. The dispatch trusts a context of ours to answer for
+// itself, and a typed-nil pointer satisfies that interface as readily as a live
+// one — so the guard has to be on the answering side. Value runs inside
+// http.RoundTripper on the caller's goroutine, where net/http does not recover.
+func TestIdentityFromNilContexts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"a typed-nil commonContext", (*commonContext)(nil)},
+		{"one wrapping a typed-nil commonContext", &commonContext{invocationContext: (*commonContext)(nil)}},
+		{"one wrapping a typed-nil invocationContext", &commonContext{invocationContext: (*invocationContext)(nil)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("Value panicked: %v", p)
+				}
+			}()
+			if id, ok := IdentityFromContext(tc.ctx); ok {
+				t.Errorf("IdentityFromContext() = %+v, true; want no identity", id)
+			}
+		})
+	}
+}
+
+// TestIdentityFromUserlessSession pins the case the decision matrix cannot
+// express: a session that reads fine and simply carries no user. That must
+// report ok with an empty UserID, not "no identity" — the two reach the
+// credential path as different errors, and only the second means "this is not an
+// agent invocation".
+func TestIdentityFromUserlessSession(t *testing.T) {
+	ic := &invocationContext{Context: t.Context(), session: &matrixSession{id: "sid", app: "app"}}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"the invocation itself", ic},
+		{"Promote", Promote(ic)},
+		{"NewToolContext", NewToolContext(ic, "fc", nil, nil)},
+		{"NewCallbackContext", NewCallbackContext(ic, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := IdentityFromContext(tc.ctx)
+			if !ok {
+				t.Fatal("IdentityFromContext() ok = false; a readable session with no user still has an identity")
+			}
+			if want := (Identity{AppName: "app", SessionID: "sid"}); id != want {
+				t.Errorf("IdentityFromContext() = %+v, want %+v", id, want)
+			}
+		})
+	}
+}
