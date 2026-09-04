@@ -439,32 +439,31 @@ func requestOptions(cfg *genai.GenerateContentConfig) []option.RequestOption {
 	return []option.RequestOption{option.WithRequestTimeout(*cfg.HTTPOptions.Timeout)}
 }
 
-// ignoredHTTPOptionFields lists the HTTPOptions fields this package neither
-// translates nor rejects, with the reason each is left alone.
+// ignoredHTTPOptionFields names the HTTPOptions fields this package neither
+// translates nor rejects. It is the one deliberate silent drop in the config
+// surface, and both halves of that — dropping rather than forwarding, and
+// dropping rather than refusing — are deliberate.
 //
-// This is the one deliberate silent drop in the config surface, and it is a
-// compatibility choice rather than an oversight: HTTPOptions.Headers has always
-// been ignored for this backend, so refusing it now would break applications
-// that set headers once on a config shared with a Gemini agent — a break the
-// bug this change fixes never asked for.
-//
-// Forwarding them is not the alternative. Two things go wrong. An Authorization
-// header does not join the client's credentials, it replaces them: openai-go
-// records any case-insensitive "Authorization" as an override and ApplySecurity
-// then returns before attaching the configured API key, so the request would go
-// out authenticated by the caller's header alone. And a credential meant for
+// Not forwarded, because two things go wrong. An Authorization header does not
+// join the client's credentials, it replaces them: openai-go records any
+// case-insensitive "Authorization" as an override and ApplySecurity then
+// returns before attaching the configured API key, so the request would go out
+// authenticated by the caller's header alone. And a credential meant for
 // Gemini, x-goog-api-key most obviously, would reach api.openai.com verbatim.
 // A denylist of credential-bearing header names is not a defense worth
 // trusting, since every name it misses is a leak.
 //
+// Not refused, because the caller is often not the one who filled this in.
+// model/gemini allocates Config.HTTPOptions.Headers and writes x-goog-api-client
+// and user-agent into it on every request, and the compaction summarizer
+// forwards the field onward (session/compaction/llm_summarizer.go), so a config
+// reaching this package can carry headers the application never set. Refusing
+// them would turn ADK's own version strings into a hard error on a config
+// nobody wrote by hand.
+//
 // Headers meant for OpenAI belong on ClientConfig.Options, which is scoped to
 // the one backend that sees them.
-var ignoredHTTPOptionFields = []struct {
-	name   string
-	reason string
-}{
-	{"Headers", "addressed to the backend HTTPOptions was written for; set ClientConfig.Options for OpenAI"},
-}
+var ignoredHTTPOptionFields = []string{"Headers"}
 
 // unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
 // Gemini wire format rather than transport, and so cannot cross to Responses.

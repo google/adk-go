@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -871,7 +872,7 @@ func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
 // This drives openai-go directly. If a future version stops treating the header
 // as an override, this test fails and Headers can be reconsidered — until then
 // it documents why applyGenerationConfig refuses them.
-func TestRequestOptionsCannotDisplaceTheAPIKey(t *testing.T) {
+func TestCallerAuthorizationHeaderDisplacesTheAPIKey(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("Authorization")
@@ -886,7 +887,7 @@ func TestRequestOptionsCannotDisplaceTheAPIKey(t *testing.T) {
 	// Only the header the stub saw matters here, never the decoded response.
 	_, _ = client.Responses.New(context.Background(), params)
 	if got != "Bearer real-key" {
-		t.Fatalf("baseline Authorization = %q, want the configured key", got)
+		t.Fatalf("baseline Authorization = %s, want the configured key", redact(got))
 	}
 	_, _ = client.Responses.New(context.Background(), params,
 		option.WithHeaderAdd("Authorization", "Bearer caller"))
@@ -895,13 +896,13 @@ func TestRequestOptionsCannotDisplaceTheAPIKey(t *testing.T) {
 			"the reason HTTPOptions.Headers is rejected no longer holds, so revisit it")
 	}
 	if got != "Bearer caller" {
-		t.Errorf("Authorization = %q, want the caller header to have displaced the key", got)
+		t.Errorf("Authorization = %s, want the caller header to have displaced the key", redact(got))
 	}
 }
 
 // Headers are ignored rather than refused, so a config that carried them
 // against main keeps working here. What must never happen is forwarding them:
-// TestRequestOptionsCannotDisplaceTheAPIKey shows what an Authorization header
+// TestCallerAuthorizationHeaderDisplacesTheAPIKey shows what an Authorization header
 // would do, and a Gemini credential would simply reach the wrong provider.
 func TestRequestOptionsIgnoresHeaders(t *testing.T) {
 	headers := []http.Header{
@@ -952,10 +953,10 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 		}
 	}
 	if v := got.Get("Authorization"); v != "Bearer real-key" {
-		t.Errorf("Authorization = %q, want the configured key: a caller header displaced it", v)
+		t.Errorf("Authorization = %s, want the configured key: a caller header displaced it", redact(v))
 	}
 	if v := got.Get("X-Goog-Api-Key"); v != "" {
-		t.Errorf("X-Goog-Api-Key = %q, want absent: a Gemini credential reached the provider", v)
+		t.Errorf("X-Goog-Api-Key = %s, want absent: a Gemini credential reached the provider", redact(v))
 	}
 	if v := got.Get("X-Trace-Id"); v != "" {
 		t.Errorf("X-Trace-Id = %q, want absent: headers are not forwarded", v)
@@ -1593,8 +1594,8 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 	honored := map[string]bool{"Timeout": true}
 	ignored := make(map[string]bool, len(ignoredHTTPOptionFields))
-	for _, field := range ignoredHTTPOptionFields {
-		ignored[field.name] = true
+	for _, name := range ignoredHTTPOptionFields {
+		ignored[name] = true
 	}
 	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
 	for _, field := range unsupportedHTTPOptionFields {
@@ -1626,5 +1627,37 @@ func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 		if _, ok := optType.FieldByName(name); !ok {
 			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
 		}
+	}
+}
+
+// redact describes a header value without reproducing it. These assertions run
+// against stub credentials, but a maintainer debugging a live problem may well
+// have swapped a real key in, and a failing test should not put it in the log.
+func redact(v string) string {
+	if v == "" {
+		return "empty"
+	}
+	return fmt.Sprintf("<%d-byte value>", len(v))
+}
+
+// requestOptions must be safe on its own terms. applyGenerationConfig rejects a
+// non-positive timeout before any request is built, so this guard is defense in
+// depth — but the header bug got through two rounds precisely because safety
+// rested on call ordering promised by a comment, so the guard is tested here
+// directly rather than assumed unreachable.
+func TestRequestOptionsGuardsNonPositiveTimeoutItself(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		timeout := d
+		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
+		if opts := requestOptions(cfg); len(opts) != 0 {
+			t.Errorf("requestOptions(timeout %v) produced %d options, want none: "+
+				"openai-go reads a non-positive timeout as no deadline at all", d, len(opts))
+		}
+	}
+	// The positive case still produces one, so the guard is not simply off.
+	positive := time.Second
+	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
+	if opts := requestOptions(cfg); len(opts) != 1 {
+		t.Errorf("requestOptions(timeout %v) produced %d options, want 1", positive, len(opts))
 	}
 }
