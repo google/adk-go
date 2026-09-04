@@ -447,3 +447,45 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 		})
 	}
 }
+
+func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	nilAgent, err := agent.New(agent.Config{
+		Name: "nil_yielder",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	r, err := New(Config{
+		AppName:           "test_app",
+		Agent:             nilAgent,
+		SessionService:    sessionService,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var count int
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if ev == nil {
+			t.Errorf("unexpected nil event")
+		}
+		count++
+	}
+	if count != 0 {
+		t.Errorf("expected 0 events, got %d", count)
+	}
+}
