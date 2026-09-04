@@ -319,6 +319,48 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 	}
 }
 
+// TestRetrieveAcceptsResourceNames pins the other side of the boundary
+// TestRetrieveValidatesRequest guards. Both of these were widened when the
+// per-segment check replaced a substring test for "..", and a widening a
+// rejection table cannot see is a widening nothing would notice being undone —
+// or being taken further.
+func TestRetrieveAcceptsResourceNames(t *testing.T) {
+	tests := []struct {
+		name, resource string
+	}{
+		// A domain-scoped project id. The colon is why the charset had to widen,
+		// and it is safe only because the name always follows a scheme, a host and
+		// a version segment, where a colon cannot begin a scheme.
+		{name: "domain-scoped project id", resource: "projects/example.com:my-project/locations/l/authProviders/a"},
+		// Dots inside a segment, as opposed to a "." or ".." segment of their own.
+		// The old substring check rejected these; path.Clean leaves them alone, so
+		// the name the server resolves is the one that was validated and routed.
+		{name: "dots inside a segment", resource: "projects/p/locations/l/authProviders/a..b"},
+		{name: "leading dot in a segment", resource: "projects/p/locations/l/authProviders/.hidden"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"success":{"header":"Authorization: Bearer","token":"tok"}}`))
+			}))
+			defer srv.Close()
+
+			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: tc.resource, UserID: "u"}); err != nil {
+				t.Fatalf("RetrieveCredential(%q) error = %v, want it accepted", tc.resource, err)
+			}
+			// The name must reach the wire unchanged: validation and routing both
+			// ran on the string the server is about to resolve.
+			if want := "/v1/" + tc.resource + "/credentials:retrieve"; gotPath != want {
+				t.Errorf("request path = %q, want %q", gotPath, want)
+			}
+		})
+	}
+}
+
 func TestNewClient(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		// Supply HTTPClient so the constructor skips the ADC lookup (offline test).

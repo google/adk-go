@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -164,11 +163,20 @@ type clientInit struct {
 	done   chan struct{}
 	client *Client
 	err    error
-	// blown is set by the first waiter whose bound expires. Later waiters fail
-	// fast instead of each paying the bound again: the attempt is kept running,
-	// so without this a stuck lookup costs every outbound request its full
-	// initTimeout for as long as it is stuck.
-	blown atomic.Bool
+	// deadline bounds this attempt, and every waiter shares it rather than
+	// starting a bound of its own on arrival. The attempt is kept running when it
+	// expires, so a per-waiter bound would cost each request that arrived inside
+	// the window a full initTimeout of its own; sharing releases the whole cohort
+	// at once, and a caller arriving after it has passed fails immediately.
+	deadline time.Time
+}
+
+// result reports what the attempt produced. Safe only after done is closed.
+func (in *clientInit) result() (*Client, error) {
+	if in.err != nil {
+		return nil, in.err
+	}
+	return in.client, nil
 }
 
 var _ auth.CredentialProvider = (*provider)(nil)
@@ -221,9 +229,13 @@ func (p *provider) attribute(err error) error {
 // Application Default Credentials) on first use.
 //
 // Concurrent callers share one attempt and each waits on the earlier of its own
-// context and initTimeout: auth.Transport resolves a credential per outbound
-// request, so a slow cold start must not outlive the request that triggered it.
-// A failed attempt is not cached; the next call retries.
+// context and that attempt's remaining bound: auth.Transport resolves a
+// credential per outbound request, so a slow cold start must not outlive the
+// request that triggered it. The bound is the attempt's rather than each
+// waiter's, so a caller arriving midway through a stuck lookup waits out what is
+// left of it instead of starting a fresh initTimeout of its own, and one
+// arriving after it has passed fails immediately. A failed attempt is not
+// cached; the next call retries.
 //
 // A hung attempt is not abandoned. The lookup cannot be cancelled, so retiring
 // it would start a fresh one every initTimeout, each parked in a syscall pinning
@@ -237,33 +249,29 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	}
 	in := p.pending
 	if in == nil {
-		in = &clientInit{done: make(chan struct{})}
+		in = &clientInit{done: make(chan struct{}), deadline: time.Now().Add(p.initTimeout)}
 		p.pending = in
 		go p.runInit(in)
 	}
 	p.mu.Unlock()
 
-	if in.blown.Load() {
-		select {
-		case <-in.done: // landed after the bound blew; fall through to the result
-		default:
-			return nil, fmt.Errorf("%w: an earlier attempt exceeded %v and is still running", ErrClientUnavailable, p.initTimeout)
-		}
+	// A result that has already landed wins over an expired bound: with both
+	// ready, the select below would choose between them at random.
+	select {
+	case <-in.done:
+		return in.result()
+	default:
 	}
 
-	timer := time.NewTimer(p.initTimeout)
+	timer := time.NewTimer(time.Until(in.deadline))
 	defer timer.Stop()
 	select {
 	case <-in.done:
-		if in.err != nil {
-			return nil, in.err
-		}
-		return in.client, nil
+		return in.result()
 	case <-timer.C:
 		// A sentinel of its own, not context.DeadlineExceeded: that is what the
 		// caller-deadline arm below returns, and the two mean different things.
-		in.blown.Store(true)
-		return nil, fmt.Errorf("%w after %v", ErrClientUnavailable, p.initTimeout)
+		return nil, fmt.Errorf("%w: the attempt exceeded %v and is still running", ErrClientUnavailable, p.initTimeout)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("gcp: waiting for the default credentials client: %w", ctx.Err())
 	}
@@ -282,10 +290,12 @@ func (p *provider) runInit(in *clientInit) {
 		if published {
 			return
 		}
+		// Every exit carries the sentinel: a caller behind a RoundTripper classifies
+		// on errors.Is, and these are client-unavailable outcomes like any other.
 		if r := recover(); r != nil {
-			in.err = fmt.Errorf("gcp: building the default credentials client panicked: %v", r)
+			in.err = fmt.Errorf("%w: building it panicked: %v", ErrClientUnavailable, r)
 		} else if in.err == nil {
-			in.err = errors.New("gcp: building the default credentials client did not complete")
+			in.err = fmt.Errorf("%w: building it did not complete", ErrClientUnavailable)
 		}
 		p.publish(in)
 	}()
@@ -296,7 +306,7 @@ func (p *provider) runInit(in *clientInit) {
 		in.err = fmt.Errorf("%w: %w", ErrClientUnavailable, err)
 	case c == nil:
 		// Caching a nil client would only move the failure to the next retrieval.
-		in.err = errors.New("gcp: default credentials client builder returned no client")
+		in.err = fmt.Errorf("%w: the builder returned no client", ErrClientUnavailable)
 	default:
 		in.client = c
 	}

@@ -219,6 +219,11 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
 					t.Fatalf("resolveClient() error = %v, want it to report %q", err, tc.wantMsg)
 				}
+				// A caller behind a RoundTripper cannot switch on a message, and
+				// this is a client-unavailable outcome like any other.
+				if !errors.Is(err, ErrClientUnavailable) {
+					t.Errorf("resolveClient() error = %v, want errors.Is(err, ErrClientUnavailable)", err)
+				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("resolveClient() blocked; an abrupt builder wedged the provider")
 			}
@@ -307,8 +312,12 @@ func TestResolveClientRejectsNilClient(t *testing.T) {
 	p := newTestProvider(t)
 	p.newClient = func(context.Context) (*Client, error) { return nil, nil }
 
-	if _, err := p.resolveClient(t.Context()); err == nil {
+	_, err := p.resolveClient(t.Context())
+	if err == nil {
 		t.Fatal("resolveClient() = nil error, want a nil client rejected")
+	}
+	if !errors.Is(err, ErrClientUnavailable) {
+		t.Errorf("resolveClient() error = %v, want errors.Is(err, ErrClientUnavailable)", err)
 	}
 	p.mu.Lock()
 	cached := p.client
@@ -389,4 +398,44 @@ func newTestProvider(t *testing.T) *provider {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 	return p.(*provider)
+}
+
+// TestResolveClientBoundIsPerAttemptNotPerWaiter pins that the bound belongs to
+// the attempt. A waiter that arrives while a lookup is already stuck must be
+// released when THAT lookup's bound expires, not initTimeout after it happened
+// to show up: auth.Transport resolves a credential per outbound request, so a
+// per-waiter bound lets every request that arrives inside the first window pay a
+// full one of its own.
+func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
+	p := newTestProvider(t)
+	p.newClient = blockingInit(t)
+	p.initTimeout = 400 * time.Millisecond
+
+	first := make(chan time.Duration, 1)
+	start := time.Now()
+	go func() {
+		_, _ = p.resolveClient(t.Context())
+		first <- time.Since(start)
+	}()
+
+	// Arrive at the halfway mark: inside the first bound, so this caller shares
+	// the attempt rather than starting one.
+	time.Sleep(p.initTimeout / 2)
+	lateStart := time.Now()
+	_, err := p.resolveClient(t.Context())
+	late := time.Since(lateStart)
+	if !errors.Is(err, ErrClientUnavailable) {
+		t.Fatalf("late resolveClient() error = %v, want ErrClientUnavailable", err)
+	}
+	select {
+	case <-first:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first caller never returned")
+	}
+
+	// It should have waited out the remainder of the attempt's bound, roughly
+	// half of it. Anything at or beyond a full bound means it started its own.
+	if late >= p.initTimeout {
+		t.Errorf("a caller arriving halfway through the bound waited %v, a full bound being %v: the bound must be the attempt's, not the waiter's", late, p.initTimeout)
+	}
 }
