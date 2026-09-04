@@ -375,10 +375,10 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			baseline, _ := runLiveStacks()
 			client, connCount := startFakeLiveServer(t, tc.serveConn)
-			f := &Flow{
-				Model:             &fakeLiveModel{client: client},
-				RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
-			}
+			// Shrunk reconnect delays: the subtests below reconnect, and the
+			// production backoff would otherwise make this test sleep for no
+			// reason and couple its runtime to constants it does not test.
+			f := newReconnectFlow(client, testReconnectPolicy(time.Millisecond, 5))
 			ctx, cancel := newLiveInvocationContext(t)
 			defer cancel()
 

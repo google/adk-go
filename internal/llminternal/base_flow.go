@@ -75,6 +75,41 @@ type Flow struct {
 	BeforeToolCallbacks   []BeforeToolCallback
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
+
+	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
+	// only tests set it, to shrink the delays.
+	reconnect *reconnectPolicy
+}
+
+// tornDown reports whether the session was closed or the invocation cancelled.
+func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
+	select {
+	case <-sess.done:
+		return true
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// waitBeforeReconnect paces a reconnect, reporting whether it should go ahead.
+// Teardown during the wait cuts it short, so Close stays prompt.
+//
+// The re-check after the timer matters: select picks uniformly among ready
+// cases, so a teardown landing as the timer fires would otherwise report
+// "proceed" half the time and dial a socket nobody reads.
+func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return !tornDown(ctx, sess)
+	case <-sess.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 var (
@@ -374,7 +409,44 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
 
+		policy := f.reconnect
+		if policy == nil {
+			policy = defaultReconnectPolicy()
+		}
+		// attempt counts consecutive reconnects that made no progress; lastErr
+		// is what triggered the last one.
+		attempt := 0
+		var lastErr error
+		everConnected := false
+
 		for {
+			// Every iteration, not just when backing off: a reconnect that
+			// skips the delay must not dial after teardown either.
+			if tornDown(ctx, sess) {
+				if err := ctx.Err(); err != nil {
+					sess.pushError(err)
+				}
+				return
+			}
+			if attempt > 0 {
+				if attempt > policy.maxRetries {
+					// Resumable errors are swallowed while retrying, so
+					// without this the caller's stream just goes quiet.
+					sess.pushError(fmt.Errorf("live session: giving up after %d consecutive reconnect attempts: %w", policy.maxRetries, lastErr))
+					return
+				}
+				delay := policy.delay(attempt)
+				log.Printf("live session: reconnect attempt %d/%d in %v", attempt, policy.maxRetries, delay)
+				if !waitBeforeReconnect(ctx, sess, delay) {
+					// Cancellation reports itself, matching the consumer
+					// loop's ctx.Done arm; Close is a clean teardown.
+					if err := ctx.Err(); err != nil {
+						sess.pushError(err)
+					}
+					return
+				}
+			}
+
 			if isIContext {
 				handle := iCtx.LiveSessionResumptionHandle()
 				if handle != "" {
@@ -396,11 +468,25 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
+				// A redial failing after a session worked is the shape of an
+				// outage, so it belongs on the budget. Without this the budget
+				// is unreachable in the case it was meant for: the first failed
+				// dial ends the session however much backoff is configured.
+				if everConnected {
+					log.Printf("live session: reconnect dial failed: %v", err)
+					lastErr = err
+					attempt++
+					continue
+				}
+				// Nothing ever connected: bad credentials, an unknown model, no
+				// route. Retrying only delays a permanent error.
 				log.Printf("failed to connect live session: %v\n", err)
 				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
 				return
 			}
+			everConnected = true
 
+			connectedAt := time.Now()
 			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
 
 			cleanup := func() {
@@ -418,12 +504,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if len(nreq.Contents) > 0 {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err)
-					sess.pushError(err)
 					// cleanup, not a bare return: genai dials the live socket
 					// with a context-less websocket.DefaultDialer.Dial, and
 					// nothing in the SDK watches a context, so only an explicit
 					// Close releases it. Returning without cleanup strands the
 					// connection for the life of the process.
+					if isResumable(err) {
+						// The socket died between the handshake and the first
+						// send, so it gets the same budget as a mid-session
+						// drop rather than ending the session outright.
+						lastErr = err
+						attempt++
+						cleanup()
+						continue
+					}
+					sess.pushError(err)
 					cleanup()
 					return
 				}
@@ -578,6 +673,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				case err := <-errChan:
 					if isResumable(err) {
 						log.Printf("Connection error, attempting to resume: %v\n", err)
+						lastErr = err
+						if policy.madeProgress(time.Since(connectedAt)) {
+							// It was working, so reconnect immediately on a
+							// fresh budget: a voice call's gap stays short.
+							attempt = 0
+						} else {
+							attempt++
+						}
 						reconnect = true
 						break // Break the select
 					}
