@@ -146,6 +146,17 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
+
+	if IsArtifactRef(artifact) {
+		parsed, ok := ParseArtifactURI(artifact.FileData.FileURI)
+		if !ok {
+			return nil, fmt.Errorf("invalid artifact reference URI: %s", artifact.FileData.FileURI)
+		}
+		if err := ValidateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+		}
+	}
+
 	// If file is user scoped, store it under user scope path
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
@@ -206,19 +217,45 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if version > 0 {
-		artifact, ok := s.get(appName, userID, sessionID, fileName, version)
+	// Artifact references (Part.FileData.FileURI with an "artifact://" scheme)
+	// point at another artifact rather than storing data directly; resolve
+	// them here, re-validating scope at each hop so a reference can never
+	// escape the app/user/session it was saved under.
+	const maxArtifactRefDepth = 10
+	for range maxArtifactRefDepth {
+		var (
+			part *genai.Part
+			ok   bool
+		)
+		if version > 0 {
+			part, ok = s.get(appName, userID, sessionID, fileName, version)
+		} else {
+			// pick the latest version
+			_, part, ok = s.find(appName, userID, sessionID, fileName)
+		}
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return &LoadResponse{Part: artifact}, nil
+
+		if !IsArtifactRef(part) {
+			return &LoadResponse{Part: part}, nil
+		}
+
+		parsed, ok := ParseArtifactURI(part.FileData.FileURI)
+		if !ok {
+			return nil, fmt.Errorf("invalid artifact reference URI: %s", part.FileData.FileURI)
+		}
+		if err := ValidateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+		}
+
+		appName, userID, fileName, version = parsed.AppName, parsed.UserID, parsed.FileName, parsed.Version
+		sessionID = parsed.SessionID
+		if fileHasUserNamespace(fileName) {
+			sessionID = userScopedArtifactKey
+		}
 	}
-	// pick the latest version
-	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
-	if !ok {
-		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-	}
-	return &LoadResponse{Part: artifact}, nil
+	return nil, fmt.Errorf("artifact reference chain exceeded max depth of %d", maxArtifactRefDepth)
 }
 
 // List implements [artifact.Service]
