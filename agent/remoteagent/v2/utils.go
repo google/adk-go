@@ -15,6 +15,7 @@
 package remoteagent
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 
@@ -35,7 +36,9 @@ type userFunctionCall struct {
 
 // toUserFunctionCall returns a non-nil struct when the last event in the session has a FunctionResponse
 // with user-provided data. The struct contains both call and response events.
-func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
+// agentName is the remote peer's name; when non-empty, only function calls authored by that peer match
+// (aligned with adk-python's event.author == self.name check).
+func getUserFunctionCallAt(events session.Events, index int, agentName string) *userFunctionCall {
 	if index < 0 || index >= events.Len() {
 		return nil
 	}
@@ -49,7 +52,7 @@ func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
 	}
 	for i := index - 1; i >= 0; i-- {
 		request := events.At(i)
-		if !isFunctionCallEvent(request, fnCallID) {
+		if !isFunctionCallEvent(request, fnCallID, agentName) {
 			continue
 		}
 		result := &userFunctionCall{response: candidate}
@@ -61,13 +64,75 @@ func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
 	return nil
 }
 
-func isFunctionCallEvent(event *session.Event, callID string) bool {
+func isFunctionCallEvent(event *session.Event, callID, agentName string) bool {
 	if event == nil || event.Content == nil {
+		return false
+	}
+	// Empty agentName skips the author gate (anonymous wrappers / harnesses).
+	if agentName != "" && event.Author != agentName {
 		return false
 	}
 	return slices.ContainsFunc(event.Content.Parts, func(part *genai.Part) bool {
 		return part.FunctionCall != nil && part.FunctionCall.ID == callID
 	})
+}
+
+// collectRemoteFunctionCallIDs returns call IDs this remote peer itself emitted.
+// Function responses whose IDs are not in this set must not be forwarded as A2A
+// function responses — the peer has no invocation to resume for a call it never made.
+func collectRemoteFunctionCallIDs(events session.Events, agentName string) map[string]struct{} {
+	ids := make(map[string]struct{})
+	if agentName == "" {
+		return ids
+	}
+	for i := 0; i < events.Len(); i++ {
+		event := events.At(i)
+		if event.Author != agentName || event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				ids[part.FunctionCall.ID] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+// unmatchedFunctionResponsesAsText rewrites function responses whose call ID was
+// not issued by this peer into plain text, matching adk-python remote_a2a_agent.
+func unmatchedFunctionResponsesAsText(parts []*genai.Part, remoteFCIDs map[string]struct{}) []*genai.Part {
+	needRewrite := false
+	for _, part := range parts {
+		if part.FunctionResponse == nil {
+			continue
+		}
+		if _, ok := remoteFCIDs[part.FunctionResponse.ID]; !ok {
+			needRewrite = true
+			break
+		}
+	}
+	if !needRewrite {
+		return parts
+	}
+	out := make([]*genai.Part, 0, len(parts))
+	for _, part := range parts {
+		if part.FunctionResponse == nil {
+			out = append(out, part)
+			continue
+		}
+		if _, ok := remoteFCIDs[part.FunctionResponse.ID]; ok {
+			out = append(out, part)
+			continue
+		}
+		respJSON, err := json.Marshal(part.FunctionResponse.Response)
+		if err != nil {
+			respJSON = []byte(fmt.Sprintf("%v", part.FunctionResponse.Response))
+		}
+		text := fmt.Sprintf("Tool %s returned: %s", part.FunctionResponse.Name, respJSON)
+		out = append(out, genai.NewPartFromText(text))
+	}
+	return out
 }
 
 // getFunctionResponseCallID finds the first part with non-nil FunctionResponse and returns the call ID.
@@ -164,9 +229,11 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 }
 
 func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]*a2a.Part, error) {
-	parts := make([]*a2a.Part, 0, len(event.Content.Parts))
+	remoteFCIDs := collectRemoteFunctionCallIDs(ctx.Session().Events(), ctx.Agent().Name())
+	genaiParts := unmatchedFunctionResponsesAsText(event.Content.Parts, remoteFCIDs)
+	parts := make([]*a2a.Part, 0, len(genaiParts))
 	if cfg.GenAIPartConverter != nil {
-		for _, part := range event.Content.Parts {
+		for _, part := range genaiParts {
 			cp, err := cfg.GenAIPartConverter(ctx, event, part)
 			if err != nil {
 				return nil, err
@@ -177,7 +244,7 @@ func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Eve
 		}
 	} else {
 		var err error
-		parts, err = adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		parts, err = adka2a.ToA2AParts(genaiParts, event.LongRunningToolIDs)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}

@@ -15,7 +15,9 @@
 package remoteagent
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -69,6 +71,7 @@ func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 }
 
 func TestGetUserFunctionCallAt(t *testing.T) {
+	remoteName := "test-agent"
 	testCases := []struct {
 		name    string
 		events  []*session.Event
@@ -78,7 +81,7 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 		{
 			name: "success",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
 				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
 			},
 			atIndex: 1,
@@ -87,8 +90,8 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 		{
 			name: "success with event in-between",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
-				newEventFromParts(genai.RoleModel, &genai.Part{Text: "another event"}),
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
+				newEventFromParts(remoteName, &genai.Part{Text: "another event"}),
 				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
 			},
 			atIndex: 2,
@@ -97,7 +100,7 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 		{
 			name: "success with multiple parts in-between",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel,
+				newEventFromParts(remoteName,
 					&genai.Part{Text: "calling"},
 					&genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}},
 					&genai.Part{Text: "called"},
@@ -114,8 +117,8 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 		{
 			name: "failf if not response index",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
-				newEventFromParts(genai.RoleModel, &genai.Part{Text: "another event"}),
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
+				newEventFromParts(remoteName, &genai.Part{Text: "another event"}),
 				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
 			},
 			atIndex: 1,
@@ -124,24 +127,33 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 		{
 			name: "fail if not user author",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
+				newEventFromParts(remoteName, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
 			},
 			success: false,
 		},
 		{
 			name: "fail if no matching function call",
 			events: []*session.Event{
-				newEventFromParts(genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-2"}}),
+				newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-2"}}),
 				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
 			},
+			success: false,
+		},
+		{
+			name: "fail if call authored by another agent",
+			events: []*session.Event{
+				newEventFromParts("coordinator", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "id-1"}}),
+				newEventFromParts(genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "id-1"}}),
+			},
+			atIndex: 1,
 			success: false,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ictx := newTestInvocationContext(t, "test-agent", tc.events...)
-			got := getUserFunctionCallAt(ictx.Session().Events(), tc.atIndex)
+			ictx := newTestInvocationContext(t, remoteName, tc.events...)
+			got := getUserFunctionCallAt(ictx.Session().Events(), tc.atIndex, remoteName)
 			if !tc.success && got != nil {
 				t.Errorf("getUserFunctionCallAt() = %v, want nil", got)
 			}
@@ -313,5 +325,86 @@ func TestPresentAsUserMessage(t *testing.T) {
 				t.Errorf("presentAsUserMessage() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %v", got, tc.want, diff)
 			}
 		})
+	}
+}
+
+func TestProbe_UnmatchedFunctionResponseSentRaw(t *testing.T) {
+	ctx := t.Context()
+	store := session.InMemoryService()
+	resp, err := store.Create(ctx, &session.CreateRequest{AppName: "t", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A function response answering a call the remote peer never made.
+	fr := newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: "fc-local", Name: "local_tool", Response: map[string]any{"v": 1},
+	}})
+	// Not the last event, so the getUserFunctionCallAt resume path is not taken.
+	tail := newEventFromParts("user", genai.NewPartFromText("and now ask the peer"))
+	for _, e := range []*session.Event{fr, tail} {
+		if err := store.AppendEvent(ctx, resp.Session, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := agent.New(agent.Config{Name: "remote-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Agent: a, Session: resp.Session,
+	})
+
+	msg, err := newMessage(ictx, A2AConfig{})
+	if err != nil {
+		t.Fatalf("newMessage() error = %v", err)
+	}
+	if len(msg.Parts) != 2 {
+		t.Fatalf("len(msg.Parts) = %d, want 2", len(msg.Parts))
+	}
+
+	// Unmatched function response must be rendered as text, not a raw A2A function_response.
+	got0 := msg.Parts[0].Text()
+	wantPrefix := "Tool local_tool returned:"
+	if !strings.HasPrefix(got0, wantPrefix) {
+		b, _ := json.Marshal(msg.Parts[0])
+		t.Fatalf("part[0] = %s, want text starting with %q", b, wantPrefix)
+	}
+	if !strings.Contains(got0, `"v":1`) && !strings.Contains(got0, `"v": 1`) {
+		t.Fatalf("part[0] text = %q, want JSON response payload", got0)
+	}
+	if meta := msg.Parts[0].Metadata; meta != nil {
+		if typ, ok := meta[adka2a.ToA2AMetaKey("type")]; ok && typ == "function_response" {
+			t.Fatalf("part[0] still has function_response metadata: %v", meta)
+		}
+	}
+	if got := msg.Parts[1].Text(); got != "and now ask the peer" {
+		t.Fatalf("part[1].Text() = %q, want %q", got, "and now ask the peer")
+	}
+}
+
+func TestToMissingRemoteSessionParts_KeepsMatchedFunctionResponse(t *testing.T) {
+	remoteName := "remote-agent"
+	events := []*session.Event{
+		newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-remote", Name: "peer_tool"}}),
+		newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "fc-remote", Name: "peer_tool", Response: map[string]any{"ok": true},
+		}}),
+		newEventFromParts("user", genai.NewPartFromText("continue")),
+	}
+	// Last remote event is the function call, so missing parts start at the response.
+	ictx := newTestInvocationContext(t, remoteName, events...)
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	if len(gotParts) < 2 {
+		t.Fatalf("len(gotParts) = %d, want >= 2", len(gotParts))
+	}
+	// Matched response should remain a data part with function_response type.
+	meta := gotParts[0].Metadata
+	if meta == nil || meta[adka2a.ToA2AMetaKey("type")] != "function_response" {
+		b, _ := json.Marshal(gotParts[0])
+		t.Fatalf("matched function response not preserved as A2A function_response: %s", b)
+	}
+	if got := gotParts[1].Text(); got != "continue" {
+		t.Fatalf("part[1].Text() = %q, want %q", got, "continue")
 	}
 }
