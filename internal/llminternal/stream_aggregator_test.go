@@ -1148,6 +1148,92 @@ func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
 	}
 }
 
+func TestUsageMetadataNotDroppedByLaterChunkWithNone(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Chunk 1: carries real UsageMetadata but no Candidates.
+	usageChunk := &genai.GenerateContentResponse{
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 150},
+	}
+
+	// Chunk 2: carries actual content but no UsageMetadata (nil).
+	contentChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Here are some movie recommendations."}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{usageChunk, contentChunk} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	final := aggregator.Close()
+	if final == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if final.UsageMetadata == nil {
+		t.Fatal("UsageMetadata is nil; chunk 1 reported 150 tokens but later nil-usage chunk wiped it")
+	}
+	if final.UsageMetadata.TotalTokenCount != 150 {
+		t.Errorf("expected TotalTokenCount=150, got %d", final.UsageMetadata.TotalTokenCount)
+	}
+}
+
+// Verify that a later chunk with non-nil UsageMetadata correctly overwrites an earlier one.
+func TestUsageMetadataUpdatedByLaterChunkWithValue(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Chunk 1: initial usage.
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Hello"}}}},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 100},
+	}
+
+	// Chunk 2: updated usage (cumulative), as typically sent by Gemini.
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Text: " world"}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 200},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	final := aggregator.Close()
+	if final == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if final.UsageMetadata == nil {
+		t.Fatal("UsageMetadata should not be nil")
+	}
+	if final.UsageMetadata.TotalTokenCount != 200 {
+		t.Errorf("expected TotalTokenCount=200 (from last chunk), got %d", final.UsageMetadata.TotalTokenCount)
+	}
+}
+
 func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
