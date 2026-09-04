@@ -621,6 +621,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
