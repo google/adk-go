@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +84,26 @@ type deployCloudRunFlags struct {
 
 var flags deployCloudRunFlags
 
+// serviceNameRE matches the Cloud Run service names gcloud itself accepts:
+// lowercase letters, digits and dashes, starting and ending with a letter or
+// digit, at most 63 characters. Verified against gcloud's own client-side
+// resource-name validation (leading digits are allowed).
+var serviceNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// validateServiceName rejects a --service_name value that gcloud would not
+// accept as a Cloud Run service. gcloudDeployToCloudRun and runGcloudProxy place
+// this value in gcloud's positional SERVICE slot; without this check a value
+// beginning with '-' is consumed by gcloud as a flag rather than a service name
+// (argument injection, CWE-88). gcloud honors such an injected flag — including
+// one supplied via --flags-file — and applies it before it aborts on the now
+// empty positional.
+func validateServiceName(name string) error {
+	if !serviceNameRE.MatchString(name) {
+		return fmt.Errorf("invalid --service_name %q: a Cloud Run service name must be 1-63 characters of lowercase letters, digits or dashes and must start and end with a letter or digit", name)
+	}
+	return nil
+}
+
 // cloudrunCmd represents the cloudrun command
 var cloudrunCmd = &cobra.Command{
 	Use:   "cloudrun",
@@ -130,6 +151,15 @@ func (f *deployCloudRunFlags) computeFlags() error {
 		func(p util.Printer) error {
 			if f.cloudRun.debugAPI && !f.cloudRun.api {
 				return fmt.Errorf("cannot enable Debug API without having enabled API")
+			}
+
+			// Validate the service name before any work: it is passed to gcloud
+			// in the positional SERVICE slot by gcloudDeployToCloudRun and
+			// runGcloudProxy, where a '-'-prefixed value would be parsed as a
+			// flag rather than a service name (CWE-88). Checking here also means
+			// a rejected value leaves no temporary directory behind.
+			if err := validateServiceName(f.cloudRun.serviceName); err != nil {
+				return err
 			}
 
 			absp, err := filepath.Abs(flags.source.entryPointPath)
