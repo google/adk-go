@@ -1033,6 +1033,20 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				return
 			}
 		}
+
+		// Reaching here means innerIter exhausted naturally. Every downstream
+		// stop returns from wrappedIter above, so buffered events are safe to flush.
+		for _, bufferedEvent := range bufferedEvents {
+			if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(bufferedEvent, nil) {
+				return
+			}
+		}
 	}
 
 	return &runnerLiveSession{
