@@ -250,6 +250,54 @@ func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 	}
 }
 
+// TestBuildOpenAIParams_ToolsPinStrictOff checks the strict flag on the request
+// body rather than on the converted tool, because that is what decides the
+// validation mode. The declaration below is already strict-compatible, which is
+// the case the Responses API would otherwise normalize into strict mode.
+func TestBuildOpenAIParams_ToolsPinStrictOff(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("weather?", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name: "get_weather",
+					ParametersJsonSchema: map[string]any{
+						"type":                 "object",
+						"properties":           map[string]any{"city": map[string]any{"type": "string"}},
+						"required":             []any{"city"},
+						"additionalProperties": false,
+					},
+				}},
+			}},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal() err = %v", err)
+	}
+	var payload struct {
+		Tools []struct {
+			Strict *bool `json:"strict"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v", err)
+	}
+	if len(payload.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1: %s", len(payload.Tools), data)
+	}
+	if payload.Tools[0].Strict == nil {
+		t.Fatalf("strict missing from the request body: %s", data)
+	}
+	if *payload.Tools[0].Strict {
+		t.Errorf("strict = true, want false")
+	}
+}
+
 func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
