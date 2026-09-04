@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,19 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	}
 
 	processedEvent := trimTempDeltaState(event)
-	s.events = append(s.events, processedEvent)
+	// s.events is chronological. A plain append is correct for the common case
+	// (each new event's timestamp is >= the last), but after an OCC refresh the
+	// retried event's timestamp can sort earlier than the tail the refresh just
+	// installed. sort.Search finds the first index whose timestamp is strictly
+	// after processedEvent's, so it inserts there rather than blindly at the
+	// tail -- and for ties it lands after every existing equal-timestamp event,
+	// which keeps a plain append's tie-breaking behavior unchanged.
+	idx := sort.Search(len(s.events), func(i int) bool {
+		return s.events[i].Timestamp.After(processedEvent.Timestamp)
+	})
+	s.events = append(s.events, nil)
+	copy(s.events[idx+1:], s.events[idx:])
+	s.events[idx] = processedEvent
 	return nil
 }
 
