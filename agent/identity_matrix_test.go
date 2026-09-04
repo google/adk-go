@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -340,6 +341,26 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 
 	cols := identityColumns(t, enclosing)
 
+	// The four columns on Context reach two different shapes: a row that is
+	// already a Context has the method called on it directly, and a row that is
+	// only an InvocationContext reaches it through Promote. Exactly one row is of
+	// the first shape, so deleting it would silently degrade those columns to
+	// testing the second — no compile error, no failing assertion, eighteen cells
+	// quietly gone. Both shapes must stay represented.
+	var direct, viaPromote int
+	for _, r := range rows {
+		if _, ok := r.ic().(Context); ok {
+			direct++
+		} else {
+			viaPromote++
+		}
+	}
+	if direct == 0 || viaPromote == 0 {
+		t.Fatalf("rows reaching the Context columns directly = %d, through Promote = %d; "+
+			"both shapes are needed, and a decorator over agent.Context is the one the "+
+			"promoted columns exist to catch", direct, viaPromote)
+	}
+
 	// The full Identity is compared, not just the user: reading two of the three
 	// fields off the wrong session, or leaving them empty, would otherwise pass
 	// every cell. matrixOwner builds "sid-<user>"; structSession and
@@ -426,50 +447,107 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 // Both are fixed here. The covered set is read off the columns, and a method
 // returning any interface must be classified rather than assumed harmless.
 func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
-	// Derived from the columns, never restated. nil enclosing is safe: only the
-	// names are read, and of is not called.
-	tabulated := map[string]bool{}
-	for _, c := range identityColumns(t, nil) {
-		if c.method != "" {
-			tabulated[c.method] = true
+	cols := identityColumns(t, nil) // nil enclosing: only names are read, of is not called.
+
+	// Covered means a column calls the method ON the invocation. Keying on the
+	// name alone was not enough: three columns name WithContext and only one
+	// calls it on the row, so deleting that one — the path agent.Run takes on
+	// every run — left this green. promoted is exactly the flag for "called on
+	// the row", which is the only shape that exercises the promotion hazard.
+	calledOnTheRow := map[string]bool{}
+	for _, c := range cols {
+		if c.method != "" && c.promoted {
+			calledOnTheRow[c.method] = true
 		}
 	}
 
-	// A method returning an interface can hand back something that holds a
-	// context, and a promoted one holds the context of what the decorator embeds
-	// rather than the decorator. So each is classified with the reason, and an
-	// unclassified one fails: SubScheduler sat unnoticed for six rounds precisely
-	// because nothing forced that decision.
-	holdsNoContext := map[string]string{
+	// Deriving from the columns cannot notice a column that is simply gone: nine
+	// of them derive a context through a package function and name no method at
+	// all, and two more share a name with a column that stays. So the set is also
+	// pinned. Unlike the list this test used to keep, this one is not pretending
+	// to be derived — it is a snapshot, and changing the table is meant to fail
+	// here and be updated deliberately.
+	wantColumns := []string{
+		"the invocation itself",
+		"Promote",
+		"NewContext",
+		"NewToolContext",
+		"NewCallbackContext",
+		"NewCallbackContextWithArtifactTracking",
+		"reparented onto a carrier of the enclosing invocation",
+		"reparented onto the enclosing invocation itself",
+		"tool context of a tool context",
+		"behind a non-ADK wrapper",
+		"PromoteWithDelta",
+		"PromoteWithDelta, nil InvocationContextDelta",
+		"WithICDelta on a promoted context",
+		"WithContext called on the invocation",
+		"WithAgentCancel called on the context",
+		"WithAgentTimeout called on the context",
+		"WithAgentContext called on the context",
+		"WithDelta called on the context",
+	}
+	gotColumns := make([]string, 0, len(cols))
+	for _, c := range cols {
+		gotColumns = append(gotColumns, c.name)
+	}
+	if !slices.Equal(gotColumns, wantColumns) {
+		t.Errorf("the derivation columns changed.\n got: %q\nwant: %q\nA removed column takes "+
+			"real coverage with it and the checks above cannot see it. If the change is "+
+			"deliberate, update wantColumns.", gotColumns, wantColumns)
+	}
+
+	// What a method HANDS BACK can hold a context, or an acting user, just as the
+	// receiver does — and a promoted one hands back the embedded invocation's,
+	// not the decorator's. So every method returning anything but an inert scalar
+	// is classified with the reason. Restricting this to interface returns was
+	// too narrow: a pointer or a slice can carry a context just as well.
+	holdsNothing := map[string]string{
 		"Agent":               "the agent, which is invocation-independent",
-		"Artifacts":           "an artifact service; holds a session id, not a context",
 		"Err":                 "cancellation cause",
-		"Memory":              "a memory service; holds no context",
-		"ReadonlyState":       "session state",
+		"OutputForAncestors":  "node names",
 		"RequestConfirmation": "reports an error, returns no object",
 		"ResumedInput":        "caller-supplied resume payload",
-		"SearchMemory":        "a memory response, and an error",
-		"Session":             "the session itself, which is what identity is read FROM",
-		"State":               "session state",
+		"RunConfig":           "run configuration, shared across the whole run",
+		"ToolConfirmation":    "the confirmation for this one call",
+		"UserContent":         "the user's message",
 		"Value":               "the context value, which is how identity is answered in the first place",
 	}
-	// Methods that DO hand back something holding a context, and cannot be given
-	// a matrix column because what they return is not itself a context. Each must
-	// be named as a drop path in IdentityFromContext's doc comment.
+	// Returns something scoped to the invocation, but which cannot be used to
+	// reach a context or act as another user.
+	holdsSessionData := map[string]string{
+		"Actions":       "event actions accumulated by this call",
+		"ReadonlyState": "session state",
+		"SearchMemory":  "a memory response, and an error",
+		"Session":       "the session itself, which is what identity is read FROM",
+		"State":         "session state",
+	}
+	// Returns something that carries the invocation's ACTING USER, so a promoted
+	// one addresses the enclosing user's data even where the identity procedure
+	// answers for the decorator. Not a context drop path, but the same
+	// wrong-user harm by another route, so each must be named in
+	// IdentityFromContext's doc.
+	holdsActingUser := map[string]string{
+		"Artifacts": "an artifact handle carrying AppName/UserID/SessionID, sent as the storage key on every Save, Load and List",
+		"Memory":    "a memory handle carrying AppName/UserID, sent as the search key",
+	}
+	// Returns something holding a context outright.
 	holdsContext := map[string]string{
 		"SubScheduler": "the scheduler captures the context it was built from and derives every child from it",
 	}
 
-	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
-	icType := reflect.TypeOf((*InvocationContext)(nil)).Elem()
-	ifaceKind := func(m reflect.Method) (reflect.Type, bool) {
-		for i := range m.Type.NumOut() {
-			if out := m.Type.Out(i); out.Kind() == reflect.Interface {
-				return out, true
+	classified := func(name string) int {
+		var n int
+		for _, m := range []map[string]string{holdsNothing, holdsSessionData, holdsActingUser, holdsContext} {
+			if m[name] != "" {
+				n++
 			}
 		}
-		return nil, false
+		return n
 	}
+
+	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
+	icType := reflect.TypeOf((*InvocationContext)(nil)).Elem()
 	produces := func(m reflect.Method) bool {
 		for i := range m.Type.NumOut() {
 			if out := m.Type.Out(i); out == ctxType || out == icType {
@@ -478,36 +556,51 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		}
 		return false
 	}
+	// Kinds that cannot carry a reference to anything. Everything else — a
+	// pointer, a slice, a map, a struct, an interface — must be classified.
+	inert := func(k reflect.Kind) bool {
+		switch k {
+		case reflect.Bool, reflect.String, reflect.Chan, reflect.Func,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			return true
+		}
+		return false
+	}
 
 	for _, iface := range []reflect.Type{ctxType, icType} {
 		for i := range iface.NumMethod() {
 			m := iface.Method(i)
-			switch {
-			case produces(m):
-				if !tabulated[m.Name] {
-					t.Errorf("%s.%s returns a context and no matrix column calls it: an "+
-						"invocation written outside the module inherits it by promotion, so it "+
-						"is a way to drop the decorator. Add a column naming it in method, and "+
-						"name it in IdentityFromContext's doc.", iface.Name(), m.Name)
+			if produces(m) {
+				if !calledOnTheRow[m.Name] {
+					t.Errorf("%s.%s returns a context and no matrix column CALLS IT on the "+
+						"invocation: an invocation written outside the module inherits it by "+
+						"promotion, so it is a way to drop the decorator. Add a column with "+
+						"method: %q and promoted: true, and name it in IdentityFromContext's doc.",
+						iface.Name(), m.Name, m.Name)
 				}
-			case holdsContext[m.Name] != "" || holdsNoContext[m.Name] != "":
-				// Classified.
-			default:
-				if out, ok := ifaceKind(m); ok {
-					t.Errorf("%s.%s returns the interface %s and is classified neither way. "+
-						"Decide: if what it returns holds a context, it is a drop path — add it "+
-						"to holdsContext and name it in IdentityFromContext's doc. If not, add it "+
-						"to holdsNoContext with the reason.", iface.Name(), m.Name, out)
-				}
+				continue
 			}
-		}
-	}
-
-	// Nothing may be in both, and a name in neither map that is also tabulated is
-	// a stale entry rather than a classification.
-	for name := range holdsContext {
-		if holdsNoContext[name] != "" {
-			t.Errorf("%s is classified as both holding and not holding a context", name)
+			if n := classified(m.Name); n > 1 {
+				t.Errorf("%s.%s is classified %d ways; it must be exactly one", iface.Name(), m.Name, n)
+				continue
+			} else if n == 1 {
+				continue
+			}
+			for j := range m.Type.NumOut() {
+				out := m.Type.Out(j)
+				// time.Time is a struct but holds nothing reachable.
+				if inert(out.Kind()) || out == reflect.TypeOf(time.Time{}) {
+					continue
+				}
+				t.Errorf("%s.%s returns %s and is classified nowhere. Decide which it is: "+
+					"holdsContext (a drop path — name it in IdentityFromContext's doc), "+
+					"holdsActingUser (addresses the enclosing user's data — also name it there), "+
+					"holdsSessionData, or holdsNothing. Each entry needs a reason.",
+					iface.Name(), m.Name, out)
+				break
+			}
 		}
 	}
 }

@@ -88,6 +88,17 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // its session with it. That is not confined to the identity: Session, UserID and
 // AppName then report the enclosing invocation too.
 //
+// Promotion also reaches what a method HANDS BACK, which matters most where the
+// thing handed back carries a user. A decorator that overrides Session but not
+// [Context.Artifacts] or [Context.Memory] gets handles built for the enclosing
+// invocation, and those carry AppName, UserID and SessionID as the storage and
+// search keys. So such a context can answer this function with its own user
+// while reading and writing the ENCLOSING user's artifacts and memories. That
+// behaviour predates the identity key and is unchanged by it — Session, UserID
+// and AppName have always reported the enclosing invocation on the same shape —
+// but a decorator author reading this rule needs to know the credential is not
+// the only thing scoped to a user.
+//
 // So an invocation written outside the module reports its own user only where it
 // answers for itself:
 //
@@ -129,8 +140,13 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     context it was built from and derives every child from that. A decorator
 //     that does not override it hands back the embedded context's scheduler, and
 //     workflow.RunNode asks for one on entry, so the whole child subtree then
-//     runs as the enclosing invocation. Overriding it does not help either: the
-//     captured context is unexported and RunNode takes none.
+//     runs as the enclosing invocation. Overriding SubScheduler does not repair
+//     it, because [DynamicSubScheduler.RunNode] takes no context and the one the
+//     scheduler captured is unexported — so the override has nothing to rebind.
+//     workflow.RunNode itself does take the caller's context and could thread it
+//     through, which would close this without touching any exported signature;
+//     that is a change to the workflow engine rather than to this package, and
+//     it has not been made.
 //
 // None of this is avoidable by discipline alone — [agent.Run] applies a delta on
 // every run, and the workflow schedulers call WithAgentCancel and
