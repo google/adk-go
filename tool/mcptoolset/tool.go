@@ -17,7 +17,9 @@ package mcptoolset
 import (
 	"errors"
 	"fmt"
+	"mime"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
@@ -126,20 +128,11 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.IsError {
-		details := strings.Builder{}
-		for _, c := range res.Content {
-			textContent, ok := c.(*mcp.TextContent)
-			if !ok {
-				continue
-			}
-			if _, err := details.WriteString(textContent.Text); err != nil {
-				return nil, fmt.Errorf("failed to write error details: %w", err)
-			}
-		}
+		details := formatMCPContent(res.Content)
 
 		errMsg := "Tool execution failed."
-		if details.Len() > 0 {
-			errMsg += " Details: " + details.String()
+		if details != "" {
+			errMsg += " Details: " + details
 		}
 
 		return nil, errors.New(errMsg)
@@ -151,37 +144,206 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}, nil
 	}
 
-	textResponse := strings.Builder{}
-	droppedNonText := false
-
-	for _, c := range res.Content {
-		textContent, ok := c.(*mcp.TextContent)
-		if !ok {
-			droppedNonText = true
-			continue
-		}
-
-		if _, err := textResponse.WriteString(textContent.Text); err != nil {
-			return nil, fmt.Errorf("failed to write text response: %w", err)
-		}
-	}
-
-	// A result that yields no text is a valid success (#1352) when there was no
-	// other content to lose: nothing at all, or only empty text blocks. When the
-	// text is empty because every block was non-text, returning {"output": ""}
-	// would report success while discarding the whole payload, so fail loudly
-	// instead.
-	//
-	// TODO(#1401): remove once non-text blocks are rendered rather than skipped.
-	// That also covers the mixed case this deliberately leaves alone, where a
-	// non-text block accompanies real text and is still dropped silently (#1391).
-	if textResponse.Len() == 0 && droppedNonText {
-		return nil, fmt.Errorf("tool %q returned only non-text content, which is not yet supported", t.name)
-	}
+	content := formatMCPContent(res.Content)
 
 	return map[string]any{
-		"output": textResponse.String(),
+		"output": content,
 	}, nil
+}
+
+type formattedMCPContent struct {
+	text    string
+	isPlain bool
+}
+
+// formatMCPContent renders MCP's ordered content blocks into the text-only
+// response shape supported by FunctionTool.Run.
+func formatMCPContent(contents []mcp.Content) string {
+	formatted := make([]formattedMCPContent, 0, len(contents))
+	for _, content := range contents {
+		block := formattedMCPContent{isPlain: true}
+		switch content := content.(type) {
+		case nil:
+			block.text = "[MCP content: unavailable]"
+			block.isPlain = false
+		case *mcp.TextContent:
+			if content == nil {
+				block.text = "[MCP text content: unavailable]"
+				block.isPlain = false
+			} else {
+				block.text = content.Text
+			}
+		case *mcp.EmbeddedResource:
+			block.text = formatEmbeddedResource(content)
+			block.isPlain = false
+		case *mcp.ResourceLink:
+			block.text = formatResourceLink(content)
+			block.isPlain = false
+		case *mcp.ImageContent:
+			if content == nil {
+				block.text = "[MCP image: unavailable]"
+			} else {
+				block.text = formatMediaContent("image", content.MIMEType, len(content.Data))
+			}
+			block.isPlain = false
+		case *mcp.AudioContent:
+			if content == nil {
+				block.text = "[MCP audio: unavailable]"
+			} else {
+				block.text = formatMediaContent("audio", content.MIMEType, len(content.Data))
+			}
+			block.isPlain = false
+		default:
+			block.text = "[MCP content: unsupported]"
+			block.isPlain = false
+		}
+		formatted = append(formatted, block)
+	}
+
+	var result strings.Builder
+	var previous *formattedMCPContent
+	for i := range formatted {
+		block := &formatted[i]
+		if block.text == "" {
+			continue
+		}
+		if previous != nil && (!previous.isPlain || !block.isPlain) &&
+			!strings.HasSuffix(previous.text, "\n") && !strings.HasPrefix(block.text, "\n") {
+			result.WriteByte('\n')
+		}
+		result.WriteString(block.text)
+		previous = block
+	}
+	return result.String()
+}
+
+func formatEmbeddedResource(content *mcp.EmbeddedResource) string {
+	if content == nil || content.Resource == nil {
+		return "[MCP embedded resource: unavailable]"
+	}
+
+	resource := content.Resource
+	attributes := resourceAttributes(resource.URI, resource.MIMEType)
+	if resource.Text != "" {
+		return formatContentWithBody("embedded resource", attributes, resource.Text)
+	}
+	if text, ok := decodeTextBlob(resource.Blob, resource.MIMEType); ok {
+		return formatContentWithBody("embedded resource", attributes, text)
+	}
+	if len(resource.Blob) > 0 {
+		attributes = append(attributes, fmt.Sprintf("size=%d bytes", len(resource.Blob)))
+	}
+	return formatContentLabel("embedded resource", attributes)
+}
+
+func formatResourceLink(content *mcp.ResourceLink) string {
+	if content == nil {
+		return "[MCP resource link: unavailable]"
+	}
+
+	attributes := resourceAttributes(content.URI, content.MIMEType)
+	if content.Name != "" {
+		attributes = append(attributes, fmt.Sprintf("name=%q", content.Name))
+	}
+	if content.Title != "" {
+		attributes = append(attributes, fmt.Sprintf("title=%q", content.Title))
+	}
+	if content.Description != "" {
+		attributes = append(attributes, fmt.Sprintf("description=%q", content.Description))
+	}
+	if content.Size != nil {
+		attributes = append(attributes, fmt.Sprintf("size=%d bytes", *content.Size))
+	}
+	return formatContentLabel("resource link", attributes)
+}
+
+func formatMediaContent(kind, mimeType string, size int) string {
+	attributes := make([]string, 0, 2)
+	if mimeType != "" {
+		attributes = append(attributes, fmt.Sprintf("mimeType=%q", mimeType))
+	}
+	attributes = append(attributes, fmt.Sprintf("size=%d bytes", size))
+	return formatContentLabel(kind, attributes)
+}
+
+func resourceAttributes(uri, mimeType string) []string {
+	attributes := make([]string, 0, 2)
+	if uri != "" {
+		attributes = append(attributes, fmt.Sprintf("uri=%q", uri))
+	}
+	if mimeType != "" {
+		attributes = append(attributes, fmt.Sprintf("mimeType=%q", mimeType))
+	}
+	return attributes
+}
+
+func formatContentWithBody(kind string, attributes []string, body string) string {
+	return formatContentLabel(kind, attributes) + "\n" + body
+}
+
+func formatContentLabel(kind string, attributes []string) string {
+	if len(attributes) == 0 {
+		return "[MCP " + kind + "]"
+	}
+	return "[MCP " + kind + ": " + strings.Join(attributes, ", ") + "]"
+}
+
+func decodeTextBlob(blob []byte, mimeType string) (string, bool) {
+	if len(blob) == 0 {
+		return "", false
+	}
+
+	mediaType, params, err := mime.ParseMediaType(mimeType)
+	if err != nil && (!errors.Is(err, mime.ErrInvalidMediaParameter) || hasMIMECharsetParameter(mimeType)) {
+		return "", false
+	}
+	if !isTextMediaType(mediaType) {
+		return "", false
+	}
+
+	charset := strings.ToLower(params["charset"])
+	switch charset {
+	case "", "utf-8", "utf8":
+		if !utf8.Valid(blob) {
+			return "", false
+		}
+	case "us-ascii":
+		for _, b := range blob {
+			if b >= utf8.RuneSelf {
+				return "", false
+			}
+		}
+	default:
+		return "", false
+	}
+	return string(blob), true
+}
+
+func hasMIMECharsetParameter(value string) bool {
+	_, params, ok := strings.Cut(value, ";")
+	for ok {
+		var parameter string
+		parameter, params, ok = strings.Cut(params, ";")
+		name, _, _ := strings.Cut(parameter, "=")
+		name = strings.ToLower(strings.Join(strings.Fields(name), ""))
+		if name == "charset" || strings.HasPrefix(name, "charset*") {
+			return true
+		}
+	}
+	return false
+}
+
+func isTextMediaType(mediaType string) bool {
+	if strings.HasPrefix(mediaType, "text/") || strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml") {
+		return true
+	}
+	switch mediaType {
+	case "application/json", "application/javascript", "application/toml", "application/xml",
+		"application/x-yaml", "application/yaml":
+		return true
+	default:
+		return false
+	}
 }
 
 var (
