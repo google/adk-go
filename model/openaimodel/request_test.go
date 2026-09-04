@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -829,59 +831,94 @@ func TestServiceTiersCoverEveryGenaiTier(t *testing.T) {
 	}
 }
 
-// HTTPOptions is transport rather than generation, and an application commonly
-// sets headers or a timeout once on a config it hands every agent. Rejecting
-// the whole struct failed every such call; the two fields that mean the same
-// thing to any HTTP client are translated instead.
-func TestRequestOptionsHonorsTransportFields(t *testing.T) {
+// A positive Timeout is the one part of HTTPOptions that crosses to Responses:
+// a duration means the same thing to any HTTP client and can carry nothing
+// sensitive. Headers cannot, which the tests below cover.
+func TestRequestOptionsHonorsTimeout(t *testing.T) {
 	timeout := 45 * time.Second
-	cfg := &genai.GenerateContentConfig{
-		HTTPOptions: &genai.HTTPOptions{
-			Headers: http.Header{
-				"X-Trace-Id": []string{"abc123"},
-				"X-Multi":    []string{"one", "two"},
-			},
-			Timeout: &timeout,
-		},
-	}
+	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
 	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
-		t.Fatalf("applyGenerationConfig() error = %v, want nil: headers and a timeout are honored", err)
+		t.Fatalf("applyGenerationConfig() error = %v, want nil: a timeout is honored", err)
 	}
-	// Three options: one per header value, plus the timeout.
-	if got := len(requestOptions(cfg)); got != 4 {
-		t.Errorf("requestOptions() produced %d options, want 4 (3 header values + 1 timeout)", got)
+	if got := len(requestOptions(cfg)); got != 1 {
+		t.Errorf("requestOptions() produced %d options, want 1", got)
 	}
+}
 
-	// The options have to reach the wire, not merely be constructed. openai-go
-	// applies them to the outgoing request, so a fake transport can read them.
-	var gotHeader http.Header
+// openai-go reads a zero timeout as "no deadline", so forwarding a non-positive
+// one would lift the caller's bound instead of applying it.
+func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		timeout := d
+		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
+		})
+		if !errors.Is(err, ErrUnsupportedConfigField) {
+			t.Fatalf("timeout %v: error = %v, want %v", d, err, ErrUnsupportedConfigField)
+		}
+		if !strings.Contains(err.Error(), "Timeout") {
+			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
+		}
+	}
+}
+
+// The reason no header crosses, pinned against the SDK rather than asserted in
+// prose: openai-go records any case-insensitive Authorization as an override and
+// then skips attaching the configured API key, so forwarding a caller's header
+// would replace the real credential rather than accompany it. WithHeaderAdd is
+// no safer than WithHeader here, despite the name.
+//
+// This drives openai-go directly. If a future version stops treating the header
+// as an override, this test fails and Headers can be reconsidered — until then
+// it documents why applyGenerationConfig refuses them.
+func TestRequestOptionsCannotDisplaceTheAPIKey(t *testing.T) {
+	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Clone()
+		got = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed",` +
-			`"output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed",` +
-			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
+		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed","output":[]}`))
 	}))
 	defer srv.Close()
 
-	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "test", BaseURL: srv.URL})
-	if err != nil {
-		t.Fatalf("NewModel() error = %v", err)
+	client := openai.NewClient(option.WithAPIKey("real-key"), option.WithBaseURL(srv.URL))
+	params := responses.ResponseNewParams{Model: shared.ResponsesModel("m")}
+
+	// Only the header the stub saw matters here, never the decoded response.
+	_, _ = client.Responses.New(context.Background(), params)
+	if got != "Bearer real-key" {
+		t.Fatalf("baseline Authorization = %q, want the configured key", got)
 	}
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
-		Config:   cfg,
+	_, _ = client.Responses.New(context.Background(), params,
+		option.WithHeaderAdd("Authorization", "Bearer caller"))
+	if got == "Bearer real-key" {
+		t.Fatal("openai-go now keeps the configured key alongside a caller Authorization header; " +
+			"the reason HTTPOptions.Headers is rejected no longer holds, so revisit it")
 	}
-	for _, err := range m.GenerateContent(context.Background(), req, false) {
-		if err != nil {
-			t.Fatalf("GenerateContent() error = %v", err)
+	if got != "Bearer caller" {
+		t.Errorf("Authorization = %q, want the caller header to have displaced the key", got)
+	}
+}
+
+// A caller header must never reach the wire, whatever it is called: the whole
+// field is refused, so there is no name-based hole to slip through.
+func TestApplyGenerationConfigRejectsHTTPOptionsHeaders(t *testing.T) {
+	headers := []http.Header{
+		{"Authorization": []string{"Bearer caller"}},
+		{"authorization": []string{"Bearer lowercase"}},
+		{"X-Goog-Api-Key": []string{"gemini-key"}},
+		{"X-Trace-Id": []string{"harmless"}},
+		{}, // present but empty is still a header map the caller allocated
+	}
+	for _, h := range headers {
+		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+			HTTPOptions: &genai.HTTPOptions{Headers: h},
+		})
+		if !errors.Is(err, ErrUnsupportedConfigField) {
+			t.Fatalf("headers %v: error = %v, want %v", h, err, ErrUnsupportedConfigField)
 		}
-	}
-	if got := gotHeader.Get("X-Trace-Id"); got != "abc123" {
-		t.Errorf("X-Trace-Id = %q, want %q: the header never reached the request", got, "abc123")
-	}
-	if got := gotHeader.Values("X-Multi"); !reflect.DeepEqual(got, []string{"one", "two"}) {
-		t.Errorf("X-Multi = %v, want both values", got)
+		if !strings.Contains(err.Error(), "Headers") {
+			t.Errorf("headers %v: error = %q, want it to name Headers", h, err)
+		}
 	}
 }
 
@@ -932,7 +969,7 @@ func TestRequestOptionsEmptyHTTPOptions(t *testing.T) {
 
 // unsupportedHTTPOptionFields must name real fields, or an entry guards nothing.
 func TestUnsupportedHTTPOptionFieldsAreAccountedFor(t *testing.T) {
-	honored := map[string]bool{"Headers": true, "Timeout": true}
+	honored := map[string]bool{"Timeout": true}
 	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
 	for _, field := range unsupportedHTTPOptionFields {
 		rejected[field.name] = true

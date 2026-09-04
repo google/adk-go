@@ -42,13 +42,23 @@
 // ServiceTier is translated; every tier genai names has a Responses
 // equivalent, with genai's "standard" reaching OpenAI as "default".
 //
-// HTTPOptions is transport rather than generation, and is honored in the two
-// places that mean the same thing to any HTTP client: Headers are added to the
-// request, and Timeout bounds it. The endpoint and credentials come from
-// ClientConfig, so BaseURL, BaseURLResourceScope and APIVersion are rejected
-// rather than fighting it, as are ExtraBody and ExtrasRequestProvider, which
-// shape a Gemini request body this package does not send, and RetryOptions,
-// whose backoff has no faithful equivalent.
+// HTTPOptions is transport rather than generation, and only its Timeout
+// crosses, bounding the request when positive. A non-positive one is rejected,
+// since openai-go reads a zero timeout as no deadline at all and would lift the
+// caller's bound instead of applying it.
+//
+// Headers do not cross, and that is a deliberate refusal rather than an
+// omission. HTTPOptions describes a call to Gemini, so a credential in it —
+// x-goog-api-key, say — would be sent verbatim to OpenAI, and an Authorization
+// header would be worse than useless: openai-go treats one as an override and
+// then declines to attach the configured API key, so the request would go out
+// authenticated by the caller's header alone. Headers intended for OpenAI
+// belong on ClientConfig.Options, which is scoped to the backend that receives
+// them. The endpoint and credentials likewise come from ClientConfig, so
+// BaseURL, BaseURLResourceScope and APIVersion are rejected rather than
+// fighting it, as are ExtraBody and ExtrasRequestProvider, which shape a Gemini
+// request body this package does not send, and RetryOptions, whose backoff has
+// no faithful equivalent.
 //
 // ThinkingConfig is translated to the Responses API's effort-based reasoning.
 // ThinkingLevel maps to the effort of the same name. A token budget, which

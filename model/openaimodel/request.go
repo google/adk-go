@@ -412,43 +412,50 @@ var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
 	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
 }
 
-// requestOptions translates the parts of HTTPOptions that describe transport
+// requestOptions translates the part of HTTPOptions that describes transport
 // rather than the Gemini wire format into openai-go request options.
 //
-// HTTPOptions is not a generation setting and openaimodel takes its endpoint
-// and credentials from ClientConfig, but an application commonly sets headers
-// or a timeout once on the config it hands every agent — and the compaction
-// summarizer forwards the field verbatim (session/compaction/llm_summarizer.go).
-// Rejecting it outright would fail every call such an application makes, and
-// ignoring it would drop a header the caller may well need, so the two fields
-// that mean the same thing to any HTTP client are honored.
+// Only Timeout survives the crossing. HTTPOptions is a genai struct describing
+// a call to Gemini, and openaimodel takes its endpoint and credentials from
+// ClientConfig; a duration is the one field that means the same thing to both
+// and can carry nothing sensitive. Headers cannot cross — see
+// unsupportedHTTPOptionFields for why.
 //
 // Called after applyGenerationConfig has accepted the config, which is where
-// the Gemini-shaped remainder is rejected.
+// everything not translated here is rejected.
 func requestOptions(cfg *genai.GenerateContentConfig) []option.RequestOption {
-	if cfg == nil || cfg.HTTPOptions == nil {
+	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
 		return nil
 	}
-	var opts []option.RequestOption
-	// Add rather than set: these join the client's headers instead of
-	// replacing them, so a caller cannot accidentally drop authorization.
-	for key, values := range cfg.HTTPOptions.Headers {
-		for _, value := range values {
-			opts = append(opts, option.WithHeaderAdd(key, value))
-		}
-	}
-	if cfg.HTTPOptions.Timeout != nil {
-		opts = append(opts, option.WithRequestTimeout(*cfg.HTTPOptions.Timeout))
-	}
-	return opts
+	// Non-positive durations were rejected with the config: openai-go reads a
+	// zero timeout as "no deadline", so passing one through would remove the
+	// bound the caller asked for rather than apply it.
+	return []option.RequestOption{option.WithRequestTimeout(*cfg.HTTPOptions.Timeout)}
 }
 
-// unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
-// Gemini wire format rather than transport, and so cannot cross to Responses.
+// unsupportedHTTPOptionFields lists the HTTPOptions fields that cannot cross to
+// Responses, either because they describe the Gemini wire format or because
+// forwarding them would move a credential.
 var unsupportedHTTPOptionFields = []struct {
 	name  string
 	isSet func(*genai.HTTPOptions) bool
 }{
+	// Headers are addressed to whatever backend HTTPOptions was written for,
+	// and this package sends them somewhere else. Two ways that goes wrong:
+	//
+	// An Authorization header does not join the client's credentials, it
+	// replaces them. openai-go records any case-insensitive "Authorization"
+	// as an override and ApplySecurity then returns before attaching the
+	// configured API key, so a caller who sets one silently unauthenticates
+	// every request — including via WithHeaderAdd, whose name suggests
+	// otherwise. TestRequestOptionsCannotDisplaceTheAPIKey pins this.
+	//
+	// And a credential meant for Gemini, x-goog-api-key most obviously, would
+	// be sent verbatim to api.openai.com. A denylist of credential-bearing
+	// header names is not a defense worth trusting, since every name it misses
+	// is a leak, so no header crosses. Headers meant for OpenAI belong on
+	// ClientConfig.Options, which is scoped to the one backend that sees them.
+	{"Headers", func(o *genai.HTTPOptions) bool { return o.Headers != nil }},
 	// The endpoint belongs to ClientConfig, which is also the only place it can
 	// be set coherently alongside the API key that authenticates against it.
 	{"BaseURL", func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
@@ -571,6 +578,12 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 			if field.isSet(cfg.HTTPOptions) {
 				return fmt.Errorf("%w: HTTPOptions.%s", ErrUnsupportedConfigField, field.name)
 			}
+		}
+		// openai-go treats a zero timeout as "no deadline", so forwarding a
+		// non-positive one would lift the caller's bound rather than apply it —
+		// the inverse of what they asked for, and worse than not asking.
+		if cfg.HTTPOptions.Timeout != nil && *cfg.HTTPOptions.Timeout <= 0 {
+			return fmt.Errorf("%w: non-positive HTTPOptions.Timeout %v", ErrUnsupportedConfigField, *cfg.HTTPOptions.Timeout)
 		}
 	}
 	return nil
