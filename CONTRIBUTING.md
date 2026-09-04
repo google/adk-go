@@ -245,14 +245,14 @@ for m in $(find . -name go.mod -not -path './.git/*' -exec dirname {} \;); do
     && go mod tidy -diff \
     && go build -mod=readonly ./... \
     && go test -race -mod=readonly -count=1 -shuffle=on ./... \
-    && golangci-lint run \
-    && golangci-lint fmt --diff ) || echo "FAILED: $m"
+    && golangci-lint run ) || echo "FAILED: $m"
 done
 ```
 
-`golangci-lint fmt --diff` reports formatting problems without rewriting your
-files. It is a separate step because `golangci-lint run` does not check
-formatting.
+`golangci-lint run` reports formatting problems too, as `gofumpt` and
+`goimports` findings, but it does not fix them. Run `golangci-lint fmt` to
+rewrite the files, or `golangci-lint fmt --diff` to see what it would change
+without writing anything.
 
 Then confirm each new test fails when your source change is reverted, and work
 out what your change means for someone already on the current release. Both are

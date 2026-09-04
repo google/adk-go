@@ -42,7 +42,7 @@ workspace, while `./...` matches only the module you are standing in:
 - Single pkg:  `go test -race ./agent/...`
 - Lint:        `golangci-lint run`   (per module; v2, CI pins v2.3.1; config in `.golangci.yml`)
 - Tidy check:  `go mod tidy -diff`   (per module; must print nothing)
-- Format:      `golangci-lint fmt --diff`   (per module; gofumpt + goimports)
+- Format:      `golangci-lint fmt`   (per module; applies gofumpt + goimports)
 
 Without a `go.work`, `work` silently falls back to the root module alone and
 still exits 0, so confirm the workspace exists before trusting a green run.
@@ -63,14 +63,14 @@ for m in $(find . -name go.mod -not -path './.git/*' -exec dirname {} \;); do
     && go mod tidy -diff \
     && go build -mod=readonly ./... \
     && go test -race -mod=readonly -count=1 -shuffle=on ./... \
-    && golangci-lint run \
-    && golangci-lint fmt --diff ) || echo "FAILED: $m"
+    && golangci-lint run ) || echo "FAILED: $m"
 done
 ```
 
-`golangci-lint fmt --diff` reports formatting without rewriting; plain
-`golangci-lint fmt` rewrites in place. Note that `golangci-lint run` does not
-check formatting at all, so `fmt` is a separate step rather than a shortcut.
+`golangci-lint run` reports formatting problems too, as `gofumpt` and
+`goimports` findings, but it does not fix them. `golangci-lint fmt` rewrites
+the files in place, and `golangci-lint fmt --diff` shows what it would change
+without writing anything.
 
 ## Definition of done
 
