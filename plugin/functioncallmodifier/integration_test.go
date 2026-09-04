@@ -35,7 +35,12 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-//go:generate go test -v -httprecord=testdata/.*\.httprr
+// httprecord:whole-package -- every cassette here is a subtest of the single
+// integration test TestPluginCallbackIntegration (plugin_test.go records
+// nothing), so there is no per-test-function partition to make: narrowing the
+// pattern would mean one directive per cassette. Re-recording them together is
+// correct (see TestHTTPRecordDirectivesPartitionCassettes in internal).
+//go:generate go test -v -httprecord=^testdata[/\\]TestPluginCallbackIntegration_.*\.httprr$
 
 func TestPluginCallbackIntegration(t *testing.T) {
 	functionTool, err := functiontool.New(functiontool.Config{
