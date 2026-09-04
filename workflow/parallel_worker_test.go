@@ -30,6 +30,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
+	grpcCodes "google.golang.org/grpc/codes"
+	grpcStatus "google.golang.org/grpc/status"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -429,42 +431,52 @@ func TestParallelWorker_FailFast(t *testing.T) {
 }
 
 func TestParallelWorker_LowestIndexErrorWins(t *testing.T) {
-	wrapped := NewFunctionNode("out_of_order_failures", func(ctx agent.Context, input int) (int, error) {
-		if input == 0 {
-			// Wait for the higher-index worker to report its error and cancel
-			// this worker, then return a distinct error anyway.
-			<-ctx.Done()
-			return 0, errors.New("error 0")
-		}
-		return 0, errors.New("error 1")
-	}, defaultNodeConfig)
+	for range 20 {
+		// Both workers return independent errors. Neither error is caused by
+		// fail-fast cancellation. Disable cancellation for this test so both
+		// results reach the aggregation loop; fail-fast cancellation is covered
+		// by the tests below.
+		wrapped := NewFunctionNode("independent_failures", func(ctx agent.Context, input int) (int, error) {
+			return 0, fmt.Errorf("error %d", input)
+		}, defaultNodeConfig)
 
-	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	exCtx := agent.NewContext(newMockCtx(t))
-	var gotErr error
-	for _, err := range pw.Run(exCtx, []any{0, 1}) {
+		pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
 		if err != nil {
-			gotErr = err
+			t.Fatal(err)
 		}
-	}
 
-	if gotErr == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if gotErr.Error() != "error 0" {
-		t.Errorf("expected lowest-index error %q, got %q", "error 0", gotErr)
+		exCtx := &nonCancellingAgentContext{Context: agent.NewContext(newMockCtx(t))}
+		var gotErr error
+		for _, err := range pw.Run(exCtx, []any{0, 1}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if gotErr.Error() != "error 0" {
+			t.Fatalf("expected lowest-index error %q, got %q", "error 0", gotErr)
+		}
 	}
 }
 
-func TestParallelWorker_FailFastCancellationDoesNotMaskError(t *testing.T) {
+// nonCancellingAgentContext isolates result ordering tests from fail-fast
+// cancellation. The cancellation behavior itself is covered separately.
+type nonCancellingAgentContext struct {
+	agent.Context
+}
+
+func (c *nonCancellingAgentContext) WithAgentCancel() (agent.Context, context.CancelFunc) {
+	return c.Context, func() {}
+}
+
+func TestParallelWorker_FailFastGRPCCancellationDoesNotMaskError(t *testing.T) {
 	wrapped := NewFunctionNode("failure_with_cancellation", func(ctx agent.Context, input int) (int, error) {
 		if input == 0 {
 			<-ctx.Done()
-			return 0, ctx.Err()
+			return 0, grpcStatus.Error(grpcCodes.Canceled, "context canceled")
 		}
 		return 0, errors.New("error 1")
 	}, defaultNodeConfig)
