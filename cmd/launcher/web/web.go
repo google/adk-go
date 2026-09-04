@@ -27,10 +27,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -151,13 +153,41 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+// applyServiceDefaults fills in in-memory services the caller left unset.
+//
+// Neither adkrest.NewServer nor runner.New defaults them; only
+// runner.NewInMemory does, and the web launcher does not use it. A nil session
+// or memory service reaches the request path and panics, which drops the
+// connection without sending any HTTP response. The artifact handlers answer
+// 503 instead, so defaulting that one replaces a clear diagnostic with a server
+// that works until it restarts and then has lost everything. It is logged for
+// that reason: cmd/launcher/prod runs through this same path, so a deployment
+// that forgot to configure a service still says so on startup.
+func applyServiceDefaults(config *launcher.Config) {
+	var defaulted []string
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
+		defaulted = append(defaulted, "session")
 	}
+	if config.ArtifactService == nil {
+		config.ArtifactService = artifact.InMemoryService()
+		defaulted = append(defaulted, "artifact")
+	}
+	if config.MemoryService == nil {
+		config.MemoryService = memory.InMemoryService()
+		defaulted = append(defaulted, "memory")
+	}
+	for _, name := range defaulted {
+		log.Printf("No %s service configured. Using an in-memory one, so whatever it holds is lost when the process exits.", name)
+	}
+}
+
+// Run implements launcher.SubLauncher.
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	applyServiceDefaults(config)
 
 	router := BuildBaseRouter()
+	registerHealthRoute(router)
 
 	// check if there are any active sublaunchers
 	if len(w.activeSublaunchers) == 0 {
@@ -283,8 +313,32 @@ func logger(inner http.Handler) http.Handler {
 }
 
 // BuildBaseRouter returns the main router, which can be extended by sub-routers.
+//
+// It deliberately registers no routes of its own. mux serves the first route
+// that matches, so anything registered here would silently shadow the same path
+// registered by a caller afterwards.
 func BuildBaseRouter() *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 	router.Use(logger)
 	return router
+}
+
+// registerHealthRoute serves health at the root as well as under the API
+// prefix. Load balancers and container probes are configured with a fixed path
+// and cannot be expected to know which sublaunchers happen to be enabled.
+//
+// Run calls this rather than BuildBaseRouter doing it, so that an embedder
+// building its own server keeps /health for itself.
+func registerHealthRoute(router *mux.Router) {
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
+}
+
+// healthHandler reports that the web server is up. It says nothing about the
+// health of the agent or its downstream models. The body and Content-Type match
+// adkrest's /api/health, so a probe can be pointed at either one.
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
+		log.Printf("failed to write health response: %v", err)
+	}
 }
