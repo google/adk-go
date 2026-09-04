@@ -175,7 +175,7 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 	}
 
 	value := any(declaration.Parameters)
-	if declaration.ParametersJsonSchema != nil {
+	if declaration.Parameters == nil {
 		value = declaration.ParametersJsonSchema
 	}
 	encoded, err := json.Marshal(value)

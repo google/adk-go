@@ -47,6 +47,20 @@ To add ADK Go to your project, run:
 go get google.golang.org/adk/v2
 ```
 
+## 🔭 Telemetry
+
+ADK records tool names, descriptions, and types in `gen_ai.tool.definitions`
+when GenAI content capture is enabled. Tool parameter schemas are excluded by
+default because they may contain sensitive application details. To opt in to
+parameter-schema capture, set:
+
+```bash
+export ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS=true
+```
+
+Use this setting only when the captured tool schemas are appropriate for your
+telemetry destination.
+
 ## 📖 Docs for AI coding agents
 
 [adk.dev/llms.txt](https://adk.dev/llms.txt) is a machine-readable index of the ADK documentation, and [adk.dev/llms-full.txt](https://adk.dev/llms-full.txt) is the same documentation as a single file. Both are generated from [adk-docs](https://github.com/google/adk-docs/) and include the Go API reference and samples, so you can point a coding agent at either one for context:

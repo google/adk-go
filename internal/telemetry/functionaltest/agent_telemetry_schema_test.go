@@ -56,19 +56,28 @@ const captureToolDefinitionParametersEnvVar = "ADK_INSTRUMENTATION_GENAI_CAPTURE
 // adk-python/tests/unittests/telemetry/test_functional.py.
 func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 	tests := []struct {
-		name           string
-		captureContent bool
-		want           *telemetrytest.SpanDigest
+		name              string
+		captureContent    bool
+		captureParameters bool
+		want              *telemetrytest.SpanDigest
 	}{
 		{
-			name:           "elided",
-			captureContent: false,
-			want:           telemetrytestcase.AgentWithToolCase,
+			name:              "elided",
+			captureContent:    false,
+			captureParameters: false,
+			want:              telemetrytestcase.AgentWithToolCase,
 		},
 		{
-			name:           "capture_content",
-			captureContent: true,
-			want:           telemetrytestcase.AgentWithToolCaptureContentCase,
+			name:              "capture_content",
+			captureContent:    true,
+			captureParameters: false,
+			want:              telemetrytestcase.AgentWithToolCaptureContentCase,
+		},
+		{
+			name:              "capture_content_and_tool_parameters",
+			captureContent:    true,
+			captureParameters: true,
+			want:              telemetrytestcase.AgentWithToolCaptureContentAndParametersCase,
 		},
 	}
 
@@ -82,7 +91,11 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 			}
 			// Keep this end-to-end test independent of a developer's local
 			// tool-schema capture setting.
-			t.Setenv(captureToolDefinitionParametersEnvVar, "")
+			if tc.captureParameters {
+				t.Setenv(captureToolDefinitionParametersEnvVar, "true")
+			} else {
+				t.Setenv(captureToolDefinitionParametersEnvVar, "")
+			}
 			telemetry.ApplyEnv()
 
 			// Install in-memory tracer + logger so the test sees

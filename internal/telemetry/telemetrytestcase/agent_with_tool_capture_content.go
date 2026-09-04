@@ -27,6 +27,11 @@ const systemInstructionsJSON = `[{"type":"text","content":"you are helpful\n\n` 
 
 const toolDefinitionsJSON = `[{"name":"some_tool","description":"A sample tool.","type":"function"}]`
 
+const toolDefinitionsWithParametersJSON = `[{"name":"some_tool","description":"A sample tool.",` +
+	`"parameters":{"additionalProperties":false,"properties":{"arg1":{"type":"string"}},` +
+	`"required":["arg1"],"type":"object"},` +
+	`"type":"function"}]`
+
 // AgentWithToolCaptureContentCase is the expected root span for
 // the same scenario as [AgentWithToolCase] but with content capture
 // enabled, via OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var.
@@ -191,4 +196,37 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 			},
 		},
 	},
+}
+
+// AgentWithToolCaptureContentAndParametersCase is the expected root span for
+// the same scenario as [AgentWithToolCaptureContentCase] with tool parameter
+// capture enabled.
+var AgentWithToolCaptureContentAndParametersCase = withToolDefinitions(
+	AgentWithToolCaptureContentCase, toolDefinitionsWithParametersJSON,
+)
+
+// withToolDefinitions makes a shallow copy of the digest tree while replacing
+// the tool-definition attribute on each generate_content span. The nested logs
+// are immutable test data and can be shared safely.
+func withToolDefinitions(base *telemetrytest.SpanDigest, toolDefinitions string) *telemetrytest.SpanDigest {
+	clone := *base
+	clone.Attributes = cloneAttributes(base.Attributes)
+	clone.Children = make([]*telemetrytest.SpanDigest, len(base.Children))
+	for i, child := range base.Children {
+		childClone := *child
+		childClone.Attributes = cloneAttributes(child.Attributes)
+		if childClone.Name == "generate_content mock" {
+			childClone.Attributes["gen_ai.tool.definitions"] = toolDefinitions
+		}
+		clone.Children[i] = &childClone
+	}
+	return &clone
+}
+
+func cloneAttributes(attributes map[string]any) map[string]any {
+	clone := make(map[string]any, len(attributes))
+	for key, value := range attributes {
+		clone[key] = value
+	}
+	return clone
 }
