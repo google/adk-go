@@ -15,6 +15,8 @@
 package workflow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
@@ -61,7 +63,8 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // the ParallelWorker will perform 1 ("a") + 3 ("b" retried) + 1 ("c") = 5 calls in total.
 //
 // If any of the wrapped node executions returns a non-retryable error, the workflow
-// will fail fast, cancel other in-flight workers, and return this first encountered error.
+// will fail fast, cancel other in-flight workers, and return the error from
+// the lowest-index failed input.
 //
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
@@ -99,16 +102,23 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 
 		resCh := make(chan workerResult, nItems)
 
-		// reportFailure cancels the remaining workers. runWorker calls it
-		// synchronously, before releasing its semaphore slot (see below).
+		// reportFailure records the lowest-index worker error and cancels the
+		// remaining workers. runWorker calls it synchronously, before releasing
+		// its semaphore slot (see below).
 		var reportOnce sync.Once
+		var firstErrMu sync.Mutex
 		var firstErr error
-		reportFailure := func(err error) {
-			reportOnce.Do(func() {
+		firstErrIndex := nItems
+		reportFailure := func(index int, err error) {
+			firstErrMu.Lock()
+			if index < firstErrIndex {
+				firstErrIndex = index
 				firstErr = err
-				cancelFunc()
-			})
+			}
+			firstErrMu.Unlock()
+			reportOnce.Do(cancelFunc)
 		}
+		skipped := false
 
 		// Branch isolation: derive a per-item sub-branch so each
 		// worker's wrapped node sees an isolated event history (the
@@ -124,6 +134,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 				select {
 				case sem <- struct{}{}:
 				case <-workerCtx.Done():
+					skipped = true
 					wg.Done()
 					continue
 				}
@@ -131,6 +142,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 				// would pick randomly if cancellation raced the send above.
 				select {
 				case <-workerCtx.Done():
+					skipped = true
 					<-sem
 					wg.Done()
 					continue
@@ -139,6 +151,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			} else {
 				select {
 				case <-workerCtx.Done():
+					skipped = true
 					wg.Done()
 					continue
 				default:
@@ -165,8 +178,15 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			}
 		}
 
-		if firstErr != nil {
-			yield(nil, firstErr)
+		firstErrMu.Lock()
+		finalErr := firstErr
+		firstErrMu.Unlock()
+		if finalErr == nil && (skipped || ctx.Err() != nil) {
+			finalErr = ctx.Err()
+		}
+
+		if finalErr != nil {
+			yield(nil, finalErr)
 			return
 		}
 
@@ -183,7 +203,7 @@ type workerResult struct {
 	err   error
 }
 
-func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup, reportFailure func(error)) {
+func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup, reportFailure func(int, error)) {
 	defer wg.Done()
 	defer func() {
 		if sem != nil {
@@ -212,21 +232,21 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 			case <-time.After(delay):
 				continue
 			case <-ctx.Done():
-				// Cancellation while parked in the retry delay is a real
-				// failure too: report it before releasing sem, exactly
-				// like the exhausted-attempts path below. Without this,
-				// firstErr stays nil unless some other worker happens to
-				// report first, so a cancellation landing here can be
-				// silently dropped and the whole run yields success with
-				// a nil output for this item.
-				reportFailure(ctx.Err())
 				resCh <- workerResult{index: idx, err: ctx.Err()}
 				return
 			}
 		}
 
+		// Cancellation caused by another worker's fail-fast signal is not the
+		// error that should be surfaced. The parent context is checked after
+		// all workers drain so external cancellation is still propagated.
+		if errors.Is(runErr, context.Canceled) && ctx.Err() != nil {
+			resCh <- workerResult{index: idx, err: runErr}
+			return
+		}
+
 		// Cannot retry or exhausted attempts: report before releasing sem.
-		reportFailure(runErr)
+		reportFailure(idx, runErr)
 		resCh <- workerResult{index: idx, err: runErr}
 		return
 	}

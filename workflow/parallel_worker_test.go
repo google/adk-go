@@ -428,6 +428,126 @@ func TestParallelWorker_FailFast(t *testing.T) {
 	}
 }
 
+func TestParallelWorker_LowestIndexErrorWins(t *testing.T) {
+	wrapped := NewFunctionNode("out_of_order_failures", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			// Wait for the higher-index worker to report its error and cancel
+			// this worker, then return a distinct error anyway.
+			<-ctx.Done()
+			return 0, errors.New("error 0")
+		}
+		return 0, errors.New("error 1")
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exCtx := agent.NewContext(newMockCtx(t))
+	var gotErr error
+	for _, err := range pw.Run(exCtx, []any{0, 1}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotErr.Error() != "error 0" {
+		t.Errorf("expected lowest-index error %q, got %q", "error 0", gotErr)
+	}
+}
+
+func TestParallelWorker_FailFastCancellationDoesNotMaskError(t *testing.T) {
+	wrapped := NewFunctionNode("failure_with_cancellation", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		return 0, errors.New("error 1")
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exCtx := agent.NewContext(newMockCtx(t))
+	var gotErr error
+	for _, err := range pw.Run(exCtx, []any{0, 1}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotErr.Error() != "error 1" {
+		t.Errorf("expected worker error %q, got %q", "error 1", gotErr)
+	}
+}
+
+func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+
+	wrapped := NewFunctionNode("slow_success", func(ctx agent.Context, input int) (int, error) {
+		startOnce.Do(func() { close(started) })
+		// Deliberately ignore cancellation so the test isolates the dispatch
+		// path and verifies that skipped items still fail the run.
+		<-release
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var hasFinalResult bool
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3, 4}) {
+			if err != nil {
+				gotErr = err
+			}
+			if _, ok := extractOutput(ev); ok {
+				hasFinalResult = true
+			}
+		}
+		close(done)
+	}()
+
+	<-started
+	cancel()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during dispatch")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected context.Canceled, got nil")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", gotErr)
+	}
+	if hasFinalResult {
+		t.Error("expected no final result after cancellation during dispatch")
+	}
+}
+
 func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	blockCh := make(chan struct{})
 	startedCh := make(chan struct{}, 2)
