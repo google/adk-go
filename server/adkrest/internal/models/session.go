@@ -38,6 +38,14 @@ type CreateSessionRequest struct {
 	Events []Event        `json:"events"`
 }
 
+// UpdateSessionRequest is the body of a PATCH session request.
+//
+// StateDelta holds the state keys to add or overwrite; keys it does not mention
+// are left as they are. An empty or absent delta is a no-op.
+type UpdateSessionRequest struct {
+	StateDelta map[string]any `json:"stateDelta"`
+}
+
 type SessionID struct {
 	ID      string `mapstructure:"session_id,optional"`
 	AppName string `mapstructure:"app_name,required"`

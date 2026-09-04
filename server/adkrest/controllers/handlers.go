@@ -53,7 +53,11 @@ func NewErrorHandler(fn errorHandler) http.HandlerFunc {
 	}
 }
 
-// Unimplemented returns 501 - Status Not Implemented error
-func Unimplemented(rw http.ResponseWriter, req *http.Request) {
+// Unimplemented returns 501 with no body.
+//
+// Deprecated: use [NewNotImplementedHandler], which returns a JSON body naming
+// the missing feature. A body-less 501 tells a client nothing about what it
+// asked for. Kept because this is an exported symbol in a public package.
+func Unimplemented(rw http.ResponseWriter, _ *http.Request) {
 	rw.WriteHeader(http.StatusNotImplemented)
 }
