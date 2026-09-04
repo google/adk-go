@@ -26,7 +26,7 @@ is specified. `web` starts an HTTP server with one or more sublaunchers:
 | `console` | Run the agent interactively in a terminal |
 | `web api` | Serve the ADK REST API |
 | `web a2a` | Serve the agent over A2A |
-| `web webui` | Serve the ADK web interface |
+| `web webui` | Serve the ADK web interface assets; combine it with `api` for a working UI |
 | `web pubsub` | Serve the Pub/Sub trigger endpoint |
 | `web eventarc` | Serve the Eventarc trigger endpoint |
 
@@ -37,7 +37,8 @@ go run ./examples/quickstart console
 go run ./examples/quickstart web api
 ```
 
-Several web sublaunchers can run together:
+The `webui` sublauncher serves the frontend assets only. Combine it with `api`
+to provide the backend routes used by the UI:
 
 ```bash
 go run ./examples/quickstart web api webui
