@@ -336,10 +336,11 @@ func TestGenerateContent(t *testing.T) {
 
 func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		response *model.LLMResponse
-		err      error
-		want     string
+		name        string
+		response    *model.LLMResponse
+		err         error
+		want        string
+		wantMissing bool
 	}{
 		{
 			name:     "stop",
@@ -378,6 +379,10 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 			err:  errTest,
 			want: "error",
 		},
+		{
+			name:        "without response or error",
+			wantMissing: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -392,6 +397,12 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 				t.Fatalf("expected 1 span, got %d", len(spans))
 			}
 			attrs := attributesToMap(spans[0].Attributes)
+			if tc.wantMissing {
+				if _, ok := attrs[semconv.GenAIResponseFinishReasonsKey]; ok {
+					t.Errorf("finish reason is present, want it to be absent")
+				}
+				return
+			}
 			want := "[\"" + tc.want + "\"]"
 			if got := attrs[semconv.GenAIResponseFinishReasonsKey]; got != want {
 				t.Errorf("finish reason = %q, want %q", got, want)
