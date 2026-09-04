@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -349,16 +350,23 @@ func TestIdentityDecisionMatrix(t *testing.T) {
 	// quietly gone. Both shapes must stay represented.
 	var direct, viaPromote int
 	for _, r := range rows {
-		if _, ok := r.ic().(Context); ok {
+		ic := r.ic()
+		_, isCtx := ic.(Context)
+		_, ours := ic.(adkcontext.Source)
+		// Being a Context is not the property that matters; being one written
+		// OUTSIDE the module is. An in-module Context satisfies the first and
+		// tests nothing, which is how this check first passed while the coverage
+		// it stands for was gone.
+		if isCtx && !ours {
 			direct++
 		} else {
 			viaPromote++
 		}
 	}
 	if direct == 0 || viaPromote == 0 {
-		t.Fatalf("rows reaching the Context columns directly = %d, through Promote = %d; "+
-			"both shapes are needed, and a decorator over agent.Context is the one the "+
-			"promoted columns exist to catch", direct, viaPromote)
+		t.Fatalf("rows that are an out-of-module Context = %d, rows reaching the Context "+
+			"columns through Promote = %d; both shapes are needed, and a decorator over "+
+			"agent.Context is the one the promoted columns exist to catch", direct, viaPromote)
 	}
 
 	// The full Identity is compared, not just the user: reading two of the three
@@ -518,7 +526,6 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 	holdsSessionData := map[string]string{
 		"Actions":       "event actions accumulated by this call",
 		"ReadonlyState": "session state",
-		"SearchMemory":  "a memory response, and an error",
 		"Session":       "the session itself, which is what identity is read FROM",
 		"State":         "session state",
 	}
@@ -530,6 +537,11 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 	holdsActingUser := map[string]string{
 		"Artifacts": "an artifact handle carrying AppName/UserID/SessionID, sent as the storage key on every Save, Load and List",
 		"Memory":    "a memory handle carrying AppName/UserID, sent as the search key",
+		// Not merely "a response and an error": it reaches the result by calling
+		// Memory() on the invocation, so a promoted one searches the enclosing
+		// user's memories. Same route as Memory, and it was in holdsSessionData
+		// under a reason that described the return type and not the path to it.
+		"SearchMemory": "searches through the invocation's Memory handle, so it carries that handle's UserID",
 	}
 	// Returns something holding a context outright.
 	holdsContext := map[string]string{
@@ -604,6 +616,116 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		}
 	}
 }
+
+// TestPromotedColumnsActuallyDropADecorator checks what the columns DO, which is
+// the thing four rounds of guards did not.
+//
+// Every guard before this one read the table's own account of itself — a method
+// name, then a name plus a promoted flag, then the list of column names. All of
+// them are labels, and a label is only worth what verifies it: a column whose
+// body was gutted, or one whose promoted flag was simply wrong, satisfied every
+// version while testing nothing. The single row that would have caught it could
+// itself be swapped for an in-module context with the suite green.
+//
+// So this builds its own decorator, owing nothing to the row table, and requires
+// each column marked promoted to actually drop it. A body that no longer calls
+// its method on the invocation now fails here, and so does a mislabelled flag.
+func TestPromotedColumnsActuallyDropADecorator(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+
+	var promoted int
+	for _, c := range identityColumns(t, enclosing) {
+		if !c.promoted {
+			continue
+		}
+		promoted++
+		t.Run(c.name, func(t *testing.T) {
+			// Overrides nothing but Session, so every context-producing method on
+			// it is promoted and hands back the invocation it embeds.
+			d := bareContextDecorator{Context: Promote(enclosing), own: matrixOwner("u")}
+			id, ok := IdentityFromContext(c.of(d))
+			if !ok || id.UserID != "enclosing" {
+				t.Errorf("IdentityFromContext() = %q, %v; want \"enclosing\", true.\n"+
+					"This column is marked promoted, which asserts it calls its method ON the "+
+					"invocation, so a decorator overriding nothing must be dropped by it. Either "+
+					"the column body no longer makes that call, or promoted is set wrongly.",
+					id.UserID, ok)
+			}
+		})
+	}
+	// Pinned because "no promoted columns" would make every check above vacuous
+	// and still report success. Seven, not six: PromoteWithDelta and WithICDelta
+	// on a promoted context both reach WithICDelta, by different routes.
+	if want := 7; promoted != want {
+		t.Errorf("promoted columns = %d, want %d", promoted, want)
+	}
+}
+
+// bareContextDecorator is the minimum an author writes: embed the context you
+// were handed, carry your own session, override nothing else.
+type bareContextDecorator struct {
+	Context
+	own session.Session
+}
+
+func (d bareContextDecorator) Session() session.Session { return d.own }
+
+// TestIdentityFromAHostileSource pins the two guarantees identityFrom's doc
+// makes about a context that IS one of ours.
+//
+// Both were stated and neither was tested: removing the type assertion, and
+// removing the recover, each left the whole suite green. A marked type is asked
+// for the identity rather than read, which is more trust than any other arm of
+// the procedure extends, so the two things that bound that trust are the ones
+// that most need pinning.
+func TestIdentityFromAHostileSource(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+
+	for _, tc := range []struct {
+		name string
+		ic   func() InvocationContext
+	}{{
+		// Answers the identity key with something that is not an Identity.
+		"a source answering with the wrong type",
+		func() InvocationContext { return &junkSource{InvocationContext: enclosing} },
+	}, {
+		// Panics on the way, which for an unmarked context Recovered already
+		// contains; this is the marked path, which asks rather than reads.
+		"a source that panics",
+		func() InvocationContext { return &panickingSource{InvocationContext: enclosing} },
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("identity read panicked out: %v", p)
+				}
+			}()
+			id, ok := IdentityFromContext(Promote(tc.ic()))
+			if ok || id != (Identity{}) {
+				t.Errorf("IdentityFromContext() = %+v, %v; want the zero Identity and false. "+
+					"A context that cannot answer must report nothing, not something taken for "+
+					"an Identity and not the enclosing call's user.", id, ok)
+			}
+		})
+	}
+}
+
+// junkSource carries the marker, so the procedure asks it, and then answers with
+// something that is not an Identity.
+type junkSource struct {
+	InvocationContext
+	adkcontext.Marker
+}
+
+func (*junkSource) Value(any) any { return "not an Identity" }
+
+// panickingSource carries the marker and then fails on the way.
+type panickingSource struct {
+	InvocationContext
+	adkcontext.Marker
+}
+
+func (*panickingSource) Value(any) any { panic("Value is not available") }
 
 // TestPromotedSubSchedulerDropsTheDecorator pins the drop path the guard
 // classifies but cannot tabulate.

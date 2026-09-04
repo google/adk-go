@@ -533,11 +533,16 @@ func (c *commonContext) identity() any {
 // identityFrom asks src for the identity key and keeps the answer only if it is
 // an [Identity].
 //
-// Type-asserted, not merely checked against nil: a context that answers every
-// key would otherwise hand back something that is not an Identity and have it
-// taken for one. Recovered, because src can be a typed-nil pointer or a wrapper
-// holding one, and this runs inside http.RoundTripper on the caller's goroutine,
-// where net/http does not recover.
+// Type-asserted rather than merely checked against nil, so a context answering
+// every key does not put a non-Identity under the identity key. That much is
+// defence in depth and not load-bearing on its own: [IdentityFromContext]
+// asserts again, so dropping this one changes what Value returns and not what
+// any caller can observe. Removing it does not fail any test, deliberately —
+// the tests pin the contract, which is that the reader gets nothing.
+//
+// Recovered is load-bearing, and is pinned: src can be a typed-nil pointer or a
+// wrapper holding one, and this runs inside http.RoundTripper on the caller's
+// goroutine, where net/http does not recover.
 func identityFrom(src interface{ Value(any) any }) any {
 	v, _ := adkcontext.Recovered(func() any { return src.Value(adkcontext.IdentityKey) })
 	if id, ok := v.(Identity); ok {
