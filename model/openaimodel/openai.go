@@ -119,7 +119,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 		var openaiResp *responses.Response
 		// Set alongside openaiResp by a terminal event, the only kind that says
 		// why the turn ended.
-		var sawFinalResponse bool
+		var sawFinalResponse, sawCompletedResponse bool
 
 		for stream.Next() {
 			event := stream.Current()
@@ -134,6 +134,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 					completed := event.AsResponseCompleted()
 					openaiResp = &completed.Response
 					sawFinalResponse = true
+					sawCompletedResponse = true
 				case responseIncomplete:
 					incomplete := event.AsResponseIncomplete()
 					openaiResp = &incomplete.Response
@@ -182,6 +183,19 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 				return
 			}
 			final = converters.Genai2LLMResponse(genaiResp)
+		} else if sawCompletedResponse {
+			// A completed response can contain text that never arrived as a
+			// delta. Use its content for the final response without re-emitting
+			// it as a delta. Keep the aggregate if the snapshot is unusable.
+			if genaiResp, err := convertResponse(openaiResp); err == nil {
+				content := genaiResp.Candidates[0].Content
+				for _, part := range content.Parts {
+					if part.Text != "" || part.FunctionCall != nil {
+						final.Content = content
+						break
+					}
+				}
+			}
 		}
 		finalizeStreamResponse(final, openaiResp, sawFinalResponse)
 		yield(final, nil)
