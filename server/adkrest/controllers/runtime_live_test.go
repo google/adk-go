@@ -211,6 +211,9 @@ func TestRunLiveHandler_StreamsEventsOverWebSocket(t *testing.T) {
 	})
 
 	var got models.Event
+	if err := conn.SetReadDeadline(time.Now().Add(testWebSocketReadTimeout)); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
 	if err := conn.ReadJSON(&got); err != nil {
 		t.Fatalf("ReadJSON() failed: %v", err)
 	}
@@ -421,9 +424,9 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 		return nil, nil, wantErr
 	})
 
-	closeReceived := make(chan struct{})
+	// Disable gorilla's automatic close reply so the test can verify that the
+	// handler waits for the explicit client acknowledgement below.
 	conn.SetCloseHandler(func(code int, text string) error {
-		close(closeReceived)
 		return nil
 	})
 	closeErr := readCloseError(t, conn)
@@ -433,12 +436,6 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 	if closeErr.Text != wantErr.Error() {
 		t.Errorf("close reason = %q, want %q", closeErr.Text, wantErr.Error())
 	}
-	select {
-	case <-closeReceived:
-	case <-time.After(time.Second):
-		t.Fatal("client did not receive server close frame")
-	}
-
 	select {
 	case <-handlerDone:
 		t.Fatal("RunLiveHandler returned before receiving the close reply")
@@ -451,6 +448,9 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 	); err != nil {
 		t.Fatalf("WriteControl(close reply) failed: %v", err)
 	}
+	// Keep this timeout much shorter than waitForHandlerExit's one-second
+	// budget. A longer wait would allow a handler that sleeps instead of
+	// draining the close reply to pass this test.
 	select {
 	case <-handlerDone:
 	case <-time.After(testCloseReplyExitTimeout):
@@ -461,12 +461,28 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 func TestRunLiveHandler_IteratorErrorSendsCloseFrame(t *testing.T) {
 	wantErr := errors.New("stream failed")
 	liveSession := newRecordingLiveSession()
+	consumerPanic := make(chan any, 1)
+	continuedAfterError := make(chan struct{}, 1)
 	conn, handlerDone := dialRunLiveHandler(t, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 		return liveSession, func(yield func(*session.Event, error) bool) {
+			// Surface a consumer panic to the test goroutine instead of leaving
+			// it visible only in net/http's server log.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					consumerPanic <- recovered
+					panic(recovered)
+				}
+			}()
 			if !yield(makeEvent("invocation-1", testLiveAppName, "before failure"), nil) {
 				return
 			}
-			yield(nil, wantErr)
+			if !yield(nil, wantErr) {
+				return
+			}
+			// Real event producers may continue after a per-item error. The
+			// handler must stop consuming before it reaches this event.
+			continuedAfterError <- struct{}{}
+			yield(makeEvent("invocation-2", testLiveAppName, "after failure"), nil)
 		}, nil
 	})
 
@@ -485,6 +501,16 @@ func TestRunLiveHandler_IteratorErrorSendsCloseFrame(t *testing.T) {
 		t.Errorf("close reason = %q, want %q", closeErr.Text, wantErr.Error())
 	}
 	waitForHandlerExit(t, handlerDone)
+	select {
+	case recovered := <-consumerPanic:
+		t.Fatalf("RunLiveHandler panicked after the iterator error: %v", recovered)
+	default:
+	}
+	select {
+	case <-continuedAfterError:
+		t.Fatal("RunLiveHandler continued consuming events after the iterator error")
+	default:
+	}
 }
 
 func TestRunLiveHandler_GracefulClientCloseDoesNotLogWriteError(t *testing.T) {
@@ -501,6 +527,8 @@ func TestRunLiveHandler_GracefulClientCloseDoesNotLogWriteError(t *testing.T) {
 				if !yield(event, nil) {
 					return
 				}
+				// Give the handler's reader goroutine time to process the client
+				// close frame before the write loop can fill the socket buffer.
 				time.Sleep(time.Millisecond)
 			}
 		}, nil
