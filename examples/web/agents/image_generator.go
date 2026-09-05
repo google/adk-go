@@ -57,13 +57,16 @@ func generateImage(ctx agent.Context, input generateImageInput) (generateImageRe
 		}, nil
 	}
 
-	imageBytes, err := imagegen.ImageBytes(response)
+	imageBytes, mimeType, err := imagegen.ImageBytes(response)
 	if err != nil {
 		// Propagate the error so callers can surface any response filtering reason.
 		return generateImageResult{}, err
 	}
+	if mimeType == "" {
+		mimeType = "image/png" // Imagen emits PNG by default; fall back when the response omits the MIME type.
+	}
 
-	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(imageBytes, "image/png"))
+	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(imageBytes, mimeType))
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",

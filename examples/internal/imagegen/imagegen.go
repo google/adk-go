@@ -18,22 +18,28 @@ package imagegen
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/genai"
 )
 
-// ImageBytes returns the bytes of the first usable image in a generation
-// response. If the response contains no generated images, it returns an error
-// reporting that no images were returned. If the entries contain no usable
-// image data but include RAI filtering reasons, the error includes the first
-// non-empty reason. Otherwise, an error reports that the entries contain no
-// usable image data.
+// ImageBytes returns the bytes and MIME type of the first usable image in a
+// generation response. If the response contains no generated images, it returns
+// an error reporting that no images were returned. If the entries contain no
+// usable image data but include RAI filtering reasons, the error includes the
+// first non-empty reason. Otherwise, an error reports that the entries contain
+// no usable image data.
 //
-// On error, ImageBytes returns nil bytes. On success, the returned bytes alias
-// the image data in the SDK response; they are not copied.
-func ImageBytes(response *genai.GenerateImagesResponse) ([]byte, error) {
+// ImageBytes assumes the image is delivered as inline bytes (Image.ImageBytes);
+// an entry carrying only a GCS URI is treated as having no usable image data.
+//
+// On error, ImageBytes returns nil bytes and an empty MIME type. On success,
+// the returned bytes alias the image data in the SDK response; they are not
+// copied. The MIME type is returned as-is from the response and may be empty,
+// so callers should fall back to a default when it is empty.
+func ImageBytes(response *genai.GenerateImagesResponse) ([]byte, string, error) {
 	if response == nil || len(response.GeneratedImages) == 0 {
-		return nil, errors.New("image generation returned no images")
+		return nil, "", errors.New("image generation returned no images")
 	}
 
 	var filteredReason string
@@ -42,15 +48,15 @@ func ImageBytes(response *genai.GenerateImagesResponse) ([]byte, error) {
 			continue
 		}
 		if generatedImage.Image != nil && len(generatedImage.Image.ImageBytes) > 0 {
-			return generatedImage.Image.ImageBytes, nil
+			return generatedImage.Image.ImageBytes, generatedImage.Image.MIMEType, nil
 		}
-		if filteredReason == "" {
-			filteredReason = generatedImage.RAIFilteredReason
+		if reason := strings.TrimSpace(generatedImage.RAIFilteredReason); filteredReason == "" && reason != "" {
+			filteredReason = reason
 		}
 	}
 
 	if filteredReason != "" {
-		return nil, fmt.Errorf("image generation returned no image: %s", filteredReason)
+		return nil, "", fmt.Errorf("image generation returned no image: %s", filteredReason)
 	}
-	return nil, errors.New("image generation returned no usable image data")
+	return nil, "", errors.New("image generation returned no usable image data")
 }

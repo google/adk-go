@@ -26,6 +26,7 @@ func TestImageBytes(t *testing.T) {
 		name     string
 		response *genai.GenerateImagesResponse
 		want     []byte
+		wantMIME string
 		wantErr  string
 	}{
 		{
@@ -48,14 +49,23 @@ func TestImageBytes(t *testing.T) {
 			name: "first filtering reason",
 			response: &genai.GenerateImagesResponse{
 				GeneratedImages: []*genai.GeneratedImage{
-					{RAIFilteredReason: "blocked"},
 					{
 						Image:             &genai.Image{},
-						RAIFilteredReason: "later reason",
+						RAIFilteredReason: "blocked",
 					},
+					{RAIFilteredReason: "later reason"},
 				},
 			},
 			wantErr: "image generation returned no image: blocked",
+		},
+		{
+			name: "whitespace filtering reason ignored",
+			response: &genai.GenerateImagesResponse{
+				GeneratedImages: []*genai.GeneratedImage{
+					{RAIFilteredReason: "   "},
+				},
+			},
+			wantErr: "image generation returned no usable image data",
 		},
 		{
 			name: "empty image data",
@@ -72,23 +82,24 @@ func TestImageBytes(t *testing.T) {
 				GeneratedImages: []*genai.GeneratedImage{
 					nil,
 					{RAIFilteredReason: "filtered"},
-					{Image: &genai.Image{ImageBytes: []byte("first image")}},
+					{Image: &genai.Image{ImageBytes: []byte("first image"), MIMEType: "image/png"}},
 					{Image: &genai.Image{ImageBytes: []byte("second image")}},
 				},
 			},
-			want: []byte("first image"),
+			want:     []byte("first image"),
+			wantMIME: "image/png",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := ImageBytes(test.response)
+			got, mime, err := ImageBytes(test.response)
 			if test.wantErr != "" {
 				if err == nil || err.Error() != test.wantErr {
 					t.Fatalf("ImageBytes() error = %v, want %q", err, test.wantErr)
 				}
-				if got != nil {
-					t.Errorf("ImageBytes() = %q, want nil on error", got)
+				if got != nil || mime != "" {
+					t.Errorf("ImageBytes() = (%q, %q), want (nil, \"\") on error", got, mime)
 				}
 				return
 			}
@@ -96,7 +107,10 @@ func TestImageBytes(t *testing.T) {
 				t.Fatalf("ImageBytes() unexpected error: %v", err)
 			}
 			if !bytes.Equal(got, test.want) {
-				t.Errorf("ImageBytes() = %q, want %q", got, test.want)
+				t.Errorf("ImageBytes() bytes = %q, want %q", got, test.want)
+			}
+			if mime != test.wantMIME {
+				t.Errorf("ImageBytes() mime = %q, want %q", mime, test.wantMIME)
 			}
 		})
 	}
