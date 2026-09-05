@@ -105,7 +105,9 @@ type TransferToAgentTool struct {
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
-// mode curAgent runs under, which decides whether transfer applies at all.
+// mode curAgent runs under, which decides whether the transfer INSTRUCTIONS are
+// generated. The tool declaration itself ships either way, so a single_turn
+// agent is still able to call it.
 func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
 	si, err := instructionsForTransferToAgent(ctx, curAgent, parent, targets)
 	if err != nil {

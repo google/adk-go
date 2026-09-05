@@ -255,6 +255,17 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 	})
 
+	// The function is exported, and both things it does with ctx — resolving the
+	// mode, and reading InvocationID for the event — dereference it. Every other
+	// subtest supplies a real context, so without this one the guard never runs.
+	t.Run("nil ctx returns nil instead of panicking", func(t *testing.T) {
+		t.Parallel()
+		a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+		if got := llmagent.PrepareLLMAgentInput(a, nil, "some input"); got != nil {
+			t.Errorf("llmagent.PrepareLLMAgentInput with a nil ctx = %v, want nil", got)
+		}
+	})
+
 	t.Run("non-LlmAgent returns nil", func(t *testing.T) {
 		t.Parallel()
 		a, err := agent.New(agent.Config{Name: "plain"})

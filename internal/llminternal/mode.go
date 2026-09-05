@@ -30,14 +30,16 @@ import "context"
 // AgentNode's synthesizeMode, the runner's task-sub-agent scan — have nothing to
 // resolve, because no placement ever defaults to task.
 //
-// isUntransferableMode asks about a PEER rather than the running agent, and a
-// binding only ever describes the agent being run, so there is no binding for
-// it to consult.
+// isUntransferableMode and installTaskTools both branch on single_turn, and
+// both are right to read the declaration, for the same reason: each is deciding
+// something about the shape of the agent TREE — whether a peer is reachable by
+// transfer, which tool a parent installs for a sub-agent — not about how one
+// agent behaves on one run. A placement is per-run and cannot answer either.
 //
-// installTaskTools runs at construction, where there is no invocation to
-// consult. It does branch on single_turn, but it is choosing which tool to give
-// a parent for a sub-agent, which is a property of the tree rather than of any
-// one run.
+// Note that "there is no binding to consult" would be the wrong reason for
+// isUntransferableMode. Bindings nest, so when a callee computes its transfer
+// targets the caller's binding is still live in that context. It is looked past
+// deliberately.
 //
 // Every other reader resolves. A reader that tests for single_turn and skips
 // the resolution disagrees with the request the flow actually builds.
@@ -84,6 +86,14 @@ type boundModeKey struct{ agent string }
 // carrying the whole transcript. Binding "" leaves such an agent at the
 // placement it was given, and leaves the missing name to whatever validates
 // names.
+//
+// ctx must be non-nil, as for any context helper.
+//
+// A ModeUnset mode returns ctx untouched. That is a guard against recording a
+// placement that resolved nothing, not a way to decline to bind: every binder
+// passes a ResolveMode whose fallback is concrete, so it is unreachable today.
+// There is deliberately no way to CLEAR a binding — a nested placement shadows
+// an outer one by binding its own value, and nothing needs to un-place an agent.
 func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Context {
 	if mode == ModeUnset {
 		return ctx
@@ -97,6 +107,10 @@ func WithBoundMode(ctx context.Context, agentName string, mode Mode) context.Con
 // Use this only to ask "did a placement put THIS agent in that mode" — a
 // declared mode is deliberately not consulted. Callers wanting the mode an
 // agent actually runs under want [ModeFor].
+//
+// ctx must be non-nil. Passing nil panics in ctx.Value, as it would for any
+// context helper, so callers holding a context that may be nil check it
+// themselves rather than relying on this.
 func BoundMode(ctx context.Context, agentName string) (Mode, bool) {
 	mode, ok := ctx.Value(boundModeKey{agent: agentName}).(Mode)
 	if !ok {

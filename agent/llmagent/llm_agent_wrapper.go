@@ -88,7 +88,16 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		// Re-bind under this agent's own name so the request processors
 		// downstream agree with the branch taken here, and so a mode resolved
 		// for this agent never governs a peer or child.
-		ctx = ctx.WithAgentContext(llminternal.WithBoundMode(ctx, a.Name(), mode))
+		//
+		// As in AgentNode.Run, the binding travels in the context passed DOWN,
+		// which is what reaches the request processors. ctx.WithAgentContext
+		// returns nil for a tool or callback context rather than erroring, so
+		// the chat path below takes a re-bound Context only when there is one
+		// to take.
+		bound := llminternal.WithBoundMode(ctx, a.Name(), mode)
+		if rebound := ctx.WithAgentContext(bound); rebound != nil {
+			ctx = rebound
+		}
 
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
@@ -113,7 +122,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
 				sess = newWrappedSession(sess, seed)
 			}
-			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			ic := icontext.NewInvocationContext(bound, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
 				Memory:         ctx.Memory(),
 				Session:        sess,
@@ -149,6 +158,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if !ok || llmA == nil {
 		return nil
 	}
+	// Exported, so nil is worth surviving rather than panicking: ModeFor reads
+	// ctx.Value below, and the event built further down reads InvocationID off
+	// it. This catches an untyped nil only — a typed-nil InvocationContext still
+	// panics, as it would anywhere else in the package.
 	if ctx == nil {
 		return nil
 	}

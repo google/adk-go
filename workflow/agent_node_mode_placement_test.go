@@ -550,3 +550,48 @@ func TestAgentNode_PlacementSurvivesATransferRoundTrip(t *testing.T) {
 			identity, transfer, history)
 	}
 }
+
+// AgentNode.Run must tolerate a tool context. agent.Context.WithAgentContext
+// returns nil for the tool and callback wrappers rather than erroring, so
+// routing the placement back through ctx crashes here on a path where every
+// symbol is exported. The merge base drained events for such a caller and this
+// must keep doing so.
+func TestAgentNode_Run_AcceptsAToolContext(t *testing.T) {
+	t.Parallel()
+
+	llm := &capturingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name: "c", Description: "c", Model: llm, Mode: llmagent.ModeChat,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	std := runconfig.ToContext(t.Context(), &runconfig.RunConfig{StreamingMode: runconfig.StreamingModeNone})
+	ic := icontext.NewInvocationContext(std, icontext.InvocationContextParams{
+		Agent: a, Session: resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-tool-ctx",
+	})
+	toolCtx := agent.NewToolContext(ic, "fc-1", &session.EventActions{}, nil)
+
+	got := 0
+	for _, err := range node.Run(toolCtx, "hello") {
+		if err != nil {
+			t.Fatalf("node.Run: %v", err)
+		}
+		got++
+	}
+	if got == 0 {
+		t.Error("node.Run over a tool context produced no events")
+	}
+}
