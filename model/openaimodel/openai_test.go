@@ -492,6 +492,32 @@ func TestModel_GenerateStream_Refusal(t *testing.T) {
 	}
 }
 
+// TestModel_GenerateStream_TerminalOnlyMessageContent pins #1476: reasoning
+// deltas must not hide an answer carried only by the completed response.
+func TestModel_GenerateStream_TerminalOnlyMessageContent(t *testing.T) {
+	const (
+		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request.","sequence_number":1}`
+		body           = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request."}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The final answer."}]}]}`
+		completed      = `{"type":"response.completed","sequence_number":2,"response":` + body + `}`
+	)
+
+	streamed, err := runStream(t, evCreated, reasoningDelta, completed)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	final := assertTurnShape(t, streamed)
+	blocking, err := runBlocking(t, body)
+	if err != nil {
+		t.Fatalf("blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+		t.Fatalf("content mismatch (-blocking +streamed):\n%s", diff)
+	}
+}
+
 func TestModel_GenerateStream_CompletedContentOrder(t *testing.T) {
 	const completedBody = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"Checking the request"}],"summary":[{"type":"summary_text","text":"Request checked"}]},{"type":"message","content":[{"type":"output_text","text":"hello"},{"type":"output_text","text":" again"}]},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"SF\"}"},{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
 	got, err := runStream(t, evCreated,
