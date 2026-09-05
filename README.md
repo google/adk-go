@@ -47,6 +47,28 @@ To add ADK Go to your project, run:
 go get google.golang.org/adk/v2
 ```
 
+## 🔭 Telemetry
+
+ADK records function tool names, descriptions, and types in
+`gen_ai.tool.definitions` when span content capture is enabled. Provider-native
+tools such as `google_search`, `code_execution`, and `url_context` are not
+currently included. Tool parameter schemas are excluded by default because
+they may contain sensitive application details. To opt in to parameter-schema
+capture, enable span content capture and set the ADK-specific flag:
+
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY
+export ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS=true
+```
+
+Use `SPAN_AND_EVENT` instead of `SPAN_ONLY` if message content should also be
+recorded in log events. A value of `true` is retained for backward compatibility
+and is equivalent to `EVENT_ONLY`; it does not enable content attributes on
+spans. Use `SPAN_ONLY` or `SPAN_AND_EVENT` when recording tool definitions or
+parameter schemas on spans. The parameter-capture flag has no effect unless
+span content capture is enabled. Use this setting only when the captured tool
+schemas are appropriate for your telemetry destination.
+
 ## 📖 Docs for AI coding agents
 
 [adk.dev/llms.txt](https://adk.dev/llms.txt) is a machine-readable index of the ADK documentation, and [adk.dev/llms-full.txt](https://adk.dev/llms-full.txt) is the same documentation as a single file. Both are generated from [adk-docs](https://github.com/google/adk-docs/) and include the Go API reference and samples, so you can point a coding agent at either one for context:
