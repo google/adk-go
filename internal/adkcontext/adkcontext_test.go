@@ -55,6 +55,33 @@ func TestSourceMethodIsUnexported(t *testing.T) {
 	}
 }
 
+// TestIdentityKeyTypeIsUnnameable guards the other half of the boundary.
+//
+// Source decides who gets ASKED for an identity. The key decides who can PLANT
+// one, and it is trusted by everything rather than by one arm, so it is the
+// stronger of the two properties. It holds only while its type is unexported and
+// declared here: a context key compares by dynamic type as well as value, so an
+// untyped `const IdentityKey = 0`, or an exported `CtxKey`, would let any package
+// forge an identity with context.WithValue(ctx, 0, agent.Identity{...}) and have
+// the credential path mint for it.
+//
+// Measured before writing this: with the constant made untyped the forgery
+// succeeds and the entire suite stays green. That is the same shape as the
+// unexported-method hole above, which also went unnoticed until someone tried
+// the rename.
+func TestIdentityKeyTypeIsUnnameable(t *testing.T) {
+	kt := reflect.TypeOf(adkcontext.IdentityKey)
+	if kt.PkgPath() == "" {
+		t.Fatalf("IdentityKey has type %s, which any package can name and plant with "+
+			"context.WithValue. The identity would then be forgeable by unrelated code.", kt)
+	}
+	if name := kt.Name(); name == "" || name[0] >= 'A' && name[0] <= 'Z' {
+		t.Errorf("IdentityKey's type is %s.%s, which is exported; any package could declare "+
+			"a value of it and plant an identity. Keep the key's type unexported.",
+			kt.PkgPath(), name)
+	}
+}
+
 // exportedLookalike is what an outside type would declare to impersonate a
 // Source if the marker method were ever exported.
 type exportedLookalike struct{}

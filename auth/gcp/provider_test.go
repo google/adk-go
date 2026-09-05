@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
@@ -156,6 +157,94 @@ func TestProviderErrorAttribution(t *testing.T) {
 	var apiErr *gcp.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
 		t.Errorf("Credential() error = %v, want a wrapped *gcp.APIError with status 403", err)
+	}
+}
+
+// TestServiceEchoIsRedacted covers the leak the attribution test cannot see.
+//
+// That test drives a body of "denied", so it passes whether or not anything
+// scrubs. A credentials service that rejects a request commonly quotes back what
+// it rejected, and up to a kilobyte of that response is carried on APIError and
+// reaches the model and the session store along with the tool's error.
+func TestServiceEchoIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid userId: `+user+`"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if strings.Contains(err.Error(), user) {
+		t.Errorf("Credential() error = %v, want the acting user redacted out of the "+
+			"service's echoed body", err)
+	}
+	// Redacted, not swallowed: the operator still needs the failure.
+	var apiErr *gcp.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("Credential() error = %v, want a wrapped *gcp.APIError with status 400", err)
+	}
+	if !strings.Contains(err.Error(), "invalid userId") {
+		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+}
+
+// TestSentinelsCarryTheResource pins the arms that previously carried no
+// resource at all.
+//
+// The 403 case above cannot cover this: an APIError already named the resource,
+// so it passes whether or not the wrap runs. The sentinels did not, and
+// restoring the old behavior for them broke nothing — errors.Is holds either
+// way, and that is all any existing assertion checks. So the resource is
+// asserted here alongside the match, on the arms where it is new, and asserted
+// to appear once, since the provider used to attribute on top of the client.
+func TestSentinelsCarryTheResource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{"consent rejected", `{"consentRejected":{}}`, gcp.ErrConsentRejected},
+		{"poll timeout", `{"pending":{}}`, gcp.ErrPollTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			// A short poll timeout: the pending arm otherwise waits out the real
+			// one, and this test is about the error's text, not about the wait.
+			client, err := gcp.NewClient(t.Context(), &gcp.Config{
+				HTTPClient:            srv.Client(),
+				AgentIdentityEndpoint: srv.URL,
+				PollTimeout:           20 * time.Millisecond,
+			})
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+				Scheme: gcp.ProviderScheme{Name: testResource},
+				Client: client,
+			})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			_, err = p.Credential(adkContext(t, "alice@example.test"))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Credential() error = %v, want errors.Is %v", err, tc.want)
+			}
+			if n := strings.Count(err.Error(), testResource); n != 1 {
+				t.Errorf("Credential() error = %v names the resource %d times, want exactly 1: "+
+					"one client serves several resources, and this sentinel used to name none",
+					err, n)
+			}
+		})
 	}
 }
 

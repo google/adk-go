@@ -237,10 +237,22 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Cr
 	// the model and persists it in the session, and every other id in scope comes
 	// off the request — a user id is commonly an email, and a session id arrives
 	// unvalidated from the request path. The resource is configuration.
+	//
+	// Adding nothing else is not sufficient on its own, because an [APIError]
+	// carries up to a kilobyte of the service's own response, and a service that
+	// rejects a request commonly quotes back what it rejected. So the two request
+	// values that could appear there are redacted on the way out. Which strings
+	// to remove is knowable only here, where the request is: doPost has the body
+	// and not the request that produced it.
 	defer func() {
-		if err != nil {
-			err = fmt.Errorf("%w (resource %q)", err, req.Resource)
+		if err == nil {
+			return
 		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			apiErr.Body = redact(apiErr.Body, req.UserID, req.ContinueURI)
+		}
+		err = fmt.Errorf("%w (resource %q)", err, req.Resource)
 	}()
 
 	retrieve := c.retrieveAgentIdentity
@@ -425,4 +437,17 @@ func truncateForError(s string) string {
 		cut = max
 	}
 	return s[:cut] + "..."
+}
+
+// redact removes caller-supplied values from a service-controlled string.
+//
+// Only non-empty values are removed: replacing the empty string would splice a
+// marker between every character.
+func redact(s string, values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "[redacted]")
+		}
+	}
+	return s
 }
