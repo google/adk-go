@@ -183,6 +183,42 @@ func TestScheduler_FailedSiblingsCancelled(t *testing.T) {
 	}
 }
 
+// TestScheduler_DrainingDoesNotRetryFailedSibling verifies that a sibling
+// returning its own retryable error after cancellation does not schedule a
+// retry while the workflow is draining.
+func TestScheduler_DrainingDoesNotRetryFailedSibling(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	primaryErr := errors.New("primary node failed")
+	siblingErr := errors.New("cancelled sibling failed during cleanup")
+	primary := newErroringNode("primary", primaryErr)
+	var siblingCalls atomic.Int32
+	sibling := NewFunctionNode("sibling", func(ctx agent.Context, _ any) (any, error) {
+		siblingCalls.Add(1)
+		<-ctx.Done()
+		return nil, siblingErr
+	}, NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  time.Hour,
+			BackoffFactor: 1.0,
+			ShouldRetry:   func(error) bool { return true },
+		},
+	})
+	w := mustNew(t, []Edge{
+		{From: Start, To: primary},
+		{From: Start, To: sibling},
+	})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+	if !errors.Is(gotErr, primaryErr) {
+		t.Errorf("Run error = %v, want it to wrap %v", gotErr, primaryErr)
+	}
+	if got := siblingCalls.Load(); got != 1 {
+		t.Errorf("sibling calls = %d, want 1 (draining must suppress retries)", got)
+	}
+}
+
 // TestScheduler_ExternalCancellationFailsRun verifies that cancellation of
 // the workflow's invocation context is surfaced to the caller, rather than
 // being mistaken for scheduler-initiated sibling cancellation.

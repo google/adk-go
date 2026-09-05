@@ -789,10 +789,10 @@ func (s *scheduler) handleEvent(it eventItem) {
 }
 
 // handleCompletion finalises a node's run: transitions its lifecycle
-// status, removes the live task, and (if scheduleSuccessors is true)
-// schedules its successors. When the consumer is draining (caller
-// stopped or a node failed), pass scheduleSuccessors=false so the
-// workflow does not keep dispatching new nodes after cancellation.
+// status, removes the live task, and (if scheduleNewWork is true)
+// schedules retries or successors. When the consumer is draining (caller
+// stopped or a node failed), pass scheduleNewWork=false so the workflow
+// does not keep dispatching new nodes after cancellation.
 //
 // The returned error is the node's own error (NodeFailed); nil on
 // clean success or sibling cancellation.
@@ -813,7 +813,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 // context cancel, multiple-output, multiple-routing-event,
 // multiple-input-request) does not silently park in NodeWaiting:
 // failures take precedence and surface as NodeFailed.
-func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
+func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) error {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
 	// For retryable nodes still delete them from run variables. If the node is retried,
@@ -855,7 +855,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 	if it.err != nil {
 		currentNode := s.nodesByName[it.nodeName]
-		if currentNode != nil {
+		if scheduleNewWork && currentNode != nil {
 			cfg := currentNode.Config()
 			if cfg.RetryConfig != nil {
 				ns.Attempt = ns.Attempt + 1
@@ -881,7 +881,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 
 	// Happy path: decide between NodeWaiting (an open interrupt) or
 	// NodeCompleted. The waiting branch fires regardless of the
-	// scheduleSuccessors flag — an interrupt that survived the run
+	// scheduleNewWork flag — an interrupt that survived the run
 	// must be observable in RunState even when the consumer is
 	// draining.
 	//
@@ -908,7 +908,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	// loop-back routing) starts a fresh lifecycle.
 	ns.ResumedInputs = nil
 
-	if !scheduleSuccessors {
+	if !scheduleNewWork {
 		return nil
 	}
 
