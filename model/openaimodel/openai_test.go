@@ -252,6 +252,7 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 		wantFinishReason genai.FinishReason
 		wantLogprobs     *genai.LogprobsResult
 		wantModelVersion string
+		wantText         string
 	}{
 		{
 			name:             "completed",
@@ -259,18 +260,36 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			wantFinishReason: genai.FinishReasonStop,
 			wantLogprobs:     helloLogprobs,
 			wantModelVersion: "stream-model",
+			wantText:         "hello",
+		},
+		{
+			name:             "completed response restores missing delta",
+			events:           []string{evCreated, evDelta1, evCompleted},
+			wantFinishReason: genai.FinishReasonStop,
+			wantLogprobs:     helloLogprobs,
+			wantModelVersion: "stream-model",
+			wantText:         "hello",
 		},
 		{
 			name:             "truncated by max output tokens",
 			events:           []string{evCreated, evDelta1, evDelta2, evMaxTokens},
 			wantFinishReason: genai.FinishReasonMaxTokens,
 			wantModelVersion: "stream-model",
+			wantText:         "hello",
+		},
+		{
+			name:             "incomplete response preserves deltas",
+			events:           []string{evCreated, evDelta1, `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`},
+			wantFinishReason: genai.FinishReasonMaxTokens,
+			wantModelVersion: "stream-model",
+			wantText:         "hel",
 		},
 		{
 			name:             "cut short by the content filter",
 			events:           []string{evCreated, evDelta1, evDelta2, evFiltered},
 			wantFinishReason: genai.FinishReasonSafety,
 			wantModelVersion: "stream-model",
+			wantText:         "hello",
 		},
 		{
 			// The model never said why it stopped, so report it as unknown
@@ -279,12 +298,14 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			events:           []string{evCreated, evDelta1, evDelta2},
 			wantFinishReason: genai.FinishReasonUnspecified,
 			wantModelVersion: "stream-model",
+			wantText:         "hello",
 		},
 		{
 			// No response object at all, so no model name to read off one.
 			name:             "no response object at all",
 			events:           []string{evDelta1, evDelta2},
 			wantFinishReason: genai.FinishReasonUnspecified,
+			wantText:         "hello",
 		},
 		{
 			// A provider that batches its output streams no deltas at all.
@@ -293,13 +314,23 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			wantFinishReason: genai.FinishReasonStop,
 			wantLogprobs:     helloLogprobs,
 			wantModelVersion: "stream-model",
+			wantText:         "hello",
 		},
 		{
 			// A "completed" after a truncation must not relabel it a clean stop.
 			name:             "first terminal event wins",
-			events:           []string{evCreated, evDelta1, evDelta2, evMaxTokens, evCompleted},
+			events:           []string{evCreated, evDelta1, evMaxTokens, evCompleted},
 			wantFinishReason: genai.FinishReasonMaxTokens,
 			wantModelVersion: "stream-model",
+			wantText:         "hel",
+		},
+		{
+			name:             "first completed event wins",
+			events:           []string{evCreated, evDelta1, evCompleted, evMaxTokens},
+			wantFinishReason: genai.FinishReasonStop,
+			wantLogprobs:     helloLogprobs,
+			wantModelVersion: "stream-model",
+			wantText:         "hello",
 		},
 	}
 
@@ -320,8 +351,8 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			if final.ModelVersion != tc.wantModelVersion {
 				t.Errorf("final ModelVersion = %q, want %q", final.ModelVersion, tc.wantModelVersion)
 			}
-			if text := allText(final.Content); text != "hello" {
-				t.Errorf("final text = %q, want %q", text, "hello")
+			if text := allText(final.Content); text != tc.wantText {
+				t.Errorf("final text = %q, want %q", text, tc.wantText)
 			}
 		})
 	}
@@ -357,6 +388,186 @@ func TestModel_GenerateStream_MatchesBlocking(t *testing.T) {
 	}
 	if gotText, wantText := allText(got.Content), allText(want.Content); gotText != wantText {
 		t.Errorf("text: streamed %q, blocking %q", gotText, wantText)
+	}
+}
+
+// TestModel_GenerateStream_Refusal verifies that non-empty streamed refusals
+// reach callers as non-thought text and final content matches blocking output.
+func TestModel_GenerateStream_Refusal(t *testing.T) {
+	const (
+		refusalOnlyDelta1 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"I cannot ","sequence_number":1}`
+		refusalOnlyDelta2 = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"help with that.","sequence_number":2}`
+		refusalOnlyDone   = `{"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"I cannot help with that.","sequence_number":3}`
+		refusalOnlyBody   = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
+		refusalOnlyFinal  = `{"type":"response.completed","sequence_number":4,"response":` + refusalOnlyBody + `}`
+		emptyRefusalDelta = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"","sequence_number":1}`
+		emptyRefusalFinal = `{"type":"response.completed","sequence_number":2,"response":` + refusalOnlyBody + `}`
+
+		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request","sequence_number":1}`
+		mixedDelta1    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"I cannot ","sequence_number":2}`
+		mixedDelta2    = `{"type":"response.refusal.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"help with that.","sequence_number":3}`
+		mixedDone      = `{"type":"response.refusal.done","item_id":"msg_1","output_index":1,"content_index":0,"refusal":"I cannot help with that.","sequence_number":4}`
+		mixedBody      = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request"}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
+		mixedFinal     = `{"type":"response.completed","sequence_number":5,"response":` + mixedBody + `}`
+	)
+
+	tests := []struct {
+		name                string
+		events              []string
+		blockingBody        string
+		wantStreamedRefusal string
+	}{
+		{
+			name:                "refusal only",
+			events:              []string{evCreated, refusalOnlyDelta1, refusalOnlyDelta2, refusalOnlyDone, refusalOnlyFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "I cannot help with that.",
+		},
+		{
+			name:                "partial refusal completed without done",
+			events:              []string{evCreated, refusalOnlyDelta1, refusalOnlyFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "I cannot ",
+		},
+		{
+			name:                "partial refusal completed after done",
+			events:              []string{evCreated, refusalOnlyDelta1, refusalOnlyDone, refusalOnlyFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "I cannot ",
+		},
+		{
+			name:                "empty delta falls back to terminal response",
+			events:              []string{evCreated, emptyRefusalDelta, emptyRefusalFinal},
+			blockingBody:        refusalOnlyBody,
+			wantStreamedRefusal: "",
+		},
+		{
+			name:                "refusal after reasoning",
+			events:              []string{evCreated, reasoningDelta, mixedDelta1, mixedDelta2, mixedDone, mixedFinal},
+			blockingBody:        mixedBody,
+			wantStreamedRefusal: "I cannot help with that.",
+		},
+		{
+			name:                "partial refusal after reasoning",
+			events:              []string{evCreated, reasoningDelta, mixedDelta1, mixedFinal},
+			blockingBody:        mixedBody,
+			wantStreamedRefusal: "I cannot ",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, tc.events...)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			blocking, err := runBlocking(t, tc.blockingBody)
+			if err != nil {
+				t.Fatalf("GenerateContent() blocking err = %v", err)
+			}
+			if len(blocking) != 1 {
+				t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+			}
+
+			var streamedRefusal strings.Builder
+			for _, resp := range got[:len(got)-1] {
+				if resp.Content == nil {
+					continue
+				}
+				for _, part := range resp.Content.Parts {
+					if !part.Thought {
+						streamedRefusal.WriteString(part.Text)
+					}
+				}
+			}
+			if got, want := streamedRefusal.String(), tc.wantStreamedRefusal; got != want {
+				t.Errorf("streamed refusal = %q, want %q", got, want)
+			}
+
+			if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+				t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestModel_GenerateStream_TerminalOnlyMessageContent pins #1476: reasoning
+// deltas must not hide an answer carried only by the completed response.
+func TestModel_GenerateStream_TerminalOnlyMessageContent(t *testing.T) {
+	const (
+		reasoningDelta = `{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Checking the request.","sequence_number":1}`
+		body           = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"Checking the request."}]},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The final answer."}]}]}`
+		completed      = `{"type":"response.completed","sequence_number":2,"response":` + body + `}`
+	)
+
+	streamed, err := runStream(t, evCreated, reasoningDelta, completed)
+	if err != nil {
+		t.Fatalf("streaming err = %v", err)
+	}
+	final := assertTurnShape(t, streamed)
+	blocking, err := runBlocking(t, body)
+	if err != nil {
+		t.Fatalf("blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+		t.Fatalf("content mismatch (-blocking +streamed):\n%s", diff)
+	}
+}
+
+func TestModel_GenerateStream_CompletedContentOrder(t *testing.T) {
+	const completedBody = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"Checking the request"}],"summary":[{"type":"summary_text","text":"Request checked"}]},{"type":"message","content":[{"type":"output_text","text":"hello"},{"type":"output_text","text":" again"}]},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"SF\"}"},{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
+	got, err := runStream(t, evCreated,
+		`{"type":"response.reasoning_text.delta","delta":"Checking"}`,
+		evDelta1,
+		`{"type":"response.completed","response":`+completedBody+`}`,
+	)
+	if err != nil {
+		t.Fatalf("GenerateContent() stream err = %v", err)
+	}
+	final := assertTurnShape(t, got)
+	blocking, err := runBlocking(t, completedBody)
+	if err != nil {
+		t.Fatalf("GenerateContent() blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+		t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+	}
+}
+
+func TestModel_GenerateStream_UnusableCompletedContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "no output items", output: `[]`},
+		{name: "empty text", output: `[{"type":"message","content":[{"type":"output_text","text":""}]}]`},
+		{name: "empty refusal", output: `[{"type":"message","content":[{"type":"refusal","refusal":""}]}]`},
+		{name: "unsupported output item", output: `[{"type":"unsupported"}]`},
+		{name: "unsupported message content", output: `[{"type":"message","content":[{"type":"unsupported"}]}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			completed := `{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","output":` + tc.output + `}}`
+			got, err := runStream(t, evCreated, evDelta1, completed)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			want := genai.NewContentFromText("hel", genai.RoleModel)
+			if diff := cmp.Diff(want, final.Content); diff != "" {
+				t.Errorf("final content mismatch (-want +got):\n%s", diff)
+			}
+			if final.FinishReason != genai.FinishReasonStop {
+				t.Errorf("final FinishReason = %q, want %q", final.FinishReason, genai.FinishReasonStop)
+			}
+		})
 	}
 }
 
@@ -411,10 +622,11 @@ func TestModel_GenerateStream_Failed(t *testing.T) {
 // turn the way a streamed message does.
 func TestModel_GenerateStream_FunctionCall(t *testing.T) {
 	const (
-		evItemAdded = `{"type":"response.output_item.added","item":{"id":"item_1","call_id":"call_1","name":"get_weather"}}`
-		evArgsDone  = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{\"city\":\"SF\"}"}`
+		evItemAdded   = `{"type":"response.output_item.added","item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"get_weather"}}`
+		evArgsDone    = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{\"city\":\"SF\"}"}`
+		completedBody = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"item_1","type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"SF\"}"}]}`
 	)
-	got, err := runStream(t, evCreated, evItemAdded, evArgsDone, evCompleted)
+	got, err := runStream(t, evCreated, evItemAdded, evArgsDone, `{"type":"response.completed","response":`+completedBody+`}`)
 	if err != nil {
 		t.Fatalf("GenerateContent() stream err = %v", err)
 	}
@@ -433,6 +645,30 @@ func TestModel_GenerateStream_FunctionCall(t *testing.T) {
 	want := []*genai.FunctionCall{{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}}}
 	if diff := cmp.Diff(want, calls); diff != "" {
 		t.Errorf("final function calls mismatch (-want +got):\n%s", diff)
+	}
+	var streamedCalls []*genai.FunctionCall
+	for _, resp := range got[:len(got)-1] {
+		if resp.Content == nil {
+			continue
+		}
+		for _, part := range resp.Content.Parts {
+			if part.FunctionCall != nil {
+				streamedCalls = append(streamedCalls, part.FunctionCall)
+			}
+		}
+	}
+	if diff := cmp.Diff(want, streamedCalls); diff != "" {
+		t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+	}
+	blocking, err := runBlocking(t, completedBody)
+	if err != nil {
+		t.Fatalf("GenerateContent() blocking err = %v", err)
+	}
+	if len(blocking) != 1 {
+		t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+	}
+	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+		t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
 	}
 }
 
