@@ -22,6 +22,24 @@ import (
 )
 
 func TestElideQuoteMarkers(t *testing.T) {
+	t.Run("marker constants have not changed", func(t *testing.T) {
+		// Pins QuotedContentBegin and QuotedContentEnd to literal string
+		// values rather than just to each other. Without this, every
+		// straddling case below is built from hand-written halves of
+		// whatever the constants currently are, and every assertion checks
+		// against the constants too -- so renaming both (or emptying
+		// quotedContentElided on top of that) leaves the whole file green,
+		// since nothing straddles anything anymore and nothing is left to
+		// detect a live marker either. This is the one assertion that
+		// would actually fail first.
+		if llminternal.QuotedContentBegin != "<<<BEGIN_QUOTED_AGENT_CONTENT>>>" {
+			t.Errorf("QuotedContentBegin = %q, want the fixed literal value -- the straddling tests below assume this exact value", llminternal.QuotedContentBegin)
+		}
+		if llminternal.QuotedContentEnd != "<<<END_QUOTED_AGENT_CONTENT>>>" {
+			t.Errorf("QuotedContentEnd = %q, want the fixed literal value -- the straddling tests below assume this exact value", llminternal.QuotedContentEnd)
+		}
+	})
+
 	t.Run("elides the begin marker", func(t *testing.T) {
 		got := llminternal.ElideQuoteMarkers("before " + llminternal.QuotedContentBegin + " after")
 		if strings.Contains(got, llminternal.QuotedContentBegin) {
@@ -80,6 +98,32 @@ func TestElideQuoteMarkers(t *testing.T) {
 		}
 		if strings.Contains(got, llminternal.QuotedContentEnd) {
 			t.Errorf("elision reassembled a live end marker from a straddling string: %q", got)
+		}
+	})
+
+	t.Run("does not reassemble a begin marker across the two replacement passes", func(t *testing.T) {
+		// Different from the case directly above, which straddles a begin
+		// marker with begin-marker halves -- that shape is handled
+		// entirely by whichever single pass replaces QuotedContentBegin,
+		// so it cannot tell an ordering bug apart from a correct
+		// implementation. This one straddles an END marker with
+		// BEGIN-marker halves: if ElideQuoteMarkers replaces
+		// QuotedContentEnd first and QuotedContentBegin second (or vice
+		// versa) without rescanning, the question is whether the first
+		// pass's own output -- specifically, the begin-marker halves left
+		// adjacent once the end marker between them is gone -- gets
+		// handled correctly by the second pass rather than being missed
+		// or double-handled. With a non-empty sentinel the halves never
+		// actually become adjacent, so this passes today, but it is the
+		// one case that would notice if the two passes' interaction ever
+		// stopped being safe.
+		straddling := "<<<BEGIN_QUOTED_AG" + llminternal.QuotedContentEnd + "ENT_CONTENT>>>"
+		got := llminternal.ElideQuoteMarkers(straddling)
+		if strings.Contains(got, llminternal.QuotedContentBegin) {
+			t.Errorf("elision reassembled a live begin marker across the two replacement passes: %q", got)
+		}
+		if strings.Contains(got, llminternal.QuotedContentEnd) {
+			t.Errorf("elision reassembled a live end marker across the two replacement passes: %q", got)
 		}
 	})
 
