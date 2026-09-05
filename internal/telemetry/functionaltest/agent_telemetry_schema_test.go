@@ -83,6 +83,9 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Register before t.Setenv so environment restoration runs before
+			// ApplyEnv refreshes the package-level telemetry settings.
+			t.Cleanup(telemetry.ApplyEnv)
 			if tc.captureContent {
 				// Spans have to be named: a truthy value means log records only.
 				t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
