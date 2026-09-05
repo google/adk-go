@@ -227,8 +227,12 @@ func TestNewAgentNode_ConcurrentWrappingIsRaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-// raceFreeLLM holds no mutable state, so a race the detector reports under
-// the test below is on the agent, not on the model double.
+// raceFreeLLM holds one atomic counter and nothing else, so a race the detector
+// reports under the test below is on the agent, not on the model double. The
+// counter is what lets the test prove it reached the model at all. Note that
+// atomics order the goroutines that touch them, so a conflicting access placed
+// AFTER the model call could be masked by it — the write this replaces happened
+// before, and is unaffected.
 type raceFreeLLM struct{ calls atomic.Int64 }
 
 func (*raceFreeLLM) Name() string { return "race-free" }

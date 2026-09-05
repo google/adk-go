@@ -47,8 +47,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		name := ctx.Agent().Name()
 		// Two questions, deliberately answered from different sources.
 		//
-		// Whether to hide history follows the placement alone — a mode this
-		// invocation bound to THIS agent. An agent that merely declares
+		// Whether to hide history follows the placement — a mode this invocation
+		// bound to THIS agent — or an explicit IncludeContentsNone, which hides
+		// it with or without one. An agent that merely declares
 		// single_turn keeps the conversation when it is run without one, which
 		// in practice means a child a composite agent runs directly rather than
 		// through the node wrapper. Reaching it through the wrapper does not
@@ -68,7 +69,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// and so could not be misconfigured this way.
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
 			state.IncludeContents != includeContentsDefault
-		fn := buildContentsDefault // "" or "default".
+		fn := buildContentsDefault // anything but "none", unless the placement hides it.
 		if state.IncludeContents == includeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}

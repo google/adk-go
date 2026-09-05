@@ -39,8 +39,9 @@ import (
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
 //
 // The mode is the one this invocation bound for the agent, else the agent's own
-// declaration, else chat. An out-of-module caller cannot bind — only the runner
-// and the workflow engine do — so an agent that declares nothing runs chat here,
+// declaration, else chat. An out-of-module caller cannot bind — only the runner,
+// the workflow engine, and this function once it has resolved — so an agent that
+// declares nothing runs chat here,
 // where it ran single_turn before the placement was made per-invocation.
 //
 // Per-mode behaviour:
