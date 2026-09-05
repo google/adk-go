@@ -77,10 +77,23 @@ type Config struct {
 
 type sequentialAgent struct{}
 
+type subInvocationContext struct {
+	agent.InvocationContext
+	ag agent.Agent
+}
+
+func (c *subInvocationContext) Agent() agent.Agent {
+	return c.ag
+}
+
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range ctx.Agent().SubAgents() {
-			for event, err := range subAgent.Run(ctx) {
+			subCtx := &subInvocationContext{
+				InvocationContext: ctx,
+				ag:                subAgent,
+			}
+			for event, err := range subAgent.Run(subCtx) {
 				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
 				if !yield(event, err) {
 					return
@@ -146,23 +159,29 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 		return nil, nil, fmt.Errorf("failed to create task_completed tool: %w", err)
 	}
 
-	for _, subAgent := range subAgents {
-		if llmAgent, ok := subAgent.(llminternal.Agent); ok {
-			state := llminternal.Reveal(llmAgent)
-			hasTaskCompleted := false
-			for _, t := range state.Tools {
-				if t.Name() == "task_completed" {
-					hasTaskCompleted = true
-					break
+	var injectSubAgents func(agents []agent.Agent)
+	injectSubAgents = func(agents []agent.Agent) {
+		for _, subAgent := range agents {
+			if llmAgent, ok := subAgent.(llminternal.Agent); ok {
+				state := llminternal.Reveal(llmAgent)
+				hasTaskCompleted := false
+				for _, t := range state.Tools {
+					if t.Name() == "task_completed" {
+						hasTaskCompleted = true
+						break
+					}
 				}
-			}
-			if !hasTaskCompleted {
-				state.Tools = append(state.Tools, taskCompletedTool)
-				instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-				state.Instruction += instructionSuffix
+				if !hasTaskCompleted {
+					state.Tools = append(state.Tools, taskCompletedTool)
+					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
+					state.Instruction += instructionSuffix
+				}
+			} else if len(subAgent.SubAgents()) > 0 {
+				injectSubAgents(subAgent.SubAgents())
 			}
 		}
 	}
+	injectSubAgents(subAgents)
 
 	seqSess := &sequentialLiveSession{}
 
@@ -178,7 +197,11 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 				return
 			}
 
-			subSess, innerIter, err := liveAgent.RunLive(ctx)
+			subCtx := &subInvocationContext{
+				InvocationContext: ctx,
+				ag:                subAgent,
+			}
+			subSess, innerIter, err := liveAgent.RunLive(subCtx)
 			if err != nil {
 				if !yield(nil, fmt.Errorf("sub-agent %s RunLive failed: %w", subAgent.Name(), err)) {
 					return

@@ -451,6 +451,61 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	}
 }
 
+func TestSequentialAgent_RunLive_NestedSequentialInjection(t *testing.T) {
+	subAgentA := newCustomAgent(t, 1)
+	subAgentB := newCustomAgent(t, 2)
+
+	innerSeq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "inner_seq",
+			SubAgents: []agent.Agent{subAgentB},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create inner sequential agent: %v", err)
+	}
+
+	outerSeq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "outer_seq",
+			SubAgents: []agent.Agent{subAgentA, innerSeq},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create outer sequential agent: %v", err)
+	}
+
+	invCtx := &mockInvocationContext{
+		agent:        outerSeq,
+		invocationID: "test_id",
+		ctx:          t.Context(),
+	}
+
+	liveAgent, ok := outerSeq.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	_, _, _ = liveAgent.RunLive(invCtx)
+
+	// subAgentB inside innerSeq must have task_completed injected!
+	if llmAgentB, ok := subAgentB.(llminternal.Agent); ok {
+		state := llminternal.Reveal(llmAgentB)
+		hasTaskCompleted := false
+		for _, tool := range state.Tools {
+			if tool.Name() == "task_completed" {
+				hasTaskCompleted = true
+				break
+			}
+		}
+		if !hasTaskCompleted {
+			t.Errorf("nested sub-agent B does not have task_completed tool injected after RunLive")
+		}
+	}
+}
+
 func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	ctx := t.Context()
 
@@ -561,6 +616,137 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	}
 
 	// The subSess2 completes
+	_, _, ok = next()
+	if ok {
+		t.Errorf("expected iterator to be exhausted")
+	}
+
+	// Verify subSess2 is closed
+	if !subSess2.closed {
+		t.Errorf("expected sub_agent_2 session to be closed at the end")
+	}
+}
+
+func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
+	ctx := t.Context()
+
+	sendChan1 := make(chan agent.LiveRequest, 10)
+	sendChan2 := make(chan agent.LiveRequest, 10)
+
+	subSess1 := &dummyLiveSession{sendChan: sendChan1}
+	subSess2 := &dummyLiveSession{sendChan: sendChan2}
+
+	agent1 := mustAgent(agent.New(agent.Config{Name: "sub_agent_1"}))
+	liveAgent1 := &mockLiveAgent{
+		Agent: agent1,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			iterFn := func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "sub_agent_1"
+				yield(ev, nil)
+			}
+			return subSess1, iterFn, nil
+		},
+	}
+
+	agent2 := mustAgent(agent.New(agent.Config{Name: "sub_agent_2"}))
+	liveAgent2 := &mockLiveAgent{
+		Agent: agent2,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			iterFn := func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "sub_agent_2"
+				yield(ev, nil)
+			}
+			return subSess2, iterFn, nil
+		},
+	}
+
+	innerSeq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "inner_seq",
+			SubAgents: []agent.Agent{liveAgent2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create inner sequential agent: %v", err)
+	}
+
+	outerSeq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "outer_seq",
+			SubAgents: []agent.Agent{liveAgent1, innerSeq},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create outer sequential agent: %v", err)
+	}
+
+	invCtx := &mockInvocationContext{
+		agent:        outerSeq,
+		invocationID: "test_inv_id",
+		ctx:          ctx,
+	}
+
+	liveAgent, ok := outerSeq.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	sess, seqIter, err := liveAgent.RunLive(invCtx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	next, stop := iter.Pull2(seqIter)
+	defer stop()
+
+	// Consume first sub-agent event
+	ev1, err1, ok := next()
+	if !ok || err1 != nil {
+		t.Fatalf("expected first event, got ok=%v, err=%v", ok, err1)
+	}
+	if ev1.Author != "sub_agent_1" {
+		t.Errorf("expected event from sub_agent_1, got %s", ev1.Author)
+	}
+
+	// Route to subSess1
+	req1 := agent.LiveRequest{Content: genai.NewContentFromText("to agent 1", "")}
+	if err := sess.Send(req1); err != nil {
+		t.Fatalf("failed to Send to sess: %v", err)
+	}
+	gotReq1 := <-sendChan1
+	if gotReq1.Content.Parts[0].Text != "to agent 1" {
+		t.Errorf("expected request to subSess1, got: %v", gotReq1)
+	}
+
+	// The subSess1 completes, transitioning to nested innerSeq -> agent2
+	ev2, err2, ok := next()
+	if !ok || err2 != nil {
+		t.Fatalf("expected second event, got ok=%v, err=%v", ok, err2)
+	}
+	if ev2.Author != "sub_agent_2" {
+		t.Errorf("expected event from sub_agent_2, got %s", ev2.Author)
+	}
+
+	// Route to subSess2
+	req2 := agent.LiveRequest{Content: genai.NewContentFromText("to agent 2", "")}
+	if err := sess.Send(req2); err != nil {
+		t.Fatalf("failed to Send to sess: %v", err)
+	}
+	gotReq2 := <-sendChan2
+	if gotReq2.Content.Parts[0].Text != "to agent 2" {
+		t.Errorf("expected request to subSess2, got: %v", gotReq2)
+	}
+
+	// Verify that subSess1 is closed
+	if !subSess1.closed {
+		t.Errorf("expected sub_agent_1 session to be closed after transition")
+	}
+
+	// Sequence completes
 	_, _, ok = next()
 	if ok {
 		t.Errorf("expected iterator to be exhausted")
