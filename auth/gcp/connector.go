@@ -39,12 +39,12 @@ type connectorOperation struct {
 }
 
 // result collapses the Operation-wrapped response into an outcome.
-func (o connectorOperation) result(resource string) (outcome, error) {
+func (o connectorOperation) result(req Request) (outcome, error) {
 	if o.Error != nil {
 		if o.Error.Message != "" {
 			// Same treatment doPost gives a response body: the message is
 			// service-controlled and otherwise bypasses both the cap and escaping.
-			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %q", o.Error.Code, truncateForError(o.Error.Message))
+			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %q", o.Error.Code, serviceText(o.Error.Message, req.UserID, req.ContinueURI))
 		}
 		return nil, fmt.Errorf("gcp: connector operation failed (code %d)", o.Error.Code)
 	}
@@ -78,8 +78,8 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, e
 	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var op connectorOperation
-	if err := c.doPost(ctx, url, body, &op); err != nil {
+	if err := c.doPost(ctx, url, body, &op, req.UserID, req.ContinueURI); err != nil {
 		return nil, err
 	}
-	return op.result(req.Resource)
+	return op.result(req)
 }

@@ -814,6 +814,45 @@ func TestAnUnmarkedContextCanAnswerTheKeyItself(t *testing.T) {
 	}
 }
 
+// TestTheKeyValueEscapesToAnyContext pins the limit the rule now states, because
+// the rule used to state the opposite.
+//
+// IdentityFromContext hands the key to whatever Value implementation it is given,
+// so one call is enough to capture it — after which an Identity can be planted
+// under it from a context descending from no invocation at all. The type being
+// unnameable does not prevent that: the value is all anyone needs.
+//
+// Pinned as a limit rather than fixed. Value is the only mechanism that reaches
+// through the intermediaries this function exists to see past, so there is no
+// version of it that both works and withholds the key.
+func TestTheKeyValueEscapesToAnyContext(t *testing.T) {
+	var captured any
+	IdentityFromContext(keySniffer{Context: t.Context(), seen: func(k any) { captured = k }})
+	if captured == nil {
+		t.Fatal("the key never reached the context's own Value; if that is now true by " +
+			"design, replace this test with one asserting the stronger property")
+	}
+
+	forged := Identity{UserID: "someone else", AppName: "app", SessionID: "s"}
+	id, ok := IdentityFromContext(context.WithValue(t.Context(), captured, forged))
+	if !ok || id != forged {
+		t.Errorf("IdentityFromContext() = %+v, %v; want %+v, true. The captured key can be "+
+			"replanted, and the rule must keep saying so rather than promising it cannot.",
+			id, ok, forged)
+	}
+}
+
+// keySniffer records the key it is handed and answers nothing.
+type keySniffer struct {
+	context.Context
+	seen func(any)
+}
+
+func (s keySniffer) Value(k any) any {
+	s.seen(k)
+	return nil
+}
+
 // forgingInvocationValue substitutes the identity on its way past without naming
 // the key, which is the shape that actually matters: it forwards keys and swaps
 // only what comes back an Identity. A wrapper answering EVERY key with an

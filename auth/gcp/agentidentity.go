@@ -36,7 +36,7 @@ type consentDetail struct {
 
 // result collapses the response's "result" oneof into an outcome, erroring if
 // the service returned no recognized arm.
-func (r agentIdentityResponse) result(resource string) (outcome, error) {
+func (r agentIdentityResponse) result(req Request) (outcome, error) {
 	switch {
 	case r.Success != nil:
 		return credOutcome{header: r.Success.Header, token: r.Success.Token}, nil
@@ -58,8 +58,8 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcom
 	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var out agentIdentityResponse
-	if err := c.doPost(ctx, url, body, &out); err != nil {
+	if err := c.doPost(ctx, url, body, &out, req.UserID, req.ContinueURI); err != nil {
 		return nil, err
 	}
-	return out.result(req.Resource)
+	return out.result(req)
 }

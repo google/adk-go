@@ -199,6 +199,75 @@ func TestServiceEchoIsRedacted(t *testing.T) {
 	}
 }
 
+// TestConnectorOperationErrorIsRedacted covers the arm the test above cannot.
+//
+// A connector reports a terminal failure inside a 200 response, so it never
+// becomes an *APIError, and a redaction keyed on that type missed it entirely.
+// The two arms carry service-controlled text by different routes and both have
+// to be scrubbed.
+func TestConnectorOperationErrorIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"done":true,"error":{"code":3,"message":"invalid userId: `+user+`"}}`)
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:        srv.Client(),
+		ConnectorEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	const connector = "projects/p/locations/l/connectors/c"
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: connector},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	_, err = p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the operation failure")
+	}
+	if strings.Contains(err.Error(), user) {
+		t.Errorf("Credential() error = %v, want the acting user redacted", err)
+	}
+	if !strings.Contains(err.Error(), "invalid userId") {
+		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+}
+
+// TestALongEchoStillRedacts pins the order of the two operations.
+//
+// The cap used to run first, which cut an identifier in half whenever it
+// straddled the boundary, and the surviving prefix then matched nothing — so a
+// long enough response smuggled out the leading bytes of the acting user.
+func TestALongEchoStillRedacts(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Padding sized so the identifier lands across the 1 KiB cap.
+		_, _ = io.WriteString(w, strings.Repeat("x", 1015)+user)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	// Neither the whole identifier nor the prefix the cap would have left behind.
+	for _, unwanted := range []string{user, user[:8]} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("Credential() error = %v, want %q gone: redaction must run before the cap",
+				err, unwanted)
+		}
+	}
+}
+
 // TestSentinelsCarryTheResource pins the arms that previously carried no
 // resource at all.
 //

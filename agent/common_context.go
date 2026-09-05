@@ -117,10 +117,20 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     parent's answer and substituted — and that is what this function reports.
 //     Naming the key is required for neither.
 //
-//     So the key is unforgeable and the value it addresses is not. This function
-//     is only as trustworthy as every wrapper between it and the invocation,
-//     which is the same trust an in-process wrapper already has over Session and
-//     UserID.
+//     Nor is the key itself out of reach, which is worth being exact about
+//     because the internal package's own doc once claimed otherwise. Its TYPE is
+//     unnameable outside the module, but this function hands the key VALUE to
+//     whatever Value implementation ctx provides, so a single call is enough for
+//     that implementation to keep it and later plant an [Identity] under it with
+//     context.WithValue — from a context descending from no invocation at all,
+//     on another goroutine, after the call it observed has ended.
+//
+//     So: this function establishes which invocation a context was DERIVED from,
+//     and it is exactly as trustworthy as every wrapper between it and that
+//     invocation. It is not an authentication boundary and cannot be made into
+//     one — any in-process code that can wrap a context can already lie about
+//     Session and UserID, and a caller needing a guarantee against in-process
+//     code needs a different mechanism.
 //
 //   - Call a context-producing method ON it and it is dropped, promoting or not,
 //     because the promoted method belongs to what it embeds. It must override

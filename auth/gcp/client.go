@@ -358,7 +358,7 @@ func mapCredential(header, token string) (auth.Credential, error) {
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.
-func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
+func (c *Client) doPost(ctx context.Context, url string, body, out any, secrets ...string) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("gcp: marshal request: %w", err)
@@ -386,7 +386,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	// Classify the status before the size check, so an oversized error page still
 	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
+		return &APIError{StatusCode: resp.StatusCode, Body: serviceText(strings.TrimSpace(string(data)), secrets...)}
 	}
 	if len(data) > maxBody {
 		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
@@ -417,6 +417,16 @@ func validHeaderFieldName(s string) bool {
 
 // maxErrorBody caps service-controlled text carried into an error.
 const maxErrorBody = 1024
+
+// serviceText prepares service-controlled text for an error message: it removes
+// the caller-supplied values first, then caps it.
+//
+// That order is load-bearing. Capping first cuts an identifier in half whenever
+// it straddles the boundary, and the surviving prefix then matches nothing, so a
+// long enough response smuggles out the leading bytes of the acting user.
+func serviceText(s string, secrets ...string) string {
+	return truncateForError(redact(s, secrets...))
+}
 
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
 // doesn't bloat the returned error.
