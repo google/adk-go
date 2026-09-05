@@ -186,10 +186,16 @@ func TestServiceEchoIsRedacted(t *testing.T) {
 	// Redacted, not swallowed: the operator still needs the failure.
 	var apiErr *gcp.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
-		t.Errorf("Credential() error = %v, want a wrapped *gcp.APIError with status 400", err)
+		t.Fatalf("Credential() error = %v, want a wrapped *gcp.APIError with status 400", err)
 	}
 	if !strings.Contains(err.Error(), "invalid userId") {
 		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+	// The field, not only the rendered message. Body is exported, so a caller
+	// that matches the error and logs the body itself takes a different path out
+	// of here, and cleaning only Error() would leave that one open.
+	if strings.Contains(apiErr.Body, user) {
+		t.Errorf("APIError.Body = %q, want the acting user redacted from the field too", apiErr.Body)
 	}
 }
 
