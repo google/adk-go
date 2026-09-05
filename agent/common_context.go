@@ -23,11 +23,183 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// Identity is an ADK invocation's identity: the acting user, app name, and
+// session a call belongs to. It is recovered from a plain context.Context via
+// [IdentityFromContext], which reads it off the live session each time, so a
+// session mutated mid-invocation is reflected in the next lookup.
+type Identity struct {
+	// UserID is the acting end user, as the embedding server put it on the
+	// session. ADK does not authenticate it: anything acting on behalf of this
+	// user — minting a per-user credential, for instance — is trusting the server
+	// to have bound session.UserID to an authenticated principal. ADK's own REST
+	// server takes it from the request body.
+	UserID string
+	// AppName is the app the invocation belongs to.
+	AppName string
+	// SessionID identifies the conversation the invocation belongs to.
+	SessionID string
+}
+
+// identityOf reads an invocation identity from the session getSession returns.
+// It is the one place package agent turns a session into an [Identity], so every
+// context type here answers the identity key the same way.
+//
+// getSession is called inside the recover, not before it: Session() is itself a
+// method on caller-supplied code and can panic on its own.
+func identityOf(getSession func() session.Session) (Identity, bool) {
+	return adkcontext.Recovered(func() Identity {
+		// One Session value, then one call per field: re-reading Session() per
+		// field risks a torn identity, and some context wrappers log on every read.
+		s := getSession()
+		return Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
+	})
+}
+
+// IdentityFromContext returns the ADK invocation [Identity] carried by ctx, if
+// present.
+//
+// ADK contexts embed context.Context and register their identity under a private
+// key, so code that only holds a context.Context — for example an
+// http.RoundTripper running deep beneath a tool call, past intermediaries that
+// wrap the context — can recover the acting identity without threading a typed
+// context through every layer.
+//
+// It returns (zero, false) both for a context that does not descend from an ADK
+// context and for an invocation with no readable session; the two are not
+// distinguishable here. ok does not imply a populated Identity either: an
+// invocation whose session carries no user yields an empty UserID, so a caller
+// that needs one must check.
+//
+// An invocation ADK itself built always reports its own user, however a context
+// is derived from it. An [InvocationContext] implemented OUTSIDE the module is
+// where that stops, and one rule covers every way it does.
+//
+// Such a type is a decorator over the invocation it embeds, and Go promotes
+// every method it does not override. Every method on [InvocationContext] and
+// [Context] that RETURNS one of them returns the receiver's own derived copy, so
+// a promoted one hands back the EMBEDDED invocation and the decorator is gone —
+// its session with it. That is not confined to the identity: Session, UserID and
+// AppName then report the enclosing invocation too.
+//
+// Promotion also reaches what a method HANDS BACK, which matters most where the
+// thing handed back carries a user. A decorator that overrides Session but not
+// [Context.Artifacts], [Context.Memory] or [Context.SearchMemory] gets handles
+// built for the enclosing invocation, and those carry AppName, UserID and
+// SessionID as the storage and search keys — SearchMemory by way of the Memory
+// handle it reaches through. So such a context can answer this function with its
+// own user while reading and writing the ENCLOSING user's artifacts and
+// memories.
+//
+// [Context.State], [ReadonlyContext.ReadonlyState] and [Context.Actions] are the
+// same shape by a different route: each resolves through the invocation the
+// context holds rather than through Session, so a promoted one reads and writes
+// the enclosing user's session state, and a promoted Actions accumulates into
+// the event actions that commit to that user's session. Override all six, or
+// accept that only the credential follows the decorator. That behaviour predates the identity key and is unchanged by it — Session, UserID
+// and AppName have always reported the enclosing invocation on the same shape —
+// but a decorator author reading this rule needs to know the credential is not
+// the only thing scoped to a user.
+//
+// So an invocation written outside the module reports its own user only where it
+// answers for itself:
+//
+//   - Derive it — [Promote], [NewContext], [NewToolContext], [NewCallbackContext],
+//     [NewCallbackContextWithArtifactTracking], a readonly context — and the
+//     derived context reports its user, or none at all if it has no readable
+//     session.
+//
+//     Passing it *as the context itself* is different, and what happens depends
+//     on what its own Value does. Leave Value alone and its parent answers, so
+//     the enclosing invocation is reported: the key is unnameable outside the
+//     module, so the decorator cannot claim it. Implement Value and there are two
+//     cases. Answer with something that is not an [Identity] and nothing is
+//     reported. Answer with an [Identity] — built directly, or taken from the
+//     parent's answer and substituted — and that is what this function reports.
+//     Naming the key is required for neither.
+//
+//     Nor is the key itself out of reach, which is worth being exact about
+//     because the internal package's own doc once claimed otherwise. Its TYPE is
+//     unnameable outside the module, but this function hands the key VALUE to
+//     whatever Value implementation ctx provides, so a single call is enough for
+//     that implementation to keep it and later plant an [Identity] under it with
+//     context.WithValue — from a context descending from no invocation at all,
+//     on another goroutine, after the call it observed has ended.
+//
+//     So: this function establishes which invocation a context was DERIVED from,
+//     and it is exactly as trustworthy as every wrapper between it and that
+//     invocation. It is not an authentication boundary and cannot be made into
+//     one — any in-process code that can wrap a context can already lie about
+//     Session and UserID, and a caller needing a guarantee against in-process
+//     code needs a different mechanism.
+//
+//   - Call a context-producing method ON it and it is dropped, promoting or not,
+//     because the promoted method belongs to what it embeds. It must override
+//     every one of them, returning a derived copy of ITSELF. The rule is the
+//     return type, not the list: as of writing that is
+//     [InvocationContext.WithContext] and [InvocationContext.WithICDelta] on
+//     [InvocationContext], plus [Context.WithDelta], [Context.WithAgentContext],
+//     [Context.WithAgentTimeout] and [Context.WithAgentCancel] on [Context].
+//     There is no exception here: a direct call drops it whatever the delta
+//     says, including one carrying no [InvocationContextDelta] at all, because
+//     the promoted method never reaches the decorator to consult the delta.
+//
+//   - Promoting it first shelters it from three of those four. [Promote] holds
+//     the decorator in a commonContext, and WithAgentContext, WithAgentTimeout
+//     and WithAgentCancel re-parent only the context.Context above it, so the
+//     decorator still answers. WithDelta is the exception: it forwards to the
+//     held invocation's WithICDelta, so it drops the decorator through the
+//     promotion, exactly as [PromoteWithDelta] does. Both reach WithICDelta and
+//     neither reaches WithDelta, so overriding WithICDelta alone is enough for
+//     them — it is a direct call on the decorator that WithDelta must also cover.
+//     This is the one place a delta carrying no [InvocationContextDelta] is
+//     genuinely safe: held inside a commonContext, such a delta leaves the
+//     invocation untouched. Held is the operative word, and it is why the
+//     exception belongs here and not above.
+//
+// Two further things a decorator cannot fix by overriding the methods above:
+//
+//   - [Context.WithContext], and [Context.WithAgentContext] it delegates to,
+//     rebind the invocation when handed an [InvocationContext] rather than a
+//     plain context.Context. The result then reports the ARGUMENT's user, by
+//     design and whoever the receiver spoke for. It is the one derivation that
+//     legitimately changes who a context speaks for, so do not hand it another
+//     call's invocation. How MUCH it rebinds then depends on whether the
+//     receiver cached an artifacts handle. Over an invocation that has an
+//     artifact service, a tool or tracking callback context caches one and
+//     carries it across untouched, so the result answers for the argument while
+//     Artifacts() still addresses the receiver's user — the same split as the
+//     promotion case above, reached the other way round. Over an invocation with
+//     none, nothing is cached, Artifacts() falls through to the invocation, and
+//     the rebind takes that with it. Both are pinned, because the second only
+//     became possible when the constructors started returning a nil handle
+//     rather than a wrapper around one.
+//   - [Context.SubScheduler] returns a scheduler, not a context, so the
+//     return-type rule above does not reach it — but the scheduler captured the
+//     context it was built from and derives every child from that. A decorator
+//     that does not override it hands back the embedded context's scheduler, and
+//     workflow.RunNode asks for one on entry, so the whole child subtree then
+//     runs as the enclosing invocation. Overriding SubScheduler does not repair
+//     it, because [DynamicSubScheduler.RunNode] takes no context and the one the
+//     scheduler captured is unexported — so the override has nothing to rebind.
+//     workflow.RunNode itself does take the caller's context and could thread it
+//     through, which would close this without touching any exported signature;
+//     that is a change to the workflow engine rather than to this package, and
+//     it has not been made.
+//
+// None of this is avoidable by discipline alone — [agent.Run] applies a delta on
+// every run, and the workflow schedulers call WithAgentCancel and
+// WithAgentTimeout on the context a node was handed.
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	id, ok := ctx.Value(adkcontext.IdentityKey).(Identity)
+	return id, ok
+}
 
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
@@ -159,6 +331,7 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 // Callbacks and Tools
 type commonContext struct {
 	context.Context
+	adkcontext.Marker
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
@@ -344,10 +517,102 @@ func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
+// Value implements context.Context. For the ADK identity key it returns the
+// [Identity] of the invocation this context speaks for (so [IdentityFromContext]
+// can recover it from a derived context); every other key delegates to the
+// embedded context, preserving existing behavior.
+//
+// Only the identity key touches the invocation, so no other key is affected by
+// its state, and a session that panics costs the identity, not the process.
+func (c *commonContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	if key == adkcontext.IdentityKey {
+		return c.identity()
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+// identity answers the ADK identity key, as an any so it can report "none".
+//
+// A commonContext owns no session, so it speaks for the invocation it wraps, and
+// how it asks depends on whether that invocation is one of the module's own
+// context types.
+//
+// One of ours is asked, and answers for itself. That is what keeps a tool or
+// callback context working: theirs hold no session by design and hand the
+// question down to the invocation underneath.
+//
+// Anything else is read, never asked. An InvocationContext written outside the
+// module embeds the context it was derived from, to inherit cancellation, and
+// cannot override a key it cannot name — so its Value answers with the
+// *enclosing* invocation's identity, a live user who made no such call. Only its
+// own session counts, and a session it cannot produce costs the identity rather
+// than inheriting one. That covers a nil session as well as a broken one: a nil
+// interface is indistinguishable from the session-less view a tool context is,
+// so for a type we do not control the two must fail the same way.
+func (c *commonContext) identity() any {
+	if c.invocationContext == nil {
+		// Speaking for no invocation, it has no acting user of its own, and the
+		// parent it would otherwise pass through to is a different call. No
+		// constructor in this package produces this shape — every one sets the
+		// invocation — so failing closed costs nothing and keeps one rule for the
+		// whole procedure.
+		return nil
+	}
+	if _, ours := c.invocationContext.(adkcontext.Source); ours {
+		return identityFrom(c.invocationContext)
+	}
+	// Method value and call both inside the recover: Session() is caller-supplied
+	// code and invocationContext can be a typed-nil pointer.
+	if id, ok := identityOf(func() session.Session { return c.invocationContext.Session() }); ok {
+		return id
+	}
+	return nil
+}
+
+// identityFrom asks src for the identity key and keeps the answer only if it is
+// an [Identity].
+//
+// Type-asserted rather than merely checked against nil, so a context answering
+// every key does not put a non-Identity under the identity key. That much is
+// defence in depth and not load-bearing on its own: [IdentityFromContext]
+// asserts again, so dropping this one changes what Value returns and not what
+// any caller can observe. Removing it does not fail any test, deliberately —
+// the tests pin the contract, which is that the reader gets nothing.
+//
+// Recovered is load-bearing, and is pinned: src can be a typed-nil pointer or a
+// wrapper holding one, and this runs inside http.RoundTripper on the caller's
+// goroutine, where net/http does not recover.
+func identityFrom(src interface{ Value(any) any }) any {
+	v, _ := adkcontext.Recovered(func() any { return src.Value(adkcontext.IdentityKey) })
+	if id, ok := v.(Identity); ok {
+		return id
+	}
+	return nil
+}
+
 var (
 	_ Context           = (*commonContext)(nil)
 	_ InvocationContext = (*commonContext)(nil)
 	_ ReadonlyContext   = (*commonContext)(nil)
+)
+
+// Every context type in this package that answers the identity key for the
+// invocation it speaks for, asserted rather than left to the [adkcontext.Marker]
+// embed. A type whose only other use of that package is the embed loses the
+// import along with it, so removing it breaks the build for an unrelated reason
+// and reads like a guard while guarding nothing. These fail on the type, which
+// is what was meant.
+var (
+	_ adkcontext.Source = (*commonContext)(nil)
+	_ adkcontext.Source = (*invocationContext)(nil)
+	_ adkcontext.Source = (*toolContextWrapper)(nil)
+	_ adkcontext.Source = (*callbackContextWrapper)(nil)
 )
 
 // --- Tool-context extensions ----------------------------------------------

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -1087,6 +1088,12 @@ Suggested fixes:
 
 type cancelledToolContext struct {
 	agent.Context
+	// Marker: this is one of ADK's own context types, so the identity procedure
+	// asks it rather than reading a session it does not have. Without it the
+	// procedure would fall back to the embedded tool context's Session(), which
+	// is nil by design, and a streaming tool that re-derives its context would
+	// lose the acting user.
+	adkcontext.Marker
 	cancelCtx context.Context
 }
 
@@ -1103,6 +1110,12 @@ func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
 }
 
 func (c *cancelledToolContext) Value(key any) any {
+	// Fails closed rather than dereferencing: this type carries the identity
+	// marker, so the identity procedure asks it directly, and that ask can arrive
+	// from inside http.RoundTripper where net/http does not recover.
+	if c == nil || c.cancelCtx == nil {
+		return nil
+	}
 	return c.cancelCtx.Value(key)
 }
 
@@ -1579,3 +1592,8 @@ type pluginManager interface {
 	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }
+
+// Asserted rather than left to the [adkcontext.Marker] embed: dropping the embed
+// would also drop the import, breaking the build for an unrelated reason. This
+// fails on the type.
+var _ adkcontext.Source = (*cancelledToolContext)(nil)

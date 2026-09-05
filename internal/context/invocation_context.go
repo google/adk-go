@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -55,6 +56,7 @@ func NewInvocationContext(ctx context.Context, params InvocationContextParams) a
 
 type InvocationContext struct {
 	context.Context
+	adkcontext.Marker
 
 	params InvocationContextParams
 }
@@ -121,6 +123,33 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	return &newCtx
 }
 
+// Value implements context.Context. It returns this invocation's [agent.Identity]
+// for the ADK identity key (so agent.IdentityFromContext can recover it); every
+// other key delegates to the embedded context, preserving existing behavior.
+//
+// This type owns its session, so the identity key is answered here even when the
+// session cannot be read — with no identity rather than the enclosing
+// invocation's, whose user made no such call and whose credential would
+// otherwise be minted for it.
+func (c *InvocationContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	if key == adkcontext.IdentityKey {
+		if id, ok := adkcontext.Recovered(func() agent.Identity {
+			s := c.params.Session
+			return agent.Identity{UserID: s.UserID(), AppName: s.AppName(), SessionID: s.ID()}
+		}); ok {
+			return id
+		}
+		return nil
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
 // ResumedInput always returns (nil, false) for the base
 // invocation context. Implementations that carry a resume payload
 // override this method.
@@ -151,3 +180,9 @@ func (c *InvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.I
 
 	return &res
 }
+
+// Asserted rather than left to the [adkcontext.Marker] embed: a type whose only
+// other use of the package is that embed loses the import along with it, so the
+// build breaks for an unrelated reason and reads like a guard while guarding
+// nothing. This fails on the type, which is what was meant.
+var _ adkcontext.Source = (*InvocationContext)(nil)

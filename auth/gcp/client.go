@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,11 +50,37 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts; the client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
-// use, so it can't inject extra path segments, a query, or a fragment into the
-// request URL it is interpolated into. A separate ".." check blocks path
-// traversal (dots are allowed so domain-style ids still pass).
-var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
+// use. It cannot inject a query, a fragment, an authority or a percent-escape
+// into the request URL the name is interpolated into; extra path segments are
+// allowed, since a resource name is itself a path. The colon is allowed for
+// domain-scoped project ids (projects/example.com:my-project/...) — the name is
+// always appended after the endpoint and a /v1 segment, so it can never be read
+// as a scheme.
+var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
+
+// validateResource rejects a resource name that cannot be safely interpolated
+// into a request URL, or that would not survive path normalization — an empty,
+// "." or ".." segment blocks traversal, and also keeps the name the caller
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
+func validateResource(name string) error {
+	if !resourceNameRE.MatchString(name) {
+		return fmt.Errorf("resource %q has invalid characters", name)
+	}
+	for seg := range strings.SplitSeq(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("resource %q has an empty or relative path segment", name)
+		}
+	}
+	return nil
+}
 
 // Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
 var (
@@ -185,16 +212,49 @@ type Request struct {
 // RetrieveCredential retrieves a credential for req, polling while the service
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
+//
+// Every error past validation names the resource. One client can serve several
+// resources, so a caller holding only the error — including a direct caller,
+// which has no provider to attribute it — must be able to tell which one failed.
+// Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
+// [auth.ConsentRequiredError] stay matchable.
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Credential, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
 	if req.UserID == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
 	}
-	if !resourceNameRE.MatchString(req.Resource) || strings.Contains(req.Resource, "..") {
-		return nil, fmt.Errorf("gcp: RetrieveCredential resource %q has invalid characters", req.Resource)
+	if err := validateResource(req.Resource); err != nil {
+		return nil, fmt.Errorf("gcp: RetrieveCredential: %w", err)
 	}
+	// Named once here rather than at each return: the two sentinels and the
+	// context error carried no resource at all, and the arms that did name it
+	// then had it named twice over on the provider path. Appended rather than
+	// prefixed, because the errors arriving here already open with the package
+	// name and a second one reads as a stutter.
+	//
+	// The resource and nothing else. This error reaches a tool, which feeds it to
+	// the model and persists it in the session, and every other id in scope comes
+	// off the request — a user id is commonly an email, and a session id arrives
+	// unvalidated from the request path. The resource is configuration.
+	//
+	// Adding nothing else is not sufficient on its own, because an [APIError]
+	// carries up to a kilobyte of the service's own response, and a service that
+	// rejects a request commonly quotes back what it rejected. So the two request
+	// values that could appear there are redacted on the way out. Which strings
+	// to remove is knowable only here, where the request is: doPost has the body
+	// and not the request that produced it.
+	defer func() {
+		if err == nil {
+			return
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			apiErr.Body = redact(apiErr.Body, req.UserID, req.ContinueURI)
+		}
+		err = fmt.Errorf("%w (resource %q)", err, req.Resource)
+	}()
 
 	retrieve := c.retrieveAgentIdentity
 	if connectorResourceRE.MatchString(req.Resource) {
@@ -214,17 +274,21 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
-			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
+			return nil, ErrConsentRejected
 		case pendingOutcome:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
+				return nil, ErrPollTimeout
 			}
-			wait := min(backoff, remaining)
+			// A timer rather than time.After: the caller giving up is an ordinary
+			// way out of this loop, and time.After holds the runtime timer until
+			// it fires whether anyone is still waiting or not.
+			timer := time.NewTimer(min(backoff, remaining))
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			backoff = min(backoff*2, maxBackoff)
 		default:
@@ -295,7 +359,7 @@ func mapCredential(header, token string) (auth.Credential, error) {
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.
-func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
+func (c *Client) doPost(ctx context.Context, url string, body, out any, secrets ...string) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("gcp: marshal request: %w", err)
@@ -323,7 +387,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	// Classify the status before the size check, so an oversized error page still
 	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
+		return &APIError{StatusCode: resp.StatusCode, Body: serviceText(strings.TrimSpace(string(data)), secrets...)}
 	}
 	if len(data) > maxBody {
 		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
@@ -355,6 +419,56 @@ func validHeaderFieldName(s string) bool {
 // maxErrorBody caps service-controlled text carried into an error.
 const maxErrorBody = 1024
 
+// serviceText prepares service-controlled text for an error message: it removes
+// the caller-supplied values first, then caps it.
+//
+// That order is load-bearing. Capping first cuts an identifier in half whenever
+// it straddles the boundary, and the surviving prefix then matches nothing, so a
+// long enough response smuggles out the leading bytes of the acting user.
+func serviceText(s string, secrets ...string) string {
+	// Redacting the literal alone is not enough. The body is service-controlled
+	// and a JSON one commonly escapes, so an echoed "alice@example.test" can
+	// arrive as "alice\u0040example.test" and walk straight past a substring
+	// scrub. Detection therefore runs against an unescaped copy, and when that
+	// matches, the unescaped text is what gets redacted and returned — safe, and
+	// more readable than the escaped original.
+	//
+	// Best-effort by construction: a service can encode its response in ways
+	// nothing here decodes, so this narrows the leak rather than closing it. The
+	// guarantee to rely on is that WE add no identifier, not that we can launder
+	// one back out of arbitrary text.
+	if u := unescapeUnicode(s); u != s {
+		for _, v := range secrets {
+			if v != "" && strings.Contains(u, v) {
+				return truncateForError(redact(u, secrets...))
+			}
+		}
+	}
+	return truncateForError(redact(s, secrets...))
+}
+
+// unescapeUnicode decodes \uXXXX sequences and leaves everything else alone,
+// including a malformed escape, which stays verbatim rather than being dropped.
+func unescapeUnicode(s string) string {
+	if !strings.Contains(s, `\u`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if i+6 <= len(s) && s[i] == '\\' && s[i+1] == 'u' {
+			if n, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+				b.WriteRune(rune(n))
+				i += 6
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
 // doesn't bloat the returned error.
 func truncateForError(s string) string {
@@ -374,4 +488,17 @@ func truncateForError(s string) string {
 		cut = max
 	}
 	return s[:cut] + "..."
+}
+
+// redact removes caller-supplied values from a service-controlled string.
+//
+// Only non-empty values are removed: replacing the empty string would splice a
+// marker between every character.
+func redact(s string, values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "[redacted]")
+		}
+	}
+	return s
 }

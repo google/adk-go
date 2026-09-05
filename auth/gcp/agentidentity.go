@@ -16,6 +16,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -35,7 +36,11 @@ type consentDetail struct {
 
 // result collapses the response's "result" oneof into an outcome, erroring if
 // the service returned no recognized arm.
-func (r agentIdentityResponse) result(resource string) (outcome, error) {
+// The request is unused here and taken anyway, to match connectorOperation.result:
+// that one redacts caller-supplied values out of the service's message, and this
+// response shape carries no service-controlled text to redact. Dropping the
+// parameter would make the next arm added here look already covered.
+func (r agentIdentityResponse) result(_ Request) (outcome, error) {
 	switch {
 	case r.Success != nil:
 		return credOutcome{header: r.Success.Header, token: r.Success.Token}, nil
@@ -46,7 +51,7 @@ func (r agentIdentityResponse) result(resource string) (outcome, error) {
 	case r.Pending != nil:
 		return pendingOutcome{}, nil
 	default:
-		return nil, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
+		return nil, errors.New("gcp: agent identity returned an empty result")
 	}
 }
 
@@ -57,8 +62,8 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcom
 	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var out agentIdentityResponse
-	if err := c.doPost(ctx, url, body, &out); err != nil {
+	if err := c.doPost(ctx, url, body, &out, req.UserID, req.ContinueURI); err != nil {
 		return nil, err
 	}
-	return out.result(req.Resource)
+	return out.result(req)
 }

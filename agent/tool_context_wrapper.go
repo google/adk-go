@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -29,6 +30,7 @@ import (
 // toolContextWrapper is used to emit log entries for unexpected calls - those
 // related to node-context methods when an agent.Context is used as a tool context.
 type toolContextWrapper struct {
+	adkcontext.Marker
 	context Context
 }
 
@@ -241,6 +243,12 @@ func (c *toolContextWrapper) UserID() string {
 
 // Value implements [Context].
 func (c *toolContextWrapper) Value(key any) any {
+	// Fails closed rather than dereferencing: this is reached from
+	// http.RoundTripper on the caller's goroutine, where net/http does not
+	// recover, and a hand-built wrapper can hold neither.
+	if c == nil || c.context == nil {
+		return nil
+	}
 	return c.context.Value(key)
 }
 

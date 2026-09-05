@@ -282,6 +282,17 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}},
 		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
 		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
+		// A name that normalizes to a different one routes to a different service
+		// than the one validateResource inspected.
+		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}},
+		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}},
+		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}},
+		// Percent-escapes are rejected by the charset, not decoded: the name is
+		// interpolated into a URL, so an escape that survives becomes traversal or
+		// a segment break once the server decodes it.
+		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}},
+		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}},
+		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}},
 	}
 	// Point at a live server: a client with no endpoint fails at transport for
 	// every input, which cannot tell a rejected request from an unreachable one.
@@ -298,11 +309,53 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 			if err == nil {
 				t.Fatalf("RetrieveCredential(%+v) = nil error, want error", tc.req)
 			}
-			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "invalid characters") {
+			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "resource ") {
 				t.Errorf("error = %v, want a request-validation error", err)
 			}
 			if got := hits.Load(); got != 0 {
 				t.Errorf("credentials service called %d time(s); a rejected request must not reach the wire", got)
+			}
+		})
+	}
+}
+
+// TestRetrieveAcceptsResourceNames pins the other side of the boundary
+// TestRetrieveValidatesRequest guards. Both of these were widened when the
+// per-segment check replaced a substring test for "..", and a widening a
+// rejection table cannot see is a widening nothing would notice being undone —
+// or being taken further.
+func TestRetrieveAcceptsResourceNames(t *testing.T) {
+	tests := []struct {
+		name, resource string
+	}{
+		// A domain-scoped project id. The colon is why the charset had to widen,
+		// and it is safe only because the name always follows a scheme, a host and
+		// a version segment, where a colon cannot begin a scheme.
+		{name: "domain-scoped project id", resource: "projects/example.com:my-project/locations/l/authProviders/a"},
+		// Dots inside a segment, as opposed to a "." or ".." segment of their own.
+		// The old substring check rejected these; path.Clean leaves them alone, so
+		// the name the server resolves is the one that was validated and routed.
+		{name: "dots inside a segment", resource: "projects/p/locations/l/authProviders/a..b"},
+		{name: "leading dot in a segment", resource: "projects/p/locations/l/authProviders/.hidden"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"success":{"header":"Authorization: Bearer","token":"tok"}}`))
+			}))
+			defer srv.Close()
+
+			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: tc.resource, UserID: "u"}); err != nil {
+				t.Fatalf("RetrieveCredential(%q) error = %v, want it accepted", tc.resource, err)
+			}
+			// The name must reach the wire unchanged: validation and routing both
+			// ran on the string the server is about to resolve.
+			if want := "/v1/" + tc.resource + "/credentials:retrieve"; gotPath != want {
+				t.Errorf("request path = %q, want %q", gotPath, want)
 			}
 		})
 	}
@@ -405,10 +458,9 @@ func TestMapCredential(t *testing.T) {
 	}
 }
 
-// TestRetrieveContextCanceledWhilePending verifies that canceling the context
-// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
-// The rejected header name is service-controlled and reaches the error by a
-// third path, separate from a response body and an operation message.
+// TestMapCredentialCapsHeaderNameInError pins the cap on a rejected header name.
+// It is service-controlled and reaches the error by a third path, separate from
+// a response body and an operation message.
 func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	_, err := mapCredential(strings.Repeat("x", 900_000)+": Token", "SECRET-TOKEN")
 	if err == nil {
@@ -422,6 +474,8 @@ func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	}
 }
 
+// TestRetrieveContextCanceledWhilePending verifies that canceling the context
+// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
 func TestRetrieveContextCanceledWhilePending(t *testing.T) {
 	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
 	defer srv.Close()
