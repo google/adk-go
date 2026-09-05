@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"log"
 
 	"google.golang.org/genai"
 
@@ -86,9 +87,13 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 
 // withICDelta applies d to the invocation this context speaks for.
 //
-// It refuses only a nil result. A context that lost its invocation falls back to
-// asking its parent, which is the enclosing call, and would report a user who
-// made no such call.
+// It refuses only a nil result, keeping the original invocation instead. That
+// guard protects the whole [Context] surface rather than the identity in
+// particular: a nil invocation dereferences in most of the accessors on
+// commonContext. The identity itself already fails closed for that shape —
+// commonContext.identity reports nothing when it has no invocation, rather than
+// asking its parent — so this is not what stands between a caller and the
+// enclosing call's user.
 //
 // It does NOT try to detect the larger problem, which is that an
 // InvocationContext written outside the module inherits WithICDelta by
@@ -114,7 +119,8 @@ func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationCont
 	// invocation from outside the module its identity. A promoted WithICDelta
 	// hands back the invocation the decorator embeds whatever the delta says, so
 	// merely asking is what drops the decorator — and entering a workflow does
-	// exactly that, with a delta carrying only Path and RunID.
+	// exactly that, with a CommonContextDelta carrying no InvocationContextDelta
+	// at all (workflow.go sets Path, RunID, OutputForAncestors and SubScheduler).
 	//
 	// Ours are still asked, because for them a nil delta is not a no-op: the tool
 	// and callback wrappers forward to the commonContext they hold, which returns
@@ -126,5 +132,12 @@ func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationCont
 	if next := ic.WithICDelta(d); next != nil {
 		return next
 	}
+	// Keeping the original beats propagating nil, which breaks most of the
+	// accessors on commonContext. But the delta is gone, so the caller silently
+	// runs with the previous Agent, Branch and IsolationScope — logged because
+	// nothing else distinguishes that from the delta having been applied, and an
+	// agent running under the wrong parent is not a quiet kind of wrong.
+	log.Printf("agent: %T.WithICDelta returned nil; keeping the previous invocation and "+
+		"discarding the delta, so Agent, Branch and IsolationScope are unchanged", ic)
 	return ic
 }

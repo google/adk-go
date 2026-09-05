@@ -65,6 +65,13 @@ type ProviderConfig struct {
 // is not available: discovery failed, or it did not finish inside the bound. The
 // lookup is not cancellable, so that bound is on the wait rather than on the
 // attempt, which keeps running — a later call may well succeed.
+//
+// That holds for a lookup that eventually returns. One that never does is
+// terminal: the attempt is cleared only when it finishes, so there is exactly
+// one for the life of the process and every later call fails here immediately.
+// Retiring a running attempt instead would start a fresh uncancellable lookup on
+// a timer, which is worse, so this is the deliberate trade rather than an
+// oversight.
 var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
 // ErrNoActingUser means the provider could not determine the acting end user,
@@ -205,9 +212,12 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 
 	client, err := p.resolveClient(ctx)
 	if err != nil {
-		// Not attributed: a client-init failure is about this process's own
-		// credentials, not about the resource, and every provider in the process
-		// fails it identically. Attributing it would also stack the package prefix.
+		// Deliberately not qualified by resource: a client-init failure is about
+		// this process's own credentials, not about the resource, and every
+		// provider in the process fails it identically. Retrieval errors are a
+		// different matter, and RetrieveCredential names the resource on all of
+		// them itself — one client serves several, and a direct caller has no
+		// provider to do it for them.
 		return nil, err
 	}
 	cred, err := client.RetrieveCredential(ctx, Request{
@@ -217,22 +227,9 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		ContinueURI: p.scheme.ContinueURI,
 	})
 	if err != nil {
-		return nil, p.attribute(err)
+		return nil, err
 	}
 	return cred, nil
-}
-
-// attribute names the resource a retrieval failure belongs to: several providers
-// can be wired into one process, and an unattributed error says nothing about
-// which.
-//
-// It names nothing else. This error becomes the tool's error, which is fed to
-// the model and persisted in the session, and every id available here is
-// supplied by the caller — a user id is commonly an email, and a session id
-// arrives unvalidated from the request path. The invocation is already
-// identified by the trace and the session the error is stored in.
-func (p *provider) attribute(err error) error {
-	return fmt.Errorf("gcp: resource %q: %w", p.scheme.Name, err)
 }
 
 // resolveClient returns the configured client, building a default one (backed by
@@ -354,9 +351,11 @@ func (p *provider) publish(in *clientInit) {
 		p.client = in.client
 	}
 	p.pending = nil
-	// Closed inside the critical section: a waiter that has already sampled
-	// p.client would otherwise be able to observe neither it nor a closed done,
-	// and report a failure for an attempt that had succeeded.
+	// Closed inside the critical section, which narrows the window rather than
+	// closing it: no waiter re-acquires p.mu after its own read, so none of them
+	// re-reads p.client and the two can never be atomic from where they stand.
+	// What moving the close inside buys is the Unlock's worth of interval in
+	// which the client is published and done is still open.
 	close(in.done)
 	p.mu.Unlock()
 }

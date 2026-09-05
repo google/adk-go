@@ -211,7 +211,13 @@ type Request struct {
 // RetrieveCredential retrieves a credential for req, polling while the service
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
+//
+// Every error past validation names the resource. One client can serve several
+// resources, so a caller holding only the error — including a direct caller,
+// which has no provider to attribute it — must be able to tell which one failed.
+// Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
+// [auth.ConsentRequiredError] stay matchable.
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Credential, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
@@ -221,6 +227,21 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 	if err := validateResource(req.Resource); err != nil {
 		return nil, fmt.Errorf("gcp: RetrieveCredential: %w", err)
 	}
+	// Named once here rather than at each return: the two sentinels and the
+	// context error carried no resource at all, and the arms that did name it
+	// then had it named twice over on the provider path. Appended rather than
+	// prefixed, because the errors arriving here already open with the package
+	// name and a second one reads as a stutter.
+	//
+	// The resource and nothing else. This error reaches a tool, which feeds it to
+	// the model and persists it in the session, and every other id in scope comes
+	// off the request — a user id is commonly an email, and a session id arrives
+	// unvalidated from the request path. The resource is configuration.
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w (resource %q)", err, req.Resource)
+		}
+	}()
 
 	retrieve := c.retrieveAgentIdentity
 	if connectorResourceRE.MatchString(req.Resource) {

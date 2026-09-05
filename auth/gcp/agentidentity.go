@@ -16,6 +16,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -46,7 +47,7 @@ func (r agentIdentityResponse) result(resource string) (outcome, error) {
 	case r.Pending != nil:
 		return pendingOutcome{}, nil
 	default:
-		return nil, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
+		return nil, errors.New("gcp: agent identity returned an empty result")
 	}
 }
 

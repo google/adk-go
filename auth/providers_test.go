@@ -112,7 +112,12 @@ func TestConsentRequiredError(t *testing.T) {
 	}
 	// The message must not carry the URI: it becomes a tool's error, which reaches
 	// the model and the session store, and the URI carries the state and nonce
-	// that bind the credential.
+	// that bind the credential. Asserted exactly, not just by absence of the URI —
+	// the message has no branches, so a negative check passes for an empty string
+	// too, and this is the only assertion on Error() anywhere.
+	if got, want := consent.Error(), "auth: interactive consent required"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
 	if strings.Contains(err.Error(), "consent.example") {
 		t.Errorf("Error() = %q, want the auth URI kept on the field only", err.Error())
 	}

@@ -294,6 +294,29 @@ func TestDeltaOnInvocationThatReturnsNil(t *testing.T) {
 			}
 		})
 	}
+
+	// The delta is discarded on the way, which the assertions above cannot see:
+	// the branch this run asked for is gone and the previous one stands. Pinned
+	// on the log, because that is the only thing separating a discarded delta
+	// from an applied one, and an agent silently running under the wrong parent
+	// is what the discard costs.
+	t.Run("the discard is reported", func(t *testing.T) {
+		var buf bytes.Buffer
+		out := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(out) })
+
+		c := PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+		})
+		if got := c.Branch(); got == branch {
+			t.Fatalf("Branch() = %q, so the delta was applied after all and this test no "+
+				"longer covers what it is named for", got)
+		}
+		if got := buf.String(); !strings.Contains(got, "discarding the delta") {
+			t.Errorf("log = %q, want the discard reported", got)
+		}
+	})
 }
 
 // TestIdentityThroughNestedSessionlessContexts pins the marker on commonContext

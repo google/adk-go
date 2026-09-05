@@ -745,6 +745,40 @@ func TestDecoratorAnswersForItselfWhileReadingTheEnclosingUsersData(t *testing.T
 	// and by promotion, and that is what the rule warns a decorator author about.
 }
 
+// TestRebindDoesNotCarryTheArtifactsHandle pins the other half of that split.
+//
+// WithContext given an invocation rebinds who the context speaks for, but an
+// artifacts handle already cached on the receiver is copied across untouched. So
+// the result answers for the argument while Artifacts() still addresses the
+// receiver's user — the same disagreement as the promotion case, reached from
+// the opposite direction, and the rule claims it in prose.
+func TestRebindDoesNotCarryTheArtifactsHandle(t *testing.T) {
+	alice := &invocationContext{Context: t.Context(), session: matrixOwner("alice"), artifacts: artifactsOf("alice")}
+	bob := &invocationContext{Context: t.Context(), session: matrixOwner("bob"), artifacts: artifactsOf("bob")}
+
+	// A callback context is one of the shapes that caches the handle.
+	wrapper, ok := NewCallbackContext(bob, nil).(*callbackContextWrapper)
+	if !ok {
+		t.Fatalf("NewCallbackContext() = %T, want *callbackContextWrapper", NewCallbackContext(bob, nil))
+	}
+	rebound, ok := wrapper.context.WithContext(alice).(*commonContext)
+	if !ok {
+		t.Fatalf("WithContext() did not return a *commonContext")
+	}
+
+	if id, ok := IdentityFromContext(rebound); !ok || id.UserID != "alice" {
+		t.Errorf("IdentityFromContext() = %q, %v; want \"alice\", true", id.UserID, ok)
+	}
+	owner, ok := rebound.Artifacts().(interface{ owner() string })
+	if !ok {
+		t.Fatalf("Artifacts() = %T, want the test handle", rebound.Artifacts())
+	}
+	if got := owner.owner(); got != "bob" {
+		t.Errorf("Artifacts() addresses %q, want \"bob\": the cached handle is expected NOT to "+
+			"follow the rebind, and the rule says so", got)
+	}
+}
+
 // TestAnUnmarkedContextCanAnswerTheKeyItself pins the limit of the mechanism,
 // which the rule used to state backwards.
 //

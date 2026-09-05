@@ -16,6 +16,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -51,7 +52,7 @@ func (o connectorOperation) result(resource string) (outcome, error) {
 		// A terminal operation must carry a credential; treat an empty result as
 		// an error rather than polling to the timeout.
 		if o.Response == nil {
-			return nil, fmt.Errorf("gcp: connector operation done but returned no credential for %q", resource)
+			return nil, errors.New("gcp: connector operation done but returned no credential")
 		}
 		return credOutcome{header: o.Response.Header, token: o.Response.Token}, nil
 	}

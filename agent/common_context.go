@@ -95,8 +95,7 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // SessionID as the storage and search keys — SearchMemory by way of the Memory
 // handle it reaches through. So such a context can answer this function with its
 // own user while reading and writing the ENCLOSING user's artifacts and
-// memories. That
-// behaviour predates the identity key and is unchanged by it — Session, UserID
+// memories. That behaviour predates the identity key and is unchanged by it — Session, UserID
 // and AppName have always reported the enclosing invocation on the same shape —
 // but a decorator author reading this rule needs to know the credential is not
 // the only thing scoped to a user.
@@ -154,7 +153,10 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     plain context.Context. The result then reports the ARGUMENT's user, by
 //     design and whoever the receiver spoke for. It is the one derivation that
 //     legitimately changes who a context speaks for, so do not hand it another
-//     call's invocation.
+//     call's invocation. The rebind is also partial: an artifacts handle already
+//     cached on the receiver is carried over untouched, so the result answers for
+//     the argument while Artifacts() still addresses the receiver's user. Same
+//     split as the promotion case above, reached the other way round.
 //   - [Context.SubScheduler] returns a scheduler, not a context, so the
 //     return-type rule above does not reach it — but the scheduler captured the
 //     context it was built from and derives every child from that. A decorator
