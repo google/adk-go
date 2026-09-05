@@ -268,6 +268,30 @@ func TestALongEchoStillRedacts(t *testing.T) {
 	}
 }
 
+// TestAnEscapedEchoIsRedacted pins the encoding half.
+//
+// A JSON body escapes at the service's discretion, so an echoed identifier can
+// arrive as \u0040 for the @ and walk past a literal substring scrub. Redaction
+// is best-effort against arbitrary encodings, and this is the one that actually
+// occurs.
+func TestAnEscapedEchoIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid userId: alice\u0040example.test"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if strings.Contains(err.Error(), "example.test") {
+		t.Errorf("Credential() error = %v, want the escaped identifier redacted too", err)
+	}
+}
+
 // TestSentinelsCarryTheResource pins the arms that previously carried no
 // resource at all.
 //

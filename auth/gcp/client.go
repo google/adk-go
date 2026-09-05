@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -425,7 +426,47 @@ const maxErrorBody = 1024
 // it straddles the boundary, and the surviving prefix then matches nothing, so a
 // long enough response smuggles out the leading bytes of the acting user.
 func serviceText(s string, secrets ...string) string {
+	// Redacting the literal alone is not enough. The body is service-controlled
+	// and a JSON one commonly escapes, so an echoed "alice@example.test" can
+	// arrive as "alice\u0040example.test" and walk straight past a substring
+	// scrub. Detection therefore runs against an unescaped copy, and when that
+	// matches, the unescaped text is what gets redacted and returned — safe, and
+	// more readable than the escaped original.
+	//
+	// Best-effort by construction: a service can encode its response in ways
+	// nothing here decodes, so this narrows the leak rather than closing it. The
+	// guarantee to rely on is that WE add no identifier, not that we can launder
+	// one back out of arbitrary text.
+	if u := unescapeUnicode(s); u != s {
+		for _, v := range secrets {
+			if v != "" && strings.Contains(u, v) {
+				return truncateForError(redact(u, secrets...))
+			}
+		}
+	}
 	return truncateForError(redact(s, secrets...))
+}
+
+// unescapeUnicode decodes \uXXXX sequences and leaves everything else alone,
+// including a malformed escape, which stays verbatim rather than being dropped.
+func unescapeUnicode(s string) string {
+	if !strings.Contains(s, `\u`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if i+6 <= len(s) && s[i] == '\\' && s[i+1] == 'u' {
+			if n, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+				b.WriteRune(rune(n))
+				i += 6
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }
 
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
