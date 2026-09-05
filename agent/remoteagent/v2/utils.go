@@ -16,6 +16,7 @@ package remoteagent
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -136,28 +138,56 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 		return event
 	}
 
-	parts := make([]*genai.Part, 0, len(agentEvent.Content.Parts)+1)
-	parts = append(parts, &genai.Part{Text: "For context:"})
+	payloadParts := make([]*genai.Part, 0, len(agentEvent.Content.Parts))
 	for _, part := range agentEvent.Content.Parts {
 		if part.Thought {
 			continue
 		}
 		if part.Text != "" {
-			text := fmt.Sprintf("[%s] said: %s", agentEvent.Author, part.Text)
-			parts = append(parts, genai.NewPartFromText(text))
+			text := fmt.Sprintf("[%s] said:\n%s", agentEvent.Author, llminternal.QuoteUntrusted(part.Text))
+			payloadParts = append(payloadParts, genai.NewPartFromText(text))
 		} else if part.FunctionCall != nil {
 			call := part.FunctionCall
-			text := fmt.Sprintf("[%s] called tool %s with parameters: %v", agentEvent.Author, call.Name, call.Args)
-			parts = append(parts, genai.NewPartFromText(text))
+			// The tool name is elided but left unfenced -- eliding markers
+			// is a complete answer to marker forgery, not to a name that
+			// carries a paragraph of unfenced text. Longer version of this
+			// comment, and the same tradeoff, in contents_processor.go's
+			// ConvertForeignEvent, which this function mirrors for the A2A
+			// path.
+			text := fmt.Sprintf("[%s] called tool `%s` with parameters:\n%s",
+				agentEvent.Author, llminternal.ElideQuoteMarkers(call.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", call.Args)))
+			payloadParts = append(payloadParts, genai.NewPartFromText(text))
 		} else if part.FunctionResponse != nil {
 			resp := part.FunctionResponse
-			text := fmt.Sprintf("[%s] %s tool returned result: %v", agentEvent.Author, resp.Name, resp.Response)
-			parts = append(parts, genai.NewPartFromText(text))
+			text := fmt.Sprintf("[%s] `%s` tool returned result:\n%s",
+				agentEvent.Author, llminternal.ElideQuoteMarkers(resp.Name), llminternal.QuoteUntrusted(fmt.Sprintf("%v", resp.Response)))
+			payloadParts = append(payloadParts, genai.NewPartFromText(text))
 		} else {
-			parts = append(parts, part)
+			// FileData, InlineData, ExecutableCode, and CodeExecutionResult
+			// parts all land here and are relayed verbatim, with no fence
+			// and no elision -- same tradeoff as ConvertForeignEvent's
+			// default case, for the same reason, including the same
+			// caveat that this is not neutral ground: see that function's
+			// comment on its own default case for the full reasoning,
+			// which applies here unchanged.
+			//
+			// A part that is itself the zero value (e.g. an empty
+			// streaming-tail part with Thought false) is skipped rather
+			// than relayed, for the same reason ConvertForeignEvent skips
+			// one: appending it here would make len(payloadParts) > 0
+			// look satisfied by a part carrying nothing at all, stranding
+			// the preamble below in front of an empty payload once such a
+			// part is later dropped by any downstream emptiness filter.
+			if part == nil || reflect.ValueOf(*part).IsZero() {
+				continue
+			}
+			payloadParts = append(payloadParts, part)
 		}
 	}
-	if len(parts) > 1 { // not only "For context:" part
+	if len(payloadParts) > 0 {
+		parts := make([]*genai.Part, 0, len(payloadParts)+1)
+		parts = append(parts, &genai.Part{Text: llminternal.OtherAgentContextPreamble})
+		parts = append(parts, payloadParts...)
 		event.Content = genai.NewContentFromParts(parts, genai.RoleUser)
 	}
 	return event
