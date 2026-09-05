@@ -90,14 +90,8 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		// for this agent never governs a peer or child.
 		//
 		// As in AgentNode.Run, the binding travels in the context passed DOWN,
-		// which is what reaches the request processors. ctx.WithAgentContext
-		// returns nil for a tool or callback context rather than erroring, so
-		// the chat path below takes a re-bound Context only when there is one
-		// to take.
+		// which is what reaches the request processors.
 		bound := llminternal.WithBoundMode(ctx, a.Name(), mode)
-		if rebound := ctx.WithAgentContext(bound); rebound != nil {
-			ctx = rebound
-		}
 
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
@@ -112,6 +106,17 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     else (memory, run config, etc.).
 		switch mode {
 		case llminternal.ModeChat:
+			// runChat needs the agent.Context itself, for the sub-scheduler its
+			// task delegations dispatch through, so this is the one branch that
+			// re-binds rather than passing `bound` down. WithAgentContext
+			// returns nil for a tool or callback context instead of erroring,
+			// hence the guard. Losing the binding there costs nothing: mode is
+			// chat on this branch, and every reader treats a chat binding and
+			// an absent one identically, which is the same reason the runner's
+			// root bind is inert.
+			if rebound := ctx.WithAgentContext(bound); rebound != nil {
+				ctx = rebound
+			}
 			runChat(a, ctx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
 			userContent := ctx.UserContent()

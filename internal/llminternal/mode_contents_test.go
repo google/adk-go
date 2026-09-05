@@ -137,8 +137,11 @@ func TestContentsRequestProcessor_BoundModeIsScopedToItsAgent(t *testing.T) {
 
 // Declaring single_turn shapes the turn, but it does not by itself hide the
 // conversation: only a placement that put this agent in that mode does. A
-// declared single_turn agent reached some other way — by transfer_to_agent,
-// say — keeps its history.
+// declared single_turn agent reached some other way keeps its history — a
+// child run directly by a sequential, loop or parallel agent, say, which calls
+// subAgent.Run and never goes through the node wrapper. Not by transfer:
+// isUntransferableMode keeps a declared single_turn agent off the target list
+// entirely.
 func TestContentsRequestProcessor_DeclaredSingleTurnWithoutPlacementKeepsHistory(t *testing.T) {
 	history := []*session.Event{
 		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("older turn", "user")}},

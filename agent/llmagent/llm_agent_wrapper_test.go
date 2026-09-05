@@ -1256,3 +1256,42 @@ func fcContent(id, name string, args map[string]any) *genai.Content {
 		}},
 	}
 }
+
+// RunLLMAgentAsNode is exported, and agent.Context.WithAgentContext returns nil
+// for the tool and callback wrappers rather than erroring, so routing the mode
+// binding back through it nils the context out. The single_turn and task
+// branches now resolve their binding without touching WithAgentContext at all,
+// which this pins.
+//
+// The chat branch is deliberately not covered. It is the one branch that still
+// re-binds, because runChat needs the agent.Context itself, and it guards the
+// nil — but a chat run cannot be driven from a tool context on the merge base
+// either. Both that and a seeded single_turn run (a tool context reports no
+// session, which wrappedSession then wraps) panic identically without this
+// change, so neither is this PR's to fix or to assert.
+func TestRunLLMAgentAsNode_SingleTurnAcceptsAToolContext(t *testing.T) {
+	t.Parallel()
+
+	a := makeLLMAgent(t, "worker", withMode(llmagent.ModeSingleTurn),
+		func(c *llmagent.Config) { c.Model = &recordingLLM{} })
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-tool-ctx",
+	})
+	toolCtx := agent.NewToolContext(ic, "fc-1", &session.EventActions{}, nil)
+
+	// The assertion is that this drains rather than panicking.
+	for _, err := range llmagent.RunLLMAgentAsNode(a, toolCtx, nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+}
