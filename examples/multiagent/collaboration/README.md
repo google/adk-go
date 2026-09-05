@@ -92,11 +92,11 @@ export GOOGLE_API_KEY=...
 go run ./examples/multiagent/collaboration console
 ```
 
-You can also serve it over REST or the web UI; run with `help` for all
-launcher subcommands:
+You can also serve it over the REST API or with the bundled web UI:
 
 ```sh
-go run ./examples/multiagent/collaboration help
+go run ./examples/multiagent/collaboration web api
+go run ./examples/multiagent/collaboration web api webui
 ```
 
 ## See also

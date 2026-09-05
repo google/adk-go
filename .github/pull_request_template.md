@@ -19,6 +19,13 @@ _A clear and concise description of what the problem is._
 _A clear and concise description of what you want to happen and why you choose
 this solution._
 
+### Behavior change
+
+**What behaves differently for someone already on the current release?**
+
+_Write "nothing" if that is the answer. Bug fixes count: a fix that alters an
+observable result is still a behavior change._
+
 ### Testing Plan
 
 _Please describe the tests that you ran to verify your changes. This is required
@@ -26,8 +33,12 @@ for all PRs that are not small documentation or typo fixes._
 
 **Unit Tests:**
 
-- [ ] I have added or updated unit tests for my change.
 - [ ] All unit tests pass locally.
+
+**With your source change reverted and your tests kept, which test fails?**
+
+_Name it. If nothing fails, the tests do not yet cover the change. This is the
+cheapest moment to find that out._
 
 _Please include a summary of passed go test results._
 
