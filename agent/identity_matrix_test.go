@@ -201,6 +201,15 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 		{name: "PromoteWithDelta, nil InvocationContextDelta", of: func(ic InvocationContext) context.Context {
 			return PromoteWithDelta(ic, &CommonContextDelta{})
 		}},
+		// The one-token neighbour of the column above, and it used to answer
+		// differently: keying the shortcut on a nil pointer rather than on
+		// emptiness meant an allocated-but-unset delta reached the invocation and
+		// dropped an out-of-module decorator. A caller that allocates the delta
+		// and fills it conditionally produces exactly this whenever no condition
+		// fires, so the two must agree.
+		{name: "PromoteWithDelta, empty InvocationContextDelta", of: func(ic InvocationContext) context.Context {
+			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{}})
+		}},
 		{name: "WithICDelta on a promoted context", method: "WithICDelta", promoted: true, of: func(ic InvocationContext) context.Context {
 			branch := "br"
 			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})
@@ -499,6 +508,7 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		"behind a non-ADK wrapper",
 		"PromoteWithDelta",
 		"PromoteWithDelta, nil InvocationContextDelta",
+		"PromoteWithDelta, empty InvocationContextDelta",
 		"WithICDelta on a promoted context",
 		"WithICDelta called on the invocation",
 		"WithContext called on the invocation",

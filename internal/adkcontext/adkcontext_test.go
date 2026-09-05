@@ -21,6 +21,8 @@ package adkcontext_test
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/internal/adkcontext"
@@ -79,6 +81,18 @@ func TestIdentityKeyTypeIsUnnameable(t *testing.T) {
 		t.Errorf("IdentityKey's type is %s.%s, which is exported; any package could declare "+
 			"a value of it and plant an identity. Keep the key's type unexported.",
 			kt.PkgPath(), name)
+	}
+	// An unexported type is not enough on its own. IdentityKey is itself
+	// exported, so anything able to IMPORT this package can plant an identity
+	// with it and never name the type at all — the only thing preventing that is
+	// the internal/ element in the path. Both checks above survive moving this
+	// package somewhere public, which is a mechanical rename, so the placement is
+	// asserted too.
+	if !slices.Contains(strings.Split(kt.PkgPath(), "/"), "internal") {
+		t.Errorf("IdentityKey is declared in %s, which is importable from anywhere. The key "+
+			"is exported, so any importer can plant an identity with it, and any importer "+
+			"can embed Marker to be asked for one. Keep this package under internal/.",
+			kt.PkgPath())
 	}
 }
 

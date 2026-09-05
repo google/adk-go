@@ -122,11 +122,16 @@ func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationCont
 	// exactly that, with a CommonContextDelta carrying no InvocationContextDelta
 	// at all (workflow.go sets Path, RunID, OutputForAncestors and SubScheduler).
 	//
-	// Ours are still asked, because for them a nil delta is not a no-op: the tool
-	// and callback wrappers forward to the commonContext they hold, which returns
-	// that inner context, and skipping the call would leave the wrapper in place
-	// with the nil session it reports by design.
-	if _, ours := ic.(adkcontext.Source); d == nil && !ours {
+	// "Nothing to say" is emptiness, not a nil pointer. A caller that allocates
+	// the delta and then fills it conditionally hands over an empty one whenever
+	// no condition fires, and keying on nil alone made that one-token neighbour
+	// drop the decorator where the nil case did not.
+	//
+	// Ours are still asked, because for them an empty delta is not a no-op: the
+	// tool and callback wrappers forward to the commonContext they hold, which
+	// returns that inner context, and skipping the call would leave the wrapper
+	// in place with the nil session it reports by design.
+	if _, ours := ic.(adkcontext.Source); d.isZero() && !ours {
 		return ic
 	}
 	if next := ic.WithICDelta(d); next != nil {
@@ -140,4 +145,12 @@ func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationCont
 	log.Printf("agent: %T.WithICDelta returned nil; keeping the previous invocation and "+
 		"discarding the delta, so Agent, Branch and IsolationScope are unchanged", ic)
 	return ic
+}
+
+// isZero reports whether d asks for no change to the invocation. A nil delta and
+// an allocated one with every field unset are the same request, and treating
+// them differently is what let an empty delta drop an out-of-module invocation
+// while a nil one preserved it.
+func (d *InvocationContextDelta) isZero() bool {
+	return d == nil || *d == InvocationContextDelta{}
 }
