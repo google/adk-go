@@ -529,7 +529,29 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("tool definition parameter precedence and absence (-want +got):\\n%s", diff)
+		t.Errorf("tool definition parameter precedence and absence (-want +got):\n%s", diff)
+	}
+}
+
+func TestToolDefinitionParameters_RejectsInvalidSchemaValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "boolean schema", value: true, want: "true"},
+		{name: "string", value: "invalid", want: unserializableSchemaPlaceholder},
+		{name: "number", value: 42, want: unserializableSchemaPlaceholder},
+		{name: "array", value: []any{"invalid"}, want: unserializableSchemaPlaceholder},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			declaration := &genai.FunctionDeclaration{ParametersJsonSchema: tc.value}
+			if got := string(toolDefinitionParameters(declaration)); got != tc.want {
+				t.Errorf("toolDefinitionParameters() = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -542,8 +564,8 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 			"properties": map[string]any{
 				"value": map[string]any{
 					"type":     []string{"OBJECT", "null"},
-					"default":  map[string]any{"type": "PRODUCTION", "region": "US-EAST1"},
-					"examples": []any{map[string]any{"type": "STAGING"}},
+					"default":  map[string]any{"type": "OBJECT", "region": "US-EAST1"},
+					"examples": []any{map[string]any{"type": "STRING"}},
 				},
 				"unspecified": map[string]any{
 					"type":        "TYPE_UNSPECIFIED",
@@ -551,7 +573,8 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 				},
 			},
 			"dependencies": map[string]any{
-				"type": []string{"billingAddress"},
+				"credit_card":     map[string]any{"type": "OBJECT"},
+				"billing_address": []string{"OBJECT"},
 			},
 		},
 	}
@@ -566,19 +589,20 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 		"properties": map[string]any{
 			"value": map[string]any{
 				"type":     []any{"object", "null"},
-				"default":  map[string]any{"type": "PRODUCTION", "region": "US-EAST1"},
-				"examples": []any{map[string]any{"type": "STAGING"}},
+				"default":  map[string]any{"type": "OBJECT", "region": "US-EAST1"},
+				"examples": []any{map[string]any{"type": "STRING"}},
 			},
 			"unspecified": map[string]any{
 				"description": "type is intentionally unspecified",
 			},
 		},
 		"dependencies": map[string]any{
-			"type": []any{"billingAddress"},
+			"credit_card":     map[string]any{"type": "object"},
+			"billing_address": []any{"OBJECT"},
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("schema normalization (-want +got):\\n%s", diff)
+		t.Errorf("schema normalization (-want +got):\n%s", diff)
 	}
 }
 

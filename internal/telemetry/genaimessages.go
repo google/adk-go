@@ -35,6 +35,16 @@ var (
 	genAIToolDefinitions    = attribute.Key("gen_ai.tool.definitions")
 )
 
+var genaiTypeNames = map[string]string{
+	string(genai.TypeString):  "string",
+	string(genai.TypeNumber):  "number",
+	string(genai.TypeInteger): "integer",
+	string(genai.TypeBoolean): "boolean",
+	string(genai.TypeArray):   "array",
+	string(genai.TypeObject):  "object",
+	string(genai.TypeNULL):    "null",
+}
+
 // Part type discriminators and roles defined by the message JSON schemas.
 const (
 	partTypeText             = "text"
@@ -189,6 +199,12 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 	if err := decoder.Decode(&normalized); err != nil {
 		return json.RawMessage(unserializableSchemaPlaceholder)
 	}
+	switch normalized.(type) {
+	case map[string]any, bool:
+		// JSON Schema draft-07 permits schemas to be objects or booleans.
+	default:
+		return json.RawMessage(unserializableSchemaPlaceholder)
+	}
 	normalizeSchemaTypes(normalized)
 	encoded, err = json.Marshal(normalized)
 	if err != nil {
@@ -227,6 +243,16 @@ func normalizeSchemaNode(value any) {
 					normalizeSchemaNode(schema)
 				}
 			}
+		case "dependencies":
+			// In draft-07 a dependency is either a property-name array or a
+			// schema. Normalize only schema-valued dependencies.
+			if dependencies, ok := child.(map[string]any); ok {
+				for _, dependency := range dependencies {
+					if schema, ok := dependency.(map[string]any); ok {
+						normalizeSchemaNode(schema)
+					}
+				}
+			}
 		case "additionalProperties", "additionalItems", "items", "contains", "not", "if", "then", "else", "propertyNames", "unevaluatedProperties", "unevaluatedItems":
 			normalizeSchemaValue(child)
 		case "allOf", "anyOf", "oneOf", "prefixItems":
@@ -251,15 +277,6 @@ func normalizeSchemaValue(value any) {
 }
 
 func normalizeSchemaTypeValue(value any) (any, bool) {
-	genaiTypeNames := map[string]string{
-		string(genai.TypeString):  "string",
-		string(genai.TypeNumber):  "number",
-		string(genai.TypeInteger): "integer",
-		string(genai.TypeBoolean): "boolean",
-		string(genai.TypeArray):   "array",
-		string(genai.TypeObject):  "object",
-		string(genai.TypeNULL):    "null",
-	}
 	switch value := value.(type) {
 	case string:
 		if normalized, ok := genaiTypeNames[value]; ok {
