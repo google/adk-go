@@ -795,6 +795,44 @@ func TestDecoratorAnswersForItselfWhileReadingTheEnclosingUsersData(t *testing.T
 // the result answers for the argument while Artifacts() still addresses the
 // receiver's user — the same disagreement as the promotion case, reached from
 // the opposite direction, and the rule claims it in prose.
+// TestRebindIsTotalWithNoCachedHandle is the other half, and it only became
+// reachable when the constructors started returning a nil handle for an
+// invocation with no artifact service rather than a wrapper around nil. Before
+// that, artifacts was always non-nil and the split below was unconditional.
+func TestRebindIsTotalWithNoCachedHandle(t *testing.T) {
+	alice := &invocationContext{Context: t.Context(), session: matrixOwner("alice"), artifacts: artifactsOf("alice")}
+	bob := &invocationContext{Context: t.Context(), session: matrixOwner("bob")} // no artifact service
+
+	wrapper, ok := NewToolContext(bob, "fc", nil, nil).(*toolContextWrapper)
+	if !ok {
+		t.Fatalf("NewToolContext() = %T, want *toolContextWrapper", NewToolContext(bob, "fc", nil, nil))
+	}
+	held, ok := wrapper.context.(*commonContext)
+	if !ok {
+		t.Fatalf("the wrapper holds %T, want *commonContext", wrapper.context)
+	}
+	if held.artifacts != nil {
+		t.Fatalf("artifacts = %T, want nil; this test covers the uncached half and the "+
+			"constructors no longer produce it", held.artifacts)
+	}
+
+	rebound, ok := held.WithContext(alice).(*commonContext)
+	if !ok {
+		t.Fatal("WithContext() did not return a *commonContext")
+	}
+	if id, ok := IdentityFromContext(rebound); !ok || id.UserID != "alice" {
+		t.Errorf("IdentityFromContext() = %q, %v; want \"alice\", true", id.UserID, ok)
+	}
+	owner, ok := rebound.Artifacts().(interface{ owner() string })
+	if !ok {
+		t.Fatalf("Artifacts() = %T, want the test handle", rebound.Artifacts())
+	}
+	if got := owner.owner(); got != "alice" {
+		t.Errorf("Artifacts() addresses %q, want \"alice\": with nothing cached the fallback "+
+			"resolves through the rebound invocation, so the rebind is total here", got)
+	}
+}
+
 func TestRebindDoesNotCarryTheArtifactsHandle(t *testing.T) {
 	alice := &invocationContext{Context: t.Context(), session: matrixOwner("alice"), artifacts: artifactsOf("alice")}
 	bob := &invocationContext{Context: t.Context(), session: matrixOwner("bob"), artifacts: artifactsOf("bob")}

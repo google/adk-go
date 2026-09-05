@@ -36,7 +36,11 @@ type consentDetail struct {
 
 // result collapses the response's "result" oneof into an outcome, erroring if
 // the service returned no recognized arm.
-func (r agentIdentityResponse) result(req Request) (outcome, error) {
+// The request is unused here and taken anyway, to match connectorOperation.result:
+// that one redacts caller-supplied values out of the service's message, and this
+// response shape carries no service-controlled text to redact. Dropping the
+// parameter would make the next arm added here look already covered.
+func (r agentIdentityResponse) result(_ Request) (outcome, error) {
 	switch {
 	case r.Success != nil:
 		return credOutcome{header: r.Success.Header, token: r.Success.Token}, nil

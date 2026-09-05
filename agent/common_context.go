@@ -170,10 +170,16 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 //     plain context.Context. The result then reports the ARGUMENT's user, by
 //     design and whoever the receiver spoke for. It is the one derivation that
 //     legitimately changes who a context speaks for, so do not hand it another
-//     call's invocation. The rebind is also partial: an artifacts handle already
-//     cached on the receiver is carried over untouched, so the result answers for
-//     the argument while Artifacts() still addresses the receiver's user. Same
-//     split as the promotion case above, reached the other way round.
+//     call's invocation. How MUCH it rebinds then depends on whether the
+//     receiver cached an artifacts handle. Over an invocation that has an
+//     artifact service, a tool or tracking callback context caches one and
+//     carries it across untouched, so the result answers for the argument while
+//     Artifacts() still addresses the receiver's user — the same split as the
+//     promotion case above, reached the other way round. Over an invocation with
+//     none, nothing is cached, Artifacts() falls through to the invocation, and
+//     the rebind takes that with it. Both are pinned, because the second only
+//     became possible when the constructors started returning a nil handle
+//     rather than a wrapper around one.
 //   - [Context.SubScheduler] returns a scheduler, not a context, so the
 //     return-type rule above does not reach it — but the scheduler captured the
 //     context it was built from and derives every child from that. A decorator
