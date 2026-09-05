@@ -37,12 +37,20 @@ import (
 )
 
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
+//
+// The mode is the one this invocation bound for the agent, else the agent's own
+// declaration, else chat. An out-of-module caller cannot bind — only the runner,
+// the workflow engine, and this function once it has resolved — so an agent that
+// declares nothing runs chat here,
+// where it ran single_turn before the placement was made per-invocation.
+//
 // Per-mode behaviour:
 //
-//   - single_turn: the wrapper forces IncludeContents=none, seeds the
-//     agent with a single user-content event derived from nodeInput,
-//     drives one Agent.Run, post-processes the model reply into the
-//     terminal Output, then returns.
+//   - single_turn: the wrapper binds the mode to the agent for this
+//     invocation, so the contents processor scopes history to the
+//     current turn. It seeds the agent with a single user-content event
+//     derived from nodeInput, drives one Agent.Run, post-processes the
+//     model reply into the terminal Output, then returns.
 //   - task: the wrapper drives Agent.Run and watches for the
 //     finish_task FunctionCall; once the matching FinishTaskTool
 //     FunctionResponse signals success, the wrapper promotes the FC
@@ -68,22 +76,37 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: %q is not an LlmAgent", a.Name()))
 			return
 		}
+		// Resolving the mode reads ctx, so a nil one has to be rejected before
+		// that rather than dereferenced. Exported, and the merge base reached
+		// its mode check without touching ctx at all.
+		if ctx == nil {
+			yield(nil, fmt.Errorf("RunLLMAgentAsNode: nil context for LlmAgent %q", a.Name()))
+			return
+		}
 		state := llminternal.Reveal(llmA)
 
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-		switch state.Mode {
+		// A placement binds the mode it resolved for this agent. Without one
+		// the agent is a plain conversational callee (a transfer target, say),
+		// which is what an undeclared mode means everywhere else.
+		mode := llminternal.ResolveMode(
+			llminternal.ModeFor(ctx, a.Name(), state.Mode),
+			llminternal.ModeChat,
+		)
+		switch mode {
 		case llminternal.ModeTask, llminternal.ModeSingleTurn, llminternal.ModeChat:
 		default:
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q only supports task, single_turn, and chat mode, got %q",
-				a.Name(), state.Mode))
+				a.Name(), mode))
 			return
 		}
+		// Re-bind under this agent's own name so the request processors
+		// downstream agree with the branch taken here, and so a mode resolved
+		// for this agent never governs a peer or child.
+		//
+		// As in AgentNode.Run, the binding travels in the context passed DOWN,
+		// which is what reaches the request processors.
+		bound := llminternal.WithBoundMode(ctx, a.Name(), mode)
 
-		if state.Mode == llminternal.ModeSingleTurn {
-			state.IncludeContents = "none"
-		}
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
@@ -95,8 +118,19 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		//     carry one,
 		//   - relies on the embedded InvocationContext for everything
 		//     else (memory, run config, etc.).
-		switch state.Mode {
+		switch mode {
 		case llminternal.ModeChat:
+			// runChat needs the agent.Context itself, for the sub-scheduler its
+			// task delegations dispatch through, so this is the one branch that
+			// re-binds rather than passing `bound` down. WithAgentContext
+			// returns nil for a tool or callback context instead of erroring,
+			// hence the guard. Losing the binding there costs nothing: mode is
+			// chat on this branch, and every reader treats a chat binding and
+			// an absent one identically, which is the same reason the runner's
+			// root bind is inert.
+			if rebound := ctx.WithAgentContext(bound); rebound != nil {
+				ctx = rebound
+			}
 			runChat(a, ctx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
 			userContent := ctx.UserContent()
@@ -107,7 +141,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
 				sess = newWrappedSession(sess, seed)
 			}
-			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			ic := icontext.NewInvocationContext(bound, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
 				Memory:         ctx.Memory(),
 				Session:        sess,
@@ -118,7 +152,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
-			if state.Mode == llminternal.ModeSingleTurn {
+			if mode == llminternal.ModeSingleTurn {
 				runSingleTurn(a, ic, yield)
 			} else {
 				runTask(a, ic, yield)
@@ -128,7 +162,14 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 }
 
 // PrepareLLMAgentInput returns the seeded user-role event for the
-// single_turn agent's first turn.
+// single_turn agent's first turn, and nil for any other agent.
+//
+// Which agents count as single_turn is decided per invocation: the mode ctx
+// bound for a, else a's own declaration. Binding is internal — the runner, the
+// workflow engine, and RunLLMAgentAsNode once it has resolved — so an
+// out-of-module caller gets a seed whenever a declares single_turn, and
+// whenever it is called with a ctx from inside a placement that bound it,
+// which a callback or tool running under a graph node holds.
 func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil
@@ -137,7 +178,14 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if !ok || llmA == nil {
 		return nil
 	}
-	if llminternal.Reveal(llmA).Mode != llminternal.ModeSingleTurn {
+	// Exported, so nil is worth surviving rather than panicking: ModeFor reads
+	// ctx.Value below, and the event built further down reads InvocationID off
+	// it. This catches an untyped nil only — a typed-nil InvocationContext still
+	// panics, as it would anywhere else in the package.
+	if ctx == nil {
+		return nil
+	}
+	if llminternal.ModeFor(ctx, a.Name(), llminternal.Reveal(llmA).Mode) != llminternal.ModeSingleTurn {
 		return nil
 	}
 	content := nodeInputToContent(nodeInput)

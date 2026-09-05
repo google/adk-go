@@ -255,6 +255,17 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 	})
 
+	// The function is exported, and both things it does with ctx — resolving the
+	// mode, and reading InvocationID for the event — dereference it. Every other
+	// subtest supplies a real context, so without this one the guard never runs.
+	t.Run("nil ctx returns nil instead of panicking", func(t *testing.T) {
+		t.Parallel()
+		a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+		if got := llmagent.PrepareLLMAgentInput(a, nil, "some input"); got != nil {
+			t.Errorf("llmagent.PrepareLLMAgentInput with a nil ctx = %v, want nil", got)
+		}
+	})
+
 	t.Run("non-LlmAgent returns nil", func(t *testing.T) {
 		t.Parallel()
 		a, err := agent.New(agent.Config{Name: "plain"})
@@ -683,6 +694,111 @@ func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 		t.Errorf("err = %q, want it to enumerate the supported modes", gotErr.Error())
 	}
 }
+
+// Resolving the mode reads ctx, so an exported entry point has to reject a nil
+// one rather than dereference it. The merge base reached its mode check without
+// touching ctx, so a caller passing nil got an error there and must still.
+func TestRunLLMAgentAsNode_NilContext_Errors(t *testing.T) {
+	t.Parallel()
+	a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+
+	var gotErr error
+	for _, err := range llmagent.RunLLMAgentAsNode(a, nil, nil) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error for a nil context; got nil")
+	}
+	if !strings.Contains(gotErr.Error(), "nil context") {
+		t.Errorf("err = %q, want it to mention a nil context", gotErr.Error())
+	}
+}
+
+// A declared single_turn agent can reach the wrapper with nothing bound for
+// it: runner.findAgentToRun picks such a sub-agent to handle the next turn,
+// and no graph node is involved. The wrapper binds the mode it resolved before
+// running the agent, so the request processors take the same branch it did.
+// Without that, the wrapper drives one turn while the contents processor still
+// assembles the whole conversation.
+func TestRunLLMAgentAsNode_DeclaredSingleTurn_BindsForTheRequestProcessors(t *testing.T) {
+	t.Parallel()
+
+	llm := &recordingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "worker",
+		Model: llm,
+		Mode:  llmagent.ModeSingleTurn,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	// The current user turn has to be in the session, as the runner puts it
+	// there before running the agent: the backward scan that isolates the
+	// current turn skips this agent's own events, so a history ending on one
+	// pivots at index 0 and returns everything either way.
+	prior := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")}},
+		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current question", "user")}},
+	}
+	for _, ev := range prior {
+		if err := svc.AppendEvent(t.Context(), resp.Session, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("current question", "user"),
+		InvocationID: "inv-declared-single-turn",
+	})
+	// nodeInput is nil, as it is on the runner path: nothing seeds this agent,
+	// so hiding history rests on the binding alone.
+	for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				t.Errorf("declared single_turn agent saw conversation history; contents = %v", llm.got.Contents)
+			}
+		}
+	}
+}
+
+// recordingLLM keeps the first request it serves and always answers with text.
+type recordingLLM struct{ got *model.LLMRequest }
+
+func (*recordingLLM) Name() string { return "recording" }
+
+func (m *recordingLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if m.got == nil {
+		m.got = r
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "answer"}},
+		}}, nil)
+	}
+}
+
+var _ model.LLM = (*recordingLLM)(nil)
 
 // TestRunLLMAgentAsNode_Task_HappyPath drives a task-mode agent
 // end-to-end via the runner. The scripted LLM emits finish_task
@@ -1159,5 +1275,44 @@ func fcContent(id, name string, args map[string]any) *genai.Content {
 		Parts: []*genai.Part{{
 			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
 		}},
+	}
+}
+
+// RunLLMAgentAsNode is exported, and agent.Context.WithAgentContext returns nil
+// for the tool and callback wrappers rather than erroring, so routing the mode
+// binding back through it nils the context out. The single_turn and task
+// branches now resolve their binding without touching WithAgentContext at all,
+// which this pins.
+//
+// The chat branch is deliberately not covered. It is the one branch that still
+// re-binds, because runChat needs the agent.Context itself, and it guards the
+// nil — but a chat run cannot be driven from a tool context on the merge base
+// either. Both that and a seeded single_turn run (a tool context reports no
+// session, which wrappedSession then wraps) panic identically without this
+// change, so neither is this PR's to fix or to assert.
+func TestRunLLMAgentAsNode_SingleTurnAcceptsAToolContext(t *testing.T) {
+	t.Parallel()
+
+	a := makeLLMAgent(t, "worker", withMode(llmagent.ModeSingleTurn),
+		func(c *llmagent.Config) { c.Model = &recordingLLM{} })
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-tool-ctx",
+	})
+	toolCtx := agent.NewToolContext(ic, "fc-1", &session.EventActions{}, nil)
+
+	// The assertion is that this drains rather than panicking.
+	for _, err := range llmagent.RunLLMAgentAsNode(a, toolCtx, nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
 	}
 }

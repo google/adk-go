@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -48,13 +49,6 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	oschema, err := resolvedSchema[Output](outputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
-	}
-
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
 	}
 
 	// The wrapped agent's Run already emits an invoke_agent span, so
@@ -96,6 +90,26 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			return
 		}
 
+		// A graph node is a one-shot placement: an agent that declares no
+		// mode runs single_turn here. Bound under the agent's own name so it
+		// cannot govern a peer this agent later transfers to.
+		//
+		// The binding goes into the context this function passes DOWN, not back
+		// into ctx. Routing it through ctx.WithAgentContext would be the obvious
+		// shape and is a crash: that method returns nil for a tool context and
+		// for a callback context, both of which log and carry on, and the nil is
+		// dereferenced a few lines below. Nothing in this repository drives a
+		// node from inside a tool, but every symbol on that path is exported.
+		// Guarding the nil and keeping the old ctx is not the fix either — the
+		// binding only reaches the request processors through the context handed
+		// downstream, so dropping it would run an undeclared agent as chat at a
+		// single_turn node.
+		bound := context.Context(ctx)
+		if llmA, ok := n.agent.(llminternal.Agent); ok && llmA != nil {
+			mode := llminternal.ResolveMode(llminternal.Reveal(llmA).Mode, llminternal.ModeSingleTurn)
+			bound = llminternal.WithBoundMode(ctx, n.agent.Name(), mode)
+		}
+
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the
 		// activation's branch; the scheduler assigns sub-branches at
@@ -113,7 +127,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			EndInvocation:  ctx.Ended(),
 			InvocationID:   ctx.InvocationID(),
 		}
-		agentCtx := internalcontext.NewInvocationContext(ctx, params)
+		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
 
 		type NodeRunner interface {

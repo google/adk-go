@@ -32,7 +32,7 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if llmAgent == nil {
 			return // do nothing.
 		}
-		if llmAgent.internal().Mode == ModeSingleTurn {
+		if ModeFor(ctx, ctx.Agent().Name(), llmAgent.internal().Mode) == ModeSingleTurn {
 			return
 		}
 

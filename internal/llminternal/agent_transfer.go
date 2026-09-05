@@ -83,7 +83,7 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
+		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parents[agent.Name()], targets)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -104,9 +104,12 @@ type TransferToAgentTool struct {
 	supportedAgents []agent.Agent
 }
 
-// NewTransferToAgentTool creates a new TransferToAgentTool.
-func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
-	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
+// NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
+// mode curAgent runs under, which decides whether the transfer INSTRUCTIONS are
+// generated. The tool declaration itself ships either way, so a single_turn
+// agent is still able to call it.
+func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(ctx, curAgent, parent, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -306,12 +309,12 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
+func instructionsForTransferToAgent(ctx agent.InvocationContext, curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
 	cur := asLLMAgent(curAgent)
 	// Suppress transfer instructions for task / single_turn agents:
 	// they reach their callees via FC delegation (TaskAgentTool /
 	// SingleTurnTool), not via transfer.
-	switch cur.internal().Mode {
+	switch ModeFor(ctx, curAgent.Name(), cur.internal().Mode) {
 	case ModeTask, ModeSingleTurn:
 		return "", nil
 	}

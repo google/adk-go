@@ -576,15 +576,21 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
-			}
-
-			if llmInternalState.Mode != llminternal.ModeChat {
-				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+			// LlmAgent as root agent must have chat mode.
+			rootMode := llminternal.ResolveMode(llmInternalState.Mode, llminternal.ModeChat)
+			if rootMode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), rootMode))
 				return
 			}
+			// Record the root's placement, as every other placement does.
+			// This changes no behavior today: the check above has already
+			// rejected anything but chat, and chat is also what an unbound
+			// agent falls back to, so no reader can tell a chat binding from
+			// an absent one. It is here so the runner is not the one
+			// placement that resolves a mode and then keeps it to itself,
+			// which is how a later reader would come to be right about graph
+			// nodes and wrong about roots.
+			ctx = llminternal.WithBoundMode(ctx, r.rootAgent.Name(), rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
