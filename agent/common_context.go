@@ -95,7 +95,14 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // SessionID as the storage and search keys — SearchMemory by way of the Memory
 // handle it reaches through. So such a context can answer this function with its
 // own user while reading and writing the ENCLOSING user's artifacts and
-// memories. That behaviour predates the identity key and is unchanged by it — Session, UserID
+// memories.
+//
+// [Context.State], [ReadonlyContext.ReadonlyState] and [Context.Actions] are the
+// same shape by a different route: each resolves through the invocation the
+// context holds rather than through Session, so a promoted one reads and writes
+// the enclosing user's session state, and a promoted Actions accumulates into
+// the event actions that commit to that user's session. Override all six, or
+// accept that only the credential follows the decorator. That behaviour predates the identity key and is unchanged by it — Session, UserID
 // and AppName have always reported the enclosing invocation on the same shape —
 // but a decorator author reading this rule needs to know the credential is not
 // the only thing scoped to a user.

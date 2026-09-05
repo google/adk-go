@@ -15,9 +15,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -533,23 +536,20 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 	// is classified with the reason. Restricting this to interface returns was
 	// too narrow: a pointer or a slice can carry a context just as well.
 	holdsNothing := map[string]string{
-		"Agent":               "the agent, which is invocation-independent",
+		"Agent":               "the agent this invocation is running, which carries no user of its own",
 		"Err":                 "cancellation cause",
 		"OutputForAncestors":  "node names",
 		"RequestConfirmation": "reports an error, returns no object",
 		"ResumedInput":        "caller-supplied resume payload",
 		"RunConfig":           "run configuration, shared across the whole run",
 		"ToolConfirmation":    "the confirmation for this one call",
-		"UserContent":         "the user's message",
+		"UserContent":         "the prompt content, which carries no identity a credential is minted from",
 		"Value":               "the context value, which is how identity is answered in the first place",
 	}
 	// Returns something scoped to the invocation, but which cannot be used to
 	// reach a context or act as another user.
 	holdsSessionData := map[string]string{
-		"Actions":       "event actions accumulated by this call",
-		"ReadonlyState": "session state",
-		"Session":       "the session itself, which is what identity is read FROM",
-		"State":         "session state",
+		"Session": "the session itself, which is what identity is read FROM",
 	}
 	// Returns something that carries the invocation's ACTING USER, so a promoted
 	// one addresses the enclosing user's data even where the identity procedure
@@ -564,6 +564,13 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		// user's memories. Same route as Memory, and it was in holdsSessionData
 		// under a reason that described the return type and not the path to it.
 		"SearchMemory": "searches through the invocation's Memory handle, so it carries that handle's UserID",
+		// Reclassified: the reason strings here used to name the return TYPE, which
+		// is what got Artifacts, Memory and SearchMemory wrong in turn. These three
+		// route through the invocation the context holds, so a promoted one reads
+		// and writes the enclosing user's session state.
+		"State":         "reaches the invocation's Session().State(), so a promoted one writes the enclosing user's state",
+		"ReadonlyState": "reaches the invocation's Session().State(), so a promoted one reads the enclosing user's state",
+		"Actions":       "the event actions of the invocation the context holds, whose StateDelta commits to that user's session",
 	}
 	// Returns something holding a context outright.
 	holdsContext := map[string]string{
@@ -578,6 +585,24 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 			}
 		}
 		return n
+	}
+
+	// The bucket has to have a consequence, or this is a spell-check: until now
+	// any of the four satisfied the check, so moving a method between them was
+	// green and only the reason string changed. Both hazardous buckets say a
+	// promoted call reaches the enclosing invocation's data, which is exactly
+	// what IdentityFromContext's rule must warn a decorator author about — so
+	// every name in them has to appear there. Five methods reached that bucket
+	// only because a reviewer caught each one by hand.
+	rule := identityRuleDoc(t)
+	for _, m := range []map[string]string{holdsActingUser, holdsContext} {
+		for name := range m {
+			if !strings.Contains(rule, name) {
+				t.Errorf("%s is classified as reaching the enclosing invocation's data, and "+
+					"IdentityFromContext's doc comment never mentions it. That comment is what "+
+					"a decorator author reads to decide what they must override.", name)
+			}
+		}
 	}
 
 	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
@@ -696,10 +721,12 @@ func TestPromotedColumnsActuallyDropADecorator(t *testing.T) {
 // claim standing with nothing behind it.
 func TestPromotedColumnsCallTheMethodTheyName(t *testing.T) {
 	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
+	var checked int
 	for _, c := range identityColumns(t, enclosing) {
 		if !c.promoted {
 			continue
 		}
+		checked++
 		t.Run(c.name, func(t *testing.T) {
 			d := selectiveDecorator{
 				Context:  Promote(enclosing),
@@ -715,6 +742,12 @@ func TestPromotedColumnsCallTheMethodTheyName(t *testing.T) {
 					"%s is not real.", id.UserID, ok, c.method, c.method, c.method)
 			}
 		})
+	}
+	// Pinned here too rather than relying on the sibling test's count: a guard
+	// whose non-emptiness lives in another function is one deletion from being
+	// vacuous, which is the failure this file catalogues.
+	if want := 8; checked != want {
+		t.Errorf("promoted columns checked = %d, want %d", checked, want)
 	}
 }
 
@@ -958,14 +991,18 @@ type bareContextDecorator struct {
 
 func (d bareContextDecorator) Session() session.Session { return d.own }
 
-// TestIdentityFromAHostileSource pins the two guarantees identityFrom's doc
-// makes about a context that IS one of ours.
+// TestIdentityFromAHostileSource pins what a marked context can do to the
+// procedure that asks it.
 //
-// Both were stated and neither was tested: removing the type assertion, and
-// removing the recover, each left the whole suite green. A marked type is asked
-// for the identity rather than read, which is more trust than any other arm of
-// the procedure extends, so the two things that bound that trust are the ones
-// that most need pinning.
+// A marked type is asked for the identity rather than read, which is more trust
+// than any other arm extends, so the two shapes that abuse it are the ones worth
+// pinning: answering with the wrong type, and panicking on the way.
+//
+// This catches the recover and NOT the inner type assertion, deliberately and as
+// identityFrom's own doc says — IdentityFromContext asserts again, so removing
+// the inner one changes what Value returns and nothing a caller can observe.
+// Claiming otherwise here would be one more unverified assertion in a file whose
+// whole subject is unverified assertions.
 func TestIdentityFromAHostileSource(t *testing.T) {
 	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
 
@@ -1121,3 +1158,27 @@ type icDeltaOnlyDecorator struct {
 func (d icDeltaOnlyDecorator) Session() session.Session { return d.own }
 
 func (d icDeltaOnlyDecorator) WithICDelta(*InvocationContextDelta) InvocationContext { return d }
+
+// identityRuleDoc returns the doc comment on IdentityFromContext, read from
+// source.
+//
+// Read rather than duplicated: a copy here would be one more list to drift, and
+// drift between the rule and what enforces it is the failure this file exists to
+// stop.
+func identityRuleDoc(t *testing.T) string {
+	t.Helper()
+	src, err := os.ReadFile("common_context.go")
+	if err != nil {
+		t.Fatalf("read common_context.go: %v", err)
+	}
+	const start = "// IdentityFromContext returns"
+	i := bytes.Index(src, []byte(start))
+	if i < 0 {
+		t.Fatal("IdentityFromContext's doc comment not found; this guard reads it by prefix")
+	}
+	j := bytes.Index(src[i:], []byte("\nfunc IdentityFromContext"))
+	if j < 0 {
+		t.Fatal("IdentityFromContext's declaration not found after its doc comment")
+	}
+	return string(src[i : i+j])
+}

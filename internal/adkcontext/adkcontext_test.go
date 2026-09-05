@@ -49,6 +49,16 @@ func TestSourceMethodIsUnexported(t *testing.T) {
 	}
 	// PkgPath is empty for an exported method and the declaring package's path
 	// for an unexported one.
+	// The method's OWN package must be internal too, not just the key's. Splitting
+	// the package — Source and Marker public, the key left behind — leaves every
+	// other check here green while letting any type anywhere embed Marker and be
+	// ASKED for an identity. Two holes of this class have already been found by
+	// hand; this is the third, and it is the same one test away.
+	if m := src.Method(0); !slices.Contains(strings.Split(m.PkgPath, "/"), "internal") {
+		t.Errorf("Source.%s is declared in %q, which is importable from anywhere. Any importer "+
+			"could then embed Marker and be taken for one of ADK's own contexts. Keep the "+
+			"marker under internal/.", m.Name, m.PkgPath)
+	}
 	if m := src.Method(0); m.PkgPath == "" {
 		t.Errorf("Source.%s is exported. Any type outside this module can then declare a "+
 			"method of that name and be taken for one of ADK's own contexts, which the "+
