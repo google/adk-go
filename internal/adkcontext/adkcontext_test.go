@@ -65,13 +65,14 @@ func (exportedLookalike) AdkIdentitySource() {}
 // that as a different method, which is the guarantee under test.
 type unexportedLookalike struct{}
 
-// Never called, and that is the point: it exists to be offered to a type
-// assertion and refused.
-//
-//nolint:unused // declared to fail an interface check, not to be invoked.
 func (unexportedLookalike) adkIdentitySource() {}
 
 func TestALookalikeFromAnotherPackageIsNotASource(t *testing.T) {
+	// Called so the method is a genuine use rather than a suppressed warning: it
+	// has to exist for the assertion below to mean anything, and a linter
+	// directive would only hide the day it stops existing.
+	unexportedLookalike{}.adkIdentitySource()
+
 	for _, tc := range []struct {
 		name string
 		v    any
