@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -60,6 +62,45 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	// LiveModeInjection guards the single live-mode tool injection an agent may
+	// receive: whichever workflow agent runs this one live first appends its
+	// hand-off tool and instruction suffix to Tools/Instruction, once, and
+	// every concurrent caller blocks until that has finished. Kept on State
+	// so its lifetime is the agent's — collected with the agent, never
+	// accumulated in a process-global map, and only ever used via (*State).
+	// Today sequentialagent.RunLive is the only injector.
+	LiveModeInjection LiveModeToolInjection
+}
+
+// LiveModeToolInjection is a one-shot, panic-safe latch for the single
+// live-mode tool injection an agent may receive (see State.LiveModeInjection).
+// The first caller to Do performs the injection; concurrent callers block
+// and then observe it as a no-op, with a happens-before edge to the first
+// caller's writes. Unlike sync.Once it does not latch when the injection
+// panics, so a misconfigured sub-agent stays loud on every call — the same
+// behaviour as re-deriving the decision each time — instead of going
+// silent after the first failure. If a second workflow agent ever adds its
+// own live-mode injection it shares this latch: first write wins, the rest
+// are skipped.
+type LiveModeToolInjection struct {
+	mu   sync.Mutex
+	done bool
+}
+
+// Do runs inject at most once successfully for the lifetime of the receiver. It
+// serialises concurrent callers, gives the ones that lose the race a
+// happens-before edge to the winner's writes, and — because done is set
+// only after inject returns normally — lets a panic propagate without
+// latching, so a later call retries.
+func (l *LiveModeToolInjection) Do(inject func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return
+	}
+	inject()
+	l.done = true
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
