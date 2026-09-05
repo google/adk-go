@@ -26,10 +26,34 @@ type TriggerConfig struct {
 	MaxDelay time.Duration
 	// MaxConcurrentRuns is the maximum number of concurrent runs.
 	MaxConcurrentRuns int
-	// ExpectedAudience, when non-empty, requires every request to carry a
-	// Google-signed OIDC bearer token whose audience claim equals this value
-	// and whose issuer is Google; requests without one are rejected with 401
-	// before the agent is invoked.
+	// OIDC, when non-nil, requires every request to carry a Google-signed
+	// OIDC bearer token before the agent is invoked. Nil leaves the endpoint
+	// exactly as it behaved before this field existed.
+	//
+	// A pointer to a struct rather than the two settings inline, because a
+	// []string field on TriggerConfig would make it non-comparable and so
+	// stop `cfg1 == cfg2` compiling for downstream callers.
+	//
+	// This endpoint accepts arbitrary attacker-controlled content as agent
+	// input and otherwise has no authentication of its own: on platforms
+	// that don't already gate the endpoint with their own IAM check (or if
+	// that gate is ever misconfigured), leaving this nil means anyone who
+	// can reach the endpoint can trigger arbitrary agent runs.
+	OIDC *OIDCConfig
+}
+
+// OIDCConfig verifies the Google-signed OIDC bearer token that Pub/Sub push
+// subscriptions and Eventarc triggers attach when they are configured with a
+// service account.
+//
+// The controller constructors copy this struct and its slice, so changing
+// either after construction does not change what a running handler enforces.
+type OIDCConfig struct {
+	// ExpectedAudience is the audience claim a token must carry, matched
+	// exactly. Requests without a valid Google-signed token for it are
+	// rejected with 401. Required: a non-nil OIDCConfig with an empty
+	// audience is a configuration error rather than a way to disable
+	// verification, and is rejected by the WithConfig constructors.
 	//
 	// This alone does not identify the caller. idtoken.Validate checks the
 	// Google signature, the expiry and the audience string, and nothing else:
@@ -38,12 +62,6 @@ type TriggerConfig struct {
 	// account of its own can obtain a Google-signed token for this audience.
 	// Set AllowedServiceAccounts to pin the check to the specific identities
 	// your trigger actually delivers as.
-	//
-	// This endpoint accepts arbitrary attacker-controlled content as agent
-	// input and otherwise has no authentication of its own: on platforms
-	// that don't already gate the endpoint with their own IAM check (or if
-	// that gate is ever misconfigured), leaving this unset means anyone who
-	// can reach the endpoint can trigger arbitrary agent runs.
 	ExpectedAudience string
 	// AllowedServiceAccounts, when non-empty, additionally requires the
 	// verified token to carry a verified email claim matching one of these
@@ -51,8 +69,8 @@ type TriggerConfig struct {
 	// or Eventarc trigger was configured with. Requests presenting a valid
 	// but unlisted principal are rejected with 403.
 	//
-	// Requires ExpectedAudience; it is ignored on its own. Tokens minted
-	// without an email claim (getOpenIdToken defaults includeEmail to false)
-	// are rejected, so the subscription must be configured to include it.
+	// Tokens minted without an email claim (getOpenIdToken defaults
+	// includeEmail to false) are rejected, so the subscription must be
+	// configured to include it.
 	AllowedServiceAccounts []string
 }

@@ -140,7 +140,7 @@ func setupTest(t *testing.T, a agent.Agent) *triggers.PubSubController {
 
 // TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured guards against
 // the endpoint accepting unauthenticated requests once an operator has opted
-// in to OIDC verification via ExpectedAudience: without a bearer token at all
+// in to OIDC verification via TriggerConfig.OIDC: without a bearer token at all
 // (the realistic "reachable from the open internet" case) the request must be
 // rejected before the agent is ever invoked.
 func TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T) {
@@ -150,7 +150,7 @@ func TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T) {
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
 	agentLoader := agent.NewSingleLoader(testAgent)
 	config := defaultTriggerConfig
-	config.ExpectedAudience = "https://example-agent.example.com"
+	config.OIDC = &triggers.OIDCConfig{ExpectedAudience: "https://example-agent.example.com"}
 	apiController := triggers.NewPubSubController(sessionService, agentLoader, nil, nil, runner.PluginConfig{}, config)
 
 	reqObj := models.PubSubTriggerRequest{
