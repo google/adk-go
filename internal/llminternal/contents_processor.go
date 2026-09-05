@@ -49,8 +49,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		//
 		// Whether to hide history follows the placement alone — a mode this
 		// invocation bound to THIS agent. An agent that merely declares
-		// single_turn and is then reached by transfer_to_agent keeps the
-		// conversation, because no placement put it where history has to go.
+		// single_turn keeps the conversation when it is run without one, which
+		// in practice means a child a composite agent runs directly rather than
+		// through the node wrapper. Reaching it through the wrapper does not
+		// count: the wrapper binds the mode it resolved, declaration included.
 		// The placement also loses to an explicit IncludeContents: asking
 		// for history beats being placed somewhere that hides it, as in
 		// adk-python, where _llm_agent_wrapper.py gates the same override on
@@ -59,9 +61,15 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// How to shape the turn also honours the declaration, since the
 		// single-turn nudge describes the agent rather than its placement.
 		boundMode, bound := BoundMode(ctx, name)
-		placementHidesHistory := bound && boundMode == ModeSingleTurn && state.IncludeContents == ""
+		// Only "default" opts out of the placement. Testing for "" instead
+		// would let any unrecognised value opt out too, and IncludeContents is
+		// an unvalidated string, so a typo — "None", "defualt" — would hand a
+		// one-shot node the whole transcript. The merge base forced "none" here
+		// and so could not be misconfigured this way.
+		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
+			state.IncludeContents != includeContentsDefault
 		fn := buildContentsDefault // "" or "default".
-		if state.IncludeContents == "none" || placementHidesHistory {
+		if state.IncludeContents == includeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		isSingleTurn := ModeFor(ctx, name, state.Mode) == ModeSingleTurn

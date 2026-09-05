@@ -361,6 +361,59 @@ func TestAgentNode_DeclaredSingleTurnWithExplicitIncludeContents_KeepsHistory(t 
 	}
 }
 
+// IncludeContents is an unvalidated string, so a typo must not be read as an
+// explicit request for history. Only the real IncludeContentsDefault opts out of
+// the placement; anything unrecognised falls back to it, as the merge base did by
+// forcing "none". Getting this wrong hands a one-shot node the whole transcript.
+func TestAgentNode_UnrecognisedIncludeContents_DoesNotDefeatThePlacement(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []llmagent.IncludeContents{"None", "defualt", "DEFAULT"} {
+		t.Run(string(bad), func(t *testing.T) {
+			t.Parallel()
+
+			llm := &capturingLLM{}
+			a, err := llmagent.New(llmagent.Config{
+				Name:            "worker",
+				Model:           llm,
+				IncludeContents: bad,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("NewAgentNode: %v", err)
+			}
+			wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
+			if err != nil {
+				t.Fatalf("workflow.New: %v", err)
+			}
+
+			prior := &session.Event{
+				Author:      "user",
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
+			}
+			for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
+				if err != nil {
+					t.Fatalf("workflow.Run: %v", err)
+				}
+			}
+			if llm.got == nil {
+				t.Fatal("model was never called")
+			}
+			for _, c := range llm.got.Contents {
+				for _, p := range c.Parts {
+					if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+						t.Errorf("IncludeContents=%q defeated the single_turn placement and leaked history; contents = %v",
+							bad, llm.got.Contents)
+					}
+				}
+			}
+		})
+	}
+}
+
 // Config.Name is documented as required but nothing rejects an empty one, and
 // the binding is keyed by name. A nameless agent must still be placed by its
 // node rather than quietly falling back to chat and carrying the whole

@@ -59,6 +59,14 @@ import "context"
 // instructions and the whole conversation with it. Placements nest, so the
 // bindings have to nest too.
 
+// The two values agent/llmagent's IncludeContents constants carry. Duplicated
+// as untyped constants because llminternal cannot import llmagent, which
+// depends on it.
+const (
+	includeContentsNone    = "none"
+	includeContentsDefault = "default"
+)
+
 // ResolveMode returns declared when set, else byPlacement.
 func ResolveMode(declared, byPlacement Mode) Mode {
 	if declared == ModeUnset {
@@ -79,6 +87,14 @@ type boundModeKey struct{ agent string }
 // Binding an agent that already has one shadows it for the rest of that
 // context, which is what a re-entrant placement of the same agent should do.
 // Binding a different agent leaves the first alone.
+//
+// The key is the name alone, so the binding is only as well-scoped as names are
+// unique within one context chain. runner.New rejects a duplicate name anywhere
+// in its agent tree and workflow.New rejects two nodes sharing one, but neither
+// covers a node agent's own descendants, so two distinct same-named agents
+// nested inside one placement would share a slot. Every other name-keyed lookup
+// in the framework — FindAgent, findAgentToRun, transfer targets — has the same
+// precondition.
 //
 // An empty agentName is bound like any other. Config.Name is documented as
 // required and nothing here can supply a missing one, but skipping the binding

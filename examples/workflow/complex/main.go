@@ -196,9 +196,9 @@ func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 	// resilientModel already bounds, retries, and fails open on each call,
 	// so the nodes need no scheduler-level RetryConfig or Timeout.
 	//
-	// Wrapping an LlmAgent in an AgentNode defaults it to single-turn mode,
-	// so the synthesis node consumes the formatter's output instead of the
-	// chat history — which is why it may sit mid-graph rather than at Start.
+	// An LlmAgent that declares no mode runs single-turn at a graph node, so
+	// the synthesis node consumes the formatter's output instead of the chat
+	// history — which is why it may sit mid-graph rather than at Start.
 	renewableNode, err := workflow.NewAgentNode(renewableAgent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("creating renewable node: %w", err)

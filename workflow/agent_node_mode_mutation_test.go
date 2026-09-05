@@ -20,6 +20,7 @@ import (
 	"iter"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/genai"
@@ -228,11 +229,12 @@ func TestNewAgentNode_ConcurrentWrappingIsRaceFree(t *testing.T) {
 
 // raceFreeLLM holds no mutable state, so a race the detector reports under
 // the test below is on the agent, not on the model double.
-type raceFreeLLM struct{}
+type raceFreeLLM struct{ calls atomic.Int64 }
 
 func (*raceFreeLLM) Name() string { return "race-free" }
 
-func (*raceFreeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *raceFreeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls.Add(1)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{Content: &genai.Content{
 			Role:  "model",
@@ -248,12 +250,20 @@ func (*raceFreeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) it
 func TestOneAgentInstance_ConcurrentInvocationsAreRaceFree(t *testing.T) {
 	t.Parallel()
 
-	a, err := llmagent.New(llmagent.Config{Name: "worker", Model: &raceFreeLLM{}})
+	const runs = 16
+
+	llm := &raceFreeLLM{}
+	a, err := llmagent.New(llmagent.Config{Name: "worker", Model: llm})
 	if err != nil {
 		t.Fatalf("llmagent.New: %v", err)
 	}
+	// Both the workflows and the contexts are built here rather than inside the
+	// goroutines: newModeTestCtx calls t.Fatalf, which is only valid on the test
+	// goroutine, and a fixture failure in a worker would otherwise be reported
+	// as something other than a failure.
 	var wfs []*workflow.Workflow
-	for range 16 {
+	var ctxs []agent.Context
+	for range runs {
 		node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
 		if err != nil {
 			t.Fatalf("NewAgentNode: %v", err)
@@ -263,14 +273,15 @@ func TestOneAgentInstance_ConcurrentInvocationsAreRaceFree(t *testing.T) {
 			t.Fatalf("workflow.New: %v", err)
 		}
 		wfs = append(wfs, wf)
+		ctxs = append(ctxs, newModeTestCtx(t, a))
 	}
 
 	var wg sync.WaitGroup
-	for _, wf := range wfs {
+	for i, wf := range wfs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for _, err := range wf.Run(newModeTestCtx(t, a)) {
+			for _, err := range wf.Run(ctxs[i]) {
 				if err != nil {
 					t.Errorf("workflow.Run: %v", err)
 					return
@@ -279,4 +290,10 @@ func TestOneAgentInstance_ConcurrentInvocationsAreRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
+	// Without this the test would stay green if the runs short-circuited before
+	// reaching the contents processor, having opened no race window at all.
+	if got := llm.calls.Load(); got != runs {
+		t.Errorf("model was called %d time(s), want %d — the runs did not reach the code this races", got, runs)
+	}
 }
