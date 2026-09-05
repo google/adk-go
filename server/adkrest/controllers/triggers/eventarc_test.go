@@ -205,7 +205,7 @@ func TestEventarcTriggerHandler(t *testing.T) {
 
 // TestEventarcTriggerHandler_RequiresAuthWhenAudienceConfigured mirrors
 // TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured: once an
-// operator opts in to OIDC verification via ExpectedAudience, a request with
+// operator opts in to OIDC verification via TriggerConfig.OIDC, a request with
 // no bearer token must be rejected before the agent is invoked.
 func TestEventarcTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T) {
 	mockAgentRunCount := 0
@@ -225,7 +225,7 @@ func TestEventarcTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T)
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
 	agentLoader := agent.NewSingleLoader(testAgent)
 	config := defaultTriggerConfig
-	config.ExpectedAudience = "https://example-agent.example.com"
+	config.OIDC = &triggers.OIDCConfig{ExpectedAudience: "https://example-agent.example.com"}
 	controller := triggers.NewEventarcController(sessionService, agentLoader, nil, nil, runner.PluginConfig{}, config)
 
 	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/eventarc", bytes.NewBuffer([]byte(`{}`)))

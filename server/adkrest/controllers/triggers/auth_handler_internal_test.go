@@ -26,12 +26,12 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/api/idtoken"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/api/idtoken"
 )
 
 // These tests drive the exported handlers through a real gorilla/mux router
@@ -61,12 +61,14 @@ func countingAgent(t *testing.T, runs *int) agent.Agent {
 
 func authTestConfig(allowed ...string) TriggerConfig {
 	return TriggerConfig{
-		MaxConcurrentRuns:      10,
-		MaxRetries:             3,
-		BaseDelay:              1 * time.Millisecond,
-		MaxDelay:               5 * time.Millisecond,
-		ExpectedAudience:       testAudience,
-		AllowedServiceAccounts: allowed,
+		MaxConcurrentRuns: 10,
+		MaxRetries:        3,
+		BaseDelay:         1 * time.Millisecond,
+		MaxDelay:          5 * time.Millisecond,
+		OIDC: &OIDCConfig{
+			ExpectedAudience:       testAudience,
+			AllowedServiceAccounts: allowed,
+		},
 	}
 }
 

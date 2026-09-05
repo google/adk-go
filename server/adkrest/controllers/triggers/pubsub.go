@@ -17,6 +17,7 @@ package triggers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"google.golang.org/adk/v2/agent"
@@ -42,17 +43,24 @@ type PubSubController struct {
 // released API and every existing call site still compiles; it is a candidate
 // for removal at the next major version.
 func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *PubSubController {
-	// No compaction, so nothing that can be rejected. The error return exists
-	// for the config form, which can be handed a configuration that cannot
-	// serve the apps behind this controller.
-	c, _ := NewPubSubControllerWithConfig(ControllerConfig{
+	cfg := ControllerConfig{
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
 		MemoryService:   memoryService,
 		ArtifactService: artifactService,
 		PluginConfig:    pluginConfig,
 		TriggerConfig:   triggerConfig,
-	})
+	}
+	c, err := NewPubSubControllerWithConfig(cfg)
+	if err != nil {
+		// No compaction here, so the only reachable rejection is an OIDC
+		// block with no audience. This signature has no error to return and
+		// handing back nil would panic on the first request, so build the
+		// controller anyway: verifyPushRequestAuth fails closed on exactly
+		// that configuration, which is the safe end of it.
+		log.Printf("adk: %v; this trigger controller will reject every request", err)
+		return &PubSubController{runner: newRetriableRunner(cfg)}
+	}
 	return c
 }
 
@@ -64,6 +72,9 @@ func NewPubSubController(sessionService session.Service, agentLoader agent.Loade
 // is released API.
 func NewPubSubControllerWithConfig(cfg ControllerConfig) (*PubSubController, error) {
 	retriable := newRetriableRunner(cfg)
+	if err := retriable.validateOIDC(); err != nil {
+		return nil, err
+	}
 	if err := retriable.validateCompaction(); err != nil {
 		return nil, err
 	}

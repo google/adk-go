@@ -55,14 +55,14 @@ func NewLauncher() web.Sublauncher {
 	fs.DurationVar(&config.triggerBaseDelay, "trigger_base_delay", 1*time.Second, "Base delay for trigger retry exponential backoff")
 	fs.DurationVar(&config.triggerMaxDelay, "trigger_max_delay", 10*time.Second, "Maximum delay for trigger retry exponential backoff")
 	fs.IntVar(&config.triggerMaxRuns, "trigger_max_concurrent_runs", 100, "Maximum concurrent trigger runs")
-	fs.StringVar(&config.oidcAudience, "oidc_audience", "", "Expected audience of the Google-signed OIDC bearer token attached by Pub/Sub push subscriptions. "+
+	fs.StringVar(&config.oidcAudience, "trigger_oidc_audience", "", "Expected audience of the Google-signed OIDC bearer token attached by Pub/Sub push subscriptions. "+
 		"This is whatever the subscription's --push-auth-token-audience was set to, which defaults to the full push endpoint URL. "+
 		"If set, requests without a valid token for this audience are rejected with 401. Verifying the audience alone does not identify the caller: "+
-		"any principal that can mint a Google-signed token for this audience passes it, so set -oidc_service_accounts as well to pin the caller identity. "+
+		"any principal that can mint a Google-signed token for this audience passes it, so set -trigger_oidc_service_accounts as well to pin the caller identity. "+
 		"If unset, this endpoint performs no authentication of its own and relies entirely on the deployment platform (for example Cloud Run configured to "+
 		"require IAM authentication) to restrict who can reach it.")
-	fs.StringVar(&config.oidcSvcAccounts, "oidc_service_accounts", "", "Comma-separated allow-list of service account emails permitted to call this endpoint, "+
-		"matched against the verified token's email claim; other principals are rejected with 403. Requires -oidc_audience. The push subscription's service "+
+	fs.StringVar(&config.oidcSvcAccounts, "trigger_oidc_service_accounts", "", "Comma-separated allow-list of service account emails permitted to call this endpoint, "+
+		"matched against the verified token's email claim; other principals are rejected with 403. Requires -trigger_oidc_audience. The push subscription's service "+
 		"account must be configured to include an email claim in the token.")
 
 	return &pubsubLauncher{
@@ -95,7 +95,7 @@ func (p *pubsubLauncher) Parse(args []string) ([]string, error) {
 		return nil, fmt.Errorf("trigger_max_concurrent_runs must be > 0")
 	}
 	if p.config.oidcSvcAccounts != "" && p.config.oidcAudience == "" {
-		return nil, fmt.Errorf("oidc_service_accounts requires oidc_audience")
+		return nil, fmt.Errorf("trigger_oidc_service_accounts requires trigger_oidc_audience")
 	}
 
 	prefix := p.config.pathPrefix
@@ -119,23 +119,13 @@ func (p *pubsubLauncher) SimpleDescription() string {
 
 // SetupSubrouters adds the PubSub trigger endpoint to the parent router.
 func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
-	triggerConfig := triggers.TriggerConfig{
-		MaxRetries:        p.config.triggerMaxRetries,
-		BaseDelay:         p.config.triggerBaseDelay,
-		MaxDelay:          p.config.triggerMaxDelay,
-		MaxConcurrentRuns: p.config.triggerMaxRuns,
-		ExpectedAudience:  p.config.oidcAudience,
-
-		AllowedServiceAccounts: splitList(p.config.oidcSvcAccounts),
-	}
-
 	controller, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
 		SessionService:  config.SessionService,
 		AgentLoader:     config.AgentLoader,
 		MemoryService:   config.MemoryService,
 		ArtifactService: config.ArtifactService,
 		PluginConfig:    config.PluginConfig,
-		TriggerConfig:   triggerConfig,
+		TriggerConfig:   p.triggerConfig(),
 		Compaction:      config.Compaction,
 	})
 	if err != nil {
@@ -149,6 +139,27 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 
 	subrouter.HandleFunc("/apps/{app_name}/trigger/pubsub", controller.PubSubTriggerHandler).Methods(http.MethodPost)
 	return nil
+}
+
+// triggerConfig builds the controller configuration from the parsed flags.
+//
+// The startup warning below reads the config this returns rather than the flag
+// fields, so a setting that stops being threaded through to the controller
+// also stops being reported as enforced.
+func (p *pubsubLauncher) triggerConfig() triggers.TriggerConfig {
+	cfg := triggers.TriggerConfig{
+		MaxRetries:        p.config.triggerMaxRetries,
+		BaseDelay:         p.config.triggerBaseDelay,
+		MaxDelay:          p.config.triggerMaxDelay,
+		MaxConcurrentRuns: p.config.triggerMaxRuns,
+	}
+	if p.config.oidcAudience != "" {
+		cfg.OIDC = &triggers.OIDCConfig{
+			ExpectedAudience:       p.config.oidcAudience,
+			AllowedServiceAccounts: splitList(p.config.oidcSvcAccounts),
+		}
+	}
+	return cfg
 }
 
 // splitList parses a comma-separated flag value into a trimmed, non-empty slice.
@@ -165,10 +176,11 @@ func splitList(v string) []string {
 // UserMessage implements web.Sublauncher.
 func (p *pubsubLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       pubsub:  PubSub trigger endpoint is available at %s%s/apps/{app_name}/trigger/pubsub", webURL, p.config.pathPrefix))
+	oidc := p.triggerConfig().OIDC
 	switch {
-	case p.config.oidcAudience == "":
-		printer("       pubsub:  WARNING: -oidc_audience is not set; this endpoint accepts unauthenticated requests unless the deployment platform restricts access on its own.")
-	case len(splitList(p.config.oidcSvcAccounts)) == 0:
-		printer("       pubsub:  WARNING: -oidc_service_accounts is not set; any caller holding a Google-signed token for this audience is accepted, not only your subscription's service account.")
+	case oidc == nil:
+		printer("       pubsub:  WARNING: -trigger_oidc_audience is not set; this endpoint accepts unauthenticated requests unless the deployment platform restricts access on its own.")
+	case len(oidc.AllowedServiceAccounts) == 0:
+		printer("       pubsub:  WARNING: -trigger_oidc_service_accounts is not set; any caller holding a Google-signed token for this audience is accepted, not only your subscription's service account.")
 	}
 }
