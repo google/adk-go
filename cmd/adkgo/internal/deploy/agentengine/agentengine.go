@@ -117,27 +117,19 @@ func init() {
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
-			f.source.origEntryPointPath = flags.source.entryPointPath
-			absp, err := filepath.Abs(flags.source.entryPointPath)
+			f.source.origEntryPointPath = f.source.entryPointPath
+			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 
-			if flags.build.tempDir == "" {
-				flags.build.tempDir = os.TempDir()
-			}
-			absp, err = filepath.Abs(flags.build.tempDir)
-			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
-			}
-			f.build.tempDir, err = os.MkdirTemp(absp, "agentEngine_"+time.Now().Format("20060102_150405__")+"*")
-			if err != nil {
-				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
-			}
-			p("Using temp dir:", f.build.tempDir)
-
-			// come up with a executable name based on entry point path
+			// come up with a executable name based on entry point path.
+			// Deriving and checking it happens before the temp dir is created:
+			// everything here can fail, and cleanTemp only runs after a fully
+			// successful deploy, so a rejected value would otherwise leave an
+			// empty agentEngine_<timestamp>_* directory behind. Only execPath
+			// below actually needs the temp dir.
 			dir, file := path.Split(f.source.entryPointPath)
 			f.source.srcBasePath = dir
 			f.source.entryPointPath = file
@@ -147,7 +139,35 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
-				f.build.execPath = path.Join(f.build.tempDir, exec)
+			}
+
+			// Both values are embedded in a Dockerfile RUN (shell-form)
+			// instruction, so they need the stricter shell-safe allowlist,
+			// not just the quote/newline blocklist used where a value only
+			// reaches a non-shell-form context (COPY path, CMD exec array).
+			if err := util.ValidateShellArgSafe(f.build.execFile,
+				fmt.Sprintf("executable name derived from --entry_point_path %q:", f.source.origEntryPointPath)); err != nil {
+				return err
+			}
+			if err := util.ValidateShellArgSafe(f.source.origEntryPointPath, "--entry_point_path"); err != nil {
+				return err
+			}
+
+			if f.build.tempDir == "" {
+				f.build.tempDir = os.TempDir()
+			}
+			absp, err = filepath.Abs(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
+			}
+			f.build.tempDir, err = os.MkdirTemp(absp, "agentEngine_"+time.Now().Format("20060102_150405__")+"*")
+			if err != nil {
+				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
+			}
+			p("Using temp dir:", f.build.tempDir)
+
+			if f.build.execPath == "" {
+				f.build.execPath = path.Join(f.build.tempDir, f.build.execFile)
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
@@ -245,6 +265,10 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 
+			// Every value below is read off the receiver, not off the package
+			// global. computeFlags validates the receiver, so a read of the
+			// global here would let the guard and the line it guards come apart
+			// for any caller that is not the cobra RunE.
 			var b strings.Builder
 			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
 			// GOTOOLCHAIN=auto lets the in-image go command fetch the toolchain
@@ -260,9 +284,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.bui
 FROM gcr.io/distroless/static-debian11
 
 COPY --from=builder /app/` + f.build.execFile + `  /app/` + f.build.execFile + `
-EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
+EXPOSE ` + strconv.Itoa(f.agentEngine.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(f.agentEngine.serverPort) + `"`)
 
 			b.WriteString(`, "agentengine"`)
 
