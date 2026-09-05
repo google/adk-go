@@ -76,6 +76,13 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			yield(nil, fmt.Errorf("RunLLMAgentAsNode: %q is not an LlmAgent", a.Name()))
 			return
 		}
+		// Resolving the mode reads ctx, so a nil one has to be rejected before
+		// that rather than dereferenced. Exported, and the merge base reached
+		// its mode check without touching ctx at all.
+		if ctx == nil {
+			yield(nil, fmt.Errorf("RunLLMAgentAsNode: nil context for LlmAgent %q", a.Name()))
+			return
+		}
 		state := llminternal.Reveal(llmA)
 
 		// A placement binds the mode it resolved for this agent. Without one
@@ -158,10 +165,11 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 // single_turn agent's first turn, and nil for any other agent.
 //
 // Which agents count as single_turn is decided per invocation: the mode ctx
-// bound for a, else a's own declaration. Only the runner and the workflow
-// engine bind one, so a caller outside this module gets a seed for an agent
-// that declares single_turn, and nil for one that leaves the mode to its
-// placement.
+// bound for a, else a's own declaration. Binding is internal — the runner, the
+// workflow engine, and RunLLMAgentAsNode once it has resolved — so an
+// out-of-module caller gets a seed whenever a declares single_turn, and
+// whenever it is called with a ctx from inside a placement that bound it,
+// which a callback or tool running under a graph node holds.
 func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil

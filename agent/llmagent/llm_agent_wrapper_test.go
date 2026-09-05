@@ -695,6 +695,27 @@ func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 	}
 }
 
+// Resolving the mode reads ctx, so an exported entry point has to reject a nil
+// one rather than dereference it. The merge base reached its mode check without
+// touching ctx, so a caller passing nil got an error there and must still.
+func TestRunLLMAgentAsNode_NilContext_Errors(t *testing.T) {
+	t.Parallel()
+	a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+
+	var gotErr error
+	for _, err := range llmagent.RunLLMAgentAsNode(a, nil, nil) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error for a nil context; got nil")
+	}
+	if !strings.Contains(gotErr.Error(), "nil context") {
+		t.Errorf("err = %q, want it to mention a nil context", gotErr.Error())
+	}
+}
+
 // A declared single_turn agent can reach the wrapper with nothing bound for
 // it: runner.findAgentToRun picks such a sub-agent to handle the next turn,
 // and no graph node is involved. The wrapper binds the mode it resolved before
