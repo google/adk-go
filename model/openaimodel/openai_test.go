@@ -1144,10 +1144,9 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 
 	t.Run("an unusable item keeps the call the deltas built", func(t *testing.T) {
 		// Arguments no caller can read lose what arguments the item never
-		// stated lose, and restoreUnstated already answers that by keeping
-		// what streamed. main returns this call too, so failing the turn would
-		// break a stream that works today. Blocking still rejects the same
-		// bytes because they are all it has, not because the rule differs.
+		// stated lose, and restoreUnstated already keeps what streamed for
+		// those. Blocking still rejects these bytes because they are all it
+		// has, not because the rule differs.
 		const badArgs = `{"id":"resp_1","model":"stream-model","status":"completed",` +
 			`"output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{"}]}`
 		got, err := runStream(t, evCreated, evAdded1, evArgs1,
@@ -1305,11 +1304,10 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 	})
 
 	t.Run("the tool's name pairs reordered calls the event does not identify", func(t *testing.T) {
-		// The same reordering with no call ID on either item, which is the
-		// provider shape that leaves the streamed ID unusable to begin with.
-		// Falling through to position would give alpha beta's arguments and
-		// beta alpha's: both tools run, each on input the model wrote for the
-		// other, and nothing surfaces it. The name is on both sides.
+		// The same reordering with no call ID on either item, the provider
+		// shape that leaves the streamed ID unusable to begin with. Position
+		// would give alpha beta's arguments and beta alpha's: both tools run
+		// on input the model wrote for the other, and nothing surfaces it.
 		got, err := runStream(t, evCreated,
 			`{"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"alpha","call_id":"call_1"}}`,
 			`{"type":"response.function_call_arguments.done","item_id":"f1","arguments":"{\"x\":1}"}`,
@@ -1323,6 +1321,30 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		want := []*genai.FunctionCall{
 			{Name: "beta", ID: "call_2", Args: map[string]any{"y": float64(2)}},
 			{Name: "alpha", ID: "call_1", Args: map[string]any{"x": float64(1)}},
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("a call id the names contradict does not pair", func(t *testing.T) {
+		// The event crosses the two calls' IDs, so trusting the ID alone hands
+		// beta alpha's arguments — the same silent swap the name match closes,
+		// reached through the key that was meant to prevent it.
+		got, err := runStream(t, evCreated,
+			`{"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"alpha","call_id":"call_1"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"f1","arguments":"{\"x\":1}"}`,
+			`{"type":"response.output_item.added","item":{"id":"f2","type":"function_call","name":"beta","call_id":"call_2"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"f2","arguments":"{\"y\":2}"}`,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"beta","call_id":"call_1"},`+
+				`{"type":"function_call","name":"alpha","call_id":"call_2"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{
+			{Name: "beta", ID: "call_1", Args: map[string]any{"y": float64(2)}},
+			{Name: "alpha", ID: "call_2", Args: map[string]any{"x": float64(1)}},
 		}
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)

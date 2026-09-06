@@ -280,7 +280,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	// same way whichever branch below reports the call.
 	paired := len(items) == len(streamedCalls)
 	stated := make([]*genai.Part, 0, len(items))
-	lent := make(map[*genai.FunctionCall]bool, len(streamedCalls))
+	lent := make(map[string]bool, len(streamedCalls))
 	for nth, item := range items {
 		streamed := streamedCounterpart(item, nth, streamedCalls, paired)
 		part, err := convertFunctionCall(item)
@@ -296,9 +296,13 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 			// failing a turn the model answered.
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: item.Name, ID: item.CallID}}
 		}
-		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), !lent[streamed])
-		if streamed != nil && part.FunctionCall != nil && part.FunctionCall.ID == streamed.ID {
-			lent[streamed] = true
+		var lendable string
+		if streamed != nil {
+			lendable = streamed.ID
+		}
+		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), !lent[lendable])
+		if call := part.FunctionCall; call != nil && call.ID != "" {
+			lent[call.ID] = true
 		}
 		stated = append(stated, part)
 	}
@@ -336,19 +340,22 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 //
 // What identifies the call is tried before where it sits, because
 // [restoreUnstated] fills arguments from whatever this returns and a wrong
-// pairing does so silently. The call ID is the only identity the two lists
-// share, so it comes first, and it is the only pairing left once the counts
-// differ. The tool's name comes next, when exactly one streamed call bears it:
-// an item carrying no call ID is the same provider shape that leaves the
-// streamed ID unusable, so the first match is absent in precisely the case that
-// needs it. Position is the last resort — alone it would be wrong for an event
-// listing the same calls in another order, pairing each with whichever call
-// happened to stream in its place. Two calls to one tool, reordered and
-// identified by neither, stay out of reach: nothing tells them apart.
+// pairing does so silently:
+//
+//  1. The call ID, the only identity the two lists share and the only pairing
+//     left once the counts differ. A name stated on both sides has to agree
+//     with it, since an ID two tools answer to identifies neither.
+//  2. The tool's name, when exactly one streamed call bears it. An item
+//     carrying no call ID is the same provider shape that leaves the streamed
+//     ID unusable, so the first key is absent in the case that needs it.
+//
+// Position is the last resort, wrong on its own for an event listing the same
+// calls in another order. Two calls to one tool, reordered and identified by
+// neither, stay out of reach: nothing tells them apart.
 func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
 	if item.CallID != "" {
 		for _, call := range streamed {
-			if call.ID == item.CallID {
+			if call.ID == item.CallID && (item.Name == "" || call.Name == "" || call.Name == item.Name) {
 				return call
 			}
 		}
@@ -402,10 +409,11 @@ func eventLeadsWithCall(items []responses.ResponseOutputItemUnion) bool {
 // takes none, and an empty string is the provider saying so poorly. streamed is
 // the call this item restates, as [streamedCounterpart] pairs them, and is nil
 // when the lists offer no way to say which that is: restoring from the wrong
-// one would report arguments the model passed to a different tool. argsUsable
-// is false for an item that stated no arguments and for one whose arguments no
-// caller can read, which lose the same thing. idFree is false once another item
-// has taken this call's ID.
+// one would report arguments the model passed to a different tool.
+//
+// argsUsable is false for an item that stated no arguments and for one whose
+// arguments no caller can read, which lose the same thing; idFree is false once
+// another call has taken this ID.
 func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable, idFree bool) {
 	call := part.FunctionCall
 	if call == nil || streamed == nil {
@@ -423,10 +431,8 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 	if call.ID == "" && idFree {
 		// An item stating no call ID leaves the caller nothing to match the
 		// tool's result back to, and what streamed is the ID the turn already
-		// reported. An item that states one still outranks it, so the event's
-		// own ID is what reaches the wire wherever the provider sends one. It
-		// is lent once: two calls under one ID cannot both be answered, which
-		// is worse than the second having none.
+		// reported. It is lent once, because two calls under one ID cannot
+		// both be answered.
 		call.ID = streamed.ID
 	}
 }
