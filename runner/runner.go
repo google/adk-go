@@ -720,7 +720,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {
@@ -939,7 +942,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {
