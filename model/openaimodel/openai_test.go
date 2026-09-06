@@ -1397,6 +1397,26 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
+	t.Run("one streamed call lends its id to one item only", func(t *testing.T) {
+		// Both items resolve to the same streamed call by name, so restoring
+		// its ID onto each would report two calls under one ID and leave the
+		// runner unable to answer either without answering both.
+		got, err := runStream(t, evCreated, evAdded1, evArgs1,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"get_weather"},`+
+				`{"type":"function_call","name":"get_weather"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{
+			{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}},
+			{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("the event places a call no aggregated turn held", func(t *testing.T) {
 		// A nameless call is dropped in aggregation while the text survives, so
 		// the turn holds no call and no position is a call's. The event's own

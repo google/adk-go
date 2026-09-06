@@ -280,6 +280,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	// same way whichever branch below reports the call.
 	paired := len(items) == len(streamedCalls)
 	stated := make([]*genai.Part, 0, len(items))
+	lent := make(map[*genai.FunctionCall]bool, len(streamedCalls))
 	for nth, item := range items {
 		streamed := streamedCounterpart(item, nth, streamedCalls, paired)
 		part, err := convertFunctionCall(item)
@@ -295,7 +296,10 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 			// failing a turn the model answered.
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: item.Name, ID: item.CallID}}
 		}
-		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid())
+		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), !lent[streamed])
+		if streamed != nil && part.FunctionCall != nil && part.FunctionCall.ID == streamed.ID {
+			lent[streamed] = true
+		}
 		stated = append(stated, part)
 	}
 	if paired {
@@ -400,8 +404,9 @@ func eventLeadsWithCall(items []responses.ResponseOutputItemUnion) bool {
 // when the lists offer no way to say which that is: restoring from the wrong
 // one would report arguments the model passed to a different tool. argsUsable
 // is false for an item that stated no arguments and for one whose arguments no
-// caller can read, which lose the same thing.
-func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable bool) {
+// caller can read, which lose the same thing. idFree is false once another item
+// has taken this call's ID.
+func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable, idFree bool) {
 	call := part.FunctionCall
 	if call == nil || streamed == nil {
 		return
@@ -415,11 +420,13 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable 
 	if call.Name == "" {
 		call.Name = streamed.Name
 	}
-	if call.ID == "" {
+	if call.ID == "" && idFree {
 		// An item stating no call ID leaves the caller nothing to match the
 		// tool's result back to, and what streamed is the ID the turn already
 		// reported. An item that states one still outranks it, so the event's
-		// own ID is what reaches the wire wherever the provider sends one.
+		// own ID is what reaches the wire wherever the provider sends one. It
+		// is lent once: two calls under one ID cannot both be answered, which
+		// is worse than the second having none.
 		call.ID = streamed.ID
 	}
 }
