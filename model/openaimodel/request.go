@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -438,22 +439,39 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseF
 }
 
 func normalizeSchema(schema any) (map[string]any, error) {
-	switch s := schema.(type) {
-	case map[string]any:
-		return s, nil
-	case nil:
+	if schema == nil {
 		return nil, ErrEmptyJSONSchema
-	default:
-		bytes, err := json.Marshal(s)
-		if err != nil {
-			return nil, fmt.Errorf("openai: marshal json schema: %w", err)
-		}
-		var result map[string]any
-		if err := json.Unmarshal(bytes, &result); err != nil {
-			return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
-		}
-		return result, nil
 	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal json schema: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var result map[string]any
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
+	}
+	preserveSchemaNumbers(result)
+	return result, nil
+}
+
+// preserveSchemaNumbers keeps numeric constraints as raw JSON. The OpenAI SDK
+// otherwise serializes json.Number values as strings.
+func preserveSchemaNumbers(val any) any {
+	switch v := val.(type) {
+	case json.Number:
+		return json.RawMessage(v.String())
+	case map[string]any:
+		for key, child := range v {
+			v[key] = preserveSchemaNumbers(child)
+		}
+	case []any:
+		for i, child := range v {
+			v[i] = preserveSchemaNumbers(child)
+		}
+	}
+	return val
 }
 
 // enforceStrictOpenAISchema recursively walks the schema and enforces the rules
