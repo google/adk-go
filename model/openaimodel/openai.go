@@ -287,6 +287,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 			lent[item.CallID] = true
 		}
 	}
+	restored := make(map[*genai.FunctionCall]bool, len(streamedCalls))
 	for nth, item := range items {
 		streamed := streamedCounterpart(item, nth, streamedCalls, paired)
 		part, err := convertFunctionCall(item)
@@ -302,10 +303,20 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 			// failing a turn the model answered.
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: item.Name, ID: item.CallID}}
 		}
+		if restored[streamed] {
+			// A streamed call restores onto one call: which of two items
+			// naming one tool the model wrote the arguments for is unknowable,
+			// and handing them to both dispatches the tool twice on input
+			// meant once.
+			streamed = nil
+		}
 		idFree := streamed != nil && streamed.ID != "" && !lent[streamed.ID]
 		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), idFree)
-		if idFree && part.FunctionCall.ID == streamed.ID {
-			lent[streamed.ID] = true
+		if streamed != nil {
+			restored[streamed] = true
+			if idFree && part.FunctionCall.ID == streamed.ID {
+				lent[streamed.ID] = true
+			}
 		}
 		stated = append(stated, part)
 	}
@@ -429,10 +440,10 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 		return
 	}
 	if !argsUsable && len(streamed.Args) > 0 {
-		// Copied because two items naming one tool restate the same streamed
-		// call, and a caller editing one call's arguments — as
-		// [plugin/functioncallmodifier] does — must not edit the other's.
-		call.Args = cloneArgs(streamed.Args)
+		// Handed over rather than copied: the caller in adoptTerminalCalls
+		// restores each streamed call onto one call only, so no two calls
+		// reach a consumer sharing this map.
+		call.Args = streamed.Args
 	}
 	if call.Name == "" {
 		call.Name = streamed.Name
@@ -443,34 +454,6 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 		// reported. It is lent once, because two calls under one ID cannot
 		// both be answered.
 		call.ID = streamed.ID
-	}
-}
-
-// cloneArgs deep-copies decoded call arguments, so that two calls restating one
-// streamed call share no structure a caller could edit through.
-//
-// The containers [encoding/json] builds are the only ones reachable here, and
-// every other value it decodes to is immutable.
-func cloneArgs(args map[string]any) map[string]any {
-	out := make(map[string]any, len(args))
-	for k, v := range args {
-		out[k] = cloneArgValue(v)
-	}
-	return out
-}
-
-func cloneArgValue(v any) any {
-	switch v := v.(type) {
-	case map[string]any:
-		return cloneArgs(v)
-	case []any:
-		out := make([]any, len(v))
-		for i, e := range v {
-			out[i] = cloneArgValue(e)
-		}
-		return out
-	default:
-		return v
 	}
 }
 

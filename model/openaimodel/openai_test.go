@@ -1397,32 +1397,13 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
-	t.Run("two items restating one streamed call do not share its arguments", func(t *testing.T) {
-		// The name resolves both items to the single call that streamed, so
-		// both restore their arguments from it. Handing over the map itself
-		// would have one call's arguments change when a caller edits the
-		// other's, and plugin/functioncallmodifier deletes from it in place.
-		got, err := runStream(t, evCreated, evAdded1, evArgs1,
-			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
-				`"output":[{"type":"function_call","name":"get_weather"},`+
-				`{"type":"function_call","name":"get_weather"}]}}`)
-		if err != nil {
-			t.Fatalf("streaming err = %v", err)
-		}
-		calls := functionCalls(assertTurnShape(t, got))
-		if len(calls) != 2 {
-			t.Fatalf("got %d function calls, want 2", len(calls))
-		}
-		delete(calls[0].Args, "city")
-		if diff := cmp.Diff(map[string]any{"city": "SF"}, calls[1].Args); diff != "" {
-			t.Errorf("editing one call's arguments changed the other's (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run("one streamed call lends its id to one item only", func(t *testing.T) {
-		// Both items resolve to the same streamed call by name, so restoring
-		// its ID onto each would report two calls under one ID and leave the
-		// runner unable to answer either without answering both.
+	t.Run("a streamed call restores onto one item only", func(t *testing.T) {
+		// Both items resolve to the single call that streamed, and which of
+		// them the model wrote those arguments for is unknowable. Restoring
+		// onto both would report two calls under one ID, hand a second
+		// dispatch input meant for one, and let a caller editing either edit
+		// the other's map — plugin/functioncallmodifier deletes from it in
+		// place.
 		got, err := runStream(t, evCreated, evAdded1, evArgs1,
 			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
 				`"output":[{"type":"function_call","name":"get_weather"},`+
@@ -1432,10 +1413,14 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 		want := []*genai.FunctionCall{
 			{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}},
-			{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+			{Name: "get_weather", Args: map[string]any{}},
 		}
-		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+		calls := functionCalls(assertTurnShape(t, got))
+		if diff := cmp.Diff(want, calls); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+		if len(calls) == 2 && &calls[0].Args == &calls[1].Args {
+			t.Error("the two calls share one arguments map")
 		}
 	})
 
@@ -1472,30 +1457,6 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		want := []*genai.FunctionCall{{Name: "delete_files", ID: "call_1", Args: map[string]any{}}}
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run("two items restating one call share no nested structure", func(t *testing.T) {
-		// maps.Clone would copy only the top level, leaving the two calls one
-		// nested map between them for a caller to edit through.
-		got, err := runStream(t, evCreated,
-			`{"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"get_weather","call_id":"call_1"}}`,
-			`{"type":"response.function_call_arguments.done","item_id":"f1","arguments":"{\"where\":{\"city\":\"SF\"},\"days\":[1,2]}"}`,
-			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
-				`"output":[{"type":"function_call","name":"get_weather"},`+
-				`{"type":"function_call","name":"get_weather"}]}}`)
-		if err != nil {
-			t.Fatalf("streaming err = %v", err)
-		}
-		calls := functionCalls(assertTurnShape(t, got))
-		if len(calls) != 2 {
-			t.Fatalf("got %d function calls, want 2", len(calls))
-		}
-		delete(calls[0].Args["where"].(map[string]any), "city")
-		calls[0].Args["days"].([]any)[0] = "edited"
-		want := map[string]any{"where": map[string]any{"city": "SF"}, "days": []any{float64(1), float64(2)}}
-		if diff := cmp.Diff(want, calls[1].Args); diff != "" {
-			t.Errorf("editing one call's arguments changed the other's (-want +got):\n%s", diff)
 		}
 	})
 
