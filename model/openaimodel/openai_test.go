@@ -1439,6 +1439,66 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
+	t.Run("an id another item claims is not lent away", func(t *testing.T) {
+		// The second item states call_1 for itself, so lending it to the first
+		// would report two calls under it — the collision the lend guards
+		// against, reached in the other order.
+		got, err := runStream(t, evCreated, evAdded1, evArgs1,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"get_weather"},`+
+				`{"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{\"q\":\"x\"}"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{
+			{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+			{Name: "lookup", ID: "call_1", Args: map[string]any{"q": "x"}},
+		}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("position does not hand one tool another's arguments", func(t *testing.T) {
+		// The item sits where get_weather streamed and states no arguments, so
+		// position alone would dispatch a different tool on the input the model
+		// wrote for that one.
+		got, err := runStream(t, evCreated, evAdded1, evArgs1,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"delete_files","call_id":"call_1"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{{Name: "delete_files", ID: "call_1", Args: map[string]any{}}}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("two items restating one call share no nested structure", func(t *testing.T) {
+		// maps.Clone would copy only the top level, leaving the two calls one
+		// nested map between them for a caller to edit through.
+		got, err := runStream(t, evCreated,
+			`{"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"get_weather","call_id":"call_1"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"f1","arguments":"{\"where\":{\"city\":\"SF\"},\"days\":[1,2]}"}`,
+			`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed",`+
+				`"output":[{"type":"function_call","name":"get_weather"},`+
+				`{"type":"function_call","name":"get_weather"}]}}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		calls := functionCalls(assertTurnShape(t, got))
+		if len(calls) != 2 {
+			t.Fatalf("got %d function calls, want 2", len(calls))
+		}
+		delete(calls[0].Args["where"].(map[string]any), "city")
+		calls[0].Args["days"].([]any)[0] = "edited"
+		want := map[string]any{"where": map[string]any{"city": "SF"}, "days": []any{float64(1), float64(2)}}
+		if diff := cmp.Diff(want, calls[1].Args); diff != "" {
+			t.Errorf("editing one call's arguments changed the other's (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("the event places a call no aggregated turn held", func(t *testing.T) {
 		// A nameless call is dropped in aggregation while the text survives, so
 		// the turn holds no call and no position is a call's. The event's own

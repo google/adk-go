@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"maps"
 	"net/http"
 	"strings"
 
@@ -280,7 +279,14 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	// same way whichever branch below reports the call.
 	paired := len(items) == len(streamedCalls)
 	stated := make([]*genai.Part, 0, len(items))
-	lent := make(map[string]bool, len(streamedCalls))
+	// Seeded with every ID the event states, so lending one cannot collide with
+	// an ID a later item claims for itself.
+	lent := make(map[string]bool, len(items))
+	for _, item := range items {
+		if item.CallID != "" {
+			lent[item.CallID] = true
+		}
+	}
 	for nth, item := range items {
 		streamed := streamedCounterpart(item, nth, streamedCalls, paired)
 		part, err := convertFunctionCall(item)
@@ -296,13 +302,10 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 			// failing a turn the model answered.
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: item.Name, ID: item.CallID}}
 		}
-		var lendable string
-		if streamed != nil {
-			lendable = streamed.ID
-		}
-		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), !lent[lendable])
-		if call := part.FunctionCall; call != nil && call.ID != "" {
-			lent[call.ID] = true
+		idFree := streamed != nil && streamed.ID != "" && !lent[streamed.ID]
+		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid(), idFree)
+		if idFree && part.FunctionCall.ID == streamed.ID {
+			lent[streamed.ID] = true
 		}
 		stated = append(stated, part)
 	}
@@ -342,20 +345,20 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 // [restoreUnstated] fills arguments from whatever this returns and a wrong
 // pairing does so silently:
 //
-//  1. The call ID, the only identity the two lists share and the only pairing
-//     left once the counts differ. A name stated on both sides has to agree
-//     with it, since an ID two tools answer to identifies neither.
-//  2. The tool's name, when exactly one streamed call bears it. An item
-//     carrying no call ID is the same provider shape that leaves the streamed
-//     ID unusable, so the first key is absent in the case that needs it.
+//  1. The call ID, the only identity both lists share, and the only pairing
+//     left once the counts differ.
+//  2. The tool's name, when exactly one streamed call bears it — the key for
+//     an item whose missing call ID leaves the first one unusable.
+//  3. Position, wrong on its own for an event listing the same calls in
+//     another order.
 //
-// Position is the last resort, wrong on its own for an event listing the same
-// calls in another order. Two calls to one tool, reordered and identified by
-// neither, stay out of reach: nothing tells them apart.
+// [namesAgree] gates every tier, so arguments never cross from one tool to
+// another. Two calls to one tool, reordered and identified by neither, stay out
+// of reach: nothing tells them apart.
 func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
 	if item.CallID != "" {
 		for _, call := range streamed {
-			if call.ID == item.CallID && (item.Name == "" || call.Name == "" || call.Name == item.Name) {
+			if call.ID == item.CallID && namesAgree(item, call) {
 				return call
 			}
 		}
@@ -377,10 +380,16 @@ func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, stream
 			return named
 		}
 	}
-	if paired && nth < len(streamed) {
+	if paired && nth < len(streamed) && namesAgree(item, streamed[nth]) {
 		return streamed[nth]
 	}
 	return nil
+}
+
+// namesAgree reports whether a terminal item and a streamed call name the same
+// tool, counting a name either side leaves out as no disagreement.
+func namesAgree(item responses.ResponseOutputItemUnion, call *genai.FunctionCall) bool {
+	return item.Name == "" || call.Name == "" || call.Name == item.Name
 }
 
 // eventLeadsWithCall reports whether the terminal event states a function call
@@ -420,10 +429,10 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 		return
 	}
 	if !argsUsable && len(streamed.Args) > 0 {
-		// Cloned because two items naming one tool restate the same streamed
+		// Copied because two items naming one tool restate the same streamed
 		// call, and a caller editing one call's arguments — as
 		// [plugin/functioncallmodifier] does — must not edit the other's.
-		call.Args = maps.Clone(streamed.Args)
+		call.Args = cloneArgs(streamed.Args)
 	}
 	if call.Name == "" {
 		call.Name = streamed.Name
@@ -434,6 +443,34 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 		// reported. It is lent once, because two calls under one ID cannot
 		// both be answered.
 		call.ID = streamed.ID
+	}
+}
+
+// cloneArgs deep-copies decoded call arguments, so that two calls restating one
+// streamed call share no structure a caller could edit through.
+//
+// The containers [encoding/json] builds are the only ones reachable here, and
+// every other value it decodes to is immutable.
+func cloneArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArgValue(v)
+	}
+	return out
+}
+
+func cloneArgValue(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		return cloneArgs(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = cloneArgValue(e)
+		}
+		return out
+	default:
+		return v
 	}
 }
 
