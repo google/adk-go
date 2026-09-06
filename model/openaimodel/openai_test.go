@@ -1142,13 +1142,35 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		}
 	})
 
-	t.Run("an unusable item fails the turn even beside the call it restates", func(t *testing.T) {
-		// Taking the event's list converts every item, so a payload blocking
-		// rejects is not excused by the deltas having built the same call
-		// usably. Falling back to the streamed copy would report a turn
-		// blocking fails, for the same bytes.
+	t.Run("an unusable item keeps the call the deltas built", func(t *testing.T) {
+		// Arguments no caller can read lose what arguments the item never
+		// stated lose, and restoreUnstated already answers that by keeping
+		// what streamed. main returns this call too, so failing the turn would
+		// break a stream that works today. Blocking still rejects the same
+		// bytes because they are all it has, not because the rule differs.
 		const badArgs = `{"id":"resp_1","model":"stream-model","status":"completed",` +
 			`"output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{"}]}`
+		got, err := runStream(t, evCreated, evAdded1, evArgs1,
+			`{"type":"response.completed","response":`+badArgs+`}`)
+		if err != nil {
+			t.Fatalf("streaming err = %v", err)
+		}
+		want := []*genai.FunctionCall{{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}}}
+		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
+			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
+		}
+		if _, err := runBlocking(t, badArgs); !errors.Is(err, ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, ErrFunctionCallArgs)
+		}
+	})
+
+	t.Run("an unusable item no delta restates fails the turn", func(t *testing.T) {
+		// Nothing pairs it, so there is no readable copy to keep and reporting
+		// the call would dispatch the tool with arguments the model did not
+		// write. The usable call beside it is what leaves the lists unpairable.
+		const badArgs = `{"id":"resp_1","model":"stream-model","status":"completed",` +
+			`"output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"},` +
+			`{"type":"function_call","name":"lookup","call_id":"call_9","arguments":"{"}]}`
 		if _, err := runStream(t, evCreated, evAdded1, evArgs1,
 			`{"type":"response.completed","response":`+badArgs+`}`); !errors.Is(err, ErrFunctionCallArgs) {
 			t.Errorf("streaming err = %v, want %v", err, ErrFunctionCallArgs)

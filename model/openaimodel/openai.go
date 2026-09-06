@@ -281,13 +281,21 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	paired := len(items) == len(streamedCalls)
 	stated := make([]*genai.Part, 0, len(items))
 	for nth, item := range items {
+		streamed := streamedCounterpart(item, nth, streamedCalls, paired)
 		part, err := convertFunctionCall(item)
 		if err != nil {
-			// Blocking rejects the same body; fail rather than report a call
-			// the provider stated unusably.
-			return err
+			if streamed == nil {
+				// Nothing else states this call, so it is as unusable here as
+				// it is to blocking, which rejects the same body.
+				return err
+			}
+			// Arguments stated but unparseable lose the same thing arguments
+			// left unstated lose, and the deltas built this call usably: the
+			// two are one failure and take the fallback below, rather than
+			// failing a turn the model answered.
+			part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: item.Name, ID: item.CallID}}
 		}
-		restoreUnstated(part, item, streamedCounterpart(item, nth, streamedCalls, paired))
+		restoreUnstated(part, streamed, err == nil && item.JSON.Arguments.Valid())
 		stated = append(stated, part)
 	}
 	if paired {
@@ -390,13 +398,15 @@ func eventLeadsWithCall(items []responses.ResponseOutputItemUnion) bool {
 // takes none, and an empty string is the provider saying so poorly. streamed is
 // the call this item restates, as [streamedCounterpart] pairs them, and is nil
 // when the lists offer no way to say which that is: restoring from the wrong
-// one would report arguments the model passed to a different tool.
-func restoreUnstated(part *genai.Part, item responses.ResponseOutputItemUnion, streamed *genai.FunctionCall) {
+// one would report arguments the model passed to a different tool. argsUsable
+// is false for an item that stated no arguments and for one whose arguments no
+// caller can read, which lose the same thing.
+func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable bool) {
 	call := part.FunctionCall
 	if call == nil || streamed == nil {
 		return
 	}
-	if !item.JSON.Arguments.Valid() && len(streamed.Args) > 0 {
+	if !argsUsable && len(streamed.Args) > 0 {
 		// Cloned because two items naming one tool restate the same streamed
 		// call, and a caller editing one call's arguments — as
 		// [plugin/functioncallmodifier] does — must not edit the other's.
