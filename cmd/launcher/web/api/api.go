@@ -228,7 +228,12 @@ func (w *redirectRewriter) Unwrap() http.ResponseWriter { return w.ResponseWrite
 func (w *redirectRewriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h, ok := w.ResponseWriter.(http.Hijacker)
 	if !ok {
-		return nil, nil, fmt.Errorf("redirectRewriter: underlying %T is not an http.Hijacker", w.ResponseWriter)
+		// Wrapping the sentinel keeps errors.Is(err, http.ErrNotSupported)
+		// true. http.ResponseController finds this method before it follows
+		// Unwrap, so without the wrap this type would silently change that
+		// answer from true to false for everything underneath it.
+		return nil, nil, fmt.Errorf("redirectRewriter: underlying %T is not an http.Hijacker: %w",
+			w.ResponseWriter, http.ErrNotSupported)
 	}
 	return h.Hijack()
 }
