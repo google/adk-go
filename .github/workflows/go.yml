@@ -83,12 +83,29 @@ jobs:
     - name: Initialize workspace
       run: go work init && go work use -r .
     
+    # Install separately so failures include the full Go output.
+    - name: Install golangci-lint
+      env:
+        CGO_ENABLED: "1"
+        GOBIN: ${{ runner.temp }}/golangci-lint/bin
+      run: |
+        for attempt in 1 2 3; do
+          if go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@5256574b81bcedfbcae9099f745f6aee9335da10; then # v2.3.1
+            echo "$GOBIN" >> "$GITHUB_PATH"
+            exit 0
+          fi
+          if [ "$attempt" -lt 3 ]; then
+            echo "::warning::golangci-lint installation attempt $attempt failed; retrying in 5 seconds"
+            sleep 5
+          fi
+        done
+        exit 1
+
     - name: Lint
       uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
       with:
         working-directory: ${{ matrix.module }}
-        install-mode: goinstall
-        version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1
+        install-mode: none
         # golangci-lint's analysis cache stores the facts analyzers derive about
         # dependencies, and its key does not track the toolchain. Restoring one
         # written by an older Go leaves staticcheck without the runtime.Goexit
