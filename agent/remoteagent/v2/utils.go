@@ -140,6 +140,15 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 
 	payloadParts := make([]*genai.Part, 0, len(agentEvent.Content.Parts))
 	for _, part := range agentEvent.Content.Parts {
+		// Hoisted to the top of the loop for the same reason as
+		// ConvertForeignEvent's equivalent check (contents_processor.go):
+		// a nil element would otherwise panic at part.Thought below,
+		// before any nil check placed later could fire. Pre-existing on
+		// the merge-base, not introduced here; fixed at no extra cost
+		// rather than left as a check that reads safe but isn't.
+		if part == nil {
+			continue
+		}
 		if part.Thought {
 			continue
 		}
@@ -178,7 +187,10 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 			// look satisfied by a part carrying nothing at all, stranding
 			// the preamble below in front of an empty payload once such a
 			// part is later dropped by any downstream emptiness filter.
-			if part == nil || reflect.ValueOf(*part).IsZero() {
+			// part == nil is not checked here: it's handled by the
+			// hoisted check at the top of the loop. Only the zero-value
+			// case remains here.
+			if reflect.ValueOf(*part).IsZero() {
 				continue
 			}
 			payloadParts = append(payloadParts, part)

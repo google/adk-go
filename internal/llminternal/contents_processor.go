@@ -573,6 +573,18 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 
 	var payloadParts []*genai.Part
 	for _, p := range content.Parts {
+		// Hoisted to the top of the loop rather than left in the default
+		// case below: a nil element in content.Parts would otherwise
+		// panic at the case p.Text != "" dereference above, before ever
+		// reaching a nil check placed later in the switch. This is a
+		// pre-existing panic (reproduces identically on the merge-base,
+		// at its own equivalent line), not something this fencing work
+		// introduced -- but a nil check that cannot fire reads as
+		// nil-safety this function doesn't actually have, so it is fixed
+		// here at no extra cost rather than left misleading.
+		if p == nil {
+			continue
+		}
 		switch {
 		case p.Text != "":
 			payloadParts = append(payloadParts, &genai.Part{
@@ -638,7 +650,10 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			// below has already been committed to, which would otherwise
 			// strand a ~400-character preamble announcing a fenced
 			// transcript in front of nothing at all.
-			if p == nil || reflect.ValueOf(*p).IsZero() {
+			// p == nil is not checked here: it's handled by the hoisted
+			// check at the top of the loop, before this switch is ever
+			// reached. Only the zero-value case remains here.
+			if reflect.ValueOf(*p).IsZero() {
 				continue
 			}
 			payloadParts = append(payloadParts, p)

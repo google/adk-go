@@ -101,29 +101,44 @@ func TestElideQuoteMarkers(t *testing.T) {
 		}
 	})
 
-	t.Run("does not reassemble a begin marker across the two replacement passes", func(t *testing.T) {
-		// Different from the case directly above, which straddles a begin
-		// marker with begin-marker halves -- that shape is handled
-		// entirely by whichever single pass replaces QuotedContentBegin,
-		// so it cannot tell an ordering bug apart from a correct
-		// implementation. This one straddles an END marker with
-		// BEGIN-marker halves: if ElideQuoteMarkers replaces
-		// QuotedContentEnd first and QuotedContentBegin second (or vice
-		// versa) without rescanning, the question is whether the first
-		// pass's own output -- specifically, the begin-marker halves left
-		// adjacent once the end marker between them is gone -- gets
-		// handled correctly by the second pass rather than being missed
-		// or double-handled. With a non-empty sentinel the halves never
-		// actually become adjacent, so this passes today, but it is the
-		// one case that would notice if the two passes' interaction ever
-		// stopped being safe.
+	t.Run("begin-marker halves straddling an end marker", func(t *testing.T) {
+		// Correction from an earlier round: this was originally written
+		// (and named) as a cross-replacement-pass ordering test, on the
+		// claim that it would notice if ElideQuoteMarkers's two passes
+		// stopped interacting safely. That claim doesn't hold: with the
+		// real, non-empty sentinel, replacing end-then-begin and
+		// begin-then-end both collapse this exact input to the identical
+		// string "<<<BEGIN_QUOTED_AG<<<ELIDED_MARKER>>>ENT_CONTENT>>>" --
+		// neither order leaves the begin-marker halves adjacent to each
+		// other at any point, since the end marker sitting between them
+		// gets replaced as a whole regardless of which pass runs first.
+		// The only mutant this case actually kills is an empty sentinel,
+		// which the two straddling cases above it already kill. Kept
+		// anyway: it's still a distinct input shape worth pinning, it
+		// just isn't the ordering test it was described as.
 		straddling := "<<<BEGIN_QUOTED_AG" + llminternal.QuotedContentEnd + "ENT_CONTENT>>>"
 		got := llminternal.ElideQuoteMarkers(straddling)
 		if strings.Contains(got, llminternal.QuotedContentBegin) {
-			t.Errorf("elision reassembled a live begin marker across the two replacement passes: %q", got)
+			t.Errorf("elision reassembled a live begin marker from this straddling string: %q", got)
 		}
 		if strings.Contains(got, llminternal.QuotedContentEnd) {
-			t.Errorf("elision reassembled a live end marker across the two replacement passes: %q", got)
+			t.Errorf("elision reassembled a live end marker from this straddling string: %q", got)
+		}
+	})
+
+	t.Run("end-marker halves straddling a begin marker", func(t *testing.T) {
+		// Symmetric to the case above (begin-marker halves straddling an
+		// end marker): swaps which marker is split and which is whole.
+		// Confirmed to hold with the real sentinel; added for the same
+		// reason as its sibling, coverage of a distinct input shape
+		// rather than a claim about pass ordering.
+		straddling := "<<<END_QUOTED_AG" + llminternal.QuotedContentBegin + "ENT_CONTENT>>>"
+		got := llminternal.ElideQuoteMarkers(straddling)
+		if strings.Contains(got, llminternal.QuotedContentBegin) {
+			t.Errorf("elision reassembled a live begin marker from this straddling string: %q", got)
+		}
+		if strings.Contains(got, llminternal.QuotedContentEnd) {
+			t.Errorf("elision reassembled a live end marker from this straddling string: %q", got)
 		}
 	})
 
