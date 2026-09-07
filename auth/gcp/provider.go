@@ -347,19 +347,6 @@ func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retriev
 	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
 }
 
-// attribute names the resource a retrieval failure belongs to: several providers
-// can be wired into one process, and an unattributed error says nothing about
-// which.
-//
-// It names nothing else. This error becomes the tool's error, which is fed to
-// the model and persisted in the session, and every id available here is
-// supplied by the caller — a user id is commonly an email, and a session id
-// arrives unvalidated from the request path. The invocation is already
-// identified by the trace and the session the error is stored in.
-func (p *provider) attribute(err error) error {
-	return fmt.Errorf("gcp: resource %q: %w", p.scheme.Name, err)
-}
-
 // resolveClient returns the configured client, building a default one (backed by
 // Application Default Credentials) on first use.
 //
