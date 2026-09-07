@@ -48,12 +48,16 @@ func TestServerHealth(t *testing.T) {
 	}
 }
 
-// debugRoutes are every route owned by the debug API router, including the
-// event graph route, whose path does not contain "debug".
+// debugRoutes are every route the IncludeDebugAPI gate covers, including the
+// event graph route, whose path does not contain "debug", and the agent-graph
+// routes, which disclose the agent tree and every tool name through the DOT
+// source they return.
 var debugRoutes = []string{
 	"/debug/trace/evt1",
 	"/debug/trace/session/sess1",
 	"/apps/app1/users/user1/sessions/sess1/events/evt1/graph",
+	"/dev/apps/app1/build_graph",
+	"/dev/apps/app1/build_graph_image",
 }
 
 // muxNotFound is what gorilla/mux writes when no route matches. A registered
@@ -71,9 +75,16 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 		{name: "included when opted in", include: true, wantRouted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A real agent, because the gated routes now include the agent
+			// graph, which loads one. agent.NewSingleLoader(nil) panics inside
+			// LoadAgent rather than returning an error.
+			rootAgent, err := agent.New(agent.Config{Name: "app1", Description: "root agent"})
+			if err != nil {
+				t.Fatalf("agent.New() failed: %v", err)
+			}
 			srv, err := NewServer(ServerConfig{
 				SessionService: session.InMemoryService(),
-				AgentLoader:    agent.NewSingleLoader(nil),
+				AgentLoader:    agent.NewSingleLoader(rootAgent),
 				DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: tc.include},
 			})
 			if err != nil {
