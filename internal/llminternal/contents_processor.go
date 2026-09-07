@@ -576,12 +576,19 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		// Hoisted to the top of the loop rather than left in the default
 		// case below: a nil element in content.Parts would otherwise
 		// panic at the case p.Text != "" dereference above, before ever
-		// reaching a nil check placed later in the switch. This is a
-		// pre-existing panic (reproduces identically on the merge-base,
-		// at its own equivalent line), not something this fencing work
-		// introduced -- but a nil check that cannot fire reads as
-		// nil-safety this function doesn't actually have, so it is fixed
-		// here at no extra cost rather than left misleading.
+		// reaching a nil check placed later in the switch.
+		//
+		// On its own this check did not actually fire on the in-process
+		// path: buildContentsDefault calls shouldExcludeEvent ahead of
+		// this function in the same pipeline, and that function
+		// dereferenced a part with no nil check of its own, panicking one
+		// frame earlier -- reproduced directly. shouldExcludeEvent is now
+		// fixed the same way, which is what makes this check load-bearing
+		// rather than merely reassuring: with both fixed, nothing between
+		// the caller and here dereferences a part unguarded. Both were
+		// pre-existing panics (reproduce identically on the merge-base at
+		// their own equivalent lines), not introduced by this fencing
+		// work, fixed here at no extra cost rather than left half-done.
 		if p == nil {
 			continue
 		}
@@ -627,18 +634,23 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			// exactly the channel that preamble just named authoritative,
 			// with no attribution line in front of it to mark it as
 			// relayed rather than the user's own. Concretely: a peer can
-			// put a literal marker into a FileData blob (built from
-			// peer-supplied bytes with no escaping) or into a
-			// CodeExecutionResult's Output (JSON-decoded from a peer's
-			// DataPart), and it survives this function intact. Whether a
+			// put a literal marker into a CodeExecutionResult's Output
+			// (JSON-decoded from a peer's DataPart, a plain string with
+			// no further encoding), and it survives this function intact.
+			// FileData and InlineData don't demonstrate the same point:
+			// FileData carries a URI and MIME type, not peer-supplied
+			// bytes, and InlineData.Data travels base64-encoded, so a
+			// marker embedded in either does not arrive as a literal one
+			// -- they're still relayed unfenced by this branch, just not
+			// a case where a literal marker is the concern. Whether a
 			// model actually honors a marker embedded in a
-			// text/plain inlineData blob or a CodeExecutionResult -- as
-			// opposed to a marker that reaches it via the Text fields
-			// QuoteUntrusted governs above -- is not measured here. This
-			// is a limitation of the port, unchanged from the merge-base,
-			// not introduced by this fencing work; noted so a future
-			// reader deciding whether to extend fencing to these part
-			// kinds has the actual gap in front of them.
+			// CodeExecutionResult's Output -- as opposed to one that
+			// reaches it via the Text fields QuoteUntrusted governs
+			// above -- is not measured here. This is a limitation of the
+			// port, unchanged from the merge-base, not introduced by this
+			// fencing work; noted so a future reader deciding whether to
+			// extend fencing to these part kinds has the actual gap in
+			// front of them.
 			//
 			// A part that is itself the zero value (e.g. an empty
 			// streaming-tail part) is skipped rather than relayed: it
@@ -703,6 +715,17 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		return false
 	}
 	for _, p := range c.Parts {
+		// buildContentsDefault calls this function ahead of
+		// ConvertForeignEvent in the same pipeline (contents_processor.go),
+		// so a nil part here panics before ConvertForeignEvent's own,
+		// separately-hoisted nil check ever gets a chance to run --
+		// confirmed by reproducing the panic. Guarding it here is what
+		// actually closes the pre-existing panic end to end; the check in
+		// ConvertForeignEvent alone was not enough, since this function
+		// runs first.
+		if p == nil {
+			continue
+		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:

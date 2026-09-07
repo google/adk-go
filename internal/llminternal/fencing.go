@@ -29,10 +29,15 @@ import "strings"
 // class: a model can still be talked round by text it was told to distrust.
 // What it removes is the structural ambiguity.
 //
-// Ported from adk-python's flows/llm_flows/_fencing.py. The names here are
-// exported despite the package being internal: the content-processor tests
-// and any future conformance harness need to spell the expected framing,
-// and neither should have to duplicate it.
+// Ported from adk-python's flows/llm_flows/_fencing.py. QuotedContentBegin
+// and QuotedContentEnd are exported despite the package being internal
+// because they are genuinely test-only: the content-processor tests and
+// any future conformance harness need to spell the expected framing, and
+// neither should have to duplicate it. QuoteUntrusted, ElideQuoteMarkers,
+// and OtherAgentContextPreamble are exported for a different reason --
+// they are called from production code in agent/remoteagent/v2/utils.go,
+// not only from tests -- so unexporting them as test-only on the strength
+// of this paragraph would break that package.
 
 const (
 	QuotedContentBegin  = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
@@ -50,11 +55,16 @@ const (
 // 2) can still relay 5 foreign-authored events into one assembled
 // request if several land in the same hop, for 5 copies of this preamble
 // rather than the 2 "transfer depth" alone would suggest. (Not cited
-// against a specific recorded fixture here: the .httprr recordings in
-// this package predate this preamble and still hold the merge-base
-// "For context:" label -- see this PR's own description for why -- so a
-// citation against one of them would describe what the fixture will show
-// once re-recorded, not what it shows today.) adk-python does the same,
+// against a specific recorded fixture here: the .httprr recordings that
+// would show it live under agent/llmagent/testdata/ and
+// plugin/functioncallmodifier/testdata/, not in this package -- this
+// package's own testdata exercises no foreign-agent relay, so grepping
+// it for "For context:" finds nothing either way and proves nothing
+// about whether this paragraph is stale. Those two packages' recordings
+// predate this preamble and still hold the merge-base "For context:"
+// label -- see this PR's own description for why -- so a citation
+// against one of them would describe what the fixture will show once
+// re-recorded, not what it shows today.) adk-python does the same,
 // and this is a faithful port rather than a place to diverge from it --
 // noted here as a known, currently-accepted cost rather than an
 // accidental one, so a future reader deciding whether to deduplicate it
