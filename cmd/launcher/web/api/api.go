@@ -16,8 +16,10 @@
 package api
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -214,6 +216,22 @@ func (w *redirectRewriter) Flush() {
 // Unwrap lets http.ResponseController reach the real writer, which the SSE
 // handler needs for SetWriteDeadline.
 func (w *redirectRewriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack lets /run_live take over the connection for its WebSocket upgrade.
+//
+// gorilla/websocket type-asserts the ResponseWriter to http.Hijacker directly
+// and does not consult Unwrap, so a wrapper that omits this method turns every
+// upgrade into a 500. Only the prefixed mount wraps the writer, which is why
+// the failure shows on the default /api path and not on an empty prefix.
+//
+// Anything else that wraps a ResponseWriter here has to forward this too.
+func (w *redirectRewriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("redirectRewriter: underlying %T is not an http.Hijacker", w.ResponseWriter)
+	}
+	return h.Hijack()
+}
 
 // rewriteRedirects re-adds pathPrefix to a redirect written below the mount.
 //

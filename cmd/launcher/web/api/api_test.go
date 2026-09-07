@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -469,6 +470,59 @@ func TestSetupSubroutersServesRealRESTAPI(t *testing.T) {
 			}
 			if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
 				t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+			}
+		})
+	}
+}
+
+// TestWebSocketUpgradeThroughMount covers /run_live, which takes over the
+// connection instead of writing a response.
+//
+// The prefixed mount wraps the ResponseWriter to rewrite redirects, and
+// gorilla/websocket type-asserts that writer to http.Hijacker directly rather
+// than following Unwrap. A wrapper missing Hijack therefore turns every
+// upgrade into a 500, on the default /api prefix but not on an empty one.
+// httptest.NewServer is used rather than a recorder because only a real
+// connection can be hijacked.
+func TestWebSocketUpgradeThroughMount(t *testing.T) {
+	for _, prefix := range []string{"/api", ""} {
+		t.Run("prefix="+prefix, func(t *testing.T) {
+			upgrader := websocket.Upgrader{}
+			echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					// Upgrade has already written the error response.
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("live"))
+			})
+
+			router := mux.NewRouter().StrictSlash(true)
+			inner := mux.NewRouter().StrictSlash(true)
+			inner.Path("/run_live").Handler(echo)
+			registerAPIRoutes(router, prefix, inner)
+
+			srv := httptest.NewServer(router)
+			defer srv.Close()
+
+			url := "ws" + strings.TrimPrefix(srv.URL, "http") + prefix + "/run_live"
+			conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				status := "no response"
+				if resp != nil {
+					status = resp.Status
+				}
+				t.Fatalf("Dial(%s) error = %v (%s), want a successful upgrade", url, err, status)
+			}
+			defer func() { _ = conn.Close() }()
+
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				t.Fatalf("ReadMessage() error = %v, want the server's frame", err)
+			}
+			if got := string(msg); got != "live" {
+				t.Errorf("ReadMessage() = %q, want %q", got, "live")
 			}
 		})
 	}
