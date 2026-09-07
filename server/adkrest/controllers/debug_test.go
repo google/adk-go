@@ -647,3 +647,47 @@ func TestEventGraphHandlerResponseShape(t *testing.T) {
 		t.Errorf("raw body contains a JSON null:\n%s", rr.Body.String())
 	}
 }
+
+// TestEventGraphHandlerRejectsANilAgent covers the guard added alongside the
+// one in the agent-graph handlers.
+//
+// This path does not panic on a nil agent the way those do. The generator
+// type-asserts the instance to a named interface and a nil interface fails
+// that, so without the guard the handler answers 200 with an empty digraph.
+// That tells the caller their agent has no structure, which is worse than
+// saying it was not found.
+func TestEventGraphHandlerRejectsANilAgent(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "app1",
+		UserID:  "user1",
+	})
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+	sess := created.Session
+	if err := svc.AppendEvent(ctx, sess, &session.Event{
+		ID:     "evt1",
+		Author: "user",
+	}); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+
+	c := controllers.NewDebugAPIController(svc, nilAgentLoader{}, nil)
+
+	req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/", nil), map[string]string{
+		"app_name":   "app1",
+		"user_id":    "user1",
+		"session_id": sess.ID(),
+		"event_id":   "evt1",
+	})
+	rr := httptest.NewRecorder()
+
+	c.EventGraphHandler(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (body %q)", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}

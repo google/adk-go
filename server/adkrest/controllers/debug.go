@@ -167,8 +167,14 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		return
 	}
 	// A Loader is an interface a caller implements, so it can hand back a nil
-	// agent with a nil error. The graph generator then dereferences it and
-	// panics, dropping the connection with no HTTP response at all.
+	// agent with a nil error.
+	//
+	// Unlike the agent-graph handlers, this path does not panic on one. The
+	// generator type-asserts the instance to a named interface, and a nil
+	// interface fails that assertion, so it returns an empty digraph instead.
+	// Answering 200 with an empty graph tells the caller their agent has no
+	// structure, which is a different and worse lie than saying it was not
+	// found.
 	if agent == nil {
 		http.Error(rw, "agent "+sessionID.AppName+" not found", http.StatusNotFound)
 		return

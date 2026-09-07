@@ -60,12 +60,24 @@ var debugRoutes = []string{
 	"/dev/apps/app1/build_graph_image",
 }
 
-// ungatedDevRoutes are developer routes that must answer whether or not the
-// debug API is enabled. None of them reads an agent or reveals anything about
-// one, and /builder answers an empty 200 on purpose so the UI disables its
-// builder toggle. A 404 there is the error status that handler exists to avoid.
-var ungatedDevRoutes = []string{
-	"/dev/apps/app1/builder",
+// ungatedDevRoutes are every route the agent builder owns. They must answer
+// whether or not the debug API is enabled.
+//
+// None of them reads an agent or reveals anything about one. The GET answers an
+// empty 200 on purpose, so the UI disables its builder toggle, and a 404 there
+// is the error status that handler exists to avoid. The writes answer 501,
+// which tells a client the feature is missing rather than the path is wrong.
+//
+// All three are listed, not just the GET, because the regression this guards
+// against is a whole router moving inside the gate.
+var ungatedDevRoutes = []struct {
+	method     string
+	path       string
+	wantStatus int
+}{
+	{http.MethodGet, "/dev/apps/app1/builder", http.StatusOK},
+	{http.MethodPost, "/dev/apps/app1/builder/save", http.StatusNotImplemented},
+	{http.MethodPost, "/dev/apps/app1/builder/cancel", http.StatusNotImplemented},
 }
 
 // muxNotFound is what gorilla/mux writes when no route matches. A registered
@@ -109,12 +121,14 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 			}
 			for _, route := range ungatedDevRoutes {
 				rr := httptest.NewRecorder()
-				srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, route, nil))
+				srv.ServeHTTP(rr, httptest.NewRequest(route.method, route.path, nil))
 				if rr.Body.String() == muxNotFound {
-					t.Errorf("GET %s: not routed, want it served regardless of the gate", route)
+					t.Errorf("%s %s: not routed, want it served regardless of the gate",
+						route.method, route.path)
 				}
-				if rr.Code != http.StatusOK {
-					t.Errorf("GET %s: status = %d, want %d", route, rr.Code, http.StatusOK)
+				if rr.Code != route.wantStatus {
+					t.Errorf("%s %s: status = %d, want %d",
+						route.method, route.path, rr.Code, route.wantStatus)
 				}
 			}
 		})
