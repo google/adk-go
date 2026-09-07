@@ -271,6 +271,7 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIUsageOutputTokensKey:     "35",
 				genAIUsageCacheReadInputTokens:        "5",
 				genAIUsageReasoningOutputTokens:       "15",
+				genAIUsageToolUsePromptTokens:         "0",
 				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
 				gcpVertexAgentInvocationID:            invocationID,
 			},
@@ -300,6 +301,7 @@ func TestGenerateContent(t *testing.T) {
 			wantAttrs: map[attribute.Key]string{
 				semconv.GenAIUsageInputTokensKey:  "17",
 				semconv.GenAIUsageOutputTokensKey: "35",
+				genAIUsageToolUsePromptTokens:     "7",
 			},
 		},
 		{

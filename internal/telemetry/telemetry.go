@@ -48,6 +48,10 @@ var (
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
+	// genAIUsageToolUsePromptTokens has no entry in the semantic-conventions
+	// registry yet; it reports the Gemini-specific share of input_tokens that came
+	// from server-side tool executions.
+	genAIUsageToolUsePromptTokens = attribute.Key("gen_ai.usage.tool_use_prompt_tokens")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -144,6 +148,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
 			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			genAIUsageToolUsePromptTokens.Int(int(params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 		)
 	}
 }
