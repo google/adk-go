@@ -799,3 +799,102 @@ func freeTestPort(t *testing.T) int {
 	}
 	return port
 }
+
+// TestHealthFallbackKeepsRouterBehaviour covers what answering in front of the
+// router used to lose.
+//
+// The fallback is a route on an outer router, not a check before the inner one,
+// so it still runs the logger middleware and still gets StrictSlash handling. A
+// probe that stopped appearing in the request log, or a probe configured with a
+// trailing slash, are both silent failures.
+func TestHealthFallbackKeepsRouterBehaviour(t *testing.T) {
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+
+	inner := BuildBaseRouter()
+	// A real route, because mux middleware runs only on a matched route. An
+	// empty router matches nothing, so the logger would never run either way.
+	inner.HandleFunc("/other", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := withHealthFallback(inner)
+
+	t.Run("logger runs", func(t *testing.T) {
+		buf.Reset()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d", healthPath, rec.Code, http.StatusOK)
+		}
+		if !strings.Contains(buf.String(), healthPath) {
+			t.Errorf("request log %q does not mention %s; the probe is invisible", buf.String(), healthPath)
+		}
+	})
+
+	t.Run("trailing slash redirects", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath+"/", nil))
+		if rec.Code != http.StatusMovedPermanently {
+			t.Errorf("GET %s/ status = %d, want %d", healthPath, rec.Code, http.StatusMovedPermanently)
+		}
+		if got := rec.Header().Get("Location"); got != healthPath {
+			t.Errorf("Location = %q, want %q", got, healthPath)
+		}
+	})
+
+	t.Run("logger is not doubled", func(t *testing.T) {
+		buf.Reset()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/other", nil))
+		if n := strings.Count(buf.String(), "/other"); n != 1 {
+			t.Errorf("request logged %d times, want 1; log was %q", n, buf.String())
+		}
+	})
+}
+
+// scopedHealthSublauncher registers healthPath behind a host matcher, so it
+// answers some requests for the path and rejects others.
+type scopedHealthSublauncher struct{}
+
+func (scopedHealthSublauncher) Keyword() string { return "scopedhealth" }
+
+func (scopedHealthSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (scopedHealthSublauncher) CommandLineSyntax() string                         { return "" }
+func (scopedHealthSublauncher) SimpleDescription() string                         { return "" }
+func (scopedHealthSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (scopedHealthSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.HandleFunc(healthPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}).Host("internal.example.com")
+	return nil
+}
+
+// TestScopedHealthRouteDoesNotDisableTheFallback covers a route that claims the
+// path only for some requests.
+//
+// Treating it as owning the path switches the fallback off for every request,
+// including the ones its own matcher rejects, so an ordinary probe 404s.
+func TestScopedHealthRouteDoesNotDisableTheFallback(t *testing.T) {
+	l := NewLauncher(scopedHealthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"scopedhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET %s status = %d, want %d; a host-scoped route switched off the fallback "+
+			"for requests it does not match", healthPath, rec.Code, http.StatusOK)
+	}
+}

@@ -177,13 +177,14 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 // configured no storage should learn about it at startup, not when a restart
 // has already dropped the data.
 //
-// adk-python does not default to memory here. An absent --artifact_service_uri
-// gets per-agent local disk under <agents_root>/<agent>/.adk/artifacts, and
-// in-memory is only the fallback when local storage is disabled or unwritable
-// (cli/utils/service_factory.py). Every one of those paths logs a warning
-// naming the flag. So Go defaulting straight to memory is already the weaker
-// behaviour, which is the argument for warning loudly now and refusing later,
-// not an argument that the fallback is fine.
+// adk-python is not a straightforward precedent either way. An absent
+// --artifact_service_uri gets per-agent local disk under
+// <agents_root>/<agent>/.adk/artifacts, but it falls back to memory when it
+// detects Cloud Run or Kubernetes even with storage writable, and that warning
+// names ADK_FORCE_LOCAL_STORAGE rather than the URI flag
+// (cli/utils/service_factory.py). So on the deployments this comment is about,
+// Python also serves from memory. What it does differently is warn at the point
+// of fallback and name the way out, which is the part worth copying.
 func applyServiceDefaults(config *launcher.Config, allowInMemory bool) (defaulted []string, unconsented bool) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
@@ -409,15 +410,23 @@ const healthPath = "/health"
 
 // withHealthFallback answers healthPath when nothing else declares it.
 //
-// This wraps the router rather than registering a route on it, because neither
-// registration order works. Registering first shadows a /health a sublauncher
-// serves itself, so a draining instance keeps reporting ok. Registering last
-// puts it behind any catch-all route a sublauncher mounted, so the probe path
-// 404s. Deciding outside the router avoids both.
+// The fallback is a route on an outer router rather than a check in front of
+// the inner one. Answering before the inner router runs skips its middleware
+// and its StrictSlash handling, so probes stopped appearing in the request log
+// and /health/ 404ed instead of redirecting.
+//
+// Registering on the inner router does not work in either position. First
+// shadows a /health a sublauncher serves itself, so a draining instance keeps
+// reporting ok. Last puts it behind any catch-all a sublauncher mounted, so the
+// probe path 404s. An outer router with the inner one as its final route avoids
+// both.
 //
 // A sublauncher that declares healthPath owns it completely, on every method.
 // Answering HEAD here while it answers GET is the same shadowing bug on one
-// verb, and HEAD is what HAProxy and nginx probe with by default.
+// verb, and HEAD is what HAProxy and nginx probe with by default. The
+// consequence is worth stating plainly: a sublauncher that registers healthPath
+// for GET alone makes HEAD a 405, where it used to be 200, so a HEAD probe
+// marks the instance down. That is what ownership means here, not an oversight.
 //
 // Run calls this rather than BuildBaseRouter doing it, so an embedder building
 // its own server keeps /health for itself.
@@ -425,26 +434,40 @@ func withHealthFallback(router *mux.Router) http.Handler {
 	if declaresHealthRoute(router) {
 		return router
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-			healthHandler(w, r)
-			return
-		}
-		router.ServeHTTP(w, r)
-	})
+	// mux.NewRouter rather than BuildBaseRouter: the latter installs logger,
+	// which would then run twice on every request the inner router serves.
+	outer := mux.NewRouter().StrictSlash(true)
+	outer.Handle(healthPath, logger(http.HandlerFunc(healthHandler))).
+		Methods(http.MethodGet, http.MethodHead)
+	outer.NewRoute().Handler(router)
+	return outer
 }
 
-// declaresHealthRoute reports whether any route names healthPath outright.
+// declaresHealthRoute reports whether a route claims healthPath unconditionally.
 //
-// It matches on the path template rather than by serving a probe request,
-// because a catch-all would answer such a probe without meaning to own the
-// path, and a catch-all is exactly what the fallback has to beat.
+// It reads the path template rather than serving a probe request, because a
+// catch-all would answer such a probe without meaning to own the path, and a
+// catch-all is exactly what the fallback has to beat.
+//
+// A route that also carries a host or query matcher does not count. It answers
+// some requests for the path and not others, so switching the fallback off for
+// all of them would 404 the ones its own matcher rejects. Header matchers are
+// not reachable through the mux API, so a route scoped only by a header still
+// counts as owning the path.
 func declaresHealthRoute(router *mux.Router) bool {
 	declared := false
 	_ = router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
-		if tmpl, err := route.GetPathTemplate(); err == nil && tmpl == healthPath {
-			declared = true
+		tmpl, err := route.GetPathTemplate()
+		if err != nil || tmpl != healthPath {
+			return nil
 		}
+		if _, err := route.GetHostTemplate(); err == nil {
+			return nil
+		}
+		if q, err := route.GetQueriesTemplates(); err == nil && len(q) > 0 {
+			return nil
+		}
+		declared = true
 		return nil
 	})
 	return declared
