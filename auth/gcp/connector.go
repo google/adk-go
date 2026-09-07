@@ -44,7 +44,7 @@ func (o connectorOperation) result(req Request) (outcome, error) {
 		if o.Error.Message != "" {
 			// Same treatment doPost gives a response body: the message is
 			// service-controlled and otherwise bypasses both the cap and escaping.
-			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %q", o.Error.Code, serviceText(o.Error.Message, req.UserID, req.ContinueURI))
+			return nil, fmt.Errorf("gcp: connector operation failed (code %d): %q", o.Error.Code, redactedForError(o.Error.Message, req.UserID, req.ContinueURI))
 		}
 		return nil, fmt.Errorf("gcp: connector operation failed (code %d)", o.Error.Code)
 	}

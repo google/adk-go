@@ -22,7 +22,7 @@ import (
 
 // unescapeJSON had no direct test until this file, and neither FuzzRedact nor the
 // exhaustive differential reach it: both drive redact, which does not call it.
-// serviceText is its only caller, so every escape case was covered only through
+// redactedForError is its only caller, so every escape case was covered only through
 // end-to-end table rows that happened to use a well-formed escape.
 
 // TestUnescapeJSONMatchesEncodingJSON compares it against the standard library
@@ -192,7 +192,7 @@ func TestUnescapeJSONNeverGrows(t *testing.T) {
 }
 
 // TestServiceTextReturnsOnlyWhatItCanShowClean pins the choice between the two
-// candidate outputs, which three earlier revisions of serviceText got wrong.
+// candidate outputs, which three earlier revisions of redactedForError got wrong.
 //
 // Each of those decided from a property of the INPUTS, and the service writes the
 // inputs. The last row is the shape that broke them: a decoy occurrence the decode
@@ -275,19 +275,19 @@ func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
 		want:    withheldText,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := serviceText(tc.in, tc.secrets...); got != tc.want {
-				t.Errorf("serviceText(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := redactedForError(tc.in, tc.secrets...); got != tc.want {
+				t.Errorf("redactedForError(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
 // TestServiceTextNeverReturnsARecoverableSecret is the invariant the four earlier
-// revisions of serviceText each violated, stated once and checked over every body
+// revisions of redactedForError each violated, stated once and checked over every body
 // an adversary can assemble from the pieces that broke them.
 //
 // It deliberately does NOT call recoverable. An earlier version of this test did,
-// and that made it circular: serviceText returns a candidate only when recoverable
+// and that made it circular: redactedForError returns a candidate only when recoverable
 // says no, so asserting the same predicate held by construction and the test was
 // green on a body it was already generating — a doubly escaped identifier, which
 // the then-single-pass recoverable could not see. The oracle below is written from
@@ -314,13 +314,13 @@ func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
 	gen = func(prefix string, n int) {
 		if n == 0 {
 			checked++
-			got := serviceText(prefix, secrets...)
+			got := redactedForError(prefix, secrets...)
 			if got == withheldText {
 				withheld++
 				return
 			}
 			if readable(t, got, secrets) {
-				t.Fatalf("serviceText(%q) = %q, out of which a secret is still readable", prefix, got)
+				t.Fatalf("redactedForError(%q) = %q, out of which a secret is still readable", prefix, got)
 			}
 			return
 		}

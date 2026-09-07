@@ -381,7 +381,7 @@ func mapCredential(header, token string, secrets ...string) (auth.Credential, er
 	// Rejecting an unusable name here keeps the failure at the cause: net/http
 	// would otherwise accept the credential and abort the eventual request.
 	if !validHeaderFieldName(header) {
-		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", serviceText(header, secrets...))
+		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", redactedForError(header, secrets...))
 	}
 	key := auth.APIKeyCredential{Name: header, Value: token}
 	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
@@ -416,7 +416,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any, secrets 
 	// Classify the status before the size check, so an oversized error page still
 	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: serviceText(strings.TrimSpace(string(data)), secrets...)}
+		return &APIError{StatusCode: resp.StatusCode, Body: redactedForError(strings.TrimSpace(string(data)), secrets...)}
 	}
 	if len(data) > maxBody {
 		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
@@ -433,7 +433,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any, secrets 
 		// %q like the other two service-text sites. A decoder message can carry a
 		// byte the service chose, and unescapeJSON can turn an escape in it into a
 		// real control character, so it is quoted rather than pasted.
-		return fmt.Errorf("%w: %q", ErrMalformedResponse, serviceText(err.Error(), secrets...))
+		return fmt.Errorf("%w: %q", ErrMalformedResponse, redactedForError(err.Error(), secrets...))
 	}
 	return nil
 }

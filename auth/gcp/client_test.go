@@ -775,7 +775,7 @@ func TestNewClientRejectsNegativePollTimeout(t *testing.T) {
 //
 // A rejected header name is service-controlled, so a service that echoes the
 // userId into it puts the acting user in an error string. The two sibling paths
-// scrub before reporting — doPost through serviceText, connectorOperation.result
+// scrub before reporting — doPost through redactedForError, connectorOperation.result
 // the same — and this one only capped.
 //
 // The user is echoed INSIDE a larger name on purpose. With the name equal to the
@@ -835,11 +835,11 @@ func TestMapCredentialRedactsTheActingUserInError(t *testing.T) {
 // TestServiceErrorsRedactTheActingUser pins the WIRING, which is a different
 // claim from the one every other test here makes.
 //
-// serviceText is pinned to death — an exact-output table, ~584 generated bodies,
+// redactedForError is pinned to death — an exact-output table, ~584 generated bodies,
 // a 2.4M-combination differential and a fuzz target — and a scrub that is never
 // CALLED passes all of it. Two of the four sites that carry service text had no
 // end-to-end test, and the ContinueURI argument had none at any of the four:
-// replacing doPost's serviceText call with truncateForError (which is what this
+// replacing doPost's redactedForError call with truncateForError (which is what this
 // package did before), replacing connectorOperation.result's, or deleting
 // req.ContinueURI from all four secret lists each left the whole package green.
 //
@@ -944,7 +944,7 @@ func TestErrorBodyIsCutBeforeTheScrubNotAfter(t *testing.T) {
 	const uri = "https://app.example.test/callback"
 
 	t.Run("redaction does not promote what the cut hid", func(t *testing.T) {
-		// Percent-encoding is outside what the scrub decodes (serviceText says so),
+		// Percent-encoding is outside what the scrub decodes (redactedForError says so),
 		// so if this tail reaches the window it is returned as it stands. It must
 		// not reach it: past the first kilobyte, it is not this error's to show.
 		body := strings.Repeat(uri+" ", 34) + "alice%40example.test"
@@ -974,7 +974,7 @@ func TestErrorBodyIsCutBeforeTheScrubNotAfter(t *testing.T) {
 		// cut it, leaving a readable head of the address. Each pad puts a different
 		// byte of the escape on the boundary.
 		for _, pad := range []int{1006, 1010, 1014, 1018, 1020, 1022, 1023} {
-			got := serviceText(strings.Repeat("x", pad)+`alice\u0040example.test`, user)
+			got := redactedForError(strings.Repeat("x", pad)+`alice\u0040example.test`, user)
 			for n := len(user); n >= 3; n-- {
 				if strings.Contains(strings.ToLower(got), user[:n]) {
 					t.Errorf("pad %d: %q of the acting user survives: %q", pad, user[:n], got)
@@ -1187,14 +1187,14 @@ func TestServiceTextCostIsBounded(t *testing.T) {
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Now()
-			got := serviceText(tc.body, tc.user, "https://app.test/cb")
+			got := redactedForError(tc.body, tc.user, "https://app.test/cb")
 			elapsed := time.Since(start)
 
 			if withheld := got == withheldText; withheld != tc.wantWithheld {
-				t.Errorf("serviceText() withheld = %v, want %v", withheld, tc.wantWithheld)
+				t.Errorf("redactedForError() withheld = %v, want %v", withheld, tc.wantWithheld)
 			}
 			if elapsed > 5*time.Second {
-				t.Errorf("serviceText() over a %d-byte body with a %d-byte value took %v",
+				t.Errorf("redactedForError() over a %d-byte body with a %d-byte value took %v",
 					len(tc.body), len(tc.user), elapsed)
 			}
 			t.Logf("body %d bytes, value %d bytes: %v", len(tc.body), len(tc.user), elapsed)
@@ -1208,12 +1208,12 @@ func TestScrubbableBoundFailsClosed(t *testing.T) {
 	atBound := strings.Repeat("a", maxScrubbableSecret)
 	// The body runs past the error-body cap either way, so the scrubbed answer
 	// carries the ellipsis that says the rest was dropped.
-	if got, want := serviceText("denied for "+atBound, atBound), "denied for "+redactedMarker+"..."; got != want {
-		t.Errorf("at the bound, serviceText() = %q, want %q", got, want)
+	if got, want := redactedForError("denied for "+atBound, atBound), "denied for "+redactedMarker+"..."; got != want {
+		t.Errorf("at the bound, redactedForError() = %q, want %q", got, want)
 	}
 	overBound := strings.Repeat("a", maxScrubbableSecret+1)
-	if got := serviceText("denied for "+overBound, overBound); got != withheldText {
-		t.Errorf("past the bound, serviceText() = %q, want it withheld", got)
+	if got := redactedForError("denied for "+overBound, overBound); got != withheldText {
+		t.Errorf("past the bound, redactedForError() = %q, want it withheld", got)
 	}
 }
 

@@ -51,7 +51,11 @@ const redactedMarker = "[redacted]"
 // bound the worst case is milliseconds.
 const maxScrubbableSecret = 4096
 
-// serviceText prepares service-controlled text for an error message.
+// redactedForError prepares service-controlled text so that an error may carry
+// it: the caller's own identifiers removed and the source capped — or, where
+// neither can be shown to have worked, none of the response at all. What comes
+// back is therefore not the service's text, and on that last path bears no
+// relation to it.
 //
 // Contract: no secret is recoverable from the returned string by this package's
 // decoder, or nothing is returned. A caller may quote the result into an error a
@@ -74,8 +78,8 @@ const maxScrubbableSecret = 4096
 // revisions were broken that way before this one.
 //
 // The cap is applied to the text being READ, not to the scrubbed result, and
-// [scrubForError] carries why both of the simpler orders leak.
-func serviceText(s string, secrets ...string) string {
+// [redactWithinLimit] carries why both of the simpler orders leak.
+func redactedForError(s string, secrets ...string) string {
 	for _, v := range secrets {
 		if len(v) > maxScrubbableSecret {
 			return withheldText
@@ -96,7 +100,7 @@ func serviceText(s string, secrets ...string) string {
 
 // showable scrubs s for an error and reports whether the result can be shown.
 func showable(s string, secrets []string) (string, bool) {
-	out, truncated := scrubForError(s, secrets...)
+	out, truncated := redactWithinLimit(s, secrets...)
 	// Asked of the WHOLE text as well, and only when the cap actually cut, because
 	// the visible part alone cannot answer it. An occurrence the scrub could not
 	// match — an escaped spelling — that straddles the cut is sliced in half, and
@@ -278,7 +282,7 @@ func decodeUnicodeEscape(s string, i int) (rune, bool) {
 
 // visibleLimit reports how many bytes of s an error may show, and whether s ran
 // past that. Factored out of truncateForError so the scan can stop at the same
-// place instead of the text being cut after it — see scrubForError.
+// place instead of the text being cut after it — see redactWithinLimit.
 func visibleLimit(s string) (cut int, truncated bool) {
 	const max = maxErrorBody
 	if len(s) <= max {
@@ -351,7 +355,7 @@ func redact(s string, values ...string) string {
 	return out
 }
 
-// scrubForError is redact with the error-body cap applied to the text it READS
+// redactWithinLimit is redact with the error-body cap applied to the text it READS
 // rather than to the text it returns.
 //
 // The order matters and the obvious one is wrong in both directions. Capping the
@@ -370,7 +374,7 @@ func redact(s string, values ...string) string {
 // The bound is measured on the lowered copy, because that is what the result is
 // built from and lowercasing does not preserve byte offsets. When nothing
 // matches there is no lowered copy in play and s is capped on its own bytes.
-func scrubForError(s string, values ...string) (string, bool) {
+func redactWithinLimit(s string, values ...string) (string, bool) {
 	lowered := loweredValues(values)
 	if len(lowered) == 0 {
 		return truncateForError(s), false
@@ -408,7 +412,7 @@ func loweredValues(values []string) []string {
 //
 // Cost is O(len(ls) x total value length): the outer scan and the next[] refresh
 // are linear in len(ls) per value, but the extension walk below re-compares a
-// value at every position of a range it covers. serviceText bounds the second
+// value at every position of a range it covers. redactedForError bounds the second
 // factor by refusing to scrub a value longer than maxScrubbableSecret.
 func redactLowered(ls string, limit int, lowered []string) (string, bool) {
 	if limit > len(ls) {
