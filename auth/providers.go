@@ -33,13 +33,15 @@ type CredentialProvider interface {
 	// and deadlines.
 	//
 	// A provider that needs the acting user's identity (for example the GCP
-	// provider, which keys on the user) recovers the ADK context from ctx via a
-	// shared helper introduced together with the first provider that needs it —
-	// so identity rides on the one ADK context rather than an auth-specific key.
+	// provider, which keys on the user) recovers it from ctx via
+	// IdentityFromContext in the agent package — so identity rides on the one
+	// ADK context rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
-	// non-interactively, Credential returns a *ConsentRequiredError carrying the
-	// authorization URI; the tool layer turns that into a human-in-the-loop
+	// non-interactively, Credential returns an error wrapping a
+	// *ConsentRequiredError that carries the authorization URI — find it with
+	// errors.As, since a provider may wrap it. The tool layer turns that into a
+	// human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
 	Credential(ctx context.Context) (Credential, error)
 }
