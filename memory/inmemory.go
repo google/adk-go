@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"google.golang.org/genai"
 
@@ -167,11 +168,14 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
+	for _, word := range strings.Fields(text) {
+		cleaned := strings.TrimFunc(word, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+		if cleaned == "" {
 			continue
 		}
-		res[strings.ToLower(s)] = struct{}{}
+		res[strings.ToLower(cleaned)] = struct{}{}
 	}
 
 	return res
