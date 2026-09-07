@@ -351,6 +351,15 @@ func TestStreamWriter_SendError(t *testing.T) {
 			wantRecvCount: 1,
 		},
 		{
+			name:          "a wrapped io.EOF still yields to the recovered status",
+			sendErr:       fmt.Errorf("send aborted: %w", io.EOF),
+			recvErr:       status.Error(codes.ResourceExhausted, "Exceeds 'AppendRows throughput' quota"),
+			wantHasStatus: true,
+			wantCode:      codes.ResourceExhausted,
+			wantErrMsg:    "AppendRows throughput",
+			wantRecvCount: 1,
+		},
+		{
 			name:          "client-side error is reported as is",
 			sendErr:       errors.New("send failed"),
 			wantErrMsg:    "send failed",
@@ -384,6 +393,9 @@ func TestStreamWriter_SendError(t *testing.T) {
 
 			if got := atomic.LoadInt32(&mStream.recvCount); got != tt.wantRecvCount {
 				t.Errorf("Recv called %d times, want %d", got, tt.wantRecvCount)
+			}
+			if got := atomic.LoadInt32(&mStream.sendCount); got != 1 {
+				t.Errorf("Send called %d times, want 1", got)
 			}
 			if bp.streamWriter.stream != nil {
 				t.Errorf("streamWriter.stream = %T, want nil", bp.streamWriter.stream)
