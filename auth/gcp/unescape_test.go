@@ -343,7 +343,12 @@ func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
 }
 
 // readable is the test's own oracle for "an attacker can read a secret out of this
-// string", written without reference to the production predicate it judges.
+// string". It is a frozen COPY of recoverable, not an independent one: it makes
+// the same three structural choices — split on the literal marker, decode then
+// fold, the same unescapeJSON. So it catches a future weakening of recoverable,
+// which is worth having, and it cannot catch a blind spot the two share today.
+// \U0040 is one they share: unescapeJSON matches the introducer case-sensitively
+// while redact folds case, and neither this nor recoverable folds before decoding.
 //
 // Markers are dropped rather than searched, since text redact itself inserted is
 // not something the service disclosed. Decoding runs to a fixpoint under an
@@ -373,6 +378,30 @@ func readable(t *testing.T, x string, secrets []string) bool {
 		}
 	}
 	return false
+}
+
+// TestDecodeFullyStopsAtItsPassBound pins the bound itself, which the end-to-end
+// timing test cannot see: the straddle window keeps the input small enough that
+// even an unbounded loop finishes inside its budget.
+//
+// Terminating is not the same as affordable. "\u005c" decodes to a backslash that
+// re-forms the introducer for the next one, so the loop shortens by five bytes a
+// pass and needs one pass per five bytes of input.
+func TestDecodeFullyStopsAtItsPassBound(t *testing.T) {
+	// Well inside a pass bound, and a fixpoint it can actually reach.
+	if got, done := decodeFully(`\u005c` + strings.Repeat("u005c", 4)); !done {
+		t.Errorf("decodeFully() gave up on %d passes' worth of input, got %q", 5, got)
+	}
+	// Past it. What matters is the flag, not the text: the caller reads "not
+	// finished" as "assume a secret is in there".
+	if _, done := decodeFully(`\u005c` + strings.Repeat("u005c", maxDecodePasses+50)); done {
+		t.Error("decodeFully() reported a fixpoint on input needing more than maxDecodePasses")
+	}
+	// And the caller does fail closed on it, which is the half that matters.
+	long := `\u005c` + strings.Repeat("u005c", maxDecodePasses+50)
+	if !recoverable(long, []string{"nowhere-in-this-string"}) {
+		t.Error("recoverable() = false on text it could not finish decoding, want it to assume the worst")
+	}
 }
 
 // TestDecodeFullyShrinksWheneverItChanges pins the termination argument decodeFully

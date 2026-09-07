@@ -53,8 +53,8 @@ var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/co
 // into the request URL the name is interpolated into. Extra path segments are
 // allowed, since a resource name is itself a path. The colon is allowed for
 // domain-scoped project ids (projects/example.com:my-project/...) — the name is
-// always appended after the endpoint and a /v1 segment, so it can never be read
-// as a scheme.
+// always appended after the endpoint and a version segment (/v1 for Agent
+// Identity, /v1alpha for the connector), so it can never be read as a scheme.
 var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
 
 // validateResource rejects a resource name that cannot be safely interpolated
@@ -87,6 +87,11 @@ var (
 	// decoder's message quotes the token it choked on, which is service-controlled
 	// text that has to be scrubbed, and keeping the wrap would leave the unscrubbed
 	// original reachable through Unwrap.
+	//
+	// Every encoding/json error loses its type this way, not only *json.SyntaxError.
+	// TestDecodeErrorScrubsTheActingUser asserts on "cannot unmarshal number", which
+	// is a *json.UnmarshalTypeError, so the second one a caller could match on is
+	// demonstrated by this package's own tests.
 	ErrMalformedResponse = errors.New("gcp: credentials service returned an undecodable response")
 	// ErrPollTimeout means polling exceeded the poll timeout while the credential
 	// was still pending.

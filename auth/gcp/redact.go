@@ -98,6 +98,29 @@ func redactedForError(s string, secrets ...string) string {
 	return withheldText
 }
 
+// maxStraddleWindow bounds how far past the cut the whole-text check reads.
+//
+// Only an occurrence that STRADDLES the cut can be hidden by it — bytes wholly
+// past the cut are never shown, so they cannot leak — and an occurrence has to
+// start before the cut to straddle it. So the check needs the visible window plus
+// room for one occurrence's escaped spelling, not the whole megabyte doPost
+// admits. Eight times the value bound covers any singly escaped spelling of a
+// bounded value with room to spare; a spelling inflated past that is the class
+// the "Not covered" paragraph above already disclaims.
+//
+// Without it the check ran redact over the full body and split the result on the
+// marker: a one-character value against a megabyte measured 39.8 MiB allocated
+// and 524,289 parts, to compute one boolean.
+const maxStraddleWindow = maxErrorBody + 8*maxScrubbableSecret
+
+// straddleWindow returns the prefix of s the whole-text check needs to read.
+func straddleWindow(s string) string {
+	if len(s) <= maxStraddleWindow {
+		return s
+	}
+	return s[:maxStraddleWindow]
+}
+
 // showable scrubs s for an error and reports whether the result can be shown.
 func showable(s string, secrets []string) (string, bool) {
 	out, truncated := redactWithinLimit(s, secrets...)
@@ -107,7 +130,7 @@ func showable(s string, secrets []string) (string, bool) {
 	// half an identifier matches nothing, so what is shown looks clean while the
 	// response plainly carried the identifier and this package's own decoder gets
 	// it back out.
-	if truncated && recoverable(redact(s, secrets...), secrets) {
+	if truncated && recoverable(redact(straddleWindow(s), secrets...), secrets) {
 		return "", false
 	}
 	// Checked AFTER the cap, so what is examined is exactly what is returned. The
@@ -141,7 +164,14 @@ func recoverable(x string, secrets []string) bool {
 		if v == "" {
 			continue
 		}
-		for _, form := range []string{strings.ToLower(v), strings.ToLower(decodeFully(v))} {
+		decoded, done := decodeFully(v)
+		if !done {
+			// Fails closed, here and below. Not finishing the decode means not
+			// knowing what this text says, and "unknown" has to answer the same
+			// way as "yes" when the question is whether a secret is readable.
+			return true
+		}
+		for _, form := range []string{strings.ToLower(v), strings.ToLower(decoded)} {
 			if form != "" {
 				forms = append(forms, form)
 			}
@@ -151,8 +181,11 @@ func recoverable(x string, secrets []string) bool {
 		return false
 	}
 	for _, part := range strings.Split(x, redactedMarker) {
-		lx := strings.ToLower(part)
-		lu := strings.ToLower(decodeFully(part))
+		decoded, done := decodeFully(part)
+		if !done {
+			return true
+		}
+		lx, lu := strings.ToLower(part), strings.ToLower(decoded)
 		for _, form := range forms {
 			if strings.Contains(lx, form) || strings.Contains(lu, form) {
 				return true
@@ -162,24 +195,44 @@ func recoverable(x string, secrets []string) bool {
 	return false
 }
 
-// decodeFully applies unescapeJSON until the text stops changing.
+// maxDecodePasses bounds decodeFully. Legitimate text needs one pass, or two
+// where a body was JSON-encoded twice; this is two orders of magnitude above
+// that, so reaching it means the text was built to be expensive rather than to
+// be read.
+const maxDecodePasses = 64
+
+// decodeFully applies unescapeJSON until the text stops changing, and reports
+// whether it got there.
 //
 // One pass is not enough. A doubly escaped identifier decodes to a singly escaped
 // one, which still hides it from a substring scrub and which this same function
 // will happily decode the rest of the way for anyone who asks twice — so checking
 // only the first pass leaves an identifier the package's own decoder recovers.
 //
-// It terminates because every branch that changes anything writes fewer bytes than
-// it consumed, so a pass that changes the text strictly shortens it. TestDecodeFully
-// pins that, and it is the whole termination argument.
-func decodeFully(s string) string {
-	for {
+// Termination alone is not enough either, which is what the pass bound is for.
+// Every branch that changes anything writes fewer bytes than it consumed, so a
+// changing pass strictly shortens — but it can shorten by as little as five
+// bytes, and `\u005c` is the input that does exactly that while re-forming the
+// introducer for the next one. Unbounded, that is one pass per five bytes of a
+// response this package reads a megabyte of: 20 KB measured 233ms, 80 KB 3.5s,
+// and 1 MiB over nine minutes of CPU no caller's deadline could cancel.
+//
+// TestDecodeFullyShrinksWheneverItChanges pins the per-pass lemma the argument
+// rests on, over unescapeJSON rather than over this loop, and
+// TestDecodeFullyStopsAtItsPassBound pins the bound.
+//
+// The bound is reported rather than swallowed because the answer this feeds is a
+// disclosure decision. A caller that cannot finish decoding has not shown the
+// text to be clean, and must treat it as though a secret were in there.
+func decodeFully(s string) (string, bool) {
+	for range maxDecodePasses {
 		u := unescapeJSON(s)
 		if u == s {
-			return s
+			return s, true
 		}
 		s = u
 	}
+	return s, false
 }
 
 // unescapeJSON decodes the JSON escapes that can hide a caller-supplied value
@@ -303,13 +356,20 @@ func visibleLimit(s string) (cut int, truncated bool) {
 }
 
 // truncateForError caps an error body so a large (e.g. HTML gateway) response
-// doesn't bloat the returned error.
-func truncateForError(s string) string {
+// doesn't bloat the returned error, and reports whether it cut.
+//
+// It returns both because a caller that takes the flag from one string and the
+// text from another can be handed a disagreement: strings.ToLower folds U+0130
+// from two bytes to one, so a lowered copy sits under the cap while the original
+// crosses it. That flag is what arms the whole-text check in showable, and with
+// it false the check never runs — measured at 14 of an 18-byte address in
+// cleartext. Returning the pair from one place makes the pairing structural.
+func truncateForError(s string) (string, bool) {
 	cut, truncated := visibleLimit(s)
 	if !truncated {
-		return s
+		return s, false
 	}
-	return s[:cut] + "..."
+	return s[:cut] + "...", true
 }
 
 // redact removes caller-supplied values from a service-controlled string,
@@ -377,13 +437,15 @@ func redact(s string, values ...string) string {
 func redactWithinLimit(s string, values ...string) (string, bool) {
 	lowered := loweredValues(values)
 	if len(lowered) == 0 {
-		return truncateForError(s), false
+		return truncateForError(s)
 	}
 	ls := strings.ToLower(s)
 	limit, truncated := visibleLimit(ls)
 	out, hit := redactLowered(ls, limit, lowered)
 	if !hit {
-		return truncateForError(s), truncated
+		// s is what is returned here, so s is what the flag has to describe. The
+		// lowered copy's own limit says nothing about it.
+		return truncateForError(s)
 	}
 	if truncated {
 		out += "..."

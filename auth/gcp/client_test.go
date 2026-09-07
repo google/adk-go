@@ -276,26 +276,38 @@ func TestRetrieveHTTPError(t *testing.T) {
 }
 
 func TestRetrieveValidatesRequest(t *testing.T) {
+	// Each row names the message it expects, not a substring true of every error
+	// this method returns. The deferred wrap appends `(resource %q)` to all of
+	// them, so an assertion on "resource " passes with validateResource deleted
+	// outright — and naming the message also keeps the two rejection reasons apart
+	// from each other, which is the distinction the charset and the segment check
+	// exist to draw.
+	const (
+		charset = "has invalid characters"
+		segment = "has an empty or relative path segment"
+		missing = "requires a"
+	)
 	tests := []struct {
-		name string
-		req  Request
+		name    string
+		req     Request
+		wantMsg string
 	}{
-		{name: "missing resource", req: Request{UserID: "u"}},
-		{name: "missing user id", req: Request{Resource: authProviderResource}},
-		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}},
-		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
-		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
+		{name: "missing resource", req: Request{UserID: "u"}, wantMsg: missing},
+		{name: "missing user id", req: Request{Resource: authProviderResource}, wantMsg: missing},
+		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}, wantMsg: segment},
+		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}, wantMsg: charset},
+		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}, wantMsg: charset},
 		// A name that normalizes to a different one routes to a different service
 		// than the one validateResource inspected.
-		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}},
-		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}},
-		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}},
+		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}, wantMsg: segment},
+		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}, wantMsg: segment},
+		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}, wantMsg: segment},
 		// Percent-escapes are rejected by the charset, not decoded: the name is
 		// interpolated into a URL, so an escape that survives becomes traversal or
 		// a segment break once the server decodes it.
-		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}},
-		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}},
-		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}},
+		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}, wantMsg: charset},
+		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}, wantMsg: charset},
+		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}, wantMsg: charset},
 	}
 	// Point at a live server: a client with no endpoint fails at transport for
 	// every input, which cannot tell a rejected request from an unreachable one.
@@ -312,8 +324,8 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 			if err == nil {
 				t.Fatalf("RetrieveCredential(%+v) = nil error, want error", tc.req)
 			}
-			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "resource ") {
-				t.Errorf("error = %v, want a request-validation error", err)
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error = %v, want it to say %q", err, tc.wantMsg)
 			}
 			if got := hits.Load(); got != 0 {
 				t.Errorf("credentials service called %d time(s); a rejected request must not reach the wire", got)
@@ -749,7 +761,7 @@ func TestTruncateForError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Report the tail as well as the length: a body that is cut at the
 			// wrong place can still come out the right size.
-			if got := truncateForError(tc.in); got != tc.want {
+			if got, cut := truncateForError(tc.in); got != tc.want || cut != (tc.in != tc.want) {
 				t.Errorf("truncateForError() = %d bytes ending %q, want %d bytes ending %q",
 					len(got), got[max(0, len(got)-8):], len(tc.want), tc.want[max(0, len(tc.want)-8):])
 			}
@@ -890,6 +902,27 @@ func TestServiceErrorsRedactTheActingUser(t *testing.T) {
 		body:        `{"done":true,"error":{"code":3,"message":"bad continueUri ` + uri + `"}}`,
 		wantAbsent:  []string{uri},
 		wantPresent: []string{"bad continueuri"},
+	}, {
+		// The connector's own doPost secret list, which the 200 rows above never
+		// reach: they exercise connectorOperation.result instead. Only a non-2xx
+		// on a connector resource gets here, and dropping req.ContinueURI at
+		// connector.go's doPost call left the package green without this row.
+		name:        "a connector error body echoing the continue uri",
+		resource:    connectorResource,
+		status:      http.StatusForbidden,
+		body:        "continueUri not registered: " + uri,
+		wantAbsent:  []string{uri},
+		wantPresent: []string{"continueuri not registered"},
+	}, {
+		// mapCredential's secret list, reached only by a 2xx whose header name is
+		// unusable. The test that covers this path elsewhere builds its request
+		// without a ContinueURI, so that argument was unpinned too.
+		name:        "an unusable header name echoing the continue uri",
+		resource:    authProviderResource,
+		status:      http.StatusOK,
+		body:        `{"success":{"header":"X-` + uri + `","token":"t"}}`,
+		wantAbsent:  []string{uri},
+		wantPresent: []string{"not a usable HTTP header name"},
 	}, {
 		// The negative control. An error carrying neither identifier has to come
 		// back whole, or the rows above are satisfied by dropping all service
@@ -1198,6 +1231,114 @@ func TestServiceTextCostIsBounded(t *testing.T) {
 					len(tc.body), len(tc.user), elapsed)
 			}
 			t.Logf("body %d bytes, value %d bytes: %v", len(tc.body), len(tc.user), elapsed)
+		})
+	}
+}
+
+// TestResponseBodyIsBoundedToo pins the other half of the cost ceiling. The value
+// bound covers the caller's side; this covers the service's.
+//
+// decodeFully shortens by as little as five bytes a pass, and `\u005c` re-forms
+// its own introducer, so an unbounded fixpoint decode is one pass per five bytes
+// of a response this package reads a megabyte of. Before the pass bound: 20 KB
+// took 233ms, 80 KB 3.5s, and a megabyte over nine minutes of CPU that no
+// caller's deadline could interrupt, because nothing below doPost reads ctx.
+func TestResponseBodyIsBoundedToo(t *testing.T) {
+	for _, n := range []int{4000, 40000, 200000} {
+		body := `\` + strings.Repeat("u005c", n)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, body)
+		}))
+		start := time.Now()
+		_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+			Resource: authProviderResource, UserID: "alice@example.test",
+		})
+		elapsed := time.Since(start)
+		srv.Close()
+		if err == nil {
+			t.Fatal("RetrieveCredential() = nil error, want the 403")
+		}
+		if elapsed > 2*time.Second {
+			t.Errorf("a %d-byte self-regenerating body took %v", len(body), elapsed)
+		}
+		t.Logf("body %d bytes: %v", len(body), elapsed)
+	}
+}
+
+// TestWholeTextCheckReadsABoundedWindow pins the straddle window, which no timing
+// test can see: the pass bound already keeps an unbounded window fast enough.
+// What the window buys is volume, and volume is what this measures.
+//
+// Only an occurrence straddling the cut can hide behind it, so the check needs
+// the visible window plus room for one occurrence — not the megabyte doPost
+// admits. Handed the whole body it ran redact over all of it and split the result
+// on the marker: a one-character value against a megabyte measured 45 MB
+// allocated against 4.6 MB with the window, for the same one boolean.
+func TestWholeTextCheckReadsABoundedWindow(t *testing.T) {
+	body := strings.Repeat("ab", 1<<19) // 1 MiB, every byte a match for "a"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	r := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			_, _ = c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "a"})
+		}
+	})
+	// Sits between the two measurements with room on both sides, so it fails on
+	// the window being dropped rather than on a machine being slow.
+	const budget = 20 << 20
+	if got := r.AllocedBytesPerOp(); got > budget {
+		t.Errorf("one call over a %d-byte body allocated %d bytes, want under %d — the whole-text "+
+			"check is reading more than the window", len(body), got, budget)
+	}
+	t.Logf("%d bytes allocated per call, %d allocations", r.AllocedBytesPerOp(), r.AllocsPerOp())
+}
+
+// TestTruncationFlagDescribesTheTextReturned pins that the two come from one
+// string.
+//
+// The flag arms the whole-text check, and the check is the only thing that sees
+// an escaped occurrence the cut sliced in half. Taking the flag from the lowered
+// copy and the text from the original let them disagree: Go folds U+0130 to a
+// one-byte "i", so the lowered copy sat under the cap while the original crossed
+// it, the check never ran, and the first candidate reported success before the
+// second one could decode and scrub. That put 14 of an 18-byte address in the
+// returned error in cleartext.
+//
+// The ASCII row is the control. Same byte length, no length-changing fold, so it
+// leaked nothing even before the fix — which is what makes the fold the variable.
+func TestTruncationFlagDescribesTheTextReturned(t *testing.T) {
+	const victim = "alice@example.test"
+	for _, tc := range []struct{ name, padding string }{
+		{"a fold that shortens the lowered copy past the cap", strings.Repeat("\u0130", 505)},
+		{"the same byte length in ASCII", strings.Repeat("x", 1010)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The address one byte short, with its last byte escaped, so redact
+			// cannot match it and only the decode can.
+			body := tc.padding + victim[:len(victim)-1] + `\u0074`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+				Resource: authProviderResource, UserID: victim,
+			})
+			if err == nil {
+				t.Fatal("RetrieveCredential() = nil error, want the 403")
+			}
+			for n := len(victim); n >= 5; n-- {
+				if strings.Contains(err.Error(), victim[:n]) {
+					t.Fatalf("%d of the address's %d bytes survive: %q", n, len(victim), victim[:n])
+				}
+			}
 		})
 	}
 }
