@@ -30,6 +30,9 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// maxSearchResultsForTest mirrors the unexported cap in the memory package.
+const maxSearchResultsForTest = 10
+
 func Test_inMemoryService_SearchMemory(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -267,4 +270,111 @@ func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// memoryIDs returns the IDs of the returned memories in order. Ordering is
+// meaningful once results are ranked, so these tests compare the sequence
+// directly rather than through the order-insensitive sortMemories transformer.
+func memoryIDs(resp *memory.SearchResponse) []string {
+	ids := make([]string, 0, len(resp.Memories))
+	for _, m := range resp.Memories {
+		ids = append(ids, m.ID)
+	}
+
+	return ids
+}
+
+func Test_inMemoryService_SearchMemory_RanksByMatchCount(t *testing.T) {
+	s := memory.InMemoryService()
+	events := []*session.Event{
+		{ID: "one", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("quick dog", genai.RoleUser)}},
+		{ID: "three", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("quick brown fox", genai.RoleUser)}},
+		{ID: "two", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("quick brown cat", genai.RoleUser)}},
+	}
+	if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app1", "user1", "sess1", events)); err != nil {
+		t.Fatalf("inMemoryService.AddSessionToMemory() error = %v", err)
+	}
+
+	got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{
+		AppName: "app1",
+		UserID:  "user1",
+		Query:   "quick brown fox",
+	})
+	if err != nil {
+		t.Fatalf("inMemoryService.SearchMemory() error = %v", err)
+	}
+
+	want := []string{"three", "two", "one"}
+	if diff := cmp.Diff(want, memoryIDs(got)); diff != "" {
+		t.Errorf("inMemoryService.SearchMemory() order mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func Test_inMemoryService_SearchMemory_CapsResults(t *testing.T) {
+	s := memory.InMemoryService()
+
+	var events []*session.Event
+	for i := range maxSearchResultsForTest + 5 {
+		events = append(events, &session.Event{
+			ID: strconv.Itoa(i),
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("shared "+strconv.Itoa(i), genai.RoleUser),
+			},
+		})
+	}
+
+	if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app1", "user1", "sess1", events)); err != nil {
+		t.Fatalf("inMemoryService.AddSessionToMemory() error = %v", err)
+	}
+
+	got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{
+		AppName: "app1",
+		UserID:  "user1",
+		Query:   "shared",
+	})
+	if err != nil {
+		t.Fatalf("inMemoryService.SearchMemory() error = %v", err)
+	}
+
+	if len(got.Memories) != maxSearchResultsForTest {
+		t.Errorf("inMemoryService.SearchMemory() returned %d memories, want %d",
+			len(got.Memories), maxSearchResultsForTest)
+	}
+}
+
+func Test_inMemoryService_SearchMemory_OrderIsStableAcrossRuns(t *testing.T) {
+	// Sessions are stored in a map, so without a fixed iteration order equally
+	// scored events come back in a different sequence on each call.
+	s := memory.InMemoryService()
+	for i := range 8 {
+		id := strconv.Itoa(i)
+		events := []*session.Event{
+			{ID: id, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("shared text", genai.RoleUser)}},
+		}
+		if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app1", "user1", "sess"+id, events)); err != nil {
+			t.Fatalf("inMemoryService.AddSessionToMemory() error = %v", err)
+		}
+	}
+
+	req := &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "shared"}
+
+	first, err := s.SearchMemory(t.Context(), req)
+	if err != nil {
+		t.Fatalf("inMemoryService.SearchMemory() error = %v", err)
+	}
+
+	want := memoryIDs(first)
+	if len(want) != 8 {
+		t.Fatalf("inMemoryService.SearchMemory() returned %d memories, want 8", len(want))
+	}
+
+	for i := range 25 {
+		got, err := s.SearchMemory(t.Context(), req)
+		if err != nil {
+			t.Fatalf("inMemoryService.SearchMemory() error = %v", err)
+		}
+		if diff := cmp.Diff(want, memoryIDs(got)); diff != "" {
+			t.Fatalf("inMemoryService.SearchMemory() order changed on run %d (-first +got):\n%s", i, diff)
+		}
+	}
 }
