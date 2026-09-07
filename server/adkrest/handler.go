@@ -104,14 +104,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
-		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
 		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	}
+	// The developer routes are opt-in because they describe the agent rather
+	// than serve it. The trace routes carry tool-call arguments and responses,
+	// and the agent-graph routes disclose the agent tree and, through the DOT
+	// source, the name of every tool the agent can call. adk-python keeps both
+	// in DevServer, a class its production server never instantiates.
 	if cfg.DebugAPIConfig.IncludeDebugAPI {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
-		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+		subrouters = append(subrouters,
+			routers.NewDebugAPIRouter(debugController),
+			routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		)
 	}
 
 	authenticator := cfg.Authenticator
