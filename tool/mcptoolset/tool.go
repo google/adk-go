@@ -360,7 +360,7 @@ func hasMIMECharsetParameter(value string) bool {
 		}
 		start = i + 1
 	}
-	return false
+	return inQuote
 }
 
 func isTextMediaType(mediaType string) bool {

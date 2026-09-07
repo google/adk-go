@@ -71,6 +71,19 @@ func TestMCPToolRunContent(t *testing.T) {
 				"package example\n"},
 		},
 		{
+			name: "multiline embedded body is separated from following text",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///multiline.txt",
+					MIMEType: "text/plain",
+					Blob:     []byte("line1\nline2"),
+				}},
+				&mcp.TextContent{Text: "tail"},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///multiline.txt\", " +
+				"mimeType=\"text/plain\"]\nline1\nline2\ntail"},
+		},
+		{
 			name: "embedded text reports an accompanying blob",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -120,6 +133,18 @@ func TestMCPToolRunContent(t *testing.T) {
 				"mimeType=\"application/pdf\"]"},
 		},
 		{
+			name: "empty text blob has no trailing newline",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///empty.txt",
+					MIMEType: "text/plain",
+					Blob:     []byte{},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///empty.txt\", " +
+				"mimeType=\"text/plain\"]"},
+		},
+		{
 			name: "unsupported text charset is represented by metadata",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -142,6 +167,18 @@ func TestMCPToolRunContent(t *testing.T) {
 			}},
 			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///utf16-star.txt\", " +
 				"mimeType=\"text/plain; charset*=utf-16\", size=4 bytes]"},
+		},
+		{
+			name: "unterminated quoted parameter is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///unterminated.txt",
+					MIMEType: `text/plain; name="a; charset=utf-16`,
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///unterminated.txt\", " +
+				"mimeType=\"text/plain; name=\\\"a; charset=utf-16\", size=4 bytes]"},
 		},
 		{
 			name: "US-ASCII text blob is decoded",
@@ -412,6 +449,22 @@ func TestMCPToolRunContent(t *testing.T) {
 			want: map[string]any{"output": "[MCP content: unavailable]"},
 		},
 		{
+			name: "untyped nil content is separated from following text",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				nil,
+				&mcp.TextContent{Text: "after"},
+			}},
+			want: map[string]any{"output": "[MCP content: unavailable]\nafter"},
+		},
+		{
+			name: "typed nil text content is separated from following text",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				(*mcp.TextContent)(nil),
+				&mcp.TextContent{Text: "after"},
+			}},
+			want: map[string]any{"output": "[MCP text content: unavailable]\nafter"},
+		},
+		{
 			name: "typed nil content does not panic",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				(*mcp.TextContent)(nil),
@@ -476,7 +529,22 @@ func TestHasMIMECharsetParameter(t *testing.T) {
 		},
 		{
 			name:     "uppercase charset parameter",
-			mimeType: `text/plain; CHARSET=utf-16; name="a`,
+			mimeType: "text/plain; CHARSET=utf-16; name=a",
+			want:     true,
+		},
+		{
+			name:     "uppercase extended charset after quoted parameter",
+			mimeType: `text/plain; name="a"; CHARSET*=UTF-16`,
+			want:     true,
+		},
+		{
+			name:     "backslash outside quoted parameter",
+			mimeType: `text/plain; \; charset=utf-16`,
+			want:     true,
+		},
+		{
+			name:     "unterminated quoted parameter is ambiguous",
+			mimeType: `text/plain; name="a`,
 			want:     true,
 		},
 		{
