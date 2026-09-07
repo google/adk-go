@@ -267,6 +267,13 @@ func registerAPIRoutes(router *mux.Router, pathPrefix string, handler http.Handl
 func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       api:  you can access API using %s%s", webURL, a.config.pathPrefix))
 	printer(fmt.Sprintf("       api:      for instance: %s%s/list-apps", webURL, a.config.pathPrefix))
+	if !a.config.includeDebugAPI {
+		// Say it here rather than leave it to be inferred from a 404 in the
+		// browser console. These routes are off by default because they expose
+		// tool-call arguments, responses and tool names, so an operator has to
+		// ask for them. Nothing else says which panels that costs.
+		printer("       api:      the web UI's Traces and agent structure panels need -include_debug_api")
+	}
 }
 
 // SetupSubrouters adds the API router to the parent router.
