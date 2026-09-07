@@ -169,6 +169,10 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 	if err := json.Unmarshal([]byte(payload), &args); err != nil {
 		return nil, fmt.Errorf("openai: parse streamed function args: %w", err)
 	}
+	if args == nil {
+		// Match the blocking path: JSON null means the call takes no arguments.
+		args = map[string]any{}
+	}
 	return &genai.Part{
 		FunctionCall: &genai.FunctionCall{
 			Name: name,

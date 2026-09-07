@@ -206,6 +206,9 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 // replace content assembled from stream deltas. Reasoning alone is not a usable
 // replacement, and the snapshot must retain all visible text and function calls
 // that callers already received from the stream.
+// When replacement is allowed, reasoning follows the completed response to match
+// the blocking path. Streamed thoughts absent from that snapshot are not added
+// back; they have already been delivered as partial responses.
 func completedContentSupersedes(aggregate, completed *genai.Content) bool {
 	if completed == nil {
 		return false

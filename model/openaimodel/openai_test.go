@@ -518,6 +518,50 @@ func TestModel_GenerateStream_TerminalOnlyMessageContent(t *testing.T) {
 	}
 }
 
+// Streamed reasoning still reaches callers even when the completed response
+// omits it from the final content, matching the blocking representation.
+func TestModel_GenerateStream_CompletedMessageOmitsStreamedReasoning(t *testing.T) {
+	for _, eventType := range []string{responseReasoningTextDelta, responseReasoningSummaryTextDelta} {
+		t.Run(eventType, func(t *testing.T) {
+			got, err := runStream(t, evCreated,
+				fmt.Sprintf(`{"type":%q,"item_id":"rs_1","delta":"Checking the request"}`, eventType),
+				evDelta1, evDelta2, evCompleted,
+			)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			var streamedThought strings.Builder
+			for _, resp := range got[:len(got)-1] {
+				if resp.Content == nil {
+					continue
+				}
+				for _, part := range resp.Content.Parts {
+					if part.Thought {
+						streamedThought.WriteString(part.Text)
+					}
+				}
+			}
+			if text := streamedThought.String(); text != "Checking the request" {
+				t.Errorf("streamed reasoning = %q, want %q", text, "Checking the request")
+			}
+			blocking, err := runBlocking(t, bodyCompleted)
+			if err != nil {
+				t.Fatalf("GenerateContent() blocking err = %v", err)
+			}
+			if len(blocking) != 1 {
+				t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+			}
+			if diff := cmp.Diff(genai.NewContentFromText("hello", genai.RoleModel), final.Content); diff != "" {
+				t.Errorf("final content mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+				t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestModel_GenerateStream_CompletedContentOrder(t *testing.T) {
 	const completedBody = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"Checking the request"}],"summary":[{"type":"summary_text","text":"Request checked"}]},{"type":"message","content":[{"type":"output_text","text":"hello"},{"type":"output_text","text":" again"}]},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"SF\"}"},{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}`
 	got, err := runStream(t, evCreated,
@@ -538,6 +582,84 @@ func TestModel_GenerateStream_CompletedContentOrder(t *testing.T) {
 	}
 	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
 		t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+	}
+}
+
+func TestCompletedContentSupersedes(t *testing.T) {
+	call := func(id, city string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{
+			ID: id, Name: "get_weather", Args: map[string]any{"city": city},
+		}}
+	}
+	tests := []struct {
+		name      string
+		aggregate []*genai.Part
+		completed []*genai.Part
+		want      bool
+	}{
+		{
+			name:      "reasoning containing the answer is not visible output",
+			aggregate: []*genai.Part{{Text: "hello"}},
+			completed: []*genai.Part{{Text: "hello is the answer", Thought: true}},
+		},
+		{
+			name:      "reasoning alone does not justify replacement",
+			aggregate: []*genai.Part{{Text: "Checking", Thought: true}},
+			completed: []*genai.Part{{Text: "Checked", Thought: true}},
+		},
+		{
+			name:      "completed text can precede and follow streamed refusal",
+			aggregate: []*genai.Part{{Text: "I cannot help."}},
+			completed: []*genai.Part{{Text: "Here is "}, {Text: "I cannot help."}, {Text: " Sorry."}},
+			want:      true,
+		},
+		{
+			name:      "shorter text does not replace the answer",
+			aggregate: []*genai.Part{{Text: "hello"}},
+			completed: []*genai.Part{{Text: "hel"}},
+		},
+		{
+			name:      "same name with different arguments is a different call",
+			aggregate: []*genai.Part{call("call_1", "SF")},
+			completed: []*genai.Part{call("call_1", "NY")},
+		},
+		{
+			name:      "different call IDs remain distinct",
+			aggregate: []*genai.Part{call("call_1", "SF")},
+			completed: []*genai.Part{call("call_2", "SF")},
+		},
+		{
+			name:      "one completed call cannot replace two streamed calls",
+			aggregate: []*genai.Part{call("call_1", "SF"), call("call_1", "SF")},
+			completed: []*genai.Part{call("call_1", "SF")},
+		},
+		{
+			name:      "matching calls allow recovery of completed text",
+			aggregate: []*genai.Part{call("call_1", "SF")},
+			completed: []*genai.Part{call("call_1", "SF"), {Text: "Checking the weather."}},
+			want:      true,
+		},
+		{
+			name:      "reordered calls can match one to one",
+			aggregate: []*genai.Part{call("call_1", "SF"), call("call_2", "NY")},
+			completed: []*genai.Part{call("call_2", "NY"), call("call_1", "SF")},
+			want:      true,
+		},
+		{
+			name:      "completed function call replaces reasoning alone",
+			aggregate: []*genai.Part{{Text: "Checking", Thought: true}},
+			completed: []*genai.Part{call("call_1", "SF")},
+			want:      true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			aggregate := &genai.Content{Role: genai.RoleModel, Parts: tc.aggregate}
+			completed := &genai.Content{Role: genai.RoleModel, Parts: tc.completed}
+			if got := completedContentSupersedes(aggregate, completed); got != tc.want {
+				t.Errorf("completedContentSupersedes() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -571,6 +693,16 @@ func TestModel_GenerateStream_NarrowerCompletedContentPreservesAggregate(t *test
 					{Text: "hello"},
 				},
 			},
+		},
+		{
+			name: "reasoning-only snapshot containing the answer does not replace it",
+			events: []string{
+				evCreated,
+				evDelta1,
+				evDelta2,
+				`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"hello is the answer"}]}]}}`,
+			},
+			want: genai.NewContentFromText("hello", genai.RoleModel),
 		},
 		{
 			name: "shorter text snapshot does not truncate an answer",
@@ -637,6 +769,38 @@ func TestModel_GenerateStream_CompletedFunctionCallReplacesThoughtOnlyAggregate(
 	}
 	if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
 		t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+	}
+}
+
+// Both encodings describe a call with no arguments. Their decoded map shape
+// must not prevent recovery of text carried only by the completed response.
+func TestModel_GenerateStream_CompletedTextAfterEmptyFunctionArgs(t *testing.T) {
+	for _, args := range []string{"{}", "null"} {
+		t.Run(args, func(t *testing.T) {
+			body := fmt.Sprintf(`{"id":"resp_1","model":"stream-model","status":"completed","output":[{"id":"item_1","type":"function_call","call_id":"call_1","name":"ping","arguments":%q},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pong"}]}]}`, args)
+			got, err := runStream(t, evCreated,
+				`{"type":"response.output_item.added","item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"ping"}}`,
+				fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":%q}`, args),
+				`{"type":"response.completed","response":`+body+`}`,
+			)
+			if err != nil {
+				t.Fatalf("GenerateContent() stream err = %v", err)
+			}
+			final := assertTurnShape(t, got)
+			if text := allText(final.Content); text != "pong" {
+				t.Errorf("final text = %q, want %q", text, "pong")
+			}
+			blocking, err := runBlocking(t, body)
+			if err != nil {
+				t.Fatalf("GenerateContent() blocking err = %v", err)
+			}
+			if len(blocking) != 1 {
+				t.Fatalf("blocking emitted %d responses, want 1", len(blocking))
+			}
+			if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
+				t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+			}
+		})
 	}
 }
 
