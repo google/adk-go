@@ -832,6 +832,159 @@ func TestMapCredentialRedactsTheActingUserInError(t *testing.T) {
 	}
 }
 
+// TestServiceErrorsRedactTheActingUser pins the WIRING, which is a different
+// claim from the one every other test here makes.
+//
+// serviceText is pinned to death — an exact-output table, ~584 generated bodies,
+// a 2.4M-combination differential and a fuzz target — and a scrub that is never
+// CALLED passes all of it. Two of the four sites that carry service text had no
+// end-to-end test, and the ContinueURI argument had none at any of the four:
+// replacing doPost's serviceText call with truncateForError (which is what this
+// package did before), replacing connectorOperation.result's, or deleting
+// req.ContinueURI from all four secret lists each left the whole package green.
+//
+// So each row below fails on one of those edits and on nothing else. The
+// surviving wording is asserted too, or a blanket drop of all service text would
+// pass every row and lose the diagnostic the error exists for.
+func TestServiceErrorsRedactTheActingUser(t *testing.T) {
+	const user = "alice@example.test"
+	// Deliberately free of the user id, so the two secrets can be asserted apart.
+	// Where one contains the other they are redacted as one range, which is
+	// TestRedactAcrossSeveralSecrets' subject rather than this test's.
+	const uri = "https://app.test/cb?state=opaque"
+
+	for _, tc := range []struct {
+		name        string
+		resource    string
+		status      int
+		body        string
+		wantAbsent  []string
+		wantPresent []string
+	}{{
+		name:        "an error body echoing the acting user",
+		resource:    authProviderResource,
+		status:      http.StatusForbidden,
+		body:        "permission denied for " + user,
+		wantAbsent:  []string{user},
+		wantPresent: []string{"permission denied for"},
+	}, {
+		name:        "an error body echoing the continue uri",
+		resource:    authProviderResource,
+		status:      http.StatusBadRequest,
+		body:        "continueUri not registered: " + uri,
+		wantAbsent:  []string{uri},
+		wantPresent: []string{"continueuri not registered"},
+	}, {
+		// connectorOperation.result's error arm, whose comment claims "the same
+		// treatment doPost gives a response body". Nothing checked that it did.
+		name:        "a connector operation message echoing the acting user",
+		resource:    connectorResource,
+		status:      http.StatusOK,
+		body:        `{"done":true,"error":{"code":7,"message":"user ` + user + ` is not permitted"}}`,
+		wantAbsent:  []string{user},
+		wantPresent: []string{"is not permitted"},
+	}, {
+		name:        "a connector operation message echoing the continue uri",
+		resource:    connectorResource,
+		status:      http.StatusOK,
+		body:        `{"done":true,"error":{"code":3,"message":"bad continueUri ` + uri + `"}}`,
+		wantAbsent:  []string{uri},
+		wantPresent: []string{"bad continueuri"},
+	}, {
+		// The negative control. An error carrying neither identifier has to come
+		// back whole, or the rows above are satisfied by dropping all service
+		// text rather than by scrubbing it.
+		name:        "an error carrying neither identifier survives intact",
+		resource:    authProviderResource,
+		status:      http.StatusServiceUnavailable,
+		body:        "backend overloaded, retry later",
+		wantPresent: []string{"backend overloaded, retry later"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+				Resource: tc.resource, UserID: user, ContinueURI: uri,
+			})
+			if err == nil {
+				t.Fatal("RetrieveCredential() = nil error, want the service's error")
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(err.Error(), absent) {
+					t.Errorf("error carries %q: %v", absent, err)
+				}
+			}
+			for _, want := range tc.wantPresent {
+				// Case-insensitively: redact lowercases the text it scrubbed, which
+				// is the documented price of not mapping offsets between two
+				// spellings of the same string.
+				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+					t.Errorf("error lost %q, so it is no longer diagnostic: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestErrorBodyIsCutBeforeTheScrubNotAfter pins the order the cap and the scrub
+// run in, which is not a detail: both of the simpler orders leak.
+//
+// Cutting the scrubbed text lets redaction's own shortening pull bytes into view
+// that the same cut on the raw response would have hidden — every echo of the
+// ContinueURI collapses to a ten-byte marker, and whatever followed them rides up
+// into the window. Cutting the raw text instead slices an occurrence straddling
+// the cut in half, and half an identifier matches nothing, so its head is copied
+// straight out.
+func TestErrorBodyIsCutBeforeTheScrubNotAfter(t *testing.T) {
+	const user = "alice@example.test"
+	const uri = "https://app.example.test/callback"
+
+	t.Run("redaction does not promote what the cut hid", func(t *testing.T) {
+		// Percent-encoding is outside what the scrub decodes (serviceText says so),
+		// so if this tail reaches the window it is returned as it stands. It must
+		// not reach it: past the first kilobyte, it is not this error's to show.
+		body := strings.Repeat(uri+" ", 34) + "alice%40example.test"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, body)
+		}))
+		defer srv.Close()
+
+		_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+			Resource: authProviderResource, UserID: user, ContinueURI: uri,
+		})
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("error = %v, want *APIError", err)
+		}
+		if strings.Contains(apiErr.Body, "alice%40example.test") {
+			t.Errorf("Body reaches past the cut: %q", apiErr.Body)
+		}
+		if !strings.Contains(apiErr.Body, redactedMarker) {
+			t.Errorf("Body = %q, want the echoed uri redacted rather than the text dropped", apiErr.Body)
+		}
+	})
+
+	t.Run("an escaped occurrence straddling the cut is not sliced in half", func(t *testing.T) {
+		// The escaped spelling is invisible to the scrub, so the cut is what would
+		// cut it, leaving a readable head of the address. Each pad puts a different
+		// byte of the escape on the boundary.
+		for _, pad := range []int{1006, 1010, 1014, 1018, 1020, 1022, 1023} {
+			got := serviceText(strings.Repeat("x", pad)+`alice\u0040example.test`, user)
+			for n := len(user); n >= 3; n-- {
+				if strings.Contains(strings.ToLower(got), user[:n]) {
+					t.Errorf("pad %d: %q of the acting user survives: %q", pad, user[:n], got)
+					break
+				}
+			}
+		}
+	})
+}
+
 // TestRedactAcrossSeveralSecrets pins the two ways one pass per value went wrong.
 //
 // Both were reachable in production, where every call site passes UserID and
@@ -957,10 +1110,12 @@ func TestRedactStaysLinear(t *testing.T) {
 		// The second factor. The walk costs O(body x secret length) on a body that
 		// tiles the secret, and the three shapes above are all short enough to hide
 		// it — they run in single-digit milliseconds whatever the walk does.
-		// Measured here: 4 KiB is ~40ms, 64 KiB ~730ms, 512 KiB ~4.2s. A UserID is
-		// bounded only by the embedding server, so the shape is worth pinning even
-		// though no realistic one is this long.
-		{"a secret long enough to show the second factor", strings.Repeat("ab", 2048)},
+		// Measured here: 4 KiB is ~40ms, 64 KiB ~730ms, 512 KiB ~4.2s. redact is
+		// reachable with any of those, so the shape is pinned here; what a caller
+		// can actually provoke through an error is capped separately, by
+		// maxScrubbableSecret, and TestServiceTextCostIsBounded is where that
+		// ceiling lives.
+		{"a secret long enough to show the second factor", strings.Repeat("ab", maxScrubbableSecret/2)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.Repeat(tc.secret, maxBody/len(tc.secret))
@@ -983,6 +1138,82 @@ func TestRedactStaysLinear(t *testing.T) {
 			}
 			t.Logf("%d bytes, secret %d bytes, every byte a match: %v", len(body), len(tc.secret), elapsed)
 		})
+	}
+}
+
+// TestServiceTextCostIsBounded pins the ceiling on what one failed call can
+// spend, which TestRedactStaysLinear cannot see because it drives redact rather
+// than the path an error actually takes.
+//
+// Three factors compounded before the bound existed, and all three needed a
+// caller-supplied value with no length limit. The scan is O(body x value). Two
+// of the values are decoded to a fixpoint, and decodeFully is quadratic on an
+// escape that re-forms its own introducer — "\u005c" decodes to a backslash, so
+// each pass shortens by five bytes and there are len/5 of them. And recoverable
+// rebuilt both per marker-separated part, a count the SERVICE picks by writing
+// the marker into its own response. Together, measured end to end through
+// RetrieveCredential against a 403 with a 1020-byte body: 3m33.6s, uncancellable,
+// for one call.
+//
+// The budget below is deliberately loose. It is here to fail on a rewrite that
+// puts an unbounded factor back, not to measure a machine.
+func TestServiceTextCostIsBounded(t *testing.T) {
+	selfRegen := func(n int) string { return `\u005c` + strings.Repeat("u005c", n) }
+
+	for _, tc := range []struct {
+		name         string
+		user         string
+		body         string
+		wantWithheld bool
+	}{{
+		// The shape that measured 3m33.6s. The value is past the bound, so it is
+		// not matched at all and nothing is shown.
+		name:         "a value past the bound is not matched and nothing is shown",
+		user:         selfRegen(12799),
+		body:         strings.Repeat(redactedMarker, 102),
+		wantWithheld: true,
+	}, {
+		// The service's own markers no longer multiply anything: the per-value
+		// forms are built once, not once per part.
+		name: "a body of service-written markers does not multiply the value cost",
+		user: strings.Repeat("ab", 2048),
+		body: strings.Repeat(redactedMarker, 102),
+	}, {
+		// The worst case still reachable: a value at the bound against a body at
+		// doPost's read cap, every byte of which matches.
+		name: "a value at the bound against a megabyte that tiles it",
+		user: strings.Repeat("ab", maxScrubbableSecret/2),
+		body: strings.Repeat("ab", (1<<20)/2),
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			got := serviceText(tc.body, tc.user, "https://app.test/cb")
+			elapsed := time.Since(start)
+
+			if withheld := got == withheldText; withheld != tc.wantWithheld {
+				t.Errorf("serviceText() withheld = %v, want %v", withheld, tc.wantWithheld)
+			}
+			if elapsed > 5*time.Second {
+				t.Errorf("serviceText() over a %d-byte body with a %d-byte value took %v",
+					len(tc.body), len(tc.user), elapsed)
+			}
+			t.Logf("body %d bytes, value %d bytes: %v", len(tc.body), len(tc.user), elapsed)
+		})
+	}
+}
+
+// TestScrubbableBoundFailsClosed pins which side of the bound gets scrubbed and
+// which gets nothing, since the difference is a value one byte longer.
+func TestScrubbableBoundFailsClosed(t *testing.T) {
+	atBound := strings.Repeat("a", maxScrubbableSecret)
+	// The body runs past the error-body cap either way, so the scrubbed answer
+	// carries the ellipsis that says the rest was dropped.
+	if got, want := serviceText("denied for "+atBound, atBound), "denied for "+redactedMarker+"..."; got != want {
+		t.Errorf("at the bound, serviceText() = %q, want %q", got, want)
+	}
+	overBound := strings.Repeat("a", maxScrubbableSecret+1)
+	if got := serviceText("denied for "+overBound, overBound); got != withheldText {
+		t.Errorf("past the bound, serviceText() = %q, want it withheld", got)
 	}
 }
 

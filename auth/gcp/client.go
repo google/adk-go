@@ -104,12 +104,20 @@ type APIError struct {
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
 	// request's own UserID and ContinueURI are removed and replaced with
-	// "[redacted]", the text is lowercased wherever anything matched, and the
-	// result is capped at a kilobyte.
+	// "[redacted]", the text is lowercased wherever anything matched, and only
+	// the first kilobyte of the response is drawn on, with "..." marking that the
+	// rest was dropped.
 	//
-	// It is still service-controlled. Render it with %q, as [APIError.Error] does
-	// — the service can put a newline in it directly, and an escaped one in the
-	// body is decoded on the way here, so "%s" into a log forges a second line.
+	// It can also be none of the response. Where the identifiers could not be
+	// shown to be gone, Body is a fixed sentence saying so and bears no relation
+	// to what the service sent. There is no supported way to tell that case
+	// apart, so branch on StatusCode and treat Body as diagnostic text for a
+	// human rather than as something to match on.
+	//
+	// Otherwise it is still service-controlled. Render it with %q, as
+	// [APIError.Error] does — the service can put a newline in it directly, and an
+	// escaped one in the body is decoded on the way here, so "%s" into a log
+	// forges a second line.
 	Body string
 }
 
@@ -461,6 +469,22 @@ const withheldText = "[withheld: could not be shown free of the request's own id
 // redactedMarker is what redact writes in place of a removed value.
 const redactedMarker = "[redacted]"
 
+// maxScrubbableSecret bounds the caller-supplied values this package will match
+// against a response. Above it, nothing is shown at all.
+//
+// Matching costs O(body x value), and the body reaches doPost's 1 MiB read cap
+// while Request.UserID and Request.ContinueURI are bounded by nothing here — a
+// 512 KiB value against a megabyte of response measured 9.1s of uninterruptible
+// CPU, and decodeFully is quadratic on the same input. Half-scrubbing is not an
+// option, so the choice is between a bound and a denial of service, and the
+// bound fails closed.
+//
+// 4 KiB rather than something tighter because it has to clear every real
+// identifier by a wide margin: an address is at most 320 bytes (RFC 5321) and a
+// redirect URI is held under 2 KiB by what servers and browsers accept. At this
+// bound the worst case is milliseconds.
+const maxScrubbableSecret = 4096
+
 // serviceText prepares service-controlled text for an error message.
 //
 // Contract: no secret is recoverable from the returned string by this package's
@@ -472,6 +496,9 @@ const redactedMarker = "[redacted]"
 // percent-encoded, echoed in half. The guarantee is that WE add no identifier,
 // not that we can launder one back out of arbitrary text.
 //
+// A value longer than [maxScrubbableSecret] is not matched at all and nothing is
+// returned, because scrubbing it costs more than the diagnostic is worth.
+//
 // Two things here look like they could be simpler and cannot be.
 //
 // The choice between the two candidates is made on the OUTPUT, never on a property
@@ -480,27 +507,47 @@ const redactedMarker = "[redacted]"
 // destroys costs it nothing and moves the comparison wherever it likes. Three
 // revisions were broken that way before this one.
 //
-// redact runs before the cap. Capping first cuts an identifier in half whenever it
-// straddles the boundary, and the surviving prefix matches nothing, so a long
-// enough response smuggles out the acting user's leading bytes.
+// The cap is applied to the text being READ, not to the scrubbed result, and
+// [scrubForError] carries why both of the simpler orders leak.
 func serviceText(s string, secrets ...string) string {
-	// Capped BEFORE the check, so what is examined is exactly what is returned.
-	// The cap is not neutral: its ellipsis is appended text, and appended text can
-	// finish a secret the untruncated string only started — an identifier ending
-	// in a dot is completed by the first character of "...".
-	if out := truncateForError(redact(s, secrets...)); !recoverable(out, secrets) {
+	for _, v := range secrets {
+		if len(v) > maxScrubbableSecret {
+			return withheldText
+		}
+	}
+	if out, ok := showable(s, secrets); ok {
 		return out
 	}
 	if u := unescapeJSON(s); u != s {
-		if out := truncateForError(redact(u, secrets...)); !recoverable(out, secrets) {
+		if out, ok := showable(u, secrets); ok {
 			return out
 		}
 	}
-	// Both candidates still yield a secret. That needs an encoding this package
-	// decodes wrapped in one it does not, so it is not a shape an ordinary service
-	// produces — which is the reason to treat it as hostile and drop the text. The
-	// status code, the resource and the sentinel all survive in the error around it.
+	// Neither candidate can be shown clean. The status code, the resource and the
+	// sentinel all survive in the error around this.
 	return withheldText
+}
+
+// showable scrubs s for an error and reports whether the result can be shown.
+func showable(s string, secrets []string) (string, bool) {
+	out, truncated := scrubForError(s, secrets...)
+	// Asked of the WHOLE text as well, and only when the cap actually cut, because
+	// the visible part alone cannot answer it. An occurrence the scrub could not
+	// match — an escaped spelling — that straddles the cut is sliced in half, and
+	// half an identifier matches nothing, so what is shown looks clean while the
+	// response plainly carried the identifier and this package's own decoder gets
+	// it back out.
+	if truncated && recoverable(redact(s, secrets...), secrets) {
+		return "", false
+	}
+	// Checked AFTER the cap, so what is examined is exactly what is returned. The
+	// cap is not neutral: its ellipsis is appended text, and appended text can
+	// finish a secret the untruncated string only started — an identifier ending
+	// in a dot is completed by the first character of "...".
+	if recoverable(out, secrets) {
+		return "", false
+	}
+	return out, true
 }
 
 // recoverable reports whether any secret can be read out of x, either literally or
@@ -510,20 +557,35 @@ func serviceText(s string, secrets ...string) string {
 // what an attacker gets from the bytes being returned, so it cannot be steered by
 // what the service put in the bytes that were measured.
 func recoverable(x string, secrets []string) bool {
+	// Built once, outside the loop over parts. These depend only on the secrets,
+	// and the SERVICE picks how many parts there are by writing the marker into
+	// its own response — a kilobyte of markers is about a hundred of them, so
+	// rebuilding these per part let a 1 KiB body multiply the per-secret cost a
+	// hundredfold. Measured before the hoist: 3m33.6s for one call, 2.35s after.
+	//
+	// Decoded spelling too, because decoding is what mangles a secret. An
+	// identifier containing \/ survives a decoded copy's scrub as the slash it
+	// decodes to, which is not the secret and is still the identity.
+	var forms []string
+	for _, v := range secrets {
+		if v == "" {
+			continue
+		}
+		for _, form := range []string{strings.ToLower(v), strings.ToLower(decodeFully(v))} {
+			if form != "" {
+				forms = append(forms, form)
+			}
+		}
+	}
+	if len(forms) == 0 {
+		return false
+	}
 	for _, part := range strings.Split(x, redactedMarker) {
 		lx := strings.ToLower(part)
 		lu := strings.ToLower(decodeFully(part))
-		for _, v := range secrets {
-			if v == "" {
-				continue
-			}
-			// Decoded spelling too, because decoding is what mangles a secret. An
-			// identifier containing \/ survives a decoded copy's scrub as the slash
-			// it decodes to, which is not the secret and is still the identity.
-			for _, form := range []string{strings.ToLower(v), strings.ToLower(decodeFully(v))} {
-				if form != "" && (strings.Contains(lx, form) || strings.Contains(lu, form)) {
-					return true
-				}
+		for _, form := range forms {
+			if strings.Contains(lx, form) || strings.Contains(lu, form) {
+				return true
 			}
 		}
 	}
@@ -616,23 +678,34 @@ func unescapeJSON(s string) string {
 	return b.String()
 }
 
-// truncateForError caps an error body so a large (e.g. HTML gateway) response
-// doesn't bloat the returned error.
-func truncateForError(s string) string {
+// visibleLimit reports how many bytes of s an error may show, and whether s ran
+// past that. Factored out of truncateForError so the scan can stop at the same
+// place instead of the text being cut after it — see scrubForError.
+func visibleLimit(s string) (cut int, truncated bool) {
 	const max = maxErrorBody
 	if len(s) <= max {
-		return s
+		return len(s), false
 	}
 	// Back up to a rune boundary so a multi-byte rune straddling the cap isn't
 	// sliced into a mangled partial rune. Bounded: the body need not be UTF-8 at
 	// all, and an unbounded scan over continuation bytes would walk to 0 and
 	// discard every byte of diagnostic context.
-	cut := max
+	cut = max
 	for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); i++ {
 		cut--
 	}
 	if !utf8.RuneStart(s[cut]) {
 		cut = max
+	}
+	return cut, true
+}
+
+// truncateForError caps an error body so a large (e.g. HTML gateway) response
+// doesn't bloat the returned error.
+func truncateForError(s string) string {
+	cut, truncated := visibleLimit(s)
+	if !truncated {
+		return s
 	}
 	return s[:cut] + "..."
 }
@@ -668,20 +741,88 @@ func truncateForError(s string) string {
 // cosmetic: the empty string matches at the cursor forever, so admitting one
 // would leave the cursor where it is and the loop would never finish.
 func redact(s string, values ...string) string {
+	lowered := loweredValues(values)
+	if len(lowered) == 0 {
+		return s
+	}
+	ls := strings.ToLower(s)
+	out, hit := redactLowered(ls, len(ls), lowered)
+	if !hit {
+		return s
+	}
+	return out
+}
+
+// scrubForError is redact with the error-body cap applied to the text it READS
+// rather than to the text it returns.
+//
+// The order matters and the obvious one is wrong in both directions. Capping the
+// scrubbed text lets redaction's own shortening pull bytes into view that the
+// same cap on the raw response would have hidden: a body that echoes the
+// ContinueURI thirty times and then names the user id past the kilobyte mark
+// collapses every echo to a ten-byte marker, and the id rides up into the
+// window. Capping the raw text instead would slice an occurrence straddling the
+// cut in half, and half an identifier matches nothing, so the surviving prefix
+// would be copied straight out.
+//
+// So the cap bounds what may be EMITTED while matching still runs over the whole
+// of s. A value that starts before the cut and ends after it is removed whole,
+// and nothing at or past the cut is shown either way.
+//
+// The bound is measured on the lowered copy, because that is what the result is
+// built from and lowercasing does not preserve byte offsets. When nothing
+// matches there is no lowered copy in play and s is capped on its own bytes.
+func scrubForError(s string, values ...string) (string, bool) {
+	lowered := loweredValues(values)
+	if len(lowered) == 0 {
+		return truncateForError(s), false
+	}
+	ls := strings.ToLower(s)
+	limit, truncated := visibleLimit(ls)
+	out, hit := redactLowered(ls, limit, lowered)
+	if !hit {
+		return truncateForError(s), truncated
+	}
+	if truncated {
+		out += "..."
+	}
+	return out, truncated
+}
+
+// loweredValues drops the empty values and lowercases the rest. Empty values are
+// dropped, and that is load-bearing rather than cosmetic: the empty string
+// matches at the cursor forever, so admitting one would leave the cursor where
+// it is and the loop would never finish.
+func loweredValues(values []string) []string {
 	lowered := make([]string, 0, len(values))
 	for _, v := range values {
 		if v != "" {
 			lowered = append(lowered, strings.ToLower(v))
 		}
 	}
-	if len(lowered) == 0 {
-		return s
+	return lowered
+}
+
+// redactLowered runs the scan over ls, which is already lowered, with lowered
+// already non-empty and lowercased. It emits no byte of ls at or past limit, and
+// reports whether it wrote a marker — if it did not, the caller returns the
+// original text rather than the lowered copy.
+//
+// Cost is O(len(ls) x total value length): the outer scan and the next[] refresh
+// are linear in len(ls) per value, but the extension walk below re-compares a
+// value at every position of a range it covers. serviceText bounds the second
+// factor by refusing to scrub a value longer than maxScrubbableSecret.
+func redactLowered(ls string, limit int, lowered []string) (string, bool) {
+	if limit > len(ls) {
+		limit = len(ls)
 	}
-	ls := strings.ToLower(s)
+	if limit <= 0 {
+		return "", false
+	}
 
 	// next[i] is where lowered[i] matches at or after pos, or -1 once exhausted.
 	// Refreshed only for values whose match pos has passed, and pos only moves
-	// forward, so the whole scan stays linear in len(ls) per value.
+	// forward, so this part of the scan is linear in len(ls) per value.
 	next := make([]int, len(lowered))
 	for i, lv := range lowered {
 		next[i] = strings.Index(ls, lv)
@@ -699,7 +840,9 @@ func redact(s string, values ...string) string {
 				at, which = n, i
 			}
 		}
-		if at < 0 {
+		if at < 0 || at >= limit {
+			// Nothing left to redact, or what is left starts at or past the bound
+			// and so cannot reach the output at all.
 			break
 		}
 		// Extend the range while ANY occurrence starts inside it. Choosing the
@@ -738,6 +881,12 @@ func redact(s string, values ...string) string {
 			b.WriteString(redactedMarker)
 		}
 		pos, hit = end, true
+		if pos >= limit {
+			// The run reaches the bound, so nothing after it may be shown. It was
+			// removed whole rather than cut, which is the point of matching over
+			// the whole of ls while emitting only up to limit.
+			return b.String(), true
+		}
 		for i, lv := range lowered {
 			if next[i] >= 0 && next[i] < pos {
 				if j := strings.Index(ls[pos:], lv); j < 0 {
@@ -749,8 +898,8 @@ func redact(s string, values ...string) string {
 		}
 	}
 	if !hit {
-		return s
+		return "", false
 	}
-	b.WriteString(ls[pos:])
-	return b.String()
+	b.WriteString(ls[pos:limit])
+	return b.String(), true
 }

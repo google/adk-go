@@ -69,6 +69,123 @@ func reference(s string, values ...string) string {
 	return b.String()
 }
 
+// referenceBounded is the obviously-correct definition of the bounded scan: the
+// same coverage as reference, but only positions before limit are emitted, and a
+// covered run reaching the limit still collapses to exactly one marker, because
+// the value under it was removed rather than cut.
+//
+// It reports whether a marker was written, which is what tells the caller to
+// return the lowered copy rather than the original text.
+func referenceBounded(ls string, limit int, lowered []string) (string, bool) {
+	if limit > len(ls) {
+		limit = len(ls)
+	}
+	if limit <= 0 {
+		return "", false
+	}
+	covered := make([]bool, len(ls))
+	for _, lv := range lowered {
+		if lv == "" {
+			continue
+		}
+		for i := 0; i+len(lv) <= len(ls); i++ {
+			if ls[i:i+len(lv)] == lv {
+				for j := i; j < i+len(lv); j++ {
+					covered[j] = true
+				}
+			}
+		}
+	}
+	var b strings.Builder
+	hit := false
+	for i := 0; i < limit; {
+		if covered[i] {
+			b.WriteString("[redacted]")
+			hit = true
+			for i < len(ls) && covered[i] {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(ls[i])
+		i++
+	}
+	if !hit {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// TestRedactLoweredMatchesReferenceAtEveryBound is the exhaustive comparison
+// above, re-run at every possible bound rather than only at the end of the text.
+//
+// The bound is what stops redaction's own shortening from pulling bytes into an
+// error that the same cut on the raw response would have hidden, and it has two
+// edges no example-based test walks onto by accident: a run starting before the
+// bound and ending after it must still collapse to one marker and end the output,
+// and a run starting at or after the bound must not appear at all. Every
+// off-by-one between those two is a byte of somebody's address.
+//
+// Inputs are pre-lowered, unlike the test below: redactLowered is handed a lowered
+// text by both of its callers, and case is that test's subject. What this one adds
+// is the bound, so it spends its budget on length instead — bodies to eight bytes
+// over two letters, where a secret can tile the body and still straddle a cut.
+func TestRedactLoweredMatchesReferenceAtEveryBound(t *testing.T) {
+	alphabet := []byte("ab")
+	var words []string
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		words = append(words, prefix)
+		if n == 0 {
+			return
+		}
+		for _, c := range alphabet {
+			gen(prefix+string(c), n-1)
+		}
+	}
+	maxLen := 8
+	if testing.Short() {
+		maxLen = 5
+	}
+	gen("", maxLen)
+
+	var secrets []string
+	for _, w := range words {
+		if w != "" && len(w) <= 4 {
+			secrets = append(secrets, w)
+		}
+	}
+
+	checked, mismatches := 0, 0
+	for _, body := range words {
+		for _, s1 := range secrets {
+			for _, s2 := range secrets {
+				lowered := []string{s1, s2}
+				// Every bound, and one on each side of the text: both ends are
+				// reachable, since visibleLimit returns len(s) for a short text and
+				// can back a cut all the way to 0 on a body that is not UTF-8.
+				for limit := -1; limit <= len(body)+1; limit++ {
+					checked++
+					got, gotHit := redactLowered(body, limit, lowered)
+					want, wantHit := referenceBounded(body, limit, lowered)
+					if got == want && gotHit == wantHit {
+						continue
+					}
+					if mismatches < 5 {
+						t.Errorf("redactLowered(%q, %d, %q) = (%q, %v), reference says (%q, %v)",
+							body, limit, lowered, got, gotHit, want, wantHit)
+					}
+					mismatches++
+				}
+			}
+		}
+	}
+	t.Logf("%d combinations checked, %d mismatches", checked, mismatches)
+	if mismatches != 0 {
+		t.Errorf("%d combinations disagree with the reference", mismatches)
+	}
+}
+
 // TestRedactMatchesReferenceExhaustively compares redact against reference over
 // every string of length <= 4 over {a,b,A,B} crossed with every secret pair of
 // length <= 3 — 2,463,725 combinations, about a second.
