@@ -86,9 +86,9 @@ type StartGenerateContentSpanParams struct {
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
-	// Request is the request about to be sent to the model. It is used only
-	// to record the opt-in gen_ai.input.messages and
-	// gen_ai.system_instructions attributes, and may be nil.
+	// Request is the request about to be sent to the model. It is used to
+	// record the opt-in gen_ai.input.messages, gen_ai.system_instructions, and
+	// gen_ai.tool.definitions attributes, and may be nil.
 	Request *model.LLMRequest
 }
 

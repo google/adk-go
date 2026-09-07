@@ -84,7 +84,7 @@ const unserializablePlaceholder = `"<unserializable>"`
 // unserializableSchemaPlaceholder is a valid JSON Schema used when a tool
 // parameter schema cannot be encoded. Unlike unserializablePlaceholder, this
 // value is used where the semantic convention requires a schema object.
-const unserializableSchemaPlaceholder = `{"type":"object","properties":{"serialization_error":{"type":"string"}}}`
+const unserializableSchemaPlaceholder = `{"$comment":"parameters omitted because serialization failed","type":"object"}`
 
 // maxInlineDataBytes bounds one inline payload before base64, which inflates it
 // by a third. A single image would otherwise consume the whole attribute and
@@ -199,6 +199,9 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 	if err := decoder.Decode(&normalized); err != nil {
 		return json.RawMessage(unserializableSchemaPlaceholder)
 	}
+	if normalized == nil {
+		return json.RawMessage("null")
+	}
 	switch normalized.(type) {
 	case map[string]any, bool:
 		// JSON Schema draft-07 permits schemas to be objects or booleans.
@@ -213,8 +216,8 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 	return json.RawMessage(encoded)
 }
 
-// normalizeSchemaTypes converts only genai.Schema's protobuf enum spellings
-// to the lowercase type values required by JSON Schema. It deliberately leaves
+// normalizeSchemaTypes normalizes values at actual JSON Schema type locations
+// to the lowercase values required by JSON Schema. It deliberately leaves
 // arbitrary strings in data-bearing fields such as default and examples alone.
 func normalizeSchemaTypes(value any) {
 	normalizeSchemaNode(value)
@@ -279,13 +282,13 @@ func normalizeSchemaValue(value any) {
 func normalizeSchemaTypeValue(value any) (any, bool) {
 	switch value := value.(type) {
 	case string:
-		if normalized, ok := genaiTypeNames[value]; ok {
-			return normalized, true
-		}
 		if value == string(genai.TypeUnspecified) {
 			return nil, false
 		}
-		return value, true
+		if normalized, ok := genaiTypeNames[value]; ok {
+			return normalized, true
+		}
+		return strings.ToLower(value), true
 	case []any:
 		normalized := make([]any, 0, len(value))
 		for _, item := range value {
@@ -299,7 +302,7 @@ func normalizeSchemaTypeValue(value any) (any, bool) {
 		}
 		return normalized, true
 	default:
-		return value, true
+		return nil, false
 	}
 }
 
@@ -322,7 +325,14 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 		}
 	}
 	if definitions := toolDefinitions(req.Config); len(definitions) > 0 {
+		before := len(attrs)
 		attrs = appendJSON(attrs, genAIToolDefinitions, definitions)
+		if len(attrs) == before && captureToolDefinitionParametersOnSpans() {
+			for i := range definitions {
+				definitions[i].Parameters = nil
+			}
+			attrs = appendJSON(attrs, genAIToolDefinitions, definitions)
+		}
 	}
 	if len(req.Contents) > 0 {
 		// Messages MUST be recorded in the order they were sent. A turn whose

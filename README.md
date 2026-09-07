@@ -69,6 +69,12 @@ parameter schemas on spans. The parameter-capture flag has no effect unless
 span content capture is enabled. Use this setting only when the captured tool
 schemas are appropriate for your telemetry destination.
 
+Each content attribute is limited to 60 KiB (61,440 bytes). When parameter
+capture is enabled and the complete tool definition does not fit, ADK retries
+with the tool name, description, and type while omitting the parameter schemas.
+If that metadata-only representation is also too large, the
+`gen_ai.tool.definitions` attribute is omitted.
+
 ## 📖 Docs for AI coding agents
 
 [adk.dev/llms.txt](https://adk.dev/llms.txt) is a machine-readable index of the ADK documentation, and [adk.dev/llms-full.txt](https://adk.dev/llms-full.txt) is the same documentation as a single file. Both are generated from [adk-docs](https://github.com/google/adk-docs/) and include the Go API reference and samples, so you can point a coding agent at either one for context:

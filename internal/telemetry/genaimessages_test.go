@@ -41,6 +41,9 @@ const cloudTraceAttributeValueLimit = 64 * 1024
 // captureContent turns on the message content opt-in for one test.
 func captureContent(t *testing.T) {
 	t.Helper()
+	// ApplyEnv copies the environment into package-level settings, so restore
+	// those settings after t.Setenv restores the environment for the next test.
+	t.Cleanup(ApplyEnv)
 	// Spans have to be asked for by name. A truthy value means log records
 	// only, which is what the variable meant before spans could carry content.
 	t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
@@ -464,10 +467,8 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersFailureIsolated(t *t
 		t.Fatalf("bad tool was not isolated: %#v", got[1])
 	}
 	wantPlaceholder := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"serialization_error": map[string]any{"type": "string"},
-		},
+		"$comment": "parameters omitted because serialization failed",
+		"type":     "object",
 	}
 	if diff := cmp.Diff(wantPlaceholder, got[1]["parameters"]); diff != "" {
 		t.Errorf("invalid parameters placeholder (-want +got):\n%s", diff)
@@ -533,6 +534,140 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing
 	}
 }
 
+func TestRequestContentAttributes_ToolDefinitions_ParameterCaptureSizeFallback(t *testing.T) {
+	newDeclaration := func(description, propertyDescription string) *genai.FunctionDeclaration {
+		return &genai.FunctionDeclaration{
+			Name:        "get_weather",
+			Description: description,
+			ParametersJsonSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city": map[string]any{
+						"type":        "string",
+						"description": propertyDescription,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name              string
+		captureParameters bool
+		declaration       *genai.FunctionDeclaration
+		wantAttribute     bool
+		wantParameters    bool
+	}{
+		{
+			name:              "parameters omitted by default",
+			captureParameters: false,
+			declaration:       newDeclaration("Gets the weather.", "parameters are not captured"),
+			wantAttribute:     true,
+			wantParameters:    false,
+		},
+		{
+			name:              "parameters included when they fit",
+			captureParameters: true,
+			declaration:       newDeclaration("Gets the weather.", ""),
+			wantAttribute:     true,
+			wantParameters:    true,
+		},
+		{
+			name:              "parameters omitted when the complete definition is too large",
+			captureParameters: true,
+			declaration:       newDeclaration("Gets the weather.", strings.Repeat("x", maxContentAttributeBytes)),
+			wantAttribute:     true,
+			wantParameters:    false,
+		},
+		{
+			name:              "attribute omitted when metadata is too large",
+			captureParameters: true,
+			declaration:       newDeclaration(strings.Repeat("x", maxContentAttributeBytes), ""),
+			wantAttribute:     false,
+			wantParameters:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.captureParameters {
+				captureToolDefinitionParameters(t)
+			} else {
+				captureContent(t)
+			}
+
+			req := &model.LLMRequest{
+				Config: &genai.GenerateContentConfig{
+					Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{tc.declaration}}},
+				},
+			}
+			encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
+			if !tc.wantAttribute {
+				if ok {
+					t.Errorf("gen_ai.tool.definitions = %d bytes, want attribute omitted", len(encoded))
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("gen_ai.tool.definitions was not set")
+			}
+
+			var got []map[string]any
+			if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+				t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d tool definitions, want 1: %s", len(got), encoded)
+			}
+			_, hasParameters := got[0]["parameters"]
+			if hasParameters != tc.wantParameters {
+				t.Errorf("parameters present = %t, want %t: %s", hasParameters, tc.wantParameters, encoded)
+			}
+			if got[0]["name"] != "get_weather" || got[0]["type"] != "function" {
+				t.Errorf("metadata was not preserved: %#v", got[0])
+			}
+		})
+	}
+}
+
+func TestToolDefinitionParameters_PreservesNull(t *testing.T) {
+	tests := []struct {
+		name        string
+		declaration *genai.FunctionDeclaration
+	}{
+		{
+			name:        "both fields empty",
+			declaration: &genai.FunctionDeclaration{},
+		},
+		{
+			name: "raw message null",
+			declaration: &genai.FunctionDeclaration{
+				ParametersJsonSchema: json.RawMessage("null"),
+			},
+		},
+		{
+			name: "typed nil pointer",
+			declaration: &genai.FunctionDeclaration{
+				ParametersJsonSchema: (*genai.Schema)(nil),
+			},
+		},
+		{
+			name: "typed nil map",
+			declaration: &genai.FunctionDeclaration{
+				ParametersJsonSchema: map[string]any(nil),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(toolDefinitionParameters(tc.declaration)); got != "null" {
+				t.Errorf("toolDefinitionParameters() = %s, want null", got)
+			}
+		})
+	}
+}
+
 func TestToolDefinitionParameters_RejectsInvalidSchemaValues(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -571,6 +706,21 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 					"type":        "TYPE_UNSPECIFIED",
 					"description": "type is intentionally unspecified",
 				},
+				"mixed_case": map[string]any{
+					"type": "Object",
+				},
+				"union_with_invalid_members": map[string]any{
+					"type": []any{"String", 42, "BOOLEAN", nil},
+				},
+				"invalid_type": map[string]any{
+					"type": 42,
+				},
+				"null_type": map[string]any{
+					"type": nil,
+				},
+				"empty_union": map[string]any{
+					"type": []any{42, nil},
+				},
 			},
 			"dependencies": map[string]any{
 				"credit_card":     map[string]any{"type": "OBJECT"},
@@ -595,6 +745,15 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 			"unspecified": map[string]any{
 				"description": "type is intentionally unspecified",
 			},
+			"mixed_case": map[string]any{
+				"type": "object",
+			},
+			"union_with_invalid_members": map[string]any{
+				"type": []any{"string", "boolean"},
+			},
+			"invalid_type": map[string]any{},
+			"null_type":    map[string]any{},
+			"empty_union":  map[string]any{},
 		},
 		"dependencies": map[string]any{
 			"credit_card":     map[string]any{"type": "object"},
@@ -622,6 +781,7 @@ func TestToolDefinitionParameters_PreservesLargeNumbers(t *testing.T) {
 }
 
 func TestRequestContentAttributes_ToolDefinitionsRespectsCapture(t *testing.T) {
+	t.Cleanup(ApplyEnv)
 	t.Setenv(captureMessageContentEnvVar, "")
 	t.Setenv(captureToolDefinitionParametersEnvVar, "true")
 	ApplyEnv()
@@ -668,6 +828,7 @@ func TestRequestContentAttributes_SystemInstructions(t *testing.T) {
 // --- Opt-in ------------------------------------------------------------
 
 func TestContentAttributes_OptInIsOffByDefault(t *testing.T) {
+	t.Cleanup(ApplyEnv)
 	t.Setenv(captureMessageContentEnvVar, "")
 	ApplyEnv()
 
@@ -1085,7 +1246,9 @@ func TestContentCaptureModes(t *testing.T) {
 		{"span_and_event", true, true},
 	} {
 		t.Run(tc.env, func(t *testing.T) {
+			t.Cleanup(ApplyEnv)
 			t.Setenv(captureMessageContentEnvVar, tc.env)
+			t.Setenv(captureToolDefinitionParametersEnvVar, "")
 			ApplyEnv()
 			if got := getGenAICaptureMessageContent(); got != tc.inLogs {
 				t.Errorf("content in log records = %v, want %v", got, tc.inLogs)
@@ -1103,6 +1266,7 @@ func TestContentCaptureModes(t *testing.T) {
 // span capture behind that value would have started shipping full conversations
 // to a tracing backend nobody opted into.
 func TestTruthyValueDoesNotPutContentOnSpans(t *testing.T) {
+	t.Cleanup(ApplyEnv)
 	t.Setenv(captureMessageContentEnvVar, "true")
 	ApplyEnv()
 
