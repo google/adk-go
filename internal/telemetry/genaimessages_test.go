@@ -535,14 +535,14 @@ func TestRequestContentAttributes_ToolDefinitions_ParametersPrecedenceAndMissing
 }
 
 func TestRequestContentAttributes_ToolDefinitions_ParameterCaptureSizeFallback(t *testing.T) {
-	newDeclaration := func(description, propertyDescription string) *genai.FunctionDeclaration {
+	newDeclaration := func(name, description, propertyDescription string) *genai.FunctionDeclaration {
 		return &genai.FunctionDeclaration{
-			Name:        "get_weather",
+			Name:        name,
 			Description: description,
 			ParametersJsonSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"city": map[string]any{
+					"value": map[string]any{
 						"type":        "string",
 						"description": propertyDescription,
 					},
@@ -551,40 +551,52 @@ func TestRequestContentAttributes_ToolDefinitions_ParameterCaptureSizeFallback(t
 		}
 	}
 
+	declarations := func(propertyDescription string) []*genai.FunctionDeclaration {
+		return []*genai.FunctionDeclaration{
+			newDeclaration("get_weather", "Gets the weather.", propertyDescription),
+			newDeclaration("get_time", "Gets the current time.", propertyDescription),
+		}
+	}
+
 	tests := []struct {
 		name              string
 		captureParameters bool
-		declaration       *genai.FunctionDeclaration
+		declarations      []*genai.FunctionDeclaration
 		wantAttribute     bool
 		wantParameters    bool
+		wantSameAsOptOut  bool
 	}{
 		{
 			name:              "parameters omitted by default",
 			captureParameters: false,
-			declaration:       newDeclaration("Gets the weather.", "parameters are not captured"),
+			declarations:      declarations("parameters are not captured"),
 			wantAttribute:     true,
 			wantParameters:    false,
 		},
 		{
 			name:              "parameters included when they fit",
 			captureParameters: true,
-			declaration:       newDeclaration("Gets the weather.", ""),
+			declarations:      declarations(""),
 			wantAttribute:     true,
 			wantParameters:    true,
 		},
 		{
 			name:              "parameters omitted when the complete definition is too large",
 			captureParameters: true,
-			declaration:       newDeclaration("Gets the weather.", strings.Repeat("x", maxContentAttributeBytes)),
+			declarations:      declarations(strings.Repeat("x", maxContentAttributeBytes)),
 			wantAttribute:     true,
 			wantParameters:    false,
+			wantSameAsOptOut:  true,
 		},
 		{
 			name:              "attribute omitted when metadata is too large",
 			captureParameters: true,
-			declaration:       newDeclaration(strings.Repeat("x", maxContentAttributeBytes), ""),
-			wantAttribute:     false,
-			wantParameters:    false,
+			declarations: []*genai.FunctionDeclaration{
+				newDeclaration("get_weather", strings.Repeat("x", maxContentAttributeBytes), ""),
+				newDeclaration("get_time", "Gets the current time.", ""),
+			},
+			wantAttribute:  false,
+			wantParameters: false,
 		},
 	}
 
@@ -598,7 +610,7 @@ func TestRequestContentAttributes_ToolDefinitions_ParameterCaptureSizeFallback(t
 
 			req := &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
-					Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{tc.declaration}}},
+					Tools: []*genai.Tool{{FunctionDeclarations: tc.declarations}},
 				},
 			}
 			encoded, ok := attrString(requestContentAttributes(req), genAIToolDefinitions)
@@ -611,20 +623,35 @@ func TestRequestContentAttributes_ToolDefinitions_ParameterCaptureSizeFallback(t
 			if !ok {
 				t.Fatal("gen_ai.tool.definitions was not set")
 			}
+			if tc.wantSameAsOptOut {
+				t.Setenv(captureToolDefinitionParametersEnvVar, "")
+				ApplyEnv()
+				withoutParameters, withoutParametersOK := attrString(requestContentAttributes(req), genAIToolDefinitions)
+				if !withoutParametersOK {
+					t.Fatal("gen_ai.tool.definitions was not set with parameter capture disabled")
+				}
+				if encoded != withoutParameters {
+					t.Errorf("parameter-capture fallback differs from opt-out value:\nwith opt-in:  %s\nwith opt-out: %s", encoded, withoutParameters)
+				}
+			}
 
 			var got []map[string]any
 			if err := json.Unmarshal([]byte(encoded), &got); err != nil {
 				t.Fatalf("invalid gen_ai.tool.definitions JSON: %v", err)
 			}
-			if len(got) != 1 {
-				t.Fatalf("got %d tool definitions, want 1: %s", len(got), encoded)
+			if len(got) != len(tc.declarations) {
+				t.Fatalf("got %d tool definitions, want %d: %s", len(got), len(tc.declarations), encoded)
 			}
-			_, hasParameters := got[0]["parameters"]
-			if hasParameters != tc.wantParameters {
-				t.Errorf("parameters present = %t, want %t: %s", hasParameters, tc.wantParameters, encoded)
-			}
-			if got[0]["name"] != "get_weather" || got[0]["type"] != "function" {
-				t.Errorf("metadata was not preserved: %#v", got[0])
+			for i, declaration := range tc.declarations {
+				if got[i]["name"] != declaration.Name ||
+					got[i]["description"] != declaration.Description ||
+					got[i]["type"] != "function" {
+					t.Errorf("tool %d metadata was not preserved: %#v", i, got[i])
+				}
+				_, hasParameters := got[i]["parameters"]
+				if hasParameters != tc.wantParameters {
+					t.Errorf("tool %d parameters present = %t, want %t: %s", i, hasParameters, tc.wantParameters, encoded)
+				}
 			}
 		})
 	}
@@ -701,6 +728,11 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 					"type":     []string{"OBJECT", "null"},
 					"default":  map[string]any{"type": "OBJECT", "region": "US-EAST1"},
 					"examples": []any{map[string]any{"type": "STRING"}},
+					"items":    map[string]any{"type": "STRING"},
+					"anyOf": []any{
+						map[string]any{"type": "OBJECT"},
+						map[string]any{"type": "String"},
+					},
 				},
 				"unspecified": map[string]any{
 					"type":        "TYPE_UNSPECIFIED",
@@ -710,13 +742,25 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 					"type": "Object",
 				},
 				"union_with_invalid_members": map[string]any{
-					"type": []any{"String", 42, "BOOLEAN", nil},
+					"type": []any{"String", 42, "BOOLEAN", nil, "STRING"},
+				},
+				"nested_type_array": map[string]any{
+					"type": []any{[]any{"STRING"}},
+				},
+				"unknown_type": map[string]any{
+					"type": "Widget",
+				},
+				"empty_type": map[string]any{
+					"type": "",
 				},
 				"invalid_type": map[string]any{
 					"type": 42,
 				},
 				"null_type": map[string]any{
 					"type": nil,
+				},
+				"lowercase_unspecified": map[string]any{
+					"type": "type_unspecified",
 				},
 				"empty_union": map[string]any{
 					"type": []any{42, nil},
@@ -741,6 +785,11 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 				"type":     []any{"object", "null"},
 				"default":  map[string]any{"type": "OBJECT", "region": "US-EAST1"},
 				"examples": []any{map[string]any{"type": "STRING"}},
+				"items":    map[string]any{"type": "string"},
+				"anyOf": []any{
+					map[string]any{"type": "object"},
+					map[string]any{"type": "string"},
+				},
 			},
 			"unspecified": map[string]any{
 				"description": "type is intentionally unspecified",
@@ -751,9 +800,13 @@ func TestToolDefinitionParameters_NormalizesSchemaTypesWithoutChangingData(t *te
 			"union_with_invalid_members": map[string]any{
 				"type": []any{"string", "boolean"},
 			},
-			"invalid_type": map[string]any{},
-			"null_type":    map[string]any{},
-			"empty_union":  map[string]any{},
+			"nested_type_array":     map[string]any{},
+			"unknown_type":          map[string]any{},
+			"empty_type":            map[string]any{},
+			"invalid_type":          map[string]any{},
+			"null_type":             map[string]any{},
+			"lowercase_unspecified": map[string]any{},
+			"empty_union":           map[string]any{},
 		},
 		"dependencies": map[string]any{
 			"credit_card":     map[string]any{"type": "object"},

@@ -45,6 +45,16 @@ var genaiTypeNames = map[string]string{
 	string(genai.TypeNULL):    "null",
 }
 
+var jsonSchemaTypeNames = map[string]struct{}{
+	"string":  {},
+	"number":  {},
+	"integer": {},
+	"boolean": {},
+	"array":   {},
+	"object":  {},
+	"null":    {},
+}
+
 // Part type discriminators and roles defined by the message JSON schemas.
 const (
 	partTypeText             = "text"
@@ -217,8 +227,9 @@ func toolDefinitionParameters(declaration *genai.FunctionDeclaration) json.RawMe
 }
 
 // normalizeSchemaTypes normalizes values at actual JSON Schema type locations
-// to the lowercase values required by JSON Schema. It deliberately leaves
-// arbitrary strings in data-bearing fields such as default and examples alone.
+// to the lowercase values required by JSON Schema, dropping invalid values and
+// duplicate union members. It deliberately leaves arbitrary strings in
+// data-bearing fields such as default and examples alone.
 func normalizeSchemaTypes(value any) {
 	normalizeSchemaNode(value)
 }
@@ -282,20 +293,31 @@ func normalizeSchemaValue(value any) {
 func normalizeSchemaTypeValue(value any) (any, bool) {
 	switch value := value.(type) {
 	case string:
-		if value == string(genai.TypeUnspecified) {
+		if strings.EqualFold(value, string(genai.TypeUnspecified)) {
 			return nil, false
 		}
-		if normalized, ok := genaiTypeNames[value]; ok {
-			return normalized, true
+		normalized := strings.ToLower(value)
+		if mapped, ok := genaiTypeNames[value]; ok {
+			return mapped, true
 		}
-		return strings.ToLower(value), true
+		if _, ok := jsonSchemaTypeNames[normalized]; !ok {
+			return nil, false
+		}
+		return normalized, true
 	case []any:
 		normalized := make([]any, 0, len(value))
+		seen := make(map[string]struct{}, len(value))
 		for _, item := range value {
 			item, keep := normalizeSchemaTypeValue(item)
-			if keep {
-				normalized = append(normalized, item)
+			itemString, ok := item.(string)
+			if !keep || !ok {
+				continue
 			}
+			if _, alreadySeen := seen[itemString]; alreadySeen {
+				continue
+			}
+			seen[itemString] = struct{}{}
+			normalized = append(normalized, itemString)
 		}
 		if len(normalized) == 0 {
 			return nil, false
