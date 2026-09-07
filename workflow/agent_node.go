@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -48,13 +49,6 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	oschema, err := resolvedSchema[Output](outputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
-	}
-
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
 	}
 
 	// The wrapped agent's Run already emits an invoke_agent span, so
@@ -95,6 +89,42 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			yield(nil, err)
 			return
 		}
+		// Resolving the mode reads ctx, so a nil one is rejected before that
+		// rather than dereferenced further down. Exported, and RunLLMAgentAsNode
+		// — the other exported entry point that resolves a mode — rejects it the
+		// same way. Placed after nodeInputToContent, which never touches ctx, so
+		// an unmarshalable input still reports the marshaling error the merge
+		// base reported for it. Untyped nil only: a typed-nil agent.Context
+		// still panics, as it does everywhere else in these packages.
+		if ctx == nil {
+			yield(nil, fmt.Errorf("AgentNode.Run: nil context for agent %q", n.agent.Name()))
+			return
+		}
+
+		// A graph node is a one-shot placement: an agent that declares no
+		// mode runs single_turn here. Bound under this agent's own key — its
+		// name and its identity — so it cannot govern a peer this agent later
+		// transfers to, nor a same-named agent nested beneath it.
+		//
+		// The binding goes into the context this function passes DOWN, not back
+		// into ctx. Routing it through ctx.WithAgentContext would be the obvious
+		// shape and is a crash: that method returns nil for a tool context and
+		// for a callback context, both of which log and carry on, and the nil is
+		// dereferenced a few lines below. Neither wrapper reaches this function:
+		// SingleTurnTool does drive a node from inside a tool, but workflow.RunNode
+		// uses the caller's context only to fetch its SubScheduler, and the child
+		// context comes from the scheduler's own parent. Every symbol on that path
+		// is exported, so an out-of-tree caller can still arrive here with either.
+		// Guarding the nil and keeping the old ctx is not the fix either — the
+		// binding only reaches the request processors through the context handed
+		// downstream, so dropping it would run an undeclared agent as chat at a
+		// single_turn node.
+		bound := context.Context(ctx)
+		if llmA, ok := n.agent.(llminternal.Agent); ok && llmA != nil {
+			state := llminternal.Reveal(llmA)
+			mode := llminternal.ResolveMode(state.Mode, llminternal.ModeSingleTurn)
+			bound = llminternal.WithBoundMode(ctx, n.agent.Name(), state, mode)
+		}
 
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the
@@ -113,7 +143,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			EndInvocation:  ctx.Ended(),
 			InvocationID:   ctx.InvocationID(),
 		}
-		agentCtx := internalcontext.NewInvocationContext(ctx, params)
+		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
 
 		type NodeRunner interface {
