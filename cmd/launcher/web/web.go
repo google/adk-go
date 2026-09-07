@@ -45,6 +45,7 @@ type webConfig struct {
 	shutdownTimeout time.Duration
 	otelToCloud     bool
 	useH2C          bool
+	allowInMemory   bool
 }
 
 // webLauncher can launch web server
@@ -153,22 +154,36 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// applyServiceDefaults fills in in-memory services the caller left unset.
+// applyServiceDefaults fills in in-memory services the caller left unset, and
+// reports which ones it invented and whether the caller consented.
 //
 // Neither adkrest.NewServer nor runner.New defaults them; only
 // runner.NewInMemory does, and the web launcher does not use it. A nil session
 // or memory service reaches the request path and panics, which drops the
-// connection without sending any HTTP response. The artifact handlers answer
-// 503 instead, so defaulting that one replaces a clear diagnostic with a server
-// that works until it restarts and then has lost everything. It is logged for
-// that reason: cmd/launcher/prod runs through this same path, so a deployment
-// that forgot to configure a service still says so on startup.
-func applyServiceDefaults(config *launcher.Config) {
-	var defaulted []string
+// connection without sending any HTTP response.
+//
+// The session service is always defaulted, as it was before the artifact and
+// memory ones were added, because every request path needs it and a nil one
+// panics.
+//
+// The other two are defaulted too, but only silently when allowInMemory says a
+// volatile store is acceptable: the webui sublauncher is a developer tool and
+// implies it, and -allow_in_memory_services sets it explicitly. Without that
+// consent they are still created, so nothing breaks on upgrade, and unconsented
+// reports true so the caller can warn that a future release will refuse instead.
+//
+// Refusing is the eventual goal rather than the current behaviour because
+// cmd/launcher/prod runs through this same path. A production deployment that
+// configured no storage should learn about it at startup, not when a restart
+// has already dropped the data. adk-python falls back to
+// InMemoryArtifactService for an absent URI, so the fallback is not wrong in
+// itself; it belongs to a dev server rather than to every server.
+func applyServiceDefaults(config *launcher.Config, allowInMemory bool) (defaulted []string, unconsented bool) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
-		defaulted = append(defaulted, "session")
+		log.Print("No session service configured. Using an in-memory one, so whatever it holds is lost when the process exits.")
 	}
+
 	if config.ArtifactService == nil {
 		config.ArtifactService = artifact.InMemoryService()
 		defaulted = append(defaulted, "artifact")
@@ -180,14 +195,39 @@ func applyServiceDefaults(config *launcher.Config) {
 	for _, name := range defaulted {
 		log.Printf("No %s service configured. Using an in-memory one, so whatever it holds is lost when the process exits.", name)
 	}
+	return defaulted, len(defaulted) > 0 && !allowInMemory
 }
 
-// Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
-	applyServiceDefaults(config)
+// logInMemoryServiceWarning restates which services fell back to memory, in the
+// startup banner alongside the URLs.
+//
+// applyServiceDefaults already logs each one, but that runs before the routers
+// are built and has scrolled past by the time the banner prints. Repeating it
+// here is deliberate: this block is what an operator reads, and losing artifacts
+// on the next restart is not something to learn from a line further up.
+//
+// When the caller did not ask for a volatile store, the warning also says the
+// launcher will refuse to start in a future release, so a deployment can fix
+// its configuration before that lands rather than after.
+func logInMemoryServiceWarning(defaulted []string, unconsented bool) {
+	if len(defaulted) == 0 {
+		return
+	}
+	log.Printf("       WARNING: no %s service configured, so an in-memory one is in use.", strings.Join(defaulted, ", "))
+	log.Printf("       WARNING:     everything it holds is lost when this process exits.")
+	if unconsented {
+		log.Printf("       WARNING:     a future release will refuse to start instead. Configure a")
+		log.Printf("       WARNING:     service, or pass -allow_in_memory_services to keep this.")
+	}
+}
 
+// buildRouter assembles the router Run serves: the base router, then every
+// active sublauncher's routes, then the fallback health route.
+//
+// Separated from Run so a test can assert the registration order without
+// binding a port, because the order is what decides which /health wins.
+func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) {
 	router := BuildBaseRouter()
-	registerHealthRoute(router)
 
 	// check if there are any active sublaunchers
 	if len(w.activeSublaunchers) == 0 {
@@ -195,16 +235,49 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		for i, l := range w.sublaunchers {
 			availableSublaunchers[i] = l.Keyword()
 		}
-		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
+		return nil, fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
 			if err := l.SetupSubrouters(router, config); err != nil {
-				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+				return nil, fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
 			}
 		}
+	}
+
+	// Registered after the sublaunchers, not before, because gorilla/mux
+	// matches in registration order. Going first would shadow a /health that a
+	// sublauncher serves itself, leaving that sublauncher's own readiness
+	// signal unreachable while the probe still reported ok.
+	registerHealthRoute(router)
+	return router, nil
+}
+
+// webUIKeyword is the command-line keyword of the webui sublauncher. It is a
+// literal rather than a reference because that package imports this one, so the
+// dependency cannot run the other way.
+const webUIKeyword = "webui"
+
+// allowsInMemoryServices reports whether a volatile artifact and memory store
+// is acceptable for this invocation. The webui sublauncher is a developer tool
+// and implies it, so `adk web api webui` still runs with no configuration.
+func (w *webLauncher) allowsInMemoryServices() bool {
+	if w.config.allowInMemory {
+		return true
+	}
+	_, hasWebUI := w.activeSublaunchers[webUIKeyword]
+	return hasWebUI
+}
+
+// Run implements launcher.SubLauncher.
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	defaulted, unconsented := applyServiceDefaults(config, w.allowsInMemoryServices())
+
+	router, err := w.buildRouter(config)
+	if err != nil {
+		return err
 	}
 
 	log.Printf("Starting the web server: %+v", w.config)
@@ -214,6 +287,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
 	}
+	logInMemoryServiceWarning(defaulted, unconsented)
 	log.Println()
 
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
@@ -288,6 +362,7 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	fs.BoolVar(&config.useH2C, "h2c", false, "Enable prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1 Upgrade) on the web server listener. Cleartext is insecure; do not expose it to untrusted networks. Long-lived streaming responses may require increasing --write-timeout.")
+	fs.BoolVar(&config.allowInMemory, "allow_in_memory_services", false, "Fall back to in-memory artifact and memory services when none is configured, instead of refusing to start. Their contents are lost when the process exits, so this is for local runs. Implied when the webui sublauncher is active.")
 
 	return &webLauncher{
 		config:       config,
@@ -328,7 +403,8 @@ func BuildBaseRouter() *mux.Router {
 // and cannot be expected to know which sublaunchers happen to be enabled.
 //
 // Run calls this rather than BuildBaseRouter doing it, so that an embedder
-// building its own server keeps /health for itself.
+// building its own server keeps /health for itself, and calls it after the
+// sublaunchers so that it is a fallback rather than an override.
 func registerHealthRoute(router *mux.Router) {
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 }

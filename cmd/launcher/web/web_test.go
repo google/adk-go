@@ -195,7 +195,7 @@ func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
 func TestApplyServiceDefaultsFillsEmptyConfig(t *testing.T) {
 	config := &launcher.Config{}
 
-	applyServiceDefaults(config)
+	applyServiceDefaults(config, true)
 
 	if config.SessionService == nil {
 		t.Error("SessionService is nil after applyServiceDefaults, want a default in-memory service")
@@ -257,7 +257,7 @@ func TestApplyServiceDefaultsKeepsSuppliedServices(t *testing.T) {
 				config.MemoryService = wantMemory
 			}
 
-			applyServiceDefaults(config)
+			applyServiceDefaults(config, true)
 
 			assertService(t, "SessionService", config.SessionService, wantSession)
 			assertService(t, "ArtifactService", config.ArtifactService, wantArtifact)
@@ -309,7 +309,7 @@ func TestApplyServiceDefaultsLogsWhatItDefaulted(t *testing.T) {
 				log.SetFlags(flags)
 			})
 
-			applyServiceDefaults(tc.config)
+			applyServiceDefaults(tc.config, true)
 
 			got := buf.String()
 			if len(tc.want) == 0 && got != "" {
@@ -354,7 +354,7 @@ func assertService(t *testing.T, name string, got, want any) {
 // guard, so its route still panics outright without them.
 func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
 	config := &launcher.Config{}
-	applyServiceDefaults(config)
+	applyServiceDefaults(config, true)
 
 	server, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService:  config.SessionService,
@@ -394,7 +394,7 @@ func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
 // call site: a nil service panics there instead of returning an empty result.
 func TestApplyServiceDefaultsMemoryServiceIsCallable(t *testing.T) {
 	config := &launcher.Config{}
-	applyServiceDefaults(config)
+	applyServiceDefaults(config, true)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -478,4 +478,196 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
 	}
+}
+
+// healthSublauncher registers its own root /health, the way a deployment with a
+// real readiness check does.
+type healthSublauncher struct{}
+
+func (healthSublauncher) Keyword() string                                   { return "ownhealth" }
+func (healthSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (healthSublauncher) CommandLineSyntax() string                         { return "" }
+func (healthSublauncher) SimpleDescription() string                         { return "" }
+func (healthSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (healthSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+	}).Methods(http.MethodGet)
+	return nil
+}
+
+// TestSublauncherHealthRouteWins pins the registration order in buildRouter.
+//
+// mux serves the first matching route, so registering the built-in /health
+// before the sublaunchers would shadow a deployment's own readiness check and
+// report ok for an instance that was reporting itself unhealthy. A load
+// balancer would then keep sending it traffic.
+func TestSublauncherHealthRouteWins(t *testing.T) {
+	l := NewLauncher(healthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"ownhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	router, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if got, want := rec.Code, http.StatusServiceUnavailable; got != want {
+		t.Errorf("GET /health status = %d, want %d from the sublauncher's own handler", got, want)
+	}
+	if got := rec.Body.String(); got != "draining" {
+		t.Errorf("GET /health body = %q, want %q; the built-in health route shadowed the sublauncher's", got, "draining")
+	}
+}
+
+// TestBuiltInHealthRouteIsAFallback is the other half: when no sublauncher
+// claims /health, the built-in one must still answer, because probes are
+// configured with a fixed path.
+func TestBuiltInHealthRouteIsAFallback(t *testing.T) {
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	router, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if got, want := rec.Code, http.StatusOK; got != want {
+		t.Errorf("GET /health status = %d, want %d", got, want)
+	}
+	if got, want := strings.TrimSpace(rec.Body.String()), `{"status":"ok"}`; got != want {
+		t.Errorf("GET /health body = %q, want %q", got, want)
+	}
+}
+
+func TestApplyServiceDefaultsReturnsWhatItDefaulted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config *launcher.Config
+		want   []string
+	}{
+		// The session service is always defaulted and is not reported here,
+		// because it is not the one whose loss on restart matters.
+		{"nothing supplied", &launcher.Config{}, []string{"artifact", "memory"}},
+		{"only session supplied", &launcher.Config{SessionService: session.InMemoryService()}, []string{"artifact", "memory"}},
+		{"all supplied", &launcher.Config{
+			SessionService:  session.InMemoryService(),
+			ArtifactService: artifact.InMemoryService(),
+			MemoryService:   memory.InMemoryService(),
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log.SetOutput(io.Discard)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			got, unconsented := applyServiceDefaults(tc.config, true)
+			if unconsented {
+				t.Error("unconsented = true, want false when in-memory is allowed")
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("applyServiceDefaults() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("applyServiceDefaults()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestInMemoryServiceWarningNamesTheDataLoss covers the startup banner warning.
+//
+// A deployment that forgot to configure storage must find that out at startup,
+// not after a restart has dropped the data. Without consent the warning also
+// has to say the launcher will refuse in a future release, since that notice is
+// the only thing standing between an operator and a broken upgrade later.
+func TestInMemoryServiceWarningNamesTheDataLoss(t *testing.T) {
+	capture := func(defaulted []string, unconsented bool) string {
+		var buf bytes.Buffer
+		flags := log.Flags()
+		log.SetOutput(&buf)
+		log.SetFlags(0)
+		defer func() {
+			log.SetOutput(os.Stderr)
+			log.SetFlags(flags)
+		}()
+		logInMemoryServiceWarning(defaulted, unconsented)
+		return buf.String()
+	}
+
+	t.Run("unconsented names the future refusal", func(t *testing.T) {
+		out := capture([]string{"artifact", "memory"}, true)
+		for _, want := range []string{
+			"WARNING", "artifact, memory", "lost when this process exits",
+			"refuse to start", "-allow_in_memory_services",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("warning output %q does not contain %q", out, want)
+			}
+		}
+	})
+
+	t.Run("consented omits the future refusal", func(t *testing.T) {
+		out := capture([]string{"artifact"}, false)
+		if !strings.Contains(out, "lost when this process exits") {
+			t.Errorf("warning output %q does not mention the data loss", out)
+		}
+		if strings.Contains(out, "refuse to start") {
+			t.Errorf("warning output %q threatens a refusal the caller already opted out of", out)
+		}
+	})
+
+	t.Run("nothing defaulted logs nothing", func(t *testing.T) {
+		if out := capture(nil, false); out != "" {
+			t.Errorf("logInMemoryServiceWarning(nil) logged %q, want nothing", out)
+		}
+	})
+}
+
+// TestWebUIImpliesInMemoryServices keeps `adk web api webui` working with no
+// configuration, because the dev UI is the case the fallback exists for.
+func TestWebUIImpliesInMemoryServices(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		keywords []string
+		flags    []string
+		want     bool
+	}{
+		{"webui active", []string{"webui"}, nil, true},
+		{"webui absent", []string{"repro"}, nil, false},
+		{"flag set without webui", []string{"repro"}, []string{"--allow_in_memory_services"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher(keywordSublauncher{"webui"}, telemetryFailSublauncher{}).(*webLauncher)
+			if _, err := l.Parse(append(tc.flags, tc.keywords...)); err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+			if got := l.allowsInMemoryServices(); got != tc.want {
+				t.Errorf("allowsInMemoryServices() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// keywordSublauncher is a no-op sublauncher registered under a chosen keyword.
+type keywordSublauncher struct{ keyword string }
+
+func (k keywordSublauncher) Keyword() string                                 { return k.keyword }
+func (keywordSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (keywordSublauncher) CommandLineSyntax() string                         { return "" }
+func (keywordSublauncher) SimpleDescription() string                         { return "" }
+func (keywordSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (keywordSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	return nil
 }
