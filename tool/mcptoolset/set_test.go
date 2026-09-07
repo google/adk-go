@@ -60,7 +60,12 @@ func weatherFunc(ctx context.Context, req *mcp.CallToolRequest, input Input) (*m
 
 const modelName = "gemini-2.5-flash"
 
-//go:generate go test -v -httprecord=.*
+// One directive per recording test function (TestMCPToolSet has one cassette,
+// TestMCPToolSetConfirmation has ten), so refreshing one against a live model
+// never rewrites the other's (see TestHTTPRecordDirectivesPartitionCassettes
+// in internal). transport_config_test.go records nothing.
+//go:generate go test -v -httprecord=^testdata[/\\]TestMCPToolSet\.httprr$
+//go:generate go test -v -httprecord=^testdata[/\\]TestMCPToolSetConfirmation_.*\.httprr$
 
 func TestMCPToolSet(t *testing.T) {
 	const (

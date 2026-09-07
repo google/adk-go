@@ -32,7 +32,12 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-//go:generate go test -httprecord=testdata/.*\.httprr
+// One directive per recording test function, so refreshing one function's
+// cassettes against a live model never rewrites another's (see
+// TestHTTPRecordDirectivesPartitionCassettes in internal).
+//go:generate go test -httprecord=^testdata[/\\]TestModel_Generate_.*\.httprr$
+//go:generate go test -httprecord=^testdata[/\\]TestModel_GenerateStream_.*\.httprr$
+//go:generate go test -httprecord=^testdata[/\\]TestModel_TrackingHeaders_.*\.httprr$
 
 func TestModel_Generate(t *testing.T) {
 	tests := []struct {

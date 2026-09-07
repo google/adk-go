@@ -14,7 +14,11 @@
 
 package remoteagent
 
-//go:generate go test -httprecord=.*
+// One directive per recording test function, so refreshing one function's
+// cassettes against a live model never rewrites another's (see
+// TestHTTPRecordDirectivesPartitionCassettes in internal).
+//go:generate go test -httprecord=^testdata[/\\]TestA2ARemoteAgentStreamingGemini(Success|Error)\.httprr$
+//go:generate go test -httprecord=^testdata[/\\]TestA2ASingleHopFinalResponse_.*\.httprr$
 
 import (
 	"context"
