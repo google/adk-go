@@ -28,6 +28,24 @@ A pin does not stop upstream from making breaking changes. It makes a refresh
 reviewable. The diff is 8MB of minified JavaScript that no reviewer can read, so
 the upstream revision range is the only part anyone can actually check.
 
+### The pin does not describe the bundle committed today
+
+Read this before assuming the script reproduces what is in the tree, because it
+does not, yet.
+
+`ADK_WEB_REF` is `33c3568`, upstream tag v1.0.5, dated 2026-08-26. The `distr/`
+directory committed alongside it was built on 2026-06-30, before the pin
+existed, and carries no `adk-web-version.json` to say which revision that was.
+
+So running the script today is a version bump of about two months, not a
+rebuild. That is unavoidable rather than intended: the old floating clone
+recorded nothing, so the revision it fetched cannot be recovered. The first
+refresh settles it. From then on the provenance file records what shipped and
+the script reports the upstream range between builds.
+
+Until that first refresh, read the pin as the revision the next build will use,
+not as the revision the committed bundle came from.
+
 ### What the pin does not cover
 
 `ADK_WEB_REF` pins the source, not the toolchain. The container installs from

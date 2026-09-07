@@ -5,27 +5,18 @@ RUN apt-get update && apt-get install -y git
 # The upstream ref to build. Pass --build-arg ADK_WEB_REF=<sha-or-tag> to move
 # it forward; see scripts/adk-web/README.md for how to bump the pin.
 #
-# This is pinned, and must stay pinned, because the bundle it produces is
-# committed and embedded into the server binary. When this cloned `main`
-# instead, a refresh took whatever upstream had that day. On 2026-06-30 one such
-# refresh (commit 893e4a4, 105 files under distr/ inside a 547-file release)
-# pulled in an upstream change that moved 30 developer API endpoints under a
-# /dev/apps/{app}/ prefix. Nothing in the commit said so, and most of the web UI
-# returned 404 for two months. A floating ref makes a refresh unreviewable: the
-# diff is 8MB of minified JavaScript, so the ref is the only thing a reviewer
-# can actually read.
+# The upstream revision to build. A SHA rather than a tag, because upstream can
+# move a tag. 33c3568 is upstream tag v1.0.5, dated 2026-08-26.
 #
-# Pinning also makes the clone layer cacheable: the same ref must yield the same
-# checkout, so there is deliberately no cache-buster here.
+# Keep it pinned. This used to clone `main` behind a cache-buster, so a refresh
+# built whatever upstream had that day and recorded nothing, which is how a
+# breaking UI change shipped unnoticed and left most of the UI returning 404 for
+# two months.
 #
-# The default is a SHA rather than a tag name, because upstream can move a tag.
-# 33c3568 is upstream tag v1.0.5, dated 2026-08-26.
-# NOTE: the bundle committed in cmd/launcher/web/webui/distr/ was built on
-# 2026-06-30, before this pin existed, and carries no provenance file. The pin
-# below therefore does not describe what is committed today: building at it
-# moves the UI forward rather than reproducing the current bundle. The first
-# refresh is a deliberate version bump; after it, the provenance file written
-# below records exactly what shipped.
+# This pin does NOT describe the bundle committed in
+# cmd/launcher/web/webui/distr/, which predates it. Building here moves the UI
+# forward rather than reproducing what is in the tree. README.md in this
+# directory explains why, and what changes after the first refresh.
 ARG ADK_WEB_REF=33c3568021d129339f52b75352dfc35deaf1bf0d
 
 # `git clone -b` accepts a branch or tag but not a SHA, so clone the repository
