@@ -645,37 +645,69 @@ func unescapeJSON(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
-		if i+2 <= len(s) && s[i] == '\\' && s[i+1] == '\\' {
+		switch {
+		case hasEscape(s, i, '\\'):
 			b.WriteByte('\\')
-			i += 2
-			continue
-		}
-		if i+2 <= len(s) && s[i] == '\\' && s[i+1] == '/' {
+			i += shortEscapeLen
+		case hasEscape(s, i, '/'):
 			b.WriteByte('/')
-			i += 2
-			continue
-		}
-		if i+6 <= len(s) && s[i] == '\\' && s[i+1] == 'u' {
-			if n, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
-				r := rune(n)
-				if utf16.IsSurrogate(r) && i+12 <= len(s) && s[i+6] == '\\' && s[i+7] == 'u' {
-					if lo, err := strconv.ParseUint(s[i+8:i+12], 16, 32); err == nil {
-						if pair := utf16.DecodeRune(r, rune(lo)); pair != utf8.RuneError {
-							b.WriteRune(pair)
-							i += 12
-							continue
-						}
-					}
-				}
-				b.WriteRune(r)
-				i += 6
+			i += shortEscapeLen
+		default:
+			r, ok := decodeUnicodeEscape(s, i)
+			if !ok {
+				// Not an escape this function decodes, or a malformed one. Either
+				// way the byte is copied through rather than dropped.
+				b.WriteByte(s[i])
+				i++
 				continue
 			}
+			// A non-BMP rune arrives as a surrogate PAIR, and the two halves have
+			// to be decoded together: apart, each is an unpaired surrogate that
+			// becomes U+FFFD, so the rune would be in neither the decoded copy nor
+			// the original and would survive the scrub whole.
+			if utf16.IsSurrogate(r) {
+				if lo, ok := decodeUnicodeEscape(s, i+unicodeEscapeLen); ok {
+					if paired := utf16.DecodeRune(r, lo); paired != utf8.RuneError {
+						b.WriteRune(paired)
+						i += surrogatePairLen
+						continue
+					}
+				}
+			}
+			b.WriteRune(r)
+			i += unicodeEscapeLen
 		}
-		b.WriteByte(s[i])
-		i++
 	}
 	return b.String()
+}
+
+// Widths in bytes of the escapes unescapeJSON decodes. They are the reason for
+// every bounds check in it: reading a \uXXXX needs six bytes to be there.
+const (
+	shortEscapeLen   = 2                    // \\ and \/
+	unicodeEscapeLen = 6                    // \uXXXX
+	surrogatePairLen = 2 * unicodeEscapeLen // \uD83D\uDE00
+)
+
+// hasEscape reports whether s[i:] begins with a backslash followed by c.
+func hasEscape(s string, i int, c byte) bool {
+	return i+shortEscapeLen <= len(s) && s[i] == '\\' && s[i+1] == c
+}
+
+// decodeUnicodeEscape decodes the \uXXXX at s[i:], if that is what is there.
+//
+// The four digits are read with an explicit base, which is what keeps this to
+// exactly the escapes JSON defines: at base 16 strconv admits no sign, no 0x
+// prefix and no underscores, so nothing but four hex digits parses.
+func decodeUnicodeEscape(s string, i int) (rune, bool) {
+	if !hasEscape(s, i, 'u') || i+unicodeEscapeLen > len(s) {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(s[i+shortEscapeLen:i+unicodeEscapeLen], 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return rune(n), true
 }
 
 // visibleLimit reports how many bytes of s an error may show, and whether s ran
@@ -831,43 +863,14 @@ func redactLowered(ls string, limit int, lowered []string) (string, bool) {
 	var b strings.Builder
 	pos, hit := 0, false
 	for {
-		at, which := -1, -1
-		for i, n := range next {
-			if n < 0 {
-				continue
-			}
-			if at < 0 || n < at || (n == at && len(lowered[i]) > len(lowered[which])) {
-				at, which = n, i
-			}
-		}
+		at, which := earliestMatch(next, lowered)
 		if at < 0 || at >= limit {
 			// Nothing left to redact, or what is left starts at or past the bound
 			// and so cannot reach the output at all.
 			break
 		}
-		// Extend the range while ANY occurrence starts inside it. Choosing the
-		// earliest match covers a contained occurrence and an equal start, but not
-		// one that straddles the far edge: the refresh below only looks forward
-		// from the cursor, so a straddler is neither redacted nor found again and
-		// its tail is copied straight out.
-		//
-		// Scanned position by position rather than off next[], which holds only
-		// the FIRST occurrence of each value at or after the cursor. A second
-		// occurrence of the same value can start inside the range and straddle it,
-		// and next[] cannot see it. Measured with the earlier version:
-		// redact("https://cb.test/u/alice@example.test/alice@example.test",
-		//        "alice@example.test", "https://cb.test/u/alice@example.test/a")
-		// returned "[redacted]lice@example.test", keeping 17 of the address's 18
-		// bytes. The loop re-reads end each step, so an extension made at k is
-		// picked up by the same walk.
-		end := at + len(lowered[which])
-		for k := at + 1; k < end; k++ {
-			for _, lv := range lowered {
-				if k+len(lv) > end && strings.HasPrefix(ls[k:], lv) {
-					end = k + len(lv)
-				}
-			}
-		}
+		end := endOfRun(ls, at, at+len(lowered[which]), lowered)
+
 		// One marker per redacted run, not per match. Adjacent ranges are the
 		// common case for a short secret — a megabyte of the acting user's single
 		// initial would otherwise emit a megabyte of markers, ten times the input,
@@ -887,19 +890,72 @@ func redactLowered(ls string, limit int, lowered []string) (string, bool) {
 			// the whole of ls while emitting only up to limit.
 			return b.String(), true
 		}
-		for i, lv := range lowered {
-			if next[i] >= 0 && next[i] < pos {
-				if j := strings.Index(ls[pos:], lv); j < 0 {
-					next[i] = -1
-				} else {
-					next[i] = pos + j
-				}
-			}
-		}
+		advanceMatches(ls, pos, lowered, next)
 	}
 	if !hit {
 		return "", false
 	}
 	b.WriteString(ls[pos:limit])
 	return b.String(), true
+}
+
+// earliestMatch picks the next range to redact: the leftmost pending match, and
+// on a tie the longest, so a value contained in another does not split it.
+// It returns -1, -1 once every value is exhausted.
+func earliestMatch(next []int, lowered []string) (at, which int) {
+	at, which = -1, -1
+	for i, n := range next {
+		if n < 0 {
+			continue
+		}
+		if at < 0 || n < at || (n == at && len(lowered[i]) > len(lowered[which])) {
+			at, which = n, i
+		}
+	}
+	return at, which
+}
+
+// endOfRun extends a redacted range while ANY occurrence starts inside it, and
+// returns where the run ends.
+//
+// Choosing the earliest match covers a contained occurrence and an equal start,
+// but not one that straddles the far edge: the caller's next[] only looks forward
+// from the cursor, so a straddler would be neither redacted nor found again and
+// its tail would be copied straight out.
+//
+// Scanned position by position rather than off next[], which holds only the FIRST
+// occurrence of each value at or after the cursor. A second occurrence of the same
+// value can start inside the range and straddle it, and next[] cannot see it.
+// Measured with an earlier version:
+// redact("https://cb.test/u/alice@example.test/alice@example.test",
+// ..... "alice@example.test", "https://cb.test/u/alice@example.test/a")
+// returned "[redacted]lice@example.test", keeping 17 of the address's 18 bytes.
+//
+// The condition re-reads end each step, so an extension made at k is picked up by
+// the same walk — which is what makes one pass enough.
+func endOfRun(ls string, at, end int, lowered []string) int {
+	for k := at + 1; k < end; k++ {
+		for _, lv := range lowered {
+			if k+len(lv) > end && strings.HasPrefix(ls[k:], lv) {
+				end = k + len(lv)
+			}
+		}
+	}
+	return end
+}
+
+// advanceMatches moves every pending match the cursor has passed forward to its
+// next occurrence, or retires it. Only the overtaken ones are re-searched, and
+// pos only moves forward, which is what keeps the outer scan linear per value.
+func advanceMatches(ls string, pos int, lowered []string, next []int) {
+	for i, lv := range lowered {
+		if next[i] < 0 || next[i] >= pos {
+			continue
+		}
+		if j := strings.Index(ls[pos:], lv); j < 0 {
+			next[i] = -1
+		} else {
+			next[i] = pos + j
+		}
+	}
 }
