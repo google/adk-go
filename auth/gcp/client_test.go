@@ -285,6 +285,17 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 		{name: "resource path traversal", req: Request{Resource: "projects/p/../q/authProviders/a", UserID: "u"}},
 		{name: "resource query injection", req: Request{Resource: "projects/p/authProviders/a?x=1", UserID: "u"}},
 		{name: "resource with space", req: Request{Resource: "projects/p/authProviders/a b", UserID: "u"}},
+		// A name that normalizes to a different one routes to a different service
+		// than the one validateResource inspected.
+		{name: "resource empty segment", req: Request{Resource: "projects/p//authProviders/a", UserID: "u"}},
+		{name: "resource trailing slash", req: Request{Resource: "projects/p/locations/l/connectors/c/", UserID: "u"}},
+		{name: "resource dot segment", req: Request{Resource: "projects/p/locations/l/connectors/c/.", UserID: "u"}},
+		// Percent-escapes are rejected by the charset, not decoded: the name is
+		// interpolated into a URL, so an escape that survives becomes traversal or
+		// a segment break once the server decodes it.
+		{name: "resource percent-escaped dot", req: Request{Resource: "projects/p/authProviders/a%2e%2e", UserID: "u"}},
+		{name: "resource percent-escaped slash", req: Request{Resource: "projects/p%2flocations/authProviders/a", UserID: "u"}},
+		{name: "resource bare percent", req: Request{Resource: "projects/p/authProviders/a%", UserID: "u"}},
 	}
 	// Point at a live server: a client with no endpoint fails at transport for
 	// every input, which cannot tell a rejected request from an unreachable one.
@@ -301,11 +312,53 @@ func TestRetrieveValidatesRequest(t *testing.T) {
 			if err == nil {
 				t.Fatalf("RetrieveCredential(%+v) = nil error, want error", tc.req)
 			}
-			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "invalid characters") {
+			if !strings.Contains(err.Error(), "requires a") && !strings.Contains(err.Error(), "resource ") {
 				t.Errorf("error = %v, want a request-validation error", err)
 			}
 			if got := hits.Load(); got != 0 {
 				t.Errorf("credentials service called %d time(s); a rejected request must not reach the wire", got)
+			}
+		})
+	}
+}
+
+// TestRetrieveAcceptsResourceNames pins the other side of the boundary
+// TestRetrieveValidatesRequest guards. Both of these were widened when the
+// per-segment check replaced a substring test for "..", and a widening a
+// rejection table cannot see is a widening nothing would notice being undone —
+// or being taken further.
+func TestRetrieveAcceptsResourceNames(t *testing.T) {
+	tests := []struct {
+		name, resource string
+	}{
+		// A domain-scoped project id. The colon is why the charset had to widen,
+		// and it is safe only because the name always follows a scheme, a host and
+		// a version segment, where a colon cannot begin a scheme.
+		{name: "domain-scoped project id", resource: "projects/example.com:my-project/locations/l/authProviders/a"},
+		// Dots inside a segment, as opposed to a "." or ".." segment of their own.
+		// The old substring check rejected these, while path.Clean leaves them
+		// alone, so the name the server resolves is the one validated and routed.
+		{name: "dots inside a segment", resource: "projects/p/locations/l/authProviders/a..b"},
+		{name: "leading dot in a segment", resource: "projects/p/locations/l/authProviders/.hidden"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"success":{"header":"Authorization: Bearer","token":"tok"}}`))
+			}))
+			defer srv.Close()
+
+			if _, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: tc.resource, UserID: "u"}); err != nil {
+				t.Fatalf("RetrieveCredential(%q) error = %v, want it accepted", tc.resource, err)
+			}
+			// The name must reach the wire unchanged: validation and routing both
+			// ran on the string the server is about to resolve.
+			if want := "/v1/" + tc.resource + "/credentials:retrieve"; gotPath != want {
+				t.Errorf("request path = %q, want %q", gotPath, want)
 			}
 		})
 	}
@@ -408,10 +461,9 @@ func TestMapCredential(t *testing.T) {
 	}
 }
 
-// TestRetrieveContextCanceledWhilePending verifies that canceling the context
-// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
-// The rejected header name is service-controlled and reaches the error by a
-// third path, separate from a response body and an operation message.
+// TestMapCredentialCapsHeaderNameInError pins the cap on a rejected header name.
+// It is service-controlled and reaches the error by a third path, separate from
+// a response body and an operation message.
 func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	_, err := mapCredential(strings.Repeat("x", 900_000)+": Token", "SECRET-TOKEN")
 	if err == nil {
@@ -420,11 +472,16 @@ func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
 	if len(err.Error()) > 2*maxErrorBody {
 		t.Errorf("error is %d bytes, want the header name capped to %d", len(err.Error()), maxErrorBody)
 	}
+	// Cannot fail against today's code — no error arm interpolates the token — and
+	// kept as a forward guard, since the token is the one value in this function
+	// that must never reach an error however the message is later reworded.
 	if strings.Contains(err.Error(), "SECRET-TOKEN") {
 		t.Error("error carries the token")
 	}
 }
 
+// TestRetrieveContextCanceledWhilePending verifies that canceling the context
+// aborts a pending poll promptly (no hang) and surfaces context.Canceled.
 func TestRetrieveContextCanceledWhilePending(t *testing.T) {
 	srv, _ := sequenceServer(`{"pending":{}}`) // never resolves
 	defer srv.Close()
@@ -710,5 +767,270 @@ func TestNewClientRejectsNegativePollTimeout(t *testing.T) {
 	if c.pollTimeout != defaultPollTimeout {
 		t.Errorf("pollTimeout = %v, want the default %v (a negative value must not mean 'never retry')",
 			c.pollTimeout, defaultPollTimeout)
+	}
+}
+
+// TestMapCredentialRedactsTheActingUserInError pins the third service-text path
+// against the acting user, not only against length.
+//
+// A rejected header name is service-controlled, so a service that echoes the
+// userId into it puts the acting user in an error string. The two sibling paths
+// scrub before reporting — doPost through serviceText, connectorOperation.result
+// the same — and this one only capped.
+//
+// The user is echoed INSIDE a larger name on purpose. With the name equal to the
+// user, a scrubbed error and an error that dropped the service text entirely read
+// the same, so errors.New("bad header") would pass. The surrounding text has to
+// survive for the assertion to be about redaction. The last case is the negative
+// control: a rejected name carrying no secret must come back intact, or the scrub
+// is a blanket drop rather than something keyed on the acting user.
+func TestMapCredentialRedactsTheActingUserInError(t *testing.T) {
+	const user = "alice@example.test"
+	for _, tc := range []struct {
+		name        string
+		header      string // "@" and " " are not RFC 9110 token characters, so both are rejected.
+		wantAbsent  string
+		wantPresent []string
+	}{{
+		name:        "the user echoed inside a larger name",
+		header:      "X-User-" + user + "-Token",
+		wantAbsent:  user,
+		wantPresent: []string{"X-User-", "-Token", "not a usable HTTP header name"},
+	}, {
+		name:        "the name is exactly the user",
+		header:      user,
+		wantAbsent:  user,
+		wantPresent: []string{"not a usable HTTP header name"},
+	}, {
+		name:        "a rejected name with no secret in it survives",
+		header:      "not a header",
+		wantPresent: []string{"not a header", "not a usable HTTP header name"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := sequenceServer(`{"success":{"header":"` + tc.header + `","token":"t"}}`)
+			defer srv.Close()
+
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+				Resource: "projects/p/locations/l/authProviders/a",
+				UserID:   user,
+			})
+			if err == nil {
+				t.Fatal("RetrieveCredential() = nil error, want the header name rejected")
+			}
+			if tc.wantAbsent != "" && strings.Contains(err.Error(), tc.wantAbsent) {
+				t.Errorf("error carries the acting user %q: %v", tc.wantAbsent, err)
+			}
+			for _, want := range tc.wantPresent {
+				// Case-insensitively: redact lowercases the text it scrubs, so a
+				// name it touched comes back lowered. That is the documented price
+				// of not mapping offsets between two spellings of the same string.
+				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+					t.Errorf("error lost %q, so it is no longer diagnostic: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactAcrossSeveralSecrets pins the two ways one pass per value went wrong.
+//
+// Both were reachable in production, where every call site passes UserID and
+// ContinueURI together, and neither was caught by a green suite or by a fuzz of
+// the single-secret shape.
+func TestRedactAcrossSeveralSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		secrets []string
+		want    string
+	}{{
+		// Redacting the URI first inserted "[redacted]", and the pass for "e" then
+		// matched the e's inside that marker.
+		name:    "a secret that occurs inside the marker",
+		in:      "error https://app.example.test/cb user e",
+		secrets: []string{"https://app.example.test/cb", "e"},
+		want:    "[redacted]rror [redacted] us[redacted]r [redacted]",
+	}, {
+		// Redacting the user first broke the URI that contains it, so the URI
+		// matched nothing afterwards and its head survived.
+		name:    "a secret contained in a longer secret",
+		in:      "bad continueUri: https://example.test/cb?user=alice",
+		secrets: []string{"alice", "https://example.test/cb?user=alice"},
+		want:    "bad continueuri: [redacted]",
+	}, {
+		// A straddle, as opposed to containment: the URI's occurrence starts before
+		// the user's and ends inside it. Choosing the earliest match covers the
+		// contained and equal-start cases on its own. Without merging the ranges,
+		// this one left the tail of the address in the error.
+		name:    "a secret straddling the end of another",
+		in:      "invalid: https://app.example.test/cb?login=alice@example.test",
+		secrets: []string{"alice@example.test", "https://app.example.test/cb?login=al"},
+		want:    "invalid: [redacted]",
+	}, {
+		name:    "the shortest straddle",
+		in:      "xalice",
+		secrets: []string{"xa", "alice"},
+		want:    "[redacted]",
+	}, {
+		// A SECOND occurrence of the same secret starting inside the range the
+		// first choice covered. Tracking one upcoming match per secret cannot see
+		// it, and the refresh only looks forward from the cursor, so it was neither
+		// redacted nor found again: this returned "[redacted]lice@example.test",
+		// keeping 17 of the address's 18 bytes.
+		name:    "a second occurrence inside the chosen range",
+		in:      "https://cb.test/u/alice@example.test/alice@example.test",
+		secrets: []string{"alice@example.test", "https://cb.test/u/alice@example.test/a"},
+		want:    "[redacted]",
+	}, {
+		// The same shape with one secret: any value whose prefix equals its suffix
+		// overlaps itself, and the overlap used to survive.
+		name:    "a secret that overlaps itself",
+		in:      "aaa",
+		secrets: []string{"aa"},
+		want:    "[redacted]",
+	}, {
+		// Longer than the exhaustive test's four-byte bodies, with a secret that
+		// tiles them. Bounding the extension walk to a fixed lookahead — a
+		// plausible way to answer its cost — passes every one of the exhaustive
+		// test's 2,463,725 combinations and leaves a byte of the secret here.
+		name:    "a repeated secret longer than the exhaustive bodies",
+		in:      "aaaaaa",
+		secrets: []string{"aa"},
+		want:    "[redacted]",
+	}, {
+		name:    "the same with the secret embedded in text",
+		in:      "before ababababab after",
+		secrets: []string{"ab"},
+		want:    "before [redacted] after",
+	}, {
+		// The no-match branch, which nothing else distinguishes: every other test
+		// that reaches it uses an already-lowercase body or compares
+		// case-insensitively, so deleting `if !hit { return s }` failed nothing.
+		name:    "no match leaves the text alone, case and all",
+		in:      "Bad Request: NOPE",
+		secrets: []string{"alice", "https://example.test/cb"},
+		want:    "Bad Request: NOPE",
+	}, {
+		name:    "order does not matter",
+		in:      "bad continueUri: https://example.test/cb?user=alice",
+		secrets: []string{"https://example.test/cb?user=alice", "alice"},
+		want:    "bad continueuri: [redacted]",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redact(tc.in, tc.secrets...); got != tc.want {
+				t.Errorf("redact(%q, %q) = %q, want %q", tc.in, tc.secrets, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRedactStaysLinear guards the scan against becoming quadratic, and the
+// extension walk against being bounded away.
+//
+// Two shapes, because they exercise different loops. A one-character secret makes
+// every range one byte wide, so the walk at the heart of the merge never runs and
+// only the outer loop and the next[] refresh are on the clock — that was the whole
+// of this test before, which meant the walk it is named for was untested. A
+// repeated multi-byte secret is the opposite: every range is extended, so the walk
+// runs for the length of the body.
+//
+// Both bodies are a megabyte where every byte matches, which is what a service
+// echoing the acting user back at length produces, and both must collapse to one
+// marker.
+//
+// This test measures cost and nothing else. Deleting the extension walk leaves it
+// green, because a body that tiles the secret produces adjacent ranges that merge
+// whatever the walk does — the walk matters where an occurrence starts inside a
+// range and ends after it, which a tiling never produces.
+// TestRedactMatchesReferenceExhaustively is what guards that.
+func TestRedactStaysLinear(t *testing.T) {
+	// doPost's own read cap, declared local to it, so it is spelled out here.
+	const maxBody = 1 << 20
+
+	for _, tc := range []struct {
+		name   string
+		secret string
+	}{
+		{"a one-character secret: the walk never runs", "e"},
+		{"a repeated multi-byte secret: the walk runs for the whole body", "ab"},
+		{"a long repeated secret: the walk runs and each step compares more", strings.Repeat("ab", 16)},
+		// The second factor. The walk costs O(body x secret length) on a body that
+		// tiles the secret, and the three shapes above are all short enough to hide
+		// it — they run in single-digit milliseconds whatever the walk does.
+		// Measured here: 4 KiB is ~40ms, 64 KiB ~730ms, 512 KiB ~4.2s. A UserID is
+		// bounded only by the embedding server, so the shape is worth pinning even
+		// though no realistic one is this long.
+		{"a secret long enough to show the second factor", strings.Repeat("ab", 2048)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Repeat(tc.secret, maxBody/len(tc.secret))
+			start := time.Now()
+			got := redact(body, tc.secret, "https://app.example.test/cb")
+			elapsed := time.Since(start)
+
+			// One marker for the whole run, not one per match. Before adjacent
+			// ranges were merged this produced 10 MiB to be thrown away by a 1 KiB
+			// cap two calls later.
+			if want := len("[redacted]"); len(got) != want {
+				t.Errorf("redact() produced %d bytes, want %d — every byte matches, so the "+
+					"whole body is one redacted run", len(got), want)
+			}
+			// Generous against the measurements above, so it fails on a rewrite that
+			// makes the cost worse and not on a slow machine.
+			if elapsed > 10*time.Second {
+				t.Errorf("redact() over %d bytes took %v; the scan is meant to be linear in the body",
+					maxBody, elapsed)
+			}
+			t.Logf("%d bytes, secret %d bytes, every byte a match: %v", len(body), len(tc.secret), elapsed)
+		})
+	}
+}
+
+// TestDecodeErrorScrubsTheActingUser pins the fourth service-text path, which was
+// the only one with no test.
+//
+// A decoder error quotes the token it choked on, so a service echoing the acting
+// user where a different type is expected puts it in the message. The connector's
+// error code is an int, so a numeric user id echoed there overflows it and the
+// literal lands in "cannot unmarshal number …".
+func TestDecodeErrorScrubsTheActingUser(t *testing.T) {
+	const user = "10355512349999999999"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"done":true,"error":{"code":`+user+`,"message":"x"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+		Resource: "projects/p/locations/l/connectors/c",
+		UserID:   user,
+	})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want the decode to fail")
+	}
+	if strings.Contains(err.Error(), user) {
+		t.Errorf("error carries the acting user: %v", err)
+	}
+	// Keyed on the secret, not a blanket drop.
+	if !strings.Contains(err.Error(), "cannot unmarshal number") {
+		t.Errorf("error lost the decoder's own wording: %v", err)
+	}
+}
+
+// TestMalformedResponseIsMatchable pins the sentinel that replaced the %w a
+// caller lost when the decode error stopped wrapping the decoder's own.
+func TestMalformedResponseIsMatchable(t *testing.T) {
+	srv, _ := sequenceServer(`{"success":` + strings.Repeat("9", 40) + `}`)
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+		Resource: "projects/p/locations/l/authProviders/a",
+		UserID:   "u",
+	})
+	if !errors.Is(err, ErrMalformedResponse) {
+		t.Errorf("RetrieveCredential() error = %v, want it to match ErrMalformedResponse", err)
+	}
+	// The resource decoration must not break the match.
+	if !strings.Contains(err.Error(), "resource") {
+		t.Errorf("error = %v, want the resource named", err)
 	}
 }

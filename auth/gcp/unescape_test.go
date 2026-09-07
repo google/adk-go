@@ -1,0 +1,390 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gcp
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// unescapeJSON had no direct test until this file, and neither FuzzRedact nor the
+// exhaustive differential reach it: both drive redact, which does not call it.
+// serviceText is its only caller, so every escape case was covered only through
+// end-to-end table rows that happened to use a well-formed escape.
+
+// TestUnescapeJSONMatchesEncodingJSON compares it against the standard library
+// over every string of length <= 6 on an alphabet chosen to build the three
+// escapes it handles, plus the ways they can be malformed.
+//
+// Inputs the standard library rejects are skipped rather than asserted: an escape
+// JSON does not define is outside this function's contract, which is to leave
+// what it does not decode alone. TestUnescapeJSONLeavesTheRestAlone covers those.
+func TestUnescapeJSONMatchesEncodingJSON(t *testing.T) {
+	// "n" earns its place by being the one symbol that forms an escape this
+	// package deliberately does not decode, which is what exercises the
+	// hasForeignEscape filter below. Without it the filter never fires and the
+	// skip it accounts for never happens.
+	alphabet := []byte(`\/un0dA8`)
+	var words []string
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		words = append(words, prefix)
+		if n == 0 {
+			return
+		}
+		for _, c := range alphabet {
+			gen(prefix+string(c), n-1)
+		}
+	}
+	gen("", 6)
+
+	checked, escaped, foreign, rejected := 0, 0, 0, 0
+	for _, w := range words {
+		var want string
+		if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
+			rejected++
+			continue
+		}
+		// Only inputs whose escapes are all ours. \n, \t and friends are real JSON
+		// and deliberately not decoded here, so they are not a disagreement.
+		if hasForeignEscape(w) {
+			foreign++
+			continue
+		}
+		checked++
+		if strings.Contains(w, `\`) {
+			escaped++
+		}
+		if got := unescapeJSON(w); got != want {
+			t.Fatalf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
+		}
+	}
+	t.Logf("%d inputs compared (%d of them escaped), %d rejected by the oracle, %d skipped as foreign escapes",
+		checked, escaped, rejected, foreign)
+	// Counting comparisons proves nothing: the escape-free words alone number
+	// tens of thousands and would clear any such floor while asserting only that
+	// plain text is copied. The floors that matter are on the two populations the
+	// test exists for.
+	if escaped < 1000 {
+		t.Errorf("only %d comparable inputs contained an escape, so the alphabet stopped producing them", escaped)
+	}
+	if foreign == 0 {
+		t.Error("no input was skipped as a foreign escape, so that filter went unexercised")
+	}
+}
+
+// TestUnescapeJSONMatchesEncodingJSONOnPairs extends the oracle to inputs the
+// byte-level sweep above cannot reach. That one stops at 6 bytes, which is one
+// \uXXXX escape, so a surrogate PAIR — 12 bytes, and the case the decoder was
+// wrong about — is never compared against the standard library there.
+//
+// Building from whole escape tokens instead of bytes reaches 30-byte inputs at a
+// fraction of the cost, and every sequence of a high and a low surrogate, of two
+// highs, of a high followed by a BMP escape, and of a doubled backslash in front
+// of any of them falls out of the enumeration.
+func TestUnescapeJSONMatchesEncodingJSONOnPairs(t *testing.T) {
+	tokens := []string{`\ud83d`, `\ude00`, `\u0041`, `\\`, `\/`, "q"}
+	var words []string
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		words = append(words, prefix)
+		if n == 0 {
+			return
+		}
+		for _, tok := range tokens {
+			gen(prefix+tok, n-1)
+		}
+	}
+	gen("", 5)
+
+	var pairs int
+	for _, w := range words {
+		var want string
+		if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
+			t.Fatalf("the oracle rejected %q, so the token set is wrong: %v", w, err)
+		}
+		if strings.Contains(w, `\ud83d\ude00`) {
+			pairs++
+		}
+		if got := unescapeJSON(w); got != want {
+			t.Fatalf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
+		}
+	}
+	t.Logf("%d token sequences compared against encoding/json", len(words))
+	// Guards the reason this test exists: a token set that stopped producing
+	// adjacent surrogate halves would still pass every assertion above.
+	if pairs == 0 {
+		t.Error("no input contained a complete surrogate pair, so the pair path went uncompared")
+	}
+}
+
+// hasForeignEscape reports whether s carries a JSON escape this package does not
+// decode, which is every one except \\, \/ and \uXXXX.
+func hasForeignEscape(s string) bool {
+	for i := 0; i < len(s); {
+		if s[i] != '\\' || i+1 >= len(s) {
+			i++
+			continue
+		}
+		switch s[i+1] {
+		case '\\', '/':
+			i += 2
+		case 'u':
+			i += 6
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// TestUnescapeJSONLeavesTheRestAlone covers the malformed shapes the standard
+// library rejects outright, so no oracle can speak for them.
+//
+// Each is a way the new surrogate lookahead can be entered and not completed. The
+// property is the same throughout: nothing panics, nothing is dropped, and what
+// cannot be decoded comes back as it went in.
+func TestUnescapeJSONLeavesTheRestAlone(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"a high surrogate at the end", `\ud83d`, "\uFFFD"},
+		{"a high surrogate then a truncated escape", `\ud83d\ude0`, "\uFFFD" + `\ude0`},
+		{"a high surrogate then a non-escape", `\ud83dX`, "\uFFFD" + "X"},
+		{"a high surrogate then a non-surrogate", `\ud83d\u0041`, "\uFFFD" + "A"},
+		{"two high surrogates", `\ud83d\ud83d`, "\uFFFD\uFFFD"},
+		{"a low surrogate first", `\ude00\ud83d`, "\uFFFD\uFFFD"},
+		{"a second escape that is not hex", `\ud83d\uZZZZ`, "\uFFFD" + `\uZZZZ`},
+		{"non-hex in the first escape", `\uZZZZ`, `\uZZZZ`},
+		{"a bare backslash-u at the end", `\u`, `\u`},
+		{"an escape this package does not decode", `\n`, `\n`},
+		{"a lone trailing backslash", `abc\`, `abc\`},
+		{"no backslash at all", "plain text", "plain text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unescapeJSON(tc.in); got != tc.want {
+				t.Errorf("unescapeJSON(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnescapeJSONNeverGrows pins the assumption b.Grow(len(s)) rests on.
+func TestUnescapeJSONNeverGrows(t *testing.T) {
+	for _, in := range []string{
+		`\ud83d\ude00`, `\u0041`, `\/`, `\\`, `\uFFFF`, strings.Repeat(`\u0040`, 1000),
+	} {
+		if got := unescapeJSON(in); len(got) > len(in) {
+			t.Errorf("unescapeJSON(%q) grew %d bytes to %d", in, len(in), len(got))
+		}
+	}
+}
+
+// TestServiceTextReturnsOnlyWhatItCanShowClean pins the choice between the two
+// candidate outputs, which three earlier revisions of serviceText got wrong.
+//
+// Each of those decided from a property of the INPUTS, and the service writes the
+// inputs. The last row is the shape that broke them: a decoy occurrence the decode
+// destroys costs the service nothing and moves any such comparison wherever it
+// likes. Deciding from the output instead is what these rows hold in place.
+//
+// The provider table's "one identifier the decode reveals, one it destroys" row is
+// the end-to-end version of the withheld case.
+func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		secrets []string
+		want    string
+	}{{
+		// The commonest real shape, and the one a presence test gets wrong: the
+		// service quotes what it received and then what it normalized to, so the
+		// identifier is in the body twice, escaped once and plain once. Both copies
+		// then CONTAIN it, and only counting shows the decoded copy holds two where
+		// the original holds one. Getting this wrong ships the escaped spelling in
+		// a body whose [redacted] marker makes it look scrubbed.
+		name:    "the same secret escaped once and plain once",
+		in:      `invalid userId: alice\u0040example.test (normalized: alice@example.test)`,
+		secrets: []string{"alice@example.test"},
+		want:    "invalid userid: [redacted] (normalized: [redacted])",
+	}, {
+		// Only the decoded copy matches, so it is the one that can remove the
+		// identifier. This is the case the decode exists for.
+		name:    "the decode reveals the only secret",
+		in:      `bad user alice\u0040example.test`,
+		secrets: []string{"alice@example.test"},
+		want:    "bad user [redacted]",
+	}, {
+		// Already-decoded text, which is what three of the four callers pass. The
+		// service really did report two backslashes and the secret is plainly
+		// visible without decoding, so decoding buys nothing and must not rewrite
+		// the path.
+		name:    "the decode reveals nothing and would rewrite the text",
+		in:      `invalid path C:\\logs for alice@example.test`,
+		secrets: []string{"alice@example.test"},
+		want:    `invalid path c:\\logs for [redacted]`,
+	}, {
+		// Neither candidate can be shown clean. The identifier matches the original
+		// only, the URI the decoded copy only, so scrubbing either one leaves the
+		// other readable — the URI decodes straight out of the first, and the
+		// identifier survives the second as the slash it decodes to. Withholding is
+		// the answer rather than picking the less bad leak.
+		name:    "no candidate is clean, so nothing is returned",
+		in:      `bad user alice\/bob, uri https:\/\/app.test\/cb`,
+		secrets: []string{`alice\/bob`, "https://app.test/cb"},
+		want:    withheldText,
+	}, {
+		// A decoy occurrence the decode destroys. \u004a decodes to "J" and eats the
+		// "a" after it, so this contains the identifier and decodes to something
+		// that does not. Every revision that compared the two inputs read that as a
+		// reason to keep the original, where the real echo is still escaped, and
+		// shipped it under a [redacted] marker that made the body look scrubbed.
+		name:    "a decoy occurrence the decode destroys",
+		in:      `invalid userId: alice\u0040example.test (also \u004alice@example.test)`,
+		secrets: []string{"alice@example.test"},
+		want:    "invalid userid: [redacted] (also jlice@example.test)",
+	}, {
+		// The scan must skip the marker redact itself wrote, or a secret spelled
+		// with letters of "redacted" finds itself inside it and every response is
+		// withheld. A one-character id makes that permanent: with the marker in
+		// scope, every body containing an "e" is suppressed, adversary or not.
+		name:    "a secret made of letters the marker also contains",
+		in:      "denied",
+		secrets: []string{"e"},
+		want:    "d[redacted]ni[redacted]d",
+	}, {
+		// The cap has to be applied before the check, because its ellipsis is text
+		// this code appends and appended text can finish a secret the untruncated
+		// string only started. Here the body ends the identifier with a "y", so
+		// nothing matches until the cut replaces that tail with "...", which
+		// completes the dot the identifier ends in.
+		name:    "the cap's ellipsis completes the secret",
+		in:      strings.Repeat("x", 1006) + "alice@example.test" + "y",
+		secrets: []string{"alice@example.test."},
+		want:    withheldText,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serviceText(tc.in, tc.secrets...); got != tc.want {
+				t.Errorf("serviceText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestServiceTextNeverReturnsARecoverableSecret is the invariant the four earlier
+// revisions of serviceText each violated, stated once and checked over every body
+// an adversary can assemble from the pieces that broke them.
+//
+// It deliberately does NOT call recoverable. An earlier version of this test did,
+// and that made it circular: serviceText returns a candidate only when recoverable
+// says no, so asserting the same predicate held by construction and the test was
+// green on a body it was already generating — a doubly escaped identifier, which
+// the then-single-pass recoverable could not see. The oracle below is written from
+// the attacker's side instead: strip the markers, decode until nothing changes,
+// look for the identifier. It fails when recoverable under-approximates, which is
+// the whole point of having it.
+func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
+	const user = "alice@example.test"
+	const uri = "https://app.test/cb"
+	pieces := []string{
+		"",
+		user,                       // plain
+		`alice\u0040example.test`,  // escaped
+		`alice\\u0040example.test`, // doubly escaped: one decode pass is not enough
+		`\u004alice@example.test`,  // decoy: decodes to Jlice@…, contains the plain form
+		uri,                        // the other secret, plain
+		`https:\/\/app.test\/cb`,   // the other secret, escaped
+		strings.Repeat("x", 600),   // pushes a later piece past the 1024-byte cap
+	}
+	secrets := []string{user, uri}
+
+	var checked, withheld int
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		if n == 0 {
+			checked++
+			got := serviceText(prefix, secrets...)
+			if got == withheldText {
+				withheld++
+				return
+			}
+			if readable(t, got, secrets) {
+				t.Fatalf("serviceText(%q) = %q, out of which a secret is still readable", prefix, got)
+			}
+			return
+		}
+		for _, p := range pieces {
+			gen(prefix+p, n-1)
+		}
+	}
+	for n := 1; n <= 3; n++ {
+		gen("", n)
+	}
+
+	t.Logf("%d bodies checked, %d withheld", checked, withheld)
+	// Both outcomes have to occur, or the invariant is being satisfied trivially.
+	if withheld == checked {
+		t.Error("every body was withheld, so the clean path went unexercised")
+	}
+	if withheld == 0 {
+		t.Error("no body was withheld, so the fail-closed path went unexercised")
+	}
+}
+
+// readable is the test's own oracle for "an attacker can read a secret out of this
+// string", written without reference to the production predicate it judges.
+//
+// Markers are dropped rather than searched, since text redact itself inserted is
+// not something the service disclosed. Decoding runs to a fixpoint under an
+// explicit bound: relying on the production loop's termination argument here would
+// hand the oracle the same assumption it is supposed to be testing.
+func readable(t *testing.T, x string, secrets []string) bool {
+	t.Helper()
+	decode := func(s string) string {
+		for range 64 {
+			u := unescapeJSON(s)
+			if u == s {
+				return s
+			}
+			s = u
+		}
+		t.Fatalf("decoding %q never reached a fixpoint in 64 passes", x)
+		return ""
+	}
+	for _, part := range strings.Split(x, "[redacted]") {
+		lp, ld := strings.ToLower(part), strings.ToLower(decode(part))
+		for _, v := range secrets {
+			for _, form := range []string{strings.ToLower(v), strings.ToLower(decode(v))} {
+				if form != "" && (strings.Contains(lp, form) || strings.Contains(ld, form)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestDecodeFullyShrinksWheneverItChanges pins the termination argument decodeFully
+// relies on, which is not the same claim as TestUnescapeJSONNeverGrows: an equal
+// length that still changed would loop forever.
+func TestDecodeFullyShrinksWheneverItChanges(t *testing.T) {
+	for _, in := range []string{
+		`\\u0040`, `\u0040`, `\/`, `\\`, `\ud83d\ude00`, `\uZZZZ`, `plain`, ``,
+		`\\\\u0040example`, `a\\b\/c\u0041d`,
+	} {
+		if u := unescapeJSON(in); u != in && len(u) >= len(in) {
+			t.Errorf("unescapeJSON(%q) = %q changed without shrinking, %d to %d bytes", in, u, len(in), len(u))
+		}
+	}
+}
