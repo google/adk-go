@@ -432,9 +432,8 @@ func serveWithoutPanic(t *testing.T, handler http.Handler, req *http.Request) *h
 	return rec
 }
 
-func TestRegisterHealthRoute(t *testing.T) {
-	router := BuildBaseRouter()
-	registerHealthRoute(router)
+func TestHealthFallbackAnswers(t *testing.T) {
+	router := withHealthFallback(BuildBaseRouter())
 
 	t.Run("GET", func(t *testing.T) {
 		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -464,10 +463,10 @@ func TestRegisterHealthRoute(t *testing.T) {
 	})
 }
 
-// TestBuildBaseRouterLeavesHealthToTheCaller guards the reason the route lives
-// in registerHealthRoute: mux serves the first matching route, so registering
-// /health inside the exported constructor would silently shadow an embedder's
-// own handler for that path.
+// TestBuildBaseRouterLeavesHealthToTheCaller guards the reason the fallback
+// lives in withHealthFallback: mux serves the first matching route, so
+// registering /health inside the exported constructor would silently shadow an
+// embedder's own handler for that path.
 func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	router := BuildBaseRouter()
 	router.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -611,6 +610,9 @@ func TestInMemoryServiceWarningNamesTheDataLoss(t *testing.T) {
 		for _, want := range []string{
 			"WARNING", "artifact, memory", "lost when this process exits",
 			"refuse to start", "-allow_in_memory_services",
+			// The flag only silences the notice. An operator also needs to know
+			// where real storage is configured, which is Go code, not a flag.
+			"launcher.Config",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("warning output %q does not contain %q", out, want)
@@ -670,4 +672,130 @@ func (keywordSublauncher) SimpleDescription() string                         { r
 func (keywordSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
 func (keywordSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
 	return nil
+}
+
+// catchAllSublauncher mounts a route that matches every path, the way an API
+// sublauncher does when its path prefix is empty.
+type catchAllSublauncher struct{}
+
+func (catchAllSublauncher) Keyword() string                                   { return "catchall" }
+func (catchAllSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (catchAllSublauncher) CommandLineSyntax() string                         { return "" }
+func (catchAllSublauncher) SimpleDescription() string                         { return "" }
+func (catchAllSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (catchAllSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.NewRoute().HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("catch-all"))
+	})
+	return nil
+}
+
+// TestHealthFallbackBeatsACatchAll covers a sublauncher that matches every
+// path without meaning to own the probe path.
+//
+// Registering the health route after the sublaunchers puts it behind such a
+// route, so the probe path 404s. Deciding outside the router avoids that,
+// because a catch-all declares no path template and so does not claim /health.
+func TestHealthFallbackBeatsACatchAll(t *testing.T) {
+	l := NewLauncher(catchAllSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"catchall"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(method, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s /health status = %d, want %d; a catch-all is hiding the probe path",
+				method, rec.Code, http.StatusOK)
+		}
+	}
+
+	// Everything else still reaches the catch-all.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/anything", nil))
+	if body := rec.Body.String(); body != "catch-all" {
+		t.Errorf("GET /anything body = %q, want the catch-all to still serve it", body)
+	}
+}
+
+// TestSublauncherHealthOwnsEveryMethod covers the verb half of the shadowing
+// bug.
+//
+// A sublauncher that declares /health for GET alone owns the path outright. If
+// the fallback answered HEAD, a draining instance would report ok on the verb
+// HAProxy and nginx probe with by default, which is the failure this is meant
+// to prevent, surviving on one method.
+func TestSublauncherHealthOwnsEveryMethod(t *testing.T) {
+	l := NewLauncher(healthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"ownhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/health", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("HEAD /health status = 200, want the sublauncher's own answer; "+
+			"the fallback is reporting ok for an instance that declared itself unhealthy (body %q)",
+			rec.Body.String())
+	}
+}
+
+// TestRunLogsTheInMemoryWarning covers the wiring, not the wording.
+//
+// logInMemoryServiceWarning had tests, but nothing checked that Run calls it.
+// Deleting the call left the package green, so the banner an operator relies on
+// could disappear silently.
+func TestRunLogsTheInMemoryWarning(t *testing.T) {
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(freeTestPort(t)), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	// A resource whose schema URL conflicts makes telemetry init fail, so Run
+	// returns straight after the banner without binding anything.
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	err := l.Run(context.Background(), &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	})
+	if err == nil {
+		t.Fatal("Run() succeeded, want the telemetry failure that stops it after the banner")
+	}
+
+	if !strings.Contains(buf.String(), "WARNING: no artifact, memory service configured") {
+		t.Errorf("Run() did not print the in-memory warning; log was:\n%s", buf.String())
+	}
+}
+
+// freeTestPort returns a port nothing is listening on.
+func freeTestPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("closing the probe listener failed: %v", err)
+	}
+	return port
 }

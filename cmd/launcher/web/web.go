@@ -175,9 +175,15 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 // Refusing is the eventual goal rather than the current behaviour because
 // cmd/launcher/prod runs through this same path. A production deployment that
 // configured no storage should learn about it at startup, not when a restart
-// has already dropped the data. adk-python falls back to
-// InMemoryArtifactService for an absent URI, so the fallback is not wrong in
-// itself; it belongs to a dev server rather than to every server.
+// has already dropped the data.
+//
+// adk-python does not default to memory here. An absent --artifact_service_uri
+// gets per-agent local disk under <agents_root>/<agent>/.adk/artifacts, and
+// in-memory is only the fallback when local storage is disabled or unwritable
+// (cli/utils/service_factory.py). Every one of those paths logs a warning
+// naming the flag. So Go defaulting straight to memory is already the weaker
+// behaviour, which is the argument for warning loudly now and refusing later,
+// not an argument that the fallback is fine.
 func applyServiceDefaults(config *launcher.Config, allowInMemory bool) (defaulted []string, unconsented bool) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
@@ -213,20 +219,23 @@ func logInMemoryServiceWarning(defaulted []string, unconsented bool) {
 	if len(defaulted) == 0 {
 		return
 	}
+	// Naming launcher.Config, not just the flag: the flag only silences this,
+	// and there is no command-line way to point the launcher at real storage.
 	log.Printf("       WARNING: no %s service configured, so an in-memory one is in use.", strings.Join(defaulted, ", "))
 	log.Printf("       WARNING:     everything it holds is lost when this process exits.")
 	if unconsented {
-		log.Printf("       WARNING:     a future release will refuse to start instead. Configure a")
-		log.Printf("       WARNING:     service, or pass -allow_in_memory_services to keep this.")
+		log.Printf("       WARNING:     a future release will refuse to start instead. Set")
+		log.Printf("       WARNING:     ArtifactService and MemoryService on launcher.Config,")
+		log.Printf("       WARNING:     or pass -allow_in_memory_services to keep this.")
 	}
 }
 
-// buildRouter assembles the router Run serves: the base router, then every
-// active sublauncher's routes, then the fallback health route.
+// buildRouter assembles the handler Run serves: the base router, every active
+// sublauncher's routes, and a health fallback around the outside.
 //
-// Separated from Run so a test can assert the registration order without
-// binding a port, because the order is what decides which /health wins.
-func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) {
+// Separated from Run so a test can exercise exactly what is served without
+// binding a port.
+func (w *webLauncher) buildRouter(config *launcher.Config) (http.Handler, error) {
 	router := BuildBaseRouter()
 
 	// check if there are any active sublaunchers
@@ -247,12 +256,7 @@ func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) 
 		}
 	}
 
-	// Registered after the sublaunchers, not before, because gorilla/mux
-	// matches in registration order. Going first would shadow a /health that a
-	// sublauncher serves itself, leaving that sublauncher's own readiness
-	// signal unreachable while the probe still reported ok.
-	registerHealthRoute(router)
-	return router, nil
+	return withHealthFallback(router), nil
 }
 
 // webUIKeyword is the command-line keyword of the webui sublauncher. It is a
@@ -398,15 +402,52 @@ func BuildBaseRouter() *mux.Router {
 	return router
 }
 
-// registerHealthRoute serves health at the root as well as under the API
+// healthPath is the probe path served at the root as well as under the API
 // prefix. Load balancers and container probes are configured with a fixed path
 // and cannot be expected to know which sublaunchers happen to be enabled.
+const healthPath = "/health"
+
+// withHealthFallback answers healthPath when nothing else declares it.
 //
-// Run calls this rather than BuildBaseRouter doing it, so that an embedder
-// building its own server keeps /health for itself, and calls it after the
-// sublaunchers so that it is a fallback rather than an override.
-func registerHealthRoute(router *mux.Router) {
-	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
+// This wraps the router rather than registering a route on it, because neither
+// registration order works. Registering first shadows a /health a sublauncher
+// serves itself, so a draining instance keeps reporting ok. Registering last
+// puts it behind any catch-all route a sublauncher mounted, so the probe path
+// 404s. Deciding outside the router avoids both.
+//
+// A sublauncher that declares healthPath owns it completely, on every method.
+// Answering HEAD here while it answers GET is the same shadowing bug on one
+// verb, and HEAD is what HAProxy and nginx probe with by default.
+//
+// Run calls this rather than BuildBaseRouter doing it, so an embedder building
+// its own server keeps /health for itself.
+func withHealthFallback(router *mux.Router) http.Handler {
+	if declaresHealthRoute(router) {
+		return router
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			healthHandler(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+}
+
+// declaresHealthRoute reports whether any route names healthPath outright.
+//
+// It matches on the path template rather than by serving a probe request,
+// because a catch-all would answer such a probe without meaning to own the
+// path, and a catch-all is exactly what the fallback has to beat.
+func declaresHealthRoute(router *mux.Router) bool {
+	declared := false
+	_ = router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		if tmpl, err := route.GetPathTemplate(); err == nil && tmpl == healthPath {
+			declared = true
+		}
+		return nil
+	})
+	return declared
 }
 
 // healthHandler reports that the web server is up. It says nothing about the
