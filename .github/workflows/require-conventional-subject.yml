@@ -1,0 +1,87 @@
+# Rejects pull requests whose landed commit subject would not be a Conventional
+# Commit.
+#
+# Release Please builds the changelog and picks the next version from the
+# conventional-commit subjects on the release branch. A subject with no
+# recognized type is not rejected there, it is silently ignored: the change
+# ships, but it never appears in the release notes and never moves the version.
+# Once merged the subject is history, so this is the last cheap moment to catch
+# it.
+#
+# Two subjects are checked, because either one can be the one that lands. This
+# repository squash-merges with the default "commit or PR title" subject, so a
+# pull request carrying a single commit lands that commit's subject and ignores
+# the PR title entirely; anything larger lands the PR title. Which of the two it
+# will be is not fixed until the merge, and a second push flips it, so both have
+# to hold.
+#
+# To make this block a merge rather than only show up red, add
+# "Require conventional subject" to the required status checks in the branch
+# ruleset.
+name: Require conventional subject
+
+# No workflow_dispatch: there is no pull request to read outside this event.
+on:
+  pull_request:
+    # `edited` is what re-runs the check when someone corrects the title. Without
+    # it a fixed title stays red until an unrelated push.
+    types: [opened, edited, reopened, synchronize]
+    branches: [ "main", "v1" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # The commit subjects of a pull request are only reachable through the pulls
+  # API; contents alone gets a 403 there.
+  pull-requests: read
+
+jobs:
+  conventional-subject:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Only the config and the script are read, and no token should linger
+          # on disk for a check that runs on pull requests from forks.
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - name: Select the config for this release line
+        id: line
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$BASE_REF" = "v1" ]; then
+            config=.github/release-please-config-v1.json
+          else
+            config=.github/release-please-config.json
+          fi
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the pull request title
+        env:
+          # Through the environment, never interpolated into the script: a title
+          # is attacker controlled, and a `${{ }}` inside run: is substituted
+          # into the shell text before the shell ever sees it.
+          TITLE: ${{ github.event.pull_request.title }}
+          CONFIG: ${{ steps.line.outputs.config }}
+        run: .github/scripts/check-conventional-subject.sh "$CONFIG" "PR title" "$TITLE"
+
+      # Only meaningful for a single-commit pull request: with more than one
+      # commit the individual subjects are folded into the squash body, where
+      # Release Please never reads them.
+      - name: Validate the single commit's subject
+        if: github.event.pull_request.commits == 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CONFIG: ${{ steps.line.outputs.config }}
+        run: |
+          set -euo pipefail
+          subject="$(gh api "repos/$REPO/pulls/$PR/commits" --jq '.[0].commit.message' | head -n 1)"
+          .github/scripts/check-conventional-subject.sh "$CONFIG" "commit subject" "$subject"

@@ -208,7 +208,9 @@ information on using pull requests.
     title, and in the commit subject too on a single-commit PR, where that is
     what lands instead. Release tooling reads the landed subject to pick the
     next version and build the release notes, and silently skips anything with
-    no recognized type.
+    no recognized type. The `Require conventional subject` check enforces this;
+    the types it accepts are the ones listed in
+    `.github/release-please-config.json`.
 -   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
 -   Please include a `testing plan` section in your PR to talk about how you
