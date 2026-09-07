@@ -34,7 +34,7 @@ type vertexAIService struct {
 // Specifies also a way to convert session events to memories (see StateKeySessionLastUpdateTime)
 type ServiceConfig struct {
 	vertexaiutil.AgentEngineData
-	// StateKeySessionLastUpdateTime controlls the process of the generation of memories.
+	// StateKeySessionLastUpdateTime controls the process of the generation of memories.
 	// If set to "", the whole session is used to generate the memories.
 	// If provided, the value is treated as a key for Session State. Retrieved value (time.Time is expected) is used to filter the events to the most recent ones.
 	// Warning! The value for State under this key should be set as soon as possible (for instance, during the BeforeRunCallback)

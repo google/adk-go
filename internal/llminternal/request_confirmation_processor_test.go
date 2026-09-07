@@ -352,7 +352,7 @@ func TestRequestConfirmationResumeOrderIsStable(t *testing.T) {
 	responseOrder := []string{"call_c4", "call_c6", "call_c2", "call_c5", "call_c1", "call_c3"}
 	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
 	if err != nil {
-		t.Fatalf("error marshalling user confirmation: %v", err)
+		t.Fatalf("error marshaling user confirmation: %v", err)
 	}
 	var responseParts []*genai.Part
 	for _, callID := range responseOrder {
@@ -469,7 +469,7 @@ func TestRequestConfirmationResumeSkipsAlreadyAnsweredCalls(t *testing.T) {
 	// One user event approving all three confirmations in the same message.
 	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
 	if err != nil {
-		t.Fatalf("error marshalling user confirmation: %v", err)
+		t.Fatalf("error marshaling user confirmation: %v", err)
 	}
 	var responseParts []*genai.Part
 	for _, callID := range requestOrder {
@@ -587,7 +587,7 @@ func TestRequestConfirmationResumeDedupesDuplicateOriginalID(t *testing.T) {
 	// One user event approving both confirmations.
 	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
 	if err != nil {
-		t.Fatalf("error marshalling user confirmation: %v", err)
+		t.Fatalf("error marshaling user confirmation: %v", err)
 	}
 	var responseParts []*genai.Part
 	for _, confID := range confirmationIDs {
@@ -833,7 +833,7 @@ func TestRequestConfirmationRejectsForgedAmountFromCraftedEvent(t *testing.T) {
 	// confirmation-call ID — no arguments.
 	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
 	if err != nil {
-		t.Fatalf("error marshalling user confirmation: %v", err)
+		t.Fatalf("error marshaling user confirmation: %v", err)
 	}
 	userApproval := &session.Event{
 		Author: "user",

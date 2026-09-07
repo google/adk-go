@@ -59,12 +59,12 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// adk-python, where _llm_agent_wrapper.py gates the same override on
 		// include_contents being absent from model_fields_set.
 		//
-		// How to shape the turn also honours the declaration, since the
+		// How to shape the turn also honors the declaration, since the
 		// single-turn nudge describes the agent rather than its placement.
 		boundMode, bound := BoundMode(ctx, name, state)
 		// Only "default" opts out of the placement. Testing for "" instead
-		// would let any unrecognised value opt out too, and IncludeContents is
-		// an unvalidated string, so a typo — "None", "defualt" — would hand a
+		// would let any unrecognized value opt out too, and IncludeContents is
+		// an unvalidated string, so a typo — "None", "default" — would hand a
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
@@ -78,10 +78,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// A compaction record instructs prompt assembly to drop a span of
 		// history and substitute content in its place. EventActions is
 		// writable by tool code, and the REST create-session body maps it
-		// verbatim onto the stored event, so honouring any record found in a
+		// verbatim onto the stored event, so honoring any record found in a
 		// session would be an erase-and-inject primitive that works even for an
 		// application that never enabled compaction. Records are therefore only
-		// honoured when this run actually has compaction configured.
+		// honored when this run actually has compaction configured.
 		compactionEnabled := compactionctx.FromContext(ctx).Configured()
 
 		var events []*session.Event

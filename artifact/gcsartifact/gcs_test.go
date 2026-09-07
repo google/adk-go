@@ -284,16 +284,16 @@ func TestIsPreconditionFailed(t *testing.T) {
 }
 
 // TestSleepContext checks that sleepContext honors a non-positive duration, an
-// already-cancelled context, and a normal short wait.
+// already-canceled context, and a normal short wait.
 func TestSleepContext(t *testing.T) {
 	if err := sleepContext(t.Context(), 0); err != nil {
 		t.Errorf("sleepContext(_, 0) = %v, want nil", err)
 	}
 
-	cancelled, cancel := context.WithCancel(t.Context())
+	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := sleepContext(cancelled, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("sleepContext(cancelled, 1h) = %v, want context.Canceled", err)
+	if err := sleepContext(canceled, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("sleepContext(canceled, 1h) = %v, want context.Canceled", err)
 	}
 
 	if err := sleepContext(t.Context(), time.Millisecond); err != nil {

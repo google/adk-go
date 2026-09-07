@@ -113,7 +113,7 @@ func TestRESTCompaction_EnabledViaServerConfig(t *testing.T) {
 }
 
 // TestRESTCompaction_DisabledByDefault pins that leaving the field unset keeps
-// the previous behaviour exactly.
+// the previous behavior exactly.
 func TestRESTCompaction_DisabledByDefault(t *testing.T) {
 	m := &echoModel{}
 	sessionService := session.InMemoryService()

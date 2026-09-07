@@ -23,7 +23,7 @@ import (
 // EvalAPIRouter defines the routes for the Eval API.
 //
 // ADK Go has no evaluation implementation. The routes exist so the endpoints
-// the web UI calls are recognised and answered deliberately, with 501 and a
+// the web UI calls are recognized and answered deliberately, with 501 and a
 // readable body, rather than falling through to a bare 404 that looks like a
 // wrong path prefix.
 type EvalAPIRouter struct{}

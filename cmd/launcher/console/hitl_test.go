@@ -406,7 +406,7 @@ func TestRenderWorkflowInputPrompt_PayloadFormatting(t *testing.T) {
 			//         "days": 5,
 			//         "user": "alice"
 			//       }
-			// (Go map keys serialise in sorted order, so "days"
+			// (Go map keys serialize in sorted order, so "days"
 			// precedes "user".)
 			wantContains: []string{
 				"  Payload: {\n",
