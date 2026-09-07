@@ -60,6 +60,14 @@ var debugRoutes = []string{
 	"/dev/apps/app1/build_graph_image",
 }
 
+// ungatedDevRoutes are developer routes that must answer whether or not the
+// debug API is enabled. None of them reads an agent or reveals anything about
+// one, and /builder answers an empty 200 on purpose so the UI disables its
+// builder toggle. A 404 there is the error status that handler exists to avoid.
+var ungatedDevRoutes = []string{
+	"/dev/apps/app1/builder",
+}
+
 // muxNotFound is what gorilla/mux writes when no route matches. A registered
 // handler that happens to answer 404 writes its own body, so the body is what
 // distinguishes "not routed" from "routed and rejected".
@@ -97,6 +105,16 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 				if routed != tc.wantRouted {
 					t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
 						route, routed, tc.wantRouted, rr.Code, rr.Body.String())
+				}
+			}
+			for _, route := range ungatedDevRoutes {
+				rr := httptest.NewRecorder()
+				srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, route, nil))
+				if rr.Body.String() == muxNotFound {
+					t.Errorf("GET %s: not routed, want it served regardless of the gate", route)
+				}
+				if rr.Code != http.StatusOK {
+					t.Errorf("GET %s: status = %d, want %d", route, rr.Code, http.StatusOK)
 				}
 			}
 		})

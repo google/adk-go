@@ -166,6 +166,13 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// A Loader is an interface a caller implements, so it can hand back a nil
+	// agent with a nil error. The graph generator then dereferences it and
+	// panics, dropping the connection with no HTTP response at all.
+	if agent == nil {
+		http.Error(rw, "agent "+sessionID.AppName+" not found", http.StatusNotFound)
+		return
+	}
 	graph, err := services.GetAgentGraph(req.Context(), agent, highlightedPairs)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)

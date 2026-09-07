@@ -335,7 +335,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
-	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true.")
+	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "Serve the developer endpoints that describe an agent rather than run it: the debug trace routes, whose payloads carry tool-call arguments and responses, and the agent graph routes, whose output names every tool the agent can call. The web UI needs this for its Traces and agent structure panels. Off by default.")
 
 	return &apiLauncher{
 		config: config,

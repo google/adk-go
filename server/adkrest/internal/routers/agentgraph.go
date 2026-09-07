@@ -21,7 +21,12 @@ import (
 )
 
 // AgentGraphAPIRouter defines the routes behind the web UI's agent-structure
-// panel and agent builder.
+// panel.
+//
+// These are separate from the builder routes because only these two disclose
+// anything: the tree of agents, and, through the DOT source, the name of every
+// tool the agent can call. That is what puts them behind IncludeDebugAPI, and
+// the builder routes must not be dragged along with them.
 type AgentGraphAPIRouter struct {
 	graphController *controllers.AgentGraphAPIController
 }
@@ -31,15 +36,8 @@ func NewAgentGraphAPIRouter(controller *controllers.AgentGraphAPIController) *Ag
 	return &AgentGraphAPIRouter{graphController: controller}
 }
 
-const builderDetail = "ADK Go agents are defined in Go code, so there is no server-side agent configuration to edit."
-
-// Routes returns the routes for the agent graph and builder APIs.
-//
-// The two graph endpoints are implemented. The builder write endpoints are not:
-// they would edit an agent's stored configuration, and ADK Go has none.
+// Routes returns the two implemented agent-graph endpoints.
 func (r *AgentGraphAPIRouter) Routes() Routes {
-	notImplemented := controllers.NewNotImplementedHandler("the agent builder", builderDetail)
-
 	return Routes{
 		Route{
 			Name:        "GetAppInfo",
@@ -53,6 +51,28 @@ func (r *AgentGraphAPIRouter) Routes() Routes {
 			Pattern:     DevPrefix + "/build_graph_image",
 			HandlerFunc: r.graphController.BuildGraphImageHandler,
 		},
+	}
+}
+
+const builderDetail = "ADK Go agents are defined in Go code, so there is no server-side agent configuration to edit."
+
+// AgentBuilderAPIRouter defines the web UI's agent builder routes.
+//
+// It is registered unconditionally, unlike the graph routes it used to share a
+// router with. None of these reads an agent or reveals anything about one: the
+// GET answers empty and the writes answer 501. Putting them behind
+// IncludeDebugAPI would turn the deliberate empty 200 into a 404, which is the
+// error status AgentBuilderConfigHandler exists to avoid.
+type AgentBuilderAPIRouter struct{}
+
+// Routes returns the routes for the agent builder API.
+//
+// The write endpoints are not implemented: they would edit an agent's stored
+// configuration, and ADK Go has none.
+func (r *AgentBuilderAPIRouter) Routes() Routes {
+	notImplemented := controllers.NewNotImplementedHandler("the agent builder", builderDetail)
+
+	return Routes{
 		Route{
 			Name:        "GetAgentBuilderConfig",
 			Methods:     []string{http.MethodGet},
