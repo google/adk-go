@@ -12,6 +12,13 @@ optimized for Gemini, and is one of three ADK implementations — Go, Python, an
 Java — that share a conceptual model but are independent codebases. Requires
 Go 1.25+.
 
+## Skills
+
+See [AI-assisted development](CONTRIBUTING.md#ai-assisted-development) in
+`CONTRIBUTING.md` for what this repo ships. The rule for agents: task-specific
+instructions live in `.agents/skills/<name>/SKILL.md`, and you read the matching
+one before starting that kind of work.
+
 ## Setup & core commands
 
 Run from the repo root. These match what CI enforces (CI also passes `-v`):
