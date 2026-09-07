@@ -57,6 +57,30 @@ func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{"result": "Mock tool result with test"}, nil
 }
 
+// followUpConfirmationTool requests another confirmation when resumed.
+type followUpConfirmationTool struct {
+	name string
+}
+
+func (t *followUpConfirmationTool) Name() string { return t.name }
+func (t *followUpConfirmationTool) Description() string {
+	return "mock tool requesting follow-up confirmation"
+}
+func (t *followUpConfirmationTool) IsLongRunning() bool { return false }
+func (t *followUpConfirmationTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name}
+}
+
+func (t *followUpConfirmationTool) Run(ctx agent.Context, _ any) (map[string]any, error) {
+	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
+		return map[string]any{"error": "tool execution not confirmed"}, nil
+	}
+	if err := ctx.RequestConfirmation("Approve the next operation?", nil); err != nil {
+		return nil, err
+	}
+	return nil, tool.ErrConfirmationRequired
+}
+
 // amountEchoTool is a confirmation-gated tool used by the confirmation-forgery
 // security test. When (and only when) the call is confirmed, it echoes back the
 // "amount" argument it was actually executed with, so the test can assert
@@ -305,6 +329,113 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRequestConfirmationRequestProcessorEmitsFollowUpConfirmation(t *testing.T) {
+	const toolName = "follow_up_confirmation_tool"
+
+	tools := []tool.Tool{&followUpConfirmationTool{name: toolName}}
+	agnt, err := llmagent.New(llmagent.Config{
+		Name:  "testAgent",
+		Model: &testModel{},
+		Tools: tools,
+	})
+	if err != nil {
+		t.Fatalf("error creating llmagent: %v", err)
+	}
+
+	originalCall := &genai.FunctionCall{
+		Name: toolName,
+		Args: map[string]any{},
+		ID:   mockFunctionCallID,
+	}
+	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
+	if err != nil {
+		t.Fatalf("error marshalling user confirmation: %v", err)
+	}
+	events := []*session.Event{
+		{
+			Author: "testAgent",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						Name: toolconfirmation.FunctionCallName,
+						ID:   mockConfirmationFunctionCallID,
+						Args: map[string]any{
+							"originalFunctionCall": originalCall,
+							"toolConfirmation": toolconfirmation.ToolConfirmation{
+								Hint: "Approve the first operation?",
+							},
+						},
+					},
+				}}},
+			},
+		},
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						Name: toolconfirmation.FunctionCallName,
+						ID:   mockConfirmationFunctionCallID,
+						Response: map[string]any{
+							"response": string(userConfirmationJSON),
+						},
+					},
+				}}},
+			},
+		},
+	}
+	invocationContext := createInvocationContext(t, agnt, &fakeSession{events: events})
+
+	var gotEvents []*session.Event
+	for event, err := range llminternal.RequestConfirmationRequestProcessor(
+		invocationContext,
+		&model.LLMRequest{},
+		&llminternal.Flow{Tools: tools},
+	) {
+		if err != nil {
+			t.Fatalf("RequestConfirmationRequestProcessor() unexpected error: %v", err)
+		}
+		gotEvents = append(gotEvents, event)
+	}
+
+	if got, want := len(gotEvents), 2; got != want {
+		t.Fatalf("RequestConfirmationRequestProcessor() got %d events, want %d", got, want)
+	}
+	responseParts := gotEvents[0].Content.Parts
+	if got, want := len(responseParts), 1; got != want {
+		t.Fatalf("response event got %d parts, want %d", got, want)
+	}
+	if got, want := responseParts[0].FunctionResponse.ID, mockFunctionCallID; got != want {
+		t.Errorf("response function call ID = %q, want %q", got, want)
+	}
+
+	confirmationEvent := gotEvents[1]
+	confirmationCalls := confirmationEvent.Content.Parts
+	if got, want := len(confirmationCalls), 1; got != want {
+		t.Fatalf("follow-up confirmation event got %d parts, want %d", got, want)
+	}
+	followUpCall := confirmationCalls[0].FunctionCall
+	if followUpCall == nil {
+		t.Fatal("follow-up confirmation event has no function call")
+	}
+	if got, want := followUpCall.Name, toolconfirmation.FunctionCallName; got != want {
+		t.Errorf("follow-up function name = %q, want %q", got, want)
+	}
+	if diff := cmp.Diff([]string{followUpCall.ID}, confirmationEvent.LongRunningToolIDs); diff != "" {
+		t.Errorf("follow-up LongRunningToolIDs diff (-want +got):\n%s", diff)
+	}
+	followUpOriginalCall, err := toolconfirmation.OriginalCallFrom(followUpCall)
+	if err != nil {
+		t.Fatalf("extracting follow-up original call: %v", err)
+	}
+	if diff := cmp.Diff(originalCall, followUpOriginalCall); diff != "" {
+		t.Errorf("follow-up original call diff (-want +got):\n%s", diff)
+	}
+	if !invocationContext.Ended() {
+		t.Error("invocation did not end after emitting follow-up confirmation")
 	}
 }
 
