@@ -23,6 +23,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
@@ -116,16 +117,28 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 		translator := newStreamTranslator()
 
 		var openaiResp *responses.Response
+		// Set alongside openaiResp by a terminal event, the only kind that says
+		// why the turn ended.
+		var sawFinalResponse bool
 
 		for stream.Next() {
 			event := stream.Current()
-			switch event.Type {
-			case "response.created":
-				created := event.AsResponseCreated()
-				openaiResp = &created.Response
-			case "response.completed":
-				completed := event.AsResponseCompleted()
-				openaiResp = &completed.Response
+			// First terminal object wins: a later one, or a stray
+			// "response.created", would relabel a truncated turn a clean stop.
+			if !sawFinalResponse {
+				switch event.Type {
+				case responseCreated:
+					created := event.AsResponseCreated()
+					openaiResp = &created.Response
+				case responseCompleted:
+					completed := event.AsResponseCompleted()
+					openaiResp = &completed.Response
+					sawFinalResponse = true
+				case responseIncomplete:
+					incomplete := event.AsResponseIncomplete()
+					openaiResp = &incomplete.Response
+					sawFinalResponse = true
+				}
 			}
 
 			// First, we convert the OpenAI streaming event format to our generic genai.GenerateContentResponse format.
@@ -152,16 +165,54 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 			return
 		}
 
-		if final := aggregator.Close(); final != nil {
-			if openaiResp != nil {
-				attachMetadata(final, openaiResp)
-				final.UsageMetadata = convertUsage(openaiResp.Usage)
-			}
-			if !yield(final, nil) {
+		final := aggregator.Close()
+		if final == nil {
+			// No delta reached the aggregator, but the turn can still be
+			// complete: a provider that batches its output puts the whole
+			// message on the terminal event. Rebuild it the way the blocking
+			// path would, so the two agree on such a stream.
+			if !sawFinalResponse {
 				return
 			}
+			genaiResp, err := convertResponse(openaiResp)
+			if err != nil {
+				// Blocking fails the call on unusable output; match it rather
+				// than pass an empty turn off as a successful one.
+				yield(nil, err)
+				return
+			}
+			final = converters.Genai2LLMResponse(genaiResp)
 		}
+		finalizeStreamResponse(final, openaiResp, sawFinalResponse)
+		yield(final, nil)
 	}
+}
+
+// finalizeStreamResponse closes out a streamed turn on the aggregated response.
+//
+// Deltas carry no finish reason (see singlePartResponse), so this is the one
+// response that marks the turn complete, and the last point where the terminal
+// OpenAI response is in reach — hence the fields copied here, which are what
+// let a streamed turn report what the same turn reports unstreamed. An erroring
+// stream never arrives: the error ends the turn in place of TurnComplete.
+func finalizeStreamResponse(final *model.LLMResponse, openaiResp *responses.Response, sawFinalResponse bool) {
+	final.TurnComplete = true
+	if openaiResp != nil {
+		attachMetadata(final, openaiResp)
+		final.ModelVersion = string(openaiResp.Model)
+	}
+	if !sawFinalResponse {
+		// The model never said why it stopped, and finishReason would read that
+		// silence as a clean stop. Usage is left alone for the same reason: only
+		// "response.created" is in hand and its counts are zero, which would
+		// report a turn that did real work as having cost nothing.
+		final.FinishReason = genai.FinishReasonUnspecified
+		return
+	}
+	// sawFinalResponse implies openaiResp != nil.
+	final.UsageMetadata = convertUsage(openaiResp.Usage)
+	final.FinishReason = finishReason(openaiResp)
+	final.LogprobsResult = convertLogprobs(openaiResp.Output)
 }
 
 func attachMetadata(resp *model.LLMResponse, openaiResp *responses.Response) {

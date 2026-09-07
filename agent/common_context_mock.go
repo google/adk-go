@@ -206,19 +206,22 @@ func (c *ContextMock) WithContext(ctx context.Context) InvocationContext {
 	return nil
 }
 
-// WithContext implements [Context].
+// WithAgentContext implements [Context].
 func (c *ContextMock) WithAgentContext(ctx context.Context) Context {
 	return nil
 }
 
+// OutputForAncestors implements [Context].
 func (c *ContextMock) OutputForAncestors() []string {
 	return nil
 }
 
+// WithDelta implements [Context].
 func (c *ContextMock) WithDelta(d *CommonContextDelta) Context {
 	return c
 }
 
+// WithICDelta implements [InvocationContext].
 func (c *ContextMock) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	return c
 }

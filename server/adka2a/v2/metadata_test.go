@@ -30,6 +30,10 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 		name    string
 		event   *session.Event
 		a2aMeta map[string]any
+		// wantAfterProcessA2AMeta overrides event for the processA2AMeta
+		// direction. Needed only when TransferToAgent is set, since that's
+		// never restored from peer metadata (see toEventActions).
+		wantAfterProcessA2AMeta *session.Event
 	}{
 		{
 			name: "error code",
@@ -79,6 +83,8 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 			name:    "actions",
 			event:   &session.Event{Actions: session.EventActions{TransferToAgent: "another", Escalate: true}},
 			a2aMeta: map[string]any{metadataTransferToAgentKey: "another", metadataEscalateKey: true},
+			// processA2AMeta never restores TransferToAgent from peer metadata.
+			wantAfterProcessA2AMeta: &session.Event{Actions: session.EventActions{Escalate: true}},
 		},
 		{
 			name: "composite",
@@ -104,6 +110,23 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 				metadataTransferToAgentKey: "another",
 				metadataEscalateKey:        true,
 			},
+			// processA2AMeta never restores TransferToAgent from peer metadata;
+			// everything else round-trips.
+			wantAfterProcessA2AMeta: &session.Event{
+				LLMResponse: model.LLMResponse{
+					GroundingMetadata: &genai.GroundingMetadata{
+						SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}},
+					},
+					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+						CandidatesTokenCount: 12,
+						ThoughtsTokenCount:   42,
+					},
+					CustomMetadata: map[string]any{
+						"nested": map[string]any{"key": "value"},
+					},
+				},
+				Actions: session.EventActions{Escalate: true},
+			},
 		},
 	}
 
@@ -120,12 +143,20 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 			}
 
 			event := &session.Event{}
+			// processA2AMeta never restores TransferToAgent from peer
+			// metadata (see TransferToAgentFromMeta for how a caller
+			// restores it explicitly, after making its own trust decision
+			// about the remote peer).
 			err = processA2AMeta(&a2a.TaskStatusUpdateEvent{Metadata: meta}, event)
 			if err != nil {
 				t.Errorf("processA2AMeta() error = %v, want nil", err)
 			}
-			if diff := cmp.Diff(tc.event, event); diff != "" {
-				t.Errorf("processA2AMeta() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", event, tc.event, diff)
+			want := tc.event
+			if tc.wantAfterProcessA2AMeta != nil {
+				want = tc.wantAfterProcessA2AMeta
+			}
+			if diff := cmp.Diff(want, event); diff != "" {
+				t.Errorf("processA2AMeta() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", event, want, diff)
 			}
 		})
 	}

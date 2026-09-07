@@ -24,7 +24,7 @@ func HostURL(region string) string {
 	return region + "-aiplatform.googleapis.com"
 }
 
-// HostPortUrl returns aiplatform host url for a given region with port number
+// HostPortURL returns aiplatform host URL for a given region with port number.
 // Example: "us-central1-aiplatform.googleapis.com:443"
 func HostPortURL(region string) string {
 	return HostURL(region) + ":443"

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"sync"
 
-	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
@@ -34,8 +34,8 @@ type LogDigest struct {
 
 func buildLogDigest(r *sdklog.Record) *LogDigest {
 	attrs := map[string]any{}
-	r.WalkAttributes(func(kv log.KeyValue) bool {
-		attrs[kv.Key] = logValueToAny(kv.Value)
+	r.WalkAttributes(func(kv attribute.KeyValue) bool {
+		attrs[string(kv.Key)] = logValueToAny(kv.Value)
 		return true
 	})
 	return &LogDigest{
@@ -102,37 +102,45 @@ func (e *InMemoryLogExporter) Records() []sdklog.Record {
 	return out
 }
 
-// logValueToAny converts an OTel log.Value to a plain Go value
+// logValueToAny converts an OTel attribute.Value to a plain Go value
 // (string, int64, float64, bool, []any, map[string]any).
-func logValueToAny(v log.Value) any {
-	switch v.Kind() {
-	case log.KindBool:
+func logValueToAny(v attribute.Value) any {
+	switch v.Type() {
+	case attribute.BOOL:
 		return v.AsBool()
-	case log.KindFloat64:
+	case attribute.BOOLSLICE:
+		return v.AsBoolSlice()
+	case attribute.FLOAT64:
 		return v.AsFloat64()
-	case log.KindInt64:
+	case attribute.FLOAT64SLICE:
+		return v.AsFloat64Slice()
+	case attribute.INT64:
 		return v.AsInt64()
-	case log.KindString:
+	case attribute.INT64SLICE:
+		return v.AsInt64Slice()
+	case attribute.STRING:
 		return v.AsString()
-	case log.KindBytes:
-		return v.AsBytes()
-	case log.KindSlice:
+	case attribute.STRINGSLICE:
+		return v.AsStringSlice()
+	case attribute.BYTESLICE:
+		return v.AsByteSlice()
+	case attribute.SLICE:
 		s := v.AsSlice()
 		out := make([]any, len(s))
 		for i, e := range s {
 			out[i] = logValueToAny(e)
 		}
 		return out
-	case log.KindMap:
+	case attribute.MAP:
 		m := v.AsMap()
 		out := make(map[string]any, len(m))
 		for _, kv := range m {
-			out[kv.Key] = logValueToAny(kv.Value)
+			out[string(kv.Key)] = logValueToAny(kv.Value)
 		}
 		return out
-	case log.KindEmpty:
+	case attribute.EMPTY:
 		return nil
 	default:
-		return fmt.Sprintf("<unknown log.Kind %v>", v.Kind())
+		return fmt.Sprintf("<unknown attribute.Type %v>", v.Type())
 	}
 }
