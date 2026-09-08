@@ -244,6 +244,13 @@ type Request struct {
 // which has no provider to attribute it — must be able to tell which one failed.
 // Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
 // [auth.ConsentRequiredError] stay matchable.
+//
+// Matchable with [errors.Is] and [errors.As], and only with those. Naming the
+// resource wraps every error past validation, so a direct == against any of those
+// sentinels, or a bare type assertion to [*APIError], stops being true where it
+// was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
+// longer carries the [encoding/json] error behind it, so [errors.As] against
+// *json.SyntaxError stops finding one.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Credential, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
