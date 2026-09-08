@@ -556,7 +556,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							var isTaskCompleted bool
 							if respEv.LLMResponse.Content != nil {
 								for _, part := range respEv.LLMResponse.Content.Parts {
-									if part.FunctionResponse != nil && part.FunctionResponse.Name == "task_completed" {
+									if part.FunctionResponse != nil && part.FunctionResponse.Name == taskCompletedFunctionCallName {
 										isTaskCompleted = true
 										break
 									}
@@ -1192,7 +1192,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 			var result map[string]any
 			var curTool tool.Tool
-			if fnCall.Name == "stop_streaming" {
+			if fnCall.Name == stopStreamingFunctionCallName {
 				funcToStop, _ := fnCall.Args["function_name"].(string)
 				var status string
 				if impl, ok := liveSess.(*liveSessionImpl); ok && impl.CancelAllStreamingTools(funcToStop) {

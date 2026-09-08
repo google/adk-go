@@ -18,6 +18,7 @@ package mcptoolset
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -160,6 +161,10 @@ type Config struct {
 	// server, including URL-mode elicitations that servers use for
 	// out-of-band interactions such as auth challenges. Setting it makes the
 	// client advertise the elicitation capability for both form and URL mode.
+	// There is no way to advertise one mode alone, so the handler must service
+	// both: a handler that rejects URL mode makes the server re-request input
+	// until the retry budget is spent. Set the handler in a custom Client's
+	// mcp.ClientOptions to declare a narrower capability.
 	//
 	// For URL mode the handler must not return until the out-of-band
 	// interaction has completed: nothing waits for the server's
@@ -170,9 +175,13 @@ type Config struct {
 	// (-32042) error code rather than through an elicitation request is not
 	// handled at all.
 	//
-	// One handler serves every tool of the toolset, and the tool calls of a
-	// single turn run on separate goroutines, so the handler must be safe for
-	// concurrent use.
+	// ElicitRequest.Params.URL arrives unprompted from the server and carries
+	// no scheme restriction, so the handler must validate it before it opens
+	// the URL or shows it to a user.
+	//
+	// One handler serves every tool of the toolset for the whole lifetime of
+	// the toolset, across every invocation, and concurrent tool calls reach it
+	// on separate goroutines, so it must be safe for concurrent use.
 	//
 	// It can only be set when Client is nil; for a custom Client, set the
 	// handler in the client's mcp.ClientOptions instead.
@@ -239,10 +248,11 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			continue
 		}
 
-		// Checked after the filter so that excluding the tool by name remains a
-		// way to keep the rest of the toolset usable.
+		// The framework serves a call to a reserved name itself, so the tool is
+		// unreachable. Dropping it keeps the rest of the toolset usable.
 		if llminternal.IsReservedToolName(mcpTool.Name) {
-			return nil, fmt.Errorf("MCP server advertises tool %q, a name reserved by the framework", mcpTool.Name)
+			log.Printf("adk: mcptoolset: MCP server advertises tool %q, a name reserved by the framework; dropping it", mcpTool.Name)
+			continue
 		}
 
 		adkTools = append(adkTools, t)
