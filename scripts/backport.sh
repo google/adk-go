@@ -273,7 +273,7 @@ backport_one() {
   local remote="$1" pr="$2" sha="$3"
   local branch="${BRANCH_PREFIX}${pr}"
   local worktree="${TMPDIR:-/tmp}/adk-backport/${branch//\//-}"
-  local subject author date patch message
+  local subject author date committer_name committer_email patch message
 
   if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
     warn "commit ${sha} for PR #${pr} is not in this clone; fetch and retry"
@@ -464,6 +464,20 @@ EOF
   author="$(git log -1 --format='%an <%ae>' "${sha}")"
   date="$(git log -1 --format=%aD "${sha}")"
 
+  # The replay carries the original's committer as well as its author.
+  #
+  # Not cosmetic: Google's CLA bot checks authors *and* committers, and
+  # github-actions[bot] is not on its allow list -- dependabot[bot] is, which is
+  # why its pull requests pass and ours did not. Committing as the bot made
+  # every backport this opens fail cla/google with "Missing CLA from one or more
+  # contributors", on a commit whose human author had signed one. A squash merge
+  # on main is committed by GitHub <noreply@github.com>, the identity GitHub
+  # itself uses for machine-made commits, so inheriting it both clears the check
+  # and says something true: this commit is a replay of that one, and it carries
+  # both of its identities.
+  committer_name="$(git log -1 --format=%cn "${sha}")"
+  committer_email="$(git log -1 --format=%ce "${sha}")"
+
   # Command substitution strips trailing newlines, so appending a blank line
   # here always leaves exactly one before the trailer. It matters: around one in
   # eight main squash commits has no body, and without the separator git folds
@@ -472,7 +486,8 @@ EOF
 
 (cherry picked from commit ${sha})"
 
-  if ! git -C "${worktree}" commit --quiet --author="${author}" --date="${date}" \
+  if ! GIT_COMMITTER_NAME="${committer_name}" GIT_COMMITTER_EMAIL="${committer_email}" \
+    git -C "${worktree}" commit --quiet --author="${author}" --date="${date}" \
     --message="${message}"; then
     warn "  could not commit the replay in ${worktree}"
     cleanup_worktree "${worktree}"

@@ -83,9 +83,13 @@ jobs:
           # backport branches. No untrusted code is checked out here.
           persist-credentials: true
 
-      # The bot, not the merging human: it is the bot that pushes these branches
-      # and opens the pull requests, and each replayed commit keeps its original
-      # author regardless.
+      # A fallback only. Each replayed commit sets its own author and committer
+      # from the commit it replays, so this identity is what git would use for
+      # anything else -- and the script commits nothing else. It is deliberately
+      # not the committer of the backports themselves: the CLA bot checks
+      # committers, and github-actions[bot] is not on its allow list, so
+      # committing as the bot failed cla/google on every pull request this
+      # opened. See the committer handling in scripts/backport.sh.
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
