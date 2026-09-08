@@ -170,7 +170,7 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	// That also covers the mixed case this deliberately leaves alone, where a
 	// non-text block accompanies real text and is still dropped silently (#1391).
 	if textResponse.Len() == 0 && droppedNonText {
-		return nil, fmt.Errorf("tool %q returned only non-text content, which is not yet supported", t.name)
+		return nil, &UnsupportedContentError{ToolName: t.name, Meta: meta}
 	}
 
 	return functionResponse(meta, textResponse.String()), nil
@@ -199,6 +199,25 @@ func (e *ToolError) Error() string {
 		return "Tool execution failed."
 	}
 	return "Tool execution failed. Details: " + e.Details
+}
+
+// UnsupportedContentError reports a tool result the toolset cannot render as a
+// function response, because every content block is of a type it does not
+// convert. Callers reach it with errors.As to read the metadata the server
+// attached to the result, which a plain error message cannot carry.
+type UnsupportedContentError struct {
+	// ToolName is the name of the tool that returned the result.
+	ToolName string
+
+	// Meta holds the metadata the server attached to the result, without keys
+	// in prefixes the MCP protocol reserves for itself. It is nil when the
+	// server attached no metadata of its own.
+	Meta map[string]any
+}
+
+// Error implements error.
+func (e *UnsupportedContentError) Error() string {
+	return fmt.Sprintf("tool %q returned only non-text content, which is not yet supported", e.ToolName)
 }
 
 // functionResponse builds the function response map for a tool result whose

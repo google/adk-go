@@ -36,6 +36,12 @@ func TestIsReservedMetaKey(t *testing.T) {
 		{key: "org.modelcontextprotocol.api/key", want: true},
 		{key: "com.mcp.tools/key", want: true},
 		{key: "com.example.mcp/key", want: false},
+		// Only the second label carries the marker, so a marker at any other
+		// position leaves the key to the server.
+		{key: "modelcontextprotocol.io/key", want: false},
+		{key: "mcp.dev/key", want: false},
+		{key: "a.b.mcp.d/key", want: false},
+		{key: "tools.api.mcp.com/key", want: false},
 		{key: "com.example/auth", want: false},
 		{key: "com.giantswarm.muster/authChallenge", want: false},
 		{key: "mcp/key", want: false},

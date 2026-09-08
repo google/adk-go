@@ -1254,7 +1254,14 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			var offered []string
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: clientTransport,
+				ToolFilter: func(ctx agent.ReadonlyContext, t tool.Tool) bool {
+					offered = append(offered, t.Name())
+					return true
+				},
+			})
 			if err != nil {
 				t.Fatalf("Failed to create MCP tool set: %v", err)
 			}
@@ -1267,7 +1274,61 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 			if len(tools) != 1 || tools[0].Name() != "get_weather" {
 				t.Fatalf("Tools() = %v, want only get_weather", toolNames(tools))
 			}
+			// The filter decides first, so it is offered the reserved name too.
+			if diff := cmp.Diff([]string{"get_weather", name}, offered, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Errorf("names offered to ToolFilter mismatch (-want +got):\n%s", diff)
+			}
 		})
+	}
+}
+
+func TestUnsupportedContentCarriesServerMeta(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "image_tool", Description: "returns an image"}, func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.ImageContent{MIMEType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}}},
+			Meta: mcp.Meta{
+				mcp.MetaKeyServerInfo:       &mcp.Implementation{Name: "test_server"},
+				"com.example/authChallenge": map[string]any{"url": "https://idp.example.com/login"},
+			},
+		}, nil, nil
+	})
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	tc := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
+	res, err := tools[0].(toolinternal.FunctionTool).Run(tc, map[string]any{})
+	if err == nil {
+		t.Fatalf("Run() = %v, want an error reporting the dropped content", res)
+	}
+
+	var unsupported *mcptoolset.UnsupportedContentError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Run() error = %v, want an *UnsupportedContentError", err)
+	}
+	if unsupported.ToolName != "image_tool" {
+		t.Errorf("ToolName = %q, want %q", unsupported.ToolName, "image_tool")
+	}
+	if want := `tool "image_tool" returned only non-text content`; !strings.Contains(err.Error(), want) {
+		t.Errorf("Run() error = %q, want it to contain %q", err.Error(), want)
+	}
+	want := map[string]any{"com.example/authChallenge": map[string]any{"url": "https://idp.example.com/login"}}
+	if diff := cmp.Diff(want, unsupported.Meta); diff != "" {
+		t.Errorf("Meta mismatch (-want +got):\n%s", diff)
 	}
 }
 
