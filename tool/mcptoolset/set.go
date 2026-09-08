@@ -16,13 +16,16 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -53,8 +56,34 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var clientOptions *mcp.ClientOptions
+	if cfg.ElicitationHandler != nil || cfg.ElicitationCompleteHandler != nil {
+		if cfg.Client != nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationHandler and ElicitationCompleteHandler cannot be combined with a custom Client; set them in the client's mcp.ClientOptions instead")
+		}
+		if cfg.ElicitationHandler == nil {
+			return nil, fmt.Errorf("mcptoolset: ElicitationCompleteHandler requires ElicitationHandler to be set; the client cannot service an elicitation without it")
+		}
+		clientOptions = &mcp.ClientOptions{
+			ElicitationHandler:         cfg.ElicitationHandler,
+			ElicitationCompleteHandler: cfg.ElicitationCompleteHandler,
+			// The capability inferred from ElicitationHandler alone covers only
+			// form mode; URL mode must be declared explicitly. RootsV2 preserves
+			// the default roots capability, which setting Capabilities would
+			// otherwise disable. RootsV2 is deprecated as of the 2026-07-28
+			// revision (SEP-2577) but remains the only field that carries
+			// ListChanged, so it stays until the SDK offers a replacement.
+			Capabilities: &mcp.ClientCapabilities{
+				Elicitation: &mcp.ElicitationCapabilities{
+					Form: &mcp.FormElicitationCapabilities{},
+					URL:  &mcp.URLElicitationCapabilities{},
+				},
+				RootsV2: &mcp.RootCapabilities{ListChanged: true},
+			},
+		}
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   newConnectionRefresher(cfg.Client, transport, clientOptions),
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -95,6 +124,14 @@ func authHTTPClient(base *http.Client, provider auth.CredentialProvider) *http.C
 }
 
 // Config provides initial configuration for the MCP ToolSet.
+//
+// A server tool whose name the framework dispatches itself is dropped from the
+// toolset and logged, because a call to that name never reaches the tool. The
+// drop is unconditional: transfer_to_agent is registered only for an agent
+// that has transfer targets, and task_completed only by sequentialagent during
+// RunLive, so an agent that registers neither still loses a server tool that
+// carries one of those names. ToolFilter runs first and cannot keep such a
+// tool.
 type Config struct {
 	// Client is an optional custom MCP client to use. If nil, a default client will be created.
 	Client *mcp.Client
@@ -127,6 +164,47 @@ type Config struct {
 	// before execution. If set to true, the ADK framework will automatically initiate
 	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
 	RequireConfirmation bool
+
+	// ElicitationHandler handles elicitation/create requests from the MCP
+	// server, including URL-mode elicitations that servers use for
+	// out-of-band interactions such as auth challenges. Setting it makes the
+	// client advertise the elicitation capability for both form and URL mode.
+	// There is no way to advertise one mode alone, so the handler must service
+	// both: a handler that rejects URL mode makes the server re-request input
+	// until the retry budget is spent. Set the handler in a custom Client's
+	// mcp.ClientOptions to declare a narrower capability.
+	//
+	// For URL mode the handler must not return until the out-of-band
+	// interaction has completed: nothing waits for the server's
+	// notifications/elicitation/complete notification on its behalf, and the
+	// call is retried as soon as the handler returns. A handler that returns
+	// early makes the server re-request input until the retry budget is spent.
+	// A server that reports the URL through the CodeURLElicitationRequired
+	// (-32042) error code rather than through an elicitation request is not
+	// handled at all.
+	//
+	// ElicitRequest.Params.URL arrives unprompted from the server and carries
+	// no scheme restriction, so the handler must validate it before it opens
+	// the URL or shows it to a user.
+	//
+	// One handler serves every tool of the toolset for the whole lifetime of
+	// the toolset, across every invocation, and concurrent tool calls reach it
+	// on separate goroutines, so it must be safe for concurrent use.
+	//
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
+
+	// ElicitationCompleteHandler handles notifications/elicitation/complete
+	// notifications, which servers send when an out-of-band (URL-mode)
+	// elicitation has been completed. It requires ElicitationHandler to also
+	// be set, since a completion notification cannot arrive unless an
+	// elicitation was created first. Like ElicitationHandler, it must be safe
+	// for concurrent use.
+	//
+	// It can only be set when Client is nil; for a custom Client, set the
+	// handler in the client's mcp.ClientOptions instead.
+	ElicitationCompleteHandler func(context.Context, *mcp.ElicitationCompleteNotificationRequest)
 
 	// RequireConfirmationProvider allows for dynamic determination of whether
 	// user confirmation is needed. This field is a function called at runtime to decide if
@@ -175,6 +253,13 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		}
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+			continue
+		}
+
+		// The framework serves a call to a reserved name itself, so the tool is
+		// unreachable. Dropping it keeps the rest of the toolset usable.
+		if llminternal.IsReservedToolName(mcpTool.Name) {
+			log.Printf("adk: mcptoolset: MCP server advertises tool %q, a name reserved by the framework; dropping it", mcpTool.Name)
 			continue
 		}
 
