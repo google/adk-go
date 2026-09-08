@@ -54,7 +54,10 @@ type value struct {
 	customMetadata map[string]any
 
 	// precomputed set of words in the content for simple keyword matching.
-	words     map[string]struct{}
+	words map[string]struct{}
+
+	// Cache an additional lowercase copy of the event text to avoid joining and
+	// lowercasing content parts on each substring search.
 	textLower string
 }
 
@@ -127,7 +130,7 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 }
 
 func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
-	// Only non-ASCII words may match a substring of the event text.
+	// A true value allows substring matching for that non-ASCII query word.
 	queryWords := make(map[string]bool)
 	for word := range extractWords(req.Query) {
 		queryWords[word] = strings.IndexFunc(word, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
