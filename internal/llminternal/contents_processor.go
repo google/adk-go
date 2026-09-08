@@ -236,13 +236,17 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 			continue
 		}
 
-		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 
-	// Ids are read after the conversion so a stripped call id is answered by a
-	// response with the same stripped id.
+	// Calls are paired while they still carry the ids ADK generated, because
+	// LongRunningToolIDs holds those ids and a turn with several calls can only
+	// be matched to its results by id. The strip that follows blanks a
+	// synthesized response id together with the call id it answers.
 	contents = pairUnansweredFunctionCalls(contents, pendingCallIDs(filtered))
+	for _, content := range contents {
+		utils.RemoveClientFunctionCallID(content)
+	}
 
 	// For scoped agents (task / single_turn), prepend a synthetic user
 	// content built from the originating FC's args. The FC lives in an

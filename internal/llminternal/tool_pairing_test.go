@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -66,8 +67,17 @@ func TestContentsRequestProcessor_PairUnansweredFunctionCalls(t *testing.T) {
 	frAsk := &genai.FunctionResponse{ID: "lro_call_1", Name: "ask_user", Response: map[string]any{"answer": "yes"}}
 
 	fcNoIDFirst := &genai.FunctionCall{Name: "search_tool", Args: map[string]any{"query": "a"}}
-	fcNoIDSecond := &genai.FunctionCall{Name: "search_tool", Args: map[string]any{"query": "b"}}
+	fcNoIDSecond := &genai.FunctionCall{Name: "fetch_tool", Args: map[string]any{"url": "http://example.com"}}
 	frNoID := &genai.FunctionResponse{Name: "search_tool", Response: map[string]any{"results": "item1"}}
+
+	// Ids ADK generates for a provider that omits them. They are stripped from
+	// the request, so the contents reaching the model carry an empty id.
+	fcGenSearch := &genai.FunctionCall{ID: "adk-AAAA", Name: "search_tool", Args: map[string]any{"query": "test"}}
+	fcGenFetch := &genai.FunctionCall{ID: "adk-BBBB", Name: "fetch_tool", Args: map[string]any{"url": "http://example.com"}}
+	frGenFetch := &genai.FunctionResponse{ID: "adk-BBBB", Name: "fetch_tool", Response: map[string]any{"body": "<html/>"}}
+	stripped := func(call *genai.FunctionCall) *genai.FunctionCall {
+		return &genai.FunctionCall{Name: call.Name, Args: call.Args}
+	}
 
 	userEvent := func(text string) *session.Event {
 		return &session.Event{
@@ -224,10 +234,74 @@ func TestContentsRequestProcessor_PairUnansweredFunctionCalls(t *testing.T) {
 				functionResponseContent(
 					frNoID,
 					&genai.FunctionResponse{
-						Name:     "search_tool",
+						Name:     "fetch_tool",
 						Response: map[string]any{"result": missingResult},
 					},
 				),
+			},
+		},
+		{
+			name: "call held open under a generated id reports that it awaits a response",
+			events: []*session.Event{
+				userEvent("search for test"),
+				callEvent([]string{"adk-AAAA"}, fcGenSearch),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("search for test", genai.RoleUser),
+				functionCallContent(stripped(fcGenSearch)),
+				functionResponseContent(&genai.FunctionResponse{
+					Name:     "search_tool",
+					Response: map[string]any{"result": pendingResult},
+				}),
+			},
+		},
+		{
+			name: "call held open under a generated id next to an answered call",
+			events: []*session.Event{
+				userEvent("do both"),
+				callEvent([]string{"adk-AAAA"}, fcGenSearch, fcGenFetch),
+				responseEvent(frGenFetch),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("do both", genai.RoleUser),
+				functionCallContent(stripped(fcGenSearch), stripped(fcGenFetch)),
+				functionResponseContent(
+					&genai.FunctionResponse{Name: "fetch_tool", Response: frGenFetch.Response},
+					&genai.FunctionResponse{
+						Name:     "search_tool",
+						Response: map[string]any{"result": pendingResult},
+					},
+				),
+			},
+		},
+		{
+			name: "results are hoisted ahead of a leading text part",
+			events: []*session.Event{
+				userEvent("search and fetch"),
+				callEvent(nil, fcSearch, fcFetch),
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							{Text: "here is what I found"},
+							{FunctionResponse: frSearch},
+						},
+					}},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("search and fetch", genai.RoleUser),
+				functionCallContent(fcSearch, fcFetch),
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{FunctionResponse: frSearch},
+					{FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_2",
+						Name:     "fetch_tool",
+						Response: map[string]any{"result": missingResult},
+					}},
+					{Text: "here is what I found"},
+				}},
 			},
 		},
 		{
@@ -272,7 +346,9 @@ func TestContentsRequestProcessor_PairUnansweredFunctionCalls(t *testing.T) {
 }
 
 // assertCallsAreAnswered checks the invariant the provider enforces: the
-// content that follows a call answers every call it carries.
+// content that follows a call answers every call it carries, once. A call is
+// matched to a response by id, or by name when the id is empty, and each
+// response answers a single call.
 func assertCallsAreAnswered(t *testing.T, contents []*genai.Content) {
 	t.Helper()
 	for i, content := range contents {
@@ -284,8 +360,22 @@ func assertCallsAreAnswered(t *testing.T, contents []*genai.Content) {
 		if i+1 < len(contents) {
 			following = contents[i+1]
 		}
-		if got, want := len(utils.FunctionResponses(following)), len(calls); got != want {
-			t.Errorf("content %d: got %d results for %d calls, want one each", i, got, want)
+		remaining := utils.FunctionResponses(following)
+		for _, call := range calls {
+			matched := slices.IndexFunc(remaining, func(response *genai.FunctionResponse) bool {
+				if call.ID != "" {
+					return response.ID == call.ID
+				}
+				return response.ID == "" && response.Name == call.Name
+			})
+			if matched < 0 {
+				t.Errorf("content %d: call %s (id %q) has no result in the following content", i, call.Name, call.ID)
+				continue
+			}
+			remaining = slices.Delete(remaining, matched, matched+1)
+		}
+		for _, response := range remaining {
+			t.Errorf("content %d: result for %s (id %q) answers no call", i+1, response.Name, response.ID)
 		}
 	}
 }
@@ -304,5 +394,21 @@ func TestContentsRequestProcessor_UnpairedHistoryFailsTheCheck(t *testing.T) {
 	assertCallsAreAnswered(recorder, unpaired)
 	if !recorder.Failed() {
 		t.Error("assertCallsAreAnswered accepted a history with an unanswered call")
+	}
+
+	fetch := &genai.FunctionResponse{Name: "fetch_tool", Response: map[string]any{"body": "<html/>"}}
+	doubled := []*genai.Content{
+		genai.NewContentFromText("do both", genai.RoleUser),
+		functionCallContent(
+			&genai.FunctionCall{Name: "search_tool", Args: map[string]any{"query": "test"}},
+			&genai.FunctionCall{Name: "fetch_tool", Args: map[string]any{"url": "http://example.com"}},
+		),
+		functionResponseContent(fetch, fetch),
+	}
+
+	recorder = &testing.T{}
+	assertCallsAreAnswered(recorder, doubled)
+	if !recorder.Failed() {
+		t.Error("assertCallsAreAnswered accepted two results for one call and none for the other")
 	}
 }

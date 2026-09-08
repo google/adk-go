@@ -123,9 +123,8 @@ func placeholderFor(call *genai.FunctionCall, pending map[string]bool) string {
 
 // unansweredCalls returns the calls that answered does not account for. Ids are
 // consumed one at a time rather than matched through a set, so a turn that
-// carries several calls without an id (Gemini omits them, and ADK strips its
-// own client ids before the request is built) does not have a single response
-// silently answer all of them.
+// carries several calls without an id (an event recorded outside the flow may
+// carry none) does not have a single response silently answer all of them.
 func unansweredCalls(calls []*genai.FunctionCall, answered []string) []*genai.FunctionCall {
 	remaining := make([]string, len(answered))
 	copy(remaining, answered)
@@ -155,20 +154,23 @@ func responseIDs(content *genai.Content) []string {
 	return ids
 }
 
-// withResultsInserted returns parts with results added to its leading run of
-// responses. Anthropic requires every tool result to precede any other block in
-// the message that carries it, so a placeholder appended after a trailing text
-// part would be rejected for the same reason the missing result was.
+// withResultsInserted returns parts with every function response, existing and
+// added, ahead of every other part. Anthropic requires every tool result to
+// precede any other block in the message that carries it, so a result left
+// after a text part would be rejected for the same reason the missing result
+// was.
 func withResultsInserted(parts, results []*genai.Part) []*genai.Part {
-	insertIndex := len(parts)
-	for i, part := range parts {
-		if part == nil || part.FunctionResponse == nil {
-			insertIndex = i
-			break
+	joined := make([]*genai.Part, 0, len(parts)+len(results))
+	for _, part := range parts {
+		if part != nil && part.FunctionResponse != nil {
+			joined = append(joined, part)
 		}
 	}
-	joined := make([]*genai.Part, 0, len(parts)+len(results))
-	joined = append(joined, parts[:insertIndex]...)
 	joined = append(joined, results...)
-	return append(joined, parts[insertIndex:]...)
+	for _, part := range parts {
+		if part == nil || part.FunctionResponse == nil {
+			joined = append(joined, part)
+		}
+	}
+	return joined
 }
