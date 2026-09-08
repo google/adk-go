@@ -278,8 +278,8 @@ func TestRetrieveHTTPError(t *testing.T) {
 
 func TestRetrieveValidatesRequest(t *testing.T) {
 	// Each row names the message it expects, not a substring true of every error
-	// this method returns. The deferred wrap appends `(resource %q)` to all of
-	// them, so an assertion on "resource " passes with validateResource deleted
+	// this method returns. "resource " appears in the validation messages
+	// themselves, so an assertion on it passes with validateResource deleted
 	// outright — and naming the message also keeps the two rejection reasons apart
 	// from each other, which is the distinction the charset and the segment check
 	// exist to draw.
@@ -477,8 +477,12 @@ func TestMapCredential(t *testing.T) {
 // TestMapCredentialCapsHeaderNameInError pins the cap on a rejected header name.
 // It is service-controlled and reaches the error by a third path, separate from
 // a response body and an operation message.
+//
+// Sized inside the examinable length on purpose. Past it the name is withheld
+// before the cap is consulted and the assertion below measures the withheld
+// sentence, which no change to the cap can lengthen.
 func TestMapCredentialCapsHeaderNameInError(t *testing.T) {
-	_, err := mapCredential(strings.Repeat("x", 900_000)+": Token", "SECRET-TOKEN")
+	_, err := mapCredential(strings.Repeat("x", maxErrorBody*4)+": Token", "SECRET-TOKEN")
 	if err == nil {
 		t.Fatal("mapCredential() = nil error, want error")
 	}
@@ -673,32 +677,53 @@ func fakeADC(t *testing.T) {
 
 // TestDoPostOversizeKeepsStatus: an error page big enough to trip the body cap
 // must still report its status, the most actionable field.
+//
+// Two sizes, because the two paths bound the body by different means and only the
+// first can see the cap. A page the whole-text check can examine is shown and
+// capped. A page past that length is withheld, and a size assertion on the
+// withheld sentence holds however the cap is broken — which is what the single
+// 1 MiB row this replaced had quietly become.
 func TestDoPostOversizeKeepsStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = io.WriteString(w, strings.Repeat("x", (1<<20)+10))
-	}))
-	defer srv.Close()
-	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
-		Request{Resource: authProviderResource, UserID: "u"})
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("error = %v, want *APIError", err)
-	}
-	if apiErr.StatusCode != http.StatusBadGateway {
-		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
-	}
-	// Pin the truncation, not just the helper: without it the whole 1 MiB page
-	// rides along in the error.
-	if len(apiErr.Body) > maxErrorBody+len("...") {
-		t.Errorf("Body = %d bytes, want it capped to %d", len(apiErr.Body), maxErrorBody)
+	for _, tc := range []struct {
+		name      string
+		size      int
+		wantShown bool
+	}{
+		{"a page the check can examine", maxErrorBody * 4, true},
+		{"a page past the examinable length", (1 << 20) + 10, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, strings.Repeat("x", tc.size))
+			}))
+			defer srv.Close()
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: authProviderResource, UserID: "u"})
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error = %v, want *APIError", err)
+			}
+			if apiErr.StatusCode != http.StatusBadGateway {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
+			}
+			if shown := apiErr.Body != withheldText; shown != tc.wantShown {
+				t.Fatalf("Body shown = %v, want %v (Body is %d bytes)", shown, tc.wantShown, len(apiErr.Body))
+			}
+			if len(apiErr.Body) > maxErrorBody+len("...") {
+				t.Errorf("Body = %d bytes, want it capped to %d", len(apiErr.Body), maxErrorBody)
+			}
+		})
 	}
 }
 
-// A service-controlled operation message must be capped like any response body;
-// it reaches the error by a different path than doPost's body.
+// A service-controlled operation message must be capped like any response body,
+// and it reaches the error by a different path than doPost's body.
+//
+// Sized inside the examinable length, for the reason given on
+// TestMapCredentialCapsHeaderNameInError.
 func TestRetrieveConnectorErrorMessageIsCapped(t *testing.T) {
-	srv, _ := sequenceServer(`{"error":{"code":7,"message":"` + strings.Repeat("x", 900_000) + `"}}`)
+	srv, _ := sequenceServer(`{"error":{"code":7,"message":"` + strings.Repeat("x", maxErrorBody*4) + `"}}`)
 	defer srv.Close()
 
 	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
@@ -1481,10 +1506,13 @@ func TestStraddlingOccurrenceIsWithheldNotShownInPart(t *testing.T) {
 // which no test did: shrinking it only ever withholds more, and an allocation
 // ceiling is satisfied by every smaller window.
 //
-// The size is built from what JUSTIFIES the window — the visible cap plus one
-// maximum-length value's singly escaped spelling — and deliberately not from
-// maxStraddleWindow, which is the thing under test. Derived from the constant
-// under test, the body would shrink along with it and the test could never fire.
+// The size repeats the window's defining expression rather than naming
+// maxStraddleWindow, so redefining that constant — the thing under test — moves
+// the threshold while the fixture stays put, and shrinking it eightfold turns
+// this red. Naming the constant would have shrunk the fixture along with it and
+// the test could never have fired. The independence is from the constant, not
+// from its terms: changing maxScrubbableSecret moves both together, and that one
+// is pinned elsewhere.
 func TestBodyInsideTheWindowIsStillShown(t *testing.T) {
 	// Just inside what the window exists to cover, and past the visible cap so the
 	// truncation path — the one the window guards — is the path under test.
@@ -1511,10 +1539,25 @@ func TestBodyInsideTheWindowIsStillShown(t *testing.T) {
 // against the number of runs, and the SERVICE picks that number, so a body of
 // alternating one-byte matches inflated the result several times past the cap the
 // exported doc promises.
+//
+// The source is deliberately UNDER the cap. That is the case the output cap was
+// added for and the only case that distinguishes it: over the cap the input bound
+// has already cut, so a body that arrives too long is capped by either
+// implementation and tells them apart not at all. Measured on a 1000-byte source,
+// an output cap reachable only once the input bound has fired returns 5500 bytes.
+//
+// Both halves are asserted. Withholding the response also satisfies a size
+// ceiling, so a bound with no accompanying "and it is still shown" is held by
+// suppressing everything.
 func TestMarkersAreBudgetedAgainstTheCap(t *testing.T) {
+	body := strings.Repeat("u ", 500) // 1000 bytes in, 5500 bytes of markers out
+	if len(body) > maxErrorBody {
+		t.Fatalf("fixture is %d bytes, want it under the %d-byte input cap so the output cap is what fires",
+			len(body), maxErrorBody)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, strings.Repeat("u ", 600))
+		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
 
@@ -1524,6 +1567,16 @@ func TestMarkersAreBudgetedAgainstTheCap(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("RetrieveCredential() error = %v, want an *APIError", err)
+	}
+	// Presence first, and stated as content rather than as "not the withheld
+	// sentence": an implementation that suppresses this body returns the sentence,
+	// but one that empties it returns neither the sentence nor anything else, and
+	// both satisfy a ceiling. What the cap must do is SHORTEN a real result.
+	if !strings.Contains(apiErr.Body, redactedMarker) {
+		t.Fatalf("Body carries no redacted run, want the body shown and cut rather than suppressed: %q", apiErr.Body)
+	}
+	if got, floor := len(apiErr.Body), maxErrorBody/2; got < floor {
+		t.Errorf("Body = %d bytes, want at least %d — the cap should cut this body, not gut it", got, floor)
 	}
 	if got, want := len(apiErr.Body), maxErrorBody+len("..."); got > want {
 		t.Errorf("Body = %d bytes, want it capped to %d", got, want)

@@ -198,9 +198,7 @@ func TestUnescapeJSONNeverGrows(t *testing.T) {
 // inputs. The last row is the shape that broke them: a decoy occurrence the decode
 // destroys costs the service nothing and moves any such comparison wherever it
 // likes. Deciding from the output instead is what these rows hold in place.
-//
-// The provider table's "one identifier the decode reveals, one it destroys" row is
-// the end-to-end version of the withheld case.
+
 func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

@@ -133,14 +133,14 @@ func redactedForError(s string, secrets ...string) string {
 // allocated and 524,289 parts, to compute one boolean.
 const maxStraddleWindow = maxErrorBody + 8*maxScrubbableSecret
 
-// straddleWindow returns the prefix of s the whole-text check reads, and reports
-// whether s ran past it. Past it, the check cannot see a whole occurrence, so a
-// caller handed true must not conclude the text is clean.
-func straddleWindow(s string) (window string, past bool) {
-	if len(s) <= maxStraddleWindow {
-		return s, false
-	}
-	return s[:maxStraddleWindow], true
+// fitsStraddleWindow reports whether the whole-text check can examine s whole.
+//
+// It is a threshold rather than a slice. An earlier version handed back the
+// prefix, which no caller can use: the part of an occurrence that fits says
+// nothing about the occurrence, and reading it is what returned a decodable
+// fragment of a value.
+func fitsStraddleWindow(s string) bool {
+	return len(s) <= maxStraddleWindow
 }
 
 // showable scrubs s for an error and reports whether the result can be shown.
@@ -154,9 +154,9 @@ func showable(s string, secrets []string) (string, bool) {
 	// it back out.
 	//
 	// Past the window there is no answer to give, only a guess, so the response is
-	// withheld unexamined — see [maxStraddleWindow].
-	window, past := straddleWindow(s)
-	if truncated && (past || recoverable(redact(window, secrets...), secrets)) {
+	// withheld unexamined — see [maxStraddleWindow]. The redact below therefore
+	// runs only on text already known to be within that bound.
+	if truncated && (!fitsStraddleWindow(s) || recoverable(redact(s, secrets...), secrets)) {
 		return "", false
 	}
 	// Checked AFTER the cap, so what is examined is exactly what is returned. The
@@ -485,13 +485,17 @@ func redactWithinLimit(s string, values ...string) (string, bool) {
 		// lowered copy's own limit says nothing about it.
 		return truncateForError(s)
 	}
-	if truncated {
+	// One ellipsis however many bounds cut. Appending before the second cut lets
+	// that cut land inside the dots just written and the next append stack more on
+	// top, which measured five of them.
+	cut, over := visibleLimit(out)
+	if over {
+		out = out[:cut]
+	}
+	if truncated || over {
 		out += "..."
 	}
-	if cut, over := visibleLimit(out); over {
-		out, truncated = out[:cut]+"...", true
-	}
-	return out, truncated
+	return out, truncated || over
 }
 
 // loweredValues drops the empty values and lowercases the rest. Empty values are
