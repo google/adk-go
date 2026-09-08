@@ -472,8 +472,8 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		metadata map[string]any
 	}{
 		{genai.NewPartFromBytes([]byte("v1"), "text/plain"), nil},
-		{genai.NewPartFromBytes([]byte("v2"), "image/png"), map[string]any{"version": "v2"}},
-		{genai.NewPartFromText("v3"), map[string]any{"version": "v3"}},
+		{genai.NewPartFromBytes([]byte("v2"), "image/png"), map[string]any{"version": "v2", "count": 2}},
+		{genai.NewPartFromText("v3"), map[string]any{"version": "v3", "enabled": true}},
 	} {
 		wantVersion := int64(i + 1)
 		got, err := srv.Save(ctx, &artifact.SaveRequest{
@@ -492,8 +492,8 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		wantMimeType string
 		wantMetadata map[string]any
 	}{
-		{name: "latest", wantVersion: 3, wantMimeType: "text/plain", wantMetadata: map[string]any{"version": "v3"}},
-		{name: "specific", version: 2, wantVersion: 2, wantMimeType: "image/png", wantMetadata: map[string]any{"version": "v2"}},
+		{name: "latest", wantVersion: 3, wantMimeType: "text/plain", wantMetadata: map[string]any{"version": "v3", "enabled": "true"}},
+		{name: "specific", version: 2, wantVersion: 2, wantMimeType: "image/png", wantMetadata: map[string]any{"version": "v2", "count": "2"}},
 		{name: "empty metadata", version: 1, wantVersion: 1, wantMimeType: "text/plain", wantMetadata: map[string]any{}},
 	} {
 		t.Run(fmt.Sprintf("GetArtifactVersion_%s_%s", tc.name, testSuffix), func(t *testing.T) {
@@ -536,7 +536,7 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		if err != nil {
 			t.Fatalf("GetArtifactVersion() failed: %v", err)
 		}
-		assertArtifactVersion(t, resp.ArtifactVersion, 2, "image/png", map[string]any{"version": "v2"})
+		assertArtifactVersion(t, resp.ArtifactVersion, 2, "image/png", map[string]any{"version": "v2", "count": "2"})
 	})
 
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{

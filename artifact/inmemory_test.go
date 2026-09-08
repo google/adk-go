@@ -109,7 +109,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 			wantFirst := &artifact.ArtifactVersion{
 				Version:        1,
 				CanonicalURI:   tc.uriPrefix + "1",
-				CustomMetadata: map[string]any{"key": "value", "count": 42, "enabled": true},
+				CustomMetadata: map[string]any{"key": "value", "count": "42", "enabled": "true"},
 				CreateTime:     firstCreateTime,
 				MimeType:       "image/png",
 			}

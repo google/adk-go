@@ -159,9 +159,9 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
 	}
-	customMetadata := maps.Clone(req.CustomMetadata)
-	if customMetadata == nil {
-		customMetadata = map[string]any{}
+	customMetadata := make(map[string]any, len(req.CustomMetadata))
+	for key, value := range req.CustomMetadata {
+		customMetadata[key] = fmt.Sprint(value)
 	}
 	mimeType := "text/plain"
 	if req.Part.InlineData != nil {
