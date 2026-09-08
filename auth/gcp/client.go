@@ -108,13 +108,17 @@ type APIError struct {
 	// request's own UserID and ContinueURI are removed and replaced with
 	// "[redacted]", the text is lowercased wherever anything matched, and only
 	// the first kilobyte of the response is drawn on, with "..." marking that the
-	// rest was dropped.
+	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
+	// not the same promise: one matched run becomes a ten-byte marker whatever it
+	// replaced, so bounding the source alone left the result several times larger.
 	//
 	// It can also be none of the response. Where the identifiers could not be
 	// shown to be gone, Body is a fixed sentence saying so and bears no relation
-	// to what the service sent. There is no supported way to tell that case
-	// apart, so branch on StatusCode and treat Body as diagnostic text for a
-	// human rather than as something to match on.
+	// to what the service sent. A response too long to examine whole lands here
+	// too, since not looking is not the same as looking and finding nothing. There
+	// is no supported way to tell that case apart, so branch on StatusCode and
+	// treat Body as diagnostic text for a human rather than as something to match
+	// on.
 	//
 	// Otherwise it is still service-controlled. Render it with %q, as
 	// [APIError.Error] does — the service can put a newline in it directly, and an

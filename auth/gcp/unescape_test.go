@@ -286,14 +286,17 @@ func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
 // revisions of redactedForError each violated, stated once and checked over every body
 // an adversary can assemble from the pieces that broke them.
 //
-// It deliberately does NOT call recoverable. An earlier version of this test did,
-// and that made it circular: redactedForError returns a candidate only when recoverable
-// says no, so asserting the same predicate held by construction and the test was
-// green on a body it was already generating — a doubly escaped identifier, which
-// the then-single-pass recoverable could not see. The oracle below is written from
-// the attacker's side instead: strip the markers, decode until nothing changes,
-// look for the identifier. It fails when recoverable under-approximates, which is
-// the whole point of having it.
+// It does not call recoverable. Calling it made an earlier version circular:
+// redactedForError returns a candidate only when recoverable says no, so asserting
+// the same predicate held by construction and the test was green on a body it was
+// already generating — a doubly escaped identifier, which the then-single-pass
+// recoverable could not see. The oracle below is written from the attacker's side
+// instead: strip the markers, decode until nothing changes, look for the identifier.
+//
+// Removing the circularity is not the same as buying independence, and the oracle
+// does not claim the second — see readable, which is a frozen copy of recoverable
+// making the same three structural choices. So this catches a future weakening of
+// recoverable, and not a blind spot the two share today.
 func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
 	const user = "alice@example.test"
 	const uri = "https://app.test/cb"
@@ -387,20 +390,37 @@ func readable(t *testing.T, x string, secrets []string) bool {
 // Terminating is not the same as affordable. "\u005c" decodes to a backslash that
 // re-forms the introducer for the next one, so the loop shortens by five bytes a
 // pass and needs one pass per five bytes of input.
+//
+// The boundary rows pin where the bound actually falls, which is one short of the
+// constant: maxDecodePasses counts reads, and a text is only reported finished by
+// a read that changes nothing, so the last of the maxDecodePasses reads has no
+// successor to confirm it. Fail-closed either way, and pinned so it cannot drift.
 func TestDecodeFullyStopsAtItsPassBound(t *testing.T) {
 	// Well inside a pass bound, and a fixpoint it can actually reach.
 	if got, done := decodeFully(`\u005c` + strings.Repeat("u005c", 4)); !done {
 		t.Errorf("decodeFully() gave up on %d passes' worth of input, got %q", 5, got)
+	}
+	// The last input reported finished, and the first one not.
+	if _, done := decodeFully(`\u005c` + strings.Repeat("u005c", maxDecodePasses-2)); !done {
+		t.Errorf("decodeFully() gave up %d changing passes in, want it to report the fixpoint", maxDecodePasses-1)
+	}
+	if _, done := decodeFully(`\u005c` + strings.Repeat("u005c", maxDecodePasses-1)); done {
+		t.Errorf("decodeFully() reported a fixpoint %d changing passes in, want it to run out of reads", maxDecodePasses)
 	}
 	// Past it. What matters is the flag, not the text: the caller reads "not
 	// finished" as "assume a secret is in there".
 	if _, done := decodeFully(`\u005c` + strings.Repeat("u005c", maxDecodePasses+50)); done {
 		t.Error("decodeFully() reported a fixpoint on input needing more than maxDecodePasses")
 	}
-	// And the caller does fail closed on it, which is the half that matters.
+	// And the caller does fail closed on it, on BOTH the text it examines and the
+	// secrets it examines it for. Two arms, so two rows: one arm covered left the
+	// other free to be flipped to fail open with the suite still green.
 	long := `\u005c` + strings.Repeat("u005c", maxDecodePasses+50)
 	if !recoverable(long, []string{"nowhere-in-this-string"}) {
 		t.Error("recoverable() = false on text it could not finish decoding, want it to assume the worst")
+	}
+	if !recoverable("carries no escape at all", []string{long}) {
+		t.Error("recoverable() = false on a secret it could not finish decoding, want it to assume the worst")
 	}
 }
 

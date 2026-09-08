@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1212,11 +1213,20 @@ func TestServiceTextCostIsBounded(t *testing.T) {
 		user: strings.Repeat("ab", 2048),
 		body: strings.Repeat(redactedMarker, 102),
 	}, {
-		// The worst case still reachable: a value at the bound against a body at
-		// doPost's read cap, every byte of which matches.
-		name: "a value at the bound against a megabyte that tiles it",
+		// The worst case still reachable on the path that SHOWS something: a value
+		// at the bound against the largest body the whole-text check can examine,
+		// every byte of which matches.
+		name: "a value at the bound against a body that tiles the window",
 		user: strings.Repeat("ab", maxScrubbableSecret/2),
-		body: strings.Repeat("ab", (1<<20)/2),
+		body: strings.Repeat("ab", maxStraddleWindow/2),
+	}, {
+		// The same shape at doPost's read cap. Past the window no whole occurrence
+		// can be seen, so this is withheld rather than examined in part. The scan
+		// over the megabyte happens first either way, and that is what is timed.
+		name:         "a value at the bound against a megabyte that tiles it",
+		user:         strings.Repeat("ab", maxScrubbableSecret/2),
+		body:         strings.Repeat("ab", (1<<20)/2),
+		wantWithheld: true,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Now()
@@ -1235,14 +1245,22 @@ func TestServiceTextCostIsBounded(t *testing.T) {
 	}
 }
 
-// TestResponseBodyIsBoundedToo pins the other half of the cost ceiling. The value
-// bound covers the caller's side; this covers the service's.
+// TestResponseBodyIsBoundedToo walks a self-regenerating body of growing size
+// end to end, on the service's side of the cost ceiling rather than the caller's.
 //
 // decodeFully shortens by as little as five bytes a pass, and `\u005c` re-forms
 // its own introducer, so an unbounded fixpoint decode is one pass per five bytes
 // of a response this package reads a megabyte of. Before the pass bound: 20 KB
 // took 233ms, 80 KB 3.5s, and a megabyte over nine minutes of CPU that no
 // caller's deadline could interrupt, because nothing below doPost reads ctx.
+//
+// It attributes no kill of its own, and is kept for the end-to-end shape rather
+// than for what it pins. Two bounds hold this budget and either alone is enough:
+// remove the pass bound and the straddle window still keeps the decoded input
+// small, remove the window and 64 passes still finish in tens of milliseconds. It
+// fires only with both gone, which is a state no single edit reaches. The pass
+// bound is pinned directly by TestDecodeFullyStopsAtItsPassBound and the window by
+// TestWholeTextCheckReadsABoundedWindow and TestBodyInsideTheWindowIsStillShown.
 func TestResponseBodyIsBoundedToo(t *testing.T) {
 	for _, n := range []int{4000, 40000, 200000} {
 		body := `\` + strings.Repeat("u005c", n)
@@ -1266,15 +1284,21 @@ func TestResponseBodyIsBoundedToo(t *testing.T) {
 	}
 }
 
-// TestWholeTextCheckReadsABoundedWindow pins the straddle window, which no timing
-// test can see: the pass bound already keeps an unbounded window fast enough.
-// What the window buys is volume, and volume is what this measures.
+// TestWholeTextCheckReadsABoundedWindow is the window's UPPER bound, which no
+// timing test can see: the pass bound already keeps an unbounded window fast
+// enough. What the window buys is volume, and volume is what this measures.
+// TestBodyInsideTheWindowIsStillShown is the lower bound, so a change to the
+// constant in either direction turns something red.
 //
 // Only an occurrence straddling the cut can hide behind it, so the check needs
 // the visible window plus room for one occurrence — not the megabyte doPost
 // admits. Handed the whole body it ran redact over all of it and split the result
 // on the marker: a one-character value against a megabyte measured 45 MB
 // allocated against 4.6 MB with the window, for the same one boolean.
+//
+// This body is past the window, so today the response is withheld before the
+// check runs at all. Growing the window past a megabyte puts the megabyte back
+// inside it, the check runs over all of it, and the ceiling below catches that.
 func TestWholeTextCheckReadsABoundedWindow(t *testing.T) {
 	body := strings.Repeat("ab", 1<<19) // 1 MiB, every byte a match for "a"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1312,11 +1336,15 @@ func TestWholeTextCheckReadsABoundedWindow(t *testing.T) {
 //
 // The ASCII row is the control. Same byte length, no length-changing fold, so it
 // leaked nothing even before the fix — which is what makes the fold the variable.
+//
+// Each row asserts presence as well as absence. Absence alone is satisfied by
+// returning nothing at all: replacing showable's success return with ("", false)
+// destroys every error body in the package and still passes an absence-only test.
 func TestTruncationFlagDescribesTheTextReturned(t *testing.T) {
 	const victim = "alice@example.test"
-	for _, tc := range []struct{ name, padding string }{
-		{"a fold that shortens the lowered copy past the cap", strings.Repeat("\u0130", 505)},
-		{"the same byte length in ASCII", strings.Repeat("x", 1010)},
+	for _, tc := range []struct{ name, padding, wantVisible string }{
+		{"a fold that shortens the lowered copy past the cap", strings.Repeat("\u0130", 505), strings.Repeat("i", 100)},
+		{"the same byte length in ASCII", strings.Repeat("x", 1010), strings.Repeat("x", 100)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The address one byte short, with its last byte escaped, so redact
@@ -1338,6 +1366,9 @@ func TestTruncationFlagDescribesTheTextReturned(t *testing.T) {
 				if strings.Contains(err.Error(), victim[:n]) {
 					t.Fatalf("%d of the address's %d bytes survive: %q", n, len(victim), victim[:n])
 				}
+			}
+			if !strings.Contains(err.Error(), tc.wantVisible) {
+				t.Errorf("the service's own text did not survive the scrub: %v", err)
 			}
 		})
 	}
@@ -1404,5 +1435,97 @@ func TestMalformedResponseIsMatchable(t *testing.T) {
 	// The resource decoration must not break the match.
 	if !strings.Contains(err.Error(), "resource") {
 		t.Errorf("error = %v, want the resource named", err)
+	}
+}
+
+// TestStraddlingOccurrenceIsWithheldNotShownInPart pins the disclosure half of the
+// straddle window. The window bounds what the whole-text check reads, and a value
+// spelled so its occurrence runs past that bound cannot be examined — so it is
+// withheld rather than shown in part.
+//
+// The escaped spelling's length is the service's choice, not a multiple of the
+// value: one character at nesting level k costs 2^(k-1)+5 bytes and takes k decode
+// passes, so a cheap prefix can fill the visible kilobyte while a tail at level 12
+// puts the end of the occurrence past any fixed window.
+func TestStraddlingOccurrenceIsWithheldNotShownInPart(t *testing.T) {
+	uri := "https://app.example.test/oauth/callback?state=" + strings.Repeat("k", 154)
+	var body strings.Builder
+	for i, r := range uri {
+		depth := 1
+		if i >= 170 {
+			depth = 12
+		}
+		fmt.Fprintf(&body, "%su%04x", strings.Repeat(`\`, 1<<(depth-1)), r)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, body.String())
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+		Resource: authProviderResource, UserID: "alice@example.test", ContinueURI: uri,
+	})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want the 403")
+	}
+	got, _ := decodeFully(err.Error())
+	for n := len(uri); n >= 5; n-- {
+		if strings.Contains(got, uri[:n]) {
+			t.Fatalf("%d of the ContinueURI's %d characters are recoverable: %q", n, len(uri), uri[:n])
+		}
+	}
+}
+
+// TestBodyInsideTheWindowIsStillShown is what fails when the window is too SMALL,
+// which no test did: shrinking it only ever withholds more, and an allocation
+// ceiling is satisfied by every smaller window.
+//
+// The size is built from what JUSTIFIES the window — the visible cap plus one
+// maximum-length value's singly escaped spelling — and deliberately not from
+// maxStraddleWindow, which is the thing under test. Derived from the constant
+// under test, the body would shrink along with it and the test could never fire.
+func TestBodyInsideTheWindowIsStillShown(t *testing.T) {
+	// Just inside what the window exists to cover, and past the visible cap so the
+	// truncation path — the one the window guards — is the path under test.
+	body := "denied: " + strings.Repeat("z", maxErrorBody+8*maxScrubbableSecret-100)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+		Resource: authProviderResource, UserID: "alice@example.test",
+	})
+	if err == nil {
+		t.Fatal("RetrieveCredential() = nil error, want the 403")
+	}
+	if !strings.Contains(err.Error(), "denied") {
+		t.Errorf("a body of %d bytes carrying no identifier was withheld: %v", len(body), err)
+	}
+}
+
+// TestMarkersAreBudgetedAgainstTheCap pins the size of what is returned, not the
+// size of what was read. One marker per matched run bounds the marker count
+// against the number of runs, and the SERVICE picks that number, so a body of
+// alternating one-byte matches inflated the result several times past the cap the
+// exported doc promises.
+func TestMarkersAreBudgetedAgainstTheCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, strings.Repeat("u ", 600))
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+		Resource: authProviderResource, UserID: "u",
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RetrieveCredential() error = %v, want an *APIError", err)
+	}
+	if got, want := len(apiErr.Body), maxErrorBody+len("..."); got > want {
+		t.Errorf("Body = %d bytes, want it capped to %d", got, want)
 	}
 }

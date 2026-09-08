@@ -63,11 +63,15 @@ const maxScrubbableSecret = 4096
 //
 // Not covered, and the boundary is exact: an identifier a service mangles into a
 // form no decoder reconstructs and a human reads anyway — split with a \n,
-// percent-encoded, echoed in half. The guarantee is that WE add no identifier,
-// not that we can launder one back out of arbitrary text.
+// percent-encoded as %40, or written \U0040 with the capital U this package's
+// decoder does not accept, or echoed in half. The guarantee is that WE add no
+// identifier, not that we can launder one back out of arbitrary text.
 //
 // A value longer than [maxScrubbableSecret] is not matched at all and nothing is
 // returned, because scrubbing it costs more than the diagnostic is worth.
+//
+// A response longer than [maxStraddleWindow] is withheld whenever the visible cap
+// cut it, because past that window an occurrence cannot be seen whole.
 //
 // Two things here look like they could be simpler and cannot be.
 //
@@ -98,27 +102,38 @@ func redactedForError(s string, secrets ...string) string {
 	return withheldText
 }
 
-// maxStraddleWindow bounds how far past the cut the whole-text check reads.
+// maxStraddleWindow bounds how much of the response the whole-text check reads.
 //
 // Only an occurrence that STRADDLES the cut can be hidden by it — bytes wholly
 // past the cut are never shown, so they cannot leak — and an occurrence has to
 // start before the cut to straddle it. So the check needs the visible window plus
 // room for one occurrence's escaped spelling, not the whole megabyte doPost
 // admits. Eight times the value bound covers any singly escaped spelling of a
-// bounded value with room to spare; a spelling inflated past that is the class
-// the "Not covered" paragraph above already disclaims.
+// bounded value with room to spare.
 //
-// Without it the check ran redact over the full body and split the result on the
-// marker: a one-character value against a megabyte measured 39.8 MiB allocated
-// and 524,289 parts, to compute one boolean.
+// It is NOT a bound on how inflated a spelling may be, and no constant is one.
+// The service chooses the spelling: a character at nesting level k costs
+// 2^(k-1)+5 bytes and needs k decode passes, so a spelling that runs past any
+// fixed window is still reconstructed by decodeFully inside its own pass bound.
+// Reading part of such an occurrence answers the question wrong rather than
+// conservatively — the check sees a proper prefix, matches nothing, and the
+// visible kilobyte goes out carrying a decodable fragment of the value. So a
+// response running past the window is withheld rather than examined in part,
+// which is also cheaper than examining it.
+//
+// Without a window the check ran redact over the full body and split the result
+// on the marker: a one-character value against a megabyte measured 39.8 MiB
+// allocated and 524,289 parts, to compute one boolean.
 const maxStraddleWindow = maxErrorBody + 8*maxScrubbableSecret
 
-// straddleWindow returns the prefix of s the whole-text check needs to read.
-func straddleWindow(s string) string {
+// straddleWindow returns the prefix of s the whole-text check reads, and reports
+// whether s ran past it. Past it, the check cannot see a whole occurrence, so a
+// caller handed true must not conclude the text is clean.
+func straddleWindow(s string) (window string, past bool) {
 	if len(s) <= maxStraddleWindow {
-		return s
+		return s, false
 	}
-	return s[:maxStraddleWindow]
+	return s[:maxStraddleWindow], true
 }
 
 // showable scrubs s for an error and reports whether the result can be shown.
@@ -130,7 +145,11 @@ func showable(s string, secrets []string) (string, bool) {
 	// half an identifier matches nothing, so what is shown looks clean while the
 	// response plainly carried the identifier and this package's own decoder gets
 	// it back out.
-	if truncated && recoverable(redact(straddleWindow(s), secrets...), secrets) {
+	//
+	// Past the window there is no answer to give, only a guess, so the response is
+	// withheld unexamined — see [maxStraddleWindow].
+	window, past := straddleWindow(s)
+	if truncated && (past || recoverable(redact(window, secrets...), secrets)) {
 		return "", false
 	}
 	// Checked AFTER the cap, so what is examined is exactly what is returned. The
@@ -199,6 +218,12 @@ func recoverable(x string, secrets []string) bool {
 // where a body was JSON-encoded twice; this is two orders of magnitude above
 // that, so reaching it means the text was built to be expensive rather than to
 // be read.
+//
+// It counts READS. A text is reported finished only by a read that changes
+// nothing, so the last read has nothing after it to confirm the result and the
+// most changing passes that can be reported finished is one fewer. The direction
+// is fail-closed — text that needed exactly this many changing passes is called
+// unfinished — and the boundary is pinned by TestDecodeFullyStopsAtItsPassBound.
 const maxDecodePasses = 64
 
 // decodeFully applies unescapeJSON until the text stops changing, and reports
@@ -427,13 +452,19 @@ func redact(s string, values ...string) string {
 // cut in half, and half an identifier matches nothing, so the surviving prefix
 // would be copied straight out.
 //
-// So the cap bounds what may be EMITTED while matching still runs over the whole
-// of s. A value that starts before the cut and ends after it is removed whole,
-// and nothing at or past the cut is shown either way.
+// So the cap bounds which bytes of s may be EMITTED while matching still runs
+// over the whole of s. A value that starts before the cut and ends after it is
+// removed whole, and nothing at or past the cut is shown either way.
 //
 // The bound is measured on the lowered copy, because that is what the result is
 // built from and lowercasing does not preserve byte offsets. When nothing
 // matches there is no lowered copy in play and s is capped on its own bytes.
+//
+// Bounding the source bytes does not bound the result, so the result is capped
+// on its own length as well. One matched run becomes a ten-byte marker however
+// short the run was, and the SERVICE picks how many runs there are: `u u u …`
+// against a user id of "u" produced 5635 bytes from a kilobyte of source, and
+// what comes back is quoted into a prompt and stored in a session.
 func redactWithinLimit(s string, values ...string) (string, bool) {
 	lowered := loweredValues(values)
 	if len(lowered) == 0 {
@@ -449,6 +480,9 @@ func redactWithinLimit(s string, values ...string) (string, bool) {
 	}
 	if truncated {
 		out += "..."
+	}
+	if cut, over := visibleLimit(out); over {
+		out, truncated = out[:cut]+"...", true
 	}
 	return out, truncated
 }
