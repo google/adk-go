@@ -439,13 +439,14 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 		default:
 			// Multiple response events exist for that function call so we merge them.
 			//
-			// This branch never coincides with the tail routing below. For a
-			// well-formed parallel call whose siblings are answered in two
-			// different events, rearrangeEventsForLatestFunctionResponse merges
-			// them before this runs, so only case 1 is reached. Getting here
-			// with the last event among the indices needs one call ID shared by
-			// two call events, which PopulateClientFunctionCallID cannot
-			// produce because it assigns a fresh ID to every call.
+			// This branch does reach the tail routing below, on well-formed
+			// input. It needs one call event whose siblings are answered by two
+			// different response events, plus pass 1 leaving the history alone:
+			// rearrangeEventsForLatestFunctionResponse returns early when the
+			// event before the last one carries any call the last event
+			// answers, so it merges nothing. CALL(c1,c2) | RESP(c2) | CALL(c3)
+			// | RESP(c1,c3) does both, and CALL(c1,c2) merges here and then
+			// moves to the tail.
 			//
 			// Collect and sort the indices to process events in order.
 			var sortedIndices []int
