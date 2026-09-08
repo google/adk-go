@@ -27,12 +27,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
-	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -45,7 +43,6 @@ type webConfig struct {
 	shutdownTimeout time.Duration
 	otelToCloud     bool
 	useH2C          bool
-	allowInMemory   bool
 }
 
 // webLauncher can launch web server
@@ -154,80 +151,27 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// applyServiceDefaults fills in in-memory services the caller left unset, and
-// reports which ones it invented and whether the caller consented.
+// applyServiceDefaults fills in the one service the launcher can safely assume.
 //
-// Neither adkrest.NewServer nor runner.New defaults them; only
-// runner.NewInMemory does, and the web launcher does not use it. A nil session
-// or memory service reaches the request path and panics, which drops the
-// connection without sending any HTTP response.
+// Only the session service. Every request path needs one, and it is what the
+// launcher defaulted before the artifact and memory services were added
+// alongside it.
 //
-// The session service is always defaulted, as it was before the artifact and
-// memory ones were added, because every request path needs it and a nil one
-// panics.
+// Those two are deliberately left as the caller set them, which for an
+// unconfigured caller means nil. Nothing crashes on that any more. The artifact
+// handlers answer 503 naming the missing service, and the runner only builds
+// the memory wrapper when a service exists, so SearchMemory reports "memory
+// service is not set" rather than dereferencing nothing.
 //
-// The other two are defaulted too, but only silently when allowInMemory says a
-// volatile store is acceptable: the webui sublauncher is a developer tool and
-// implies it, and -allow_in_memory_services sets it explicitly. Without that
-// consent they are still created, so nothing breaks on upgrade, and unconsented
-// reports true so the caller can warn that a future release will refuse instead.
-//
-// Refusing is the eventual goal rather than the current behaviour because
-// cmd/launcher/prod runs through this same path. A production deployment that
-// configured no storage should learn about it at startup, not when a restart
-// has already dropped the data.
-//
-// adk-python is not a straightforward precedent either way. An absent
-// --artifact_service_uri gets per-agent local disk under
-// <agents_root>/<agent>/.adk/artifacts, but it falls back to memory when it
-// detects Cloud Run or Kubernetes even with storage writable, and that warning
-// names ADK_FORCE_LOCAL_STORAGE rather than the URI flag
-// (cli/utils/service_factory.py). So on the deployments this comment is about,
-// Python also serves from memory. What it does differently is warn at the point
-// of fallback and name the way out, which is the part worth copying.
-func applyServiceDefaults(config *launcher.Config, allowInMemory bool) (defaulted []string, unconsented bool) {
+// Filling them in instead is what made a misconfigured deployment look healthy:
+// it came up, served requests, and lost everything it had stored on the next
+// restart. A 503 that names the missing service is the more useful answer, and
+// it is the caller's decision to make. examples/web/main.go shows the intended
+// pattern.
+func applyServiceDefaults(config *launcher.Config) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 		log.Print("No session service configured. Using an in-memory one, so whatever it holds is lost when the process exits.")
-	}
-
-	if config.ArtifactService == nil {
-		config.ArtifactService = artifact.InMemoryService()
-		defaulted = append(defaulted, "artifact")
-	}
-	if config.MemoryService == nil {
-		config.MemoryService = memory.InMemoryService()
-		defaulted = append(defaulted, "memory")
-	}
-	for _, name := range defaulted {
-		log.Printf("No %s service configured. Using an in-memory one, so whatever it holds is lost when the process exits.", name)
-	}
-	return defaulted, len(defaulted) > 0 && !allowInMemory
-}
-
-// logInMemoryServiceWarning restates which services fell back to memory, in the
-// startup banner alongside the URLs.
-//
-// applyServiceDefaults already logs each one, but that runs before the routers
-// are built and has scrolled past by the time the banner prints. Repeating it
-// here is deliberate: this block is what an operator reads, and losing artifacts
-// on the next restart is not something to learn from a line further up.
-//
-// When the caller did not ask for a volatile store, the warning also says the
-// launcher will refuse to start in a future release, so a deployment can fix
-// its configuration before that lands rather than after.
-func logInMemoryServiceWarning(defaulted []string, unconsented bool) {
-	if len(defaulted) == 0 {
-		return
-	}
-	// Naming launcher.Config, not just the flag: the flag only silences this,
-	// and there is no command-line way to point the launcher at real storage.
-	log.Printf("       WARNING: no %s service configured, so an in-memory one is in use.", strings.Join(defaulted, ", "))
-	log.Printf("       WARNING:     everything it holds is lost when this process exits.")
-	if unconsented {
-		log.Printf("       WARNING:     a future release will refuse to start instead. Set")
-		log.Printf("       WARNING:     ArtifactService and MemoryService on launcher.Config,")
-		log.Printf("       WARNING:     or pass -allow_in_memory_services to keep this.")
 	}
 }
 
@@ -260,25 +204,9 @@ func (w *webLauncher) buildRouter(config *launcher.Config) (http.Handler, error)
 	return withHealthFallback(router), nil
 }
 
-// webUIKeyword is the command-line keyword of the webui sublauncher. It is a
-// literal rather than a reference because that package imports this one, so the
-// dependency cannot run the other way.
-const webUIKeyword = "webui"
-
-// allowsInMemoryServices reports whether a volatile artifact and memory store
-// is acceptable for this invocation. The webui sublauncher is a developer tool
-// and implies it, so `adk web api webui` still runs with no configuration.
-func (w *webLauncher) allowsInMemoryServices() bool {
-	if w.config.allowInMemory {
-		return true
-	}
-	_, hasWebUI := w.activeSublaunchers[webUIKeyword]
-	return hasWebUI
-}
-
 // Run implements launcher.SubLauncher.
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
-	defaulted, unconsented := applyServiceDefaults(config, w.allowsInMemoryServices())
+	applyServiceDefaults(config)
 
 	router, err := w.buildRouter(config)
 	if err != nil {
@@ -292,7 +220,6 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
 	}
-	logInMemoryServiceWarning(defaulted, unconsented)
 	log.Println()
 
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
@@ -367,7 +294,6 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	fs.BoolVar(&config.useH2C, "h2c", false, "Enable prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1 Upgrade) on the web server listener. Cleartext is insecure; do not expose it to untrusted networks. Long-lived streaming responses may require increasing --write-timeout.")
-	fs.BoolVar(&config.allowInMemory, "allow_in_memory_services", false, "Fall back to in-memory artifact and memory services when none is configured, instead of refusing to start. Their contents are lost when the process exits, so this is for local runs. Implied when the webui sublauncher is active.")
 
 	return &webLauncher{
 		config:       config,
