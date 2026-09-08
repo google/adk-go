@@ -73,6 +73,13 @@ const maxScrubbableSecret = 4096
 // A response longer than [maxStraddleWindow] is withheld whenever the visible cap
 // cut it, because past that window an occurrence cannot be seen whole.
 //
+// The ContinueURI is covered less thoroughly than the UserID in one shape. Where
+// the UserID is a substring of the URI and the service escapes the URI so the
+// scrub cannot match it, the UserID's marker lands inside the URI and the rest of
+// the URI stays visible around it. The contract holds as stated, since this
+// package's decoder does not reconstruct the URI from what is returned, but a
+// reader sees most of it: https://github.com/google/adk-go/issues/1539.
+//
 // Two things here look like they could be simpler and cannot be.
 //
 // The choice between the two candidates is made on the OUTPUT, never on a property
