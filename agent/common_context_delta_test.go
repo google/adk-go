@@ -15,20 +15,30 @@
 package agent
 
 import (
-	"bytes"
-	"log"
+	"context"
 	"strings"
 	"testing"
+
+	"google.golang.org/genai"
 )
 
 // nilDeltaInvocation returns nil from WithICDelta rather than a derived
-// invocation, the shape a partial implementation takes. ADK's own ContextMock
-// returns nil from WithContext, WithBranch and WithAgentContext.
+// invocation — the shape an implementation written outside this repository
+// takes. Nothing in the repository does it, which is why the fixture has to.
 type nilDeltaInvocation struct {
 	InvocationContext
 }
 
 func (nilDeltaInvocation) WithICDelta(*InvocationContextDelta) InvocationContext { return nil }
+
+// freshReports makes the once-per-type report available again. The set has
+// process lifetime, so without this a test that asserts on the report passes
+// only on the first run of the binary and fails under -count=2.
+func freshReports(t *testing.T) {
+	t.Helper()
+	reportedNilICDelta.Clear()
+	t.Cleanup(reportedNilICDelta.Clear)
+}
 
 // TestDeltaOnInvocationThatReturnsNil pins that a nil from WithICDelta costs the
 // delta and not the context. Storing the nil leaves a commonContext with no
@@ -83,20 +93,190 @@ func TestDeltaOnInvocationThatReturnsNil(t *testing.T) {
 	// assertions above separates it from the delta having been applied. Pinned on
 	// the log, which is the only thing that does.
 	t.Run("the discard is reported", func(t *testing.T) {
-		var buf bytes.Buffer
-		out := log.Writer()
-		log.SetOutput(&buf)
-		t.Cleanup(func() { log.SetOutput(out) })
-
-		c := PromoteWithDelta(ic, delta())
-		if got := c.Branch(); got == branch {
+		freshReports(t)
+		var c Context
+		got := captureLog(t, func() { c = PromoteWithDelta(ic, delta()) })
+		if b := c.Branch(); b == branch {
 			t.Fatalf("Branch() = %q, so the delta was applied after all and this test no "+
-				"longer covers what it is named for", got)
+				"longer covers what it is named for", b)
 		}
-		if got := buf.String(); !strings.Contains(got, "discarding the delta") {
+		if !strings.Contains(got, "did not reach it") {
 			t.Errorf("log = %q, want the discard reported", got)
 		}
 	})
+}
+
+// TestDiscardReportNamesWhatWasLost pins the field list. Without it the whole
+// enumeration is unasserted: swapping two labels, or pointing %T at the delta
+// instead of the implementation, passes every other test in this file.
+func TestDiscardReportNamesWhatWasLost(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	var child Agent = &agent{name: "child"}
+	branch, scope := "child-branch", "child-scope"
+	content := &genai.Content{}
+	newCtx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		delta *InvocationContextDelta
+		want  string
+	}{
+		{"agent", &InvocationContextDelta{Agent: &child}, "Agent"},
+		{"branch", &InvocationContextDelta{Branch: &branch}, `Branch="child-branch"`},
+		{"isolation scope", &InvocationContextDelta{IsolationScope: &scope}, `IsolationScope="child-scope"`},
+		{"user content", &InvocationContextDelta{UserContent: &content}, "UserContent"},
+		{
+			"every reported field at once",
+			&InvocationContextDelta{Agent: &child, Branch: &branch, IsolationScope: &scope, UserContent: &content},
+			`Agent, Branch="child-branch", IsolationScope="child-scope", UserContent`,
+		},
+		{
+			// Named on both entry points: neither installs it on the invocation.
+			// WithDelta puts it on the context it returns, which is a different
+			// object and is why the message says "did not reach it".
+			"context never reaches the invocation, so it is named",
+			&InvocationContextDelta{Agent: &child, Context: &newCtx},
+			"Agent, Context",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			freshReports(t)
+			got := captureLog(t, func() {
+				_ = PromoteWithDelta(nilDeltaInvocation{InvocationContext: enclosing},
+					&CommonContextDelta{InvocationContextDelta: tc.delta})
+			})
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("log = %q, want it to name %s", got, tc.want)
+			}
+			if !strings.Contains(got, "agent.nilDeltaInvocation.WithICDelta") {
+				t.Errorf("log = %q, want the implementation's type named", got)
+			}
+		})
+	}
+}
+
+// TestDiscardReportIsEmittedOnce pins the deduplication. Deriving from two
+// distinct values of the same type is what makes it a test of the per-type key
+// rather than a per-instance one: keying on ic itself passes a single-value
+// version of this, and in production would hold every invocation object a
+// non-conforming type ever produced.
+func TestDiscardReportIsEmittedOnce(t *testing.T) {
+	freshReports(t)
+	branch := "child-branch"
+	derive := func(ic InvocationContext) {
+		_ = PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+		})
+	}
+	out := captureLog(t, func() {
+		for range 3 {
+			// A fresh enclosing invocation each time, so each derivation runs on a
+			// different value of the same type.
+			derive(nilDeltaInvocation{InvocationContext: &invocationContext{
+				Context: t.Context(), agent: &agent{name: "parent"},
+			}})
+		}
+	})
+	if got := strings.Count(out, "returned nil"); got != 1 {
+		t.Errorf("three discards of the same shape produced %d report(s), want 1:\n%s", got, out)
+	}
+}
+
+// TestDiscardReportsEachDistinctLoss pins the other half of the key. A later
+// discard that loses different fields carries information the first line did
+// not, so suppressing it would make the comment on reportKey untrue.
+func TestDiscardReportsEachDistinctLoss(t *testing.T) {
+	freshReports(t)
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	ic := nilDeltaInvocation{InvocationContext: enclosing}
+	branch := "child-branch"
+	var child Agent = &agent{name: "child"}
+
+	out := captureLog(t, func() {
+		// The shape the scheduler derives per node, twice, then the one that
+		// actually swaps the agent.
+		for range 2 {
+			_ = PromoteWithDelta(ic, &CommonContextDelta{
+				InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+			})
+		}
+		_ = PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Agent: &child},
+		})
+	})
+	if got := strings.Count(out, "returned nil"); got != 2 {
+		t.Errorf("two distinct losses produced %d report(s), want 2:\n%s", got, out)
+	}
+	if !strings.Contains(out, "Agent") {
+		t.Errorf("log = %q, want the agent loss reported and not swallowed by the branch one", out)
+	}
+}
+
+// TestDiscardRepeatDoesNotAllocate pins the ordering the mask exists for: a
+// repeat must not pay the slice or the formatting.
+func TestDiscardRepeatDoesNotAllocate(t *testing.T) {
+	freshReports(t)
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	ic := nilDeltaInvocation{InvocationContext: enclosing}
+	branch, scope := "child-branch", "child-scope"
+	d := &InvocationContextDelta{Branch: &branch, IsolationScope: &scope}
+
+	// Bound to the interface once: converting the fixture struct at each call
+	// would allocate here in the test and be counted against the function.
+	var boxed InvocationContext = ic
+	_ = captureLog(t, func() {
+		reportDiscardedDelta(boxed, d) // claim the bit
+		if got := testing.AllocsPerRun(100, func() { reportDiscardedDelta(boxed, d) }); got != 0 {
+			t.Errorf("a repeat allocated %v times, want 0 — the field list is being built before the dedup check", got)
+		}
+	})
+}
+
+// TestDiscardWithNothingToReport pins that a delta which asked for nothing
+// neither reports nor spends the type's one report. Claiming the type before
+// building the field list made an empty delta silence the next real loss.
+func TestDiscardWithNothingToReport(t *testing.T) {
+	freshReports(t)
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	ic := nilDeltaInvocation{InvocationContext: enclosing}
+
+	empty := captureLog(t, func() {
+		_ = PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{}})
+	})
+	if empty != "" {
+		t.Errorf("a delta that asked for nothing logged %q, want silence", empty)
+	}
+
+	branch := "child-branch"
+	real := captureLog(t, func() {
+		_ = PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+		})
+	})
+	if !strings.Contains(real, `Branch="child-branch"`) {
+		t.Errorf("log = %q, want the empty delta to have left the report unspent", real)
+	}
+}
+
+// TestNilDeltaStillReachesTheInvocation pins that a delta carrying no
+// InvocationContextDelta is still handed to the implementation. Both wrappers in
+// this package delegate to the inner commonContext, which answers a nil delta by
+// returning itself — skipping the call leaves the wrapper in place, and its
+// Agent() returns nil.
+func TestNilDeltaStillReachesTheInvocation(t *testing.T) {
+	inner := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	wrapped := NewToolContext(inner, "fc-1", nil, nil).(InvocationContext)
+	path := "wf/n@1"
+
+	c := Promote(wrapped).WithDelta(&CommonContextDelta{Path: &path})
+
+	got := c.(InvocationContext).Agent()
+	if got == nil || got.Name() != "parent" {
+		t.Fatalf("Agent() = %v, want the wrapper to have been unwrapped to %q", got, "parent")
+	}
+	if name := c.AgentName(); name != "parent" {
+		t.Errorf("AgentName() = %q, want %q", name, "parent")
+	}
 }
 
 // TestDeltaReachesTheInvocation pins that the guard above does not cost a
@@ -111,13 +291,117 @@ func TestDeltaReachesTheInvocation(t *testing.T) {
 	var child Agent = &agent{name: "child"}
 	branch := "child-branch"
 
-	c := PromoteWithDelta(ic, &CommonContextDelta{
-		InvocationContextDelta: &InvocationContextDelta{Agent: &child, Branch: &branch},
-	})
+	var c Context
+	// Silence matters as much as the values: a helper that reported on every
+	// derivation, not only on a discard, would satisfy every other assertion here.
+	if out := captureLog(t, func() {
+		c = PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Agent: &child, Branch: &branch},
+		})
+	}); out != "" {
+		t.Errorf("a delta the invocation accepted logged %q, want silence", out)
+	}
 	if got := c.(InvocationContext).Agent(); got == nil || got.Name() != "child" {
 		t.Errorf("Agent() = %v, want the agent the delta named", got)
 	}
 	if got := c.Branch(); got != branch {
 		t.Errorf("Branch() = %q, want %q", got, branch)
+	}
+}
+
+// TestDiscardKeepsTheRestOfTheDelta pins the CommonContextDelta fields that
+// WithDelta applies alongside the invocation delta. RunID and SubScheduler are
+// asserted nowhere else in this package, so dropping them was invisible.
+func TestDiscardKeepsTheRestOfTheDelta(t *testing.T) {
+	freshReports(t)
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	ic := nilDeltaInvocation{InvocationContext: enclosing}
+
+	runID, path := "run-7", "wf/n@1"
+	ancestors := []string{"a", "b"}
+	var sub DynamicSubScheduler = stubSubScheduler{}
+	branch := "child-branch"
+
+	var c Context
+	_ = captureLog(t, func() {
+		c = PromoteWithDelta(ic, &CommonContextDelta{
+			InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+			RunID:                  &runID,
+			Path:                   &path,
+			OutputForAncestors:     &ancestors,
+			SubScheduler:           &sub,
+		})
+	})
+
+	if got := c.RunID(); got != runID {
+		t.Errorf("RunID() = %q, want %q — a discarded invocation delta must not cost the rest", got, runID)
+	}
+	if got := c.SubScheduler(); got == nil {
+		t.Error("SubScheduler() = nil, want the one the delta carried")
+	}
+	if got := c.Path(); got != path {
+		t.Errorf("Path() = %q, want %q", got, path)
+	}
+}
+
+// stubSubScheduler is a non-nil DynamicSubScheduler for the assertion above.
+type stubSubScheduler struct{ DynamicSubScheduler }
+
+// TestDiscardNamesContextOnBothEntryPoints pins that Context is reported
+// whichever method was called. Neither installs it on the invocation, so it
+// never reaches it — WithDelta separately puts it on the context it returns,
+// which is a different object and is what the message's wording is careful about.
+func TestDiscardNamesContextOnBothEntryPoints(t *testing.T) {
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	ic := nilDeltaInvocation{InvocationContext: enclosing}
+	type key struct{}
+	newCtx := context.WithValue(context.Background(), key{}, "from-the-delta")
+
+	t.Run("WithDelta", func(t *testing.T) {
+		freshReports(t)
+		var c Context
+		got := captureLog(t, func() {
+			c = PromoteWithDelta(ic, &CommonContextDelta{
+				InvocationContextDelta: &InvocationContextDelta{Context: &newCtx},
+			})
+		})
+		if !strings.Contains(got, "Context") {
+			t.Errorf("log = %q, want Context named — it never reached the invocation", got)
+		}
+		if v := c.Value(key{}); v != "from-the-delta" {
+			t.Errorf("Value(key) = %v, want the delta's context on the returned context", v)
+		}
+	})
+
+	t.Run("WithICDelta", func(t *testing.T) {
+		freshReports(t)
+		got := captureLog(t, func() {
+			_ = Promote(ic).WithICDelta(&InvocationContextDelta{Context: &newCtx})
+		})
+		if !strings.Contains(got, "Context") {
+			t.Errorf("log = %q, want Context named", got)
+		}
+	})
+}
+
+// TestDiscardWithNoInvocationDelta pins the nil guard in withICDelta. The
+// reporter dereferences d, so without the guard this shape panics — and it is
+// the shape workflow.Run and dynamic nodes pass, a CommonContextDelta carrying
+// no InvocationContextDelta at all.
+func TestDiscardWithNoInvocationDelta(t *testing.T) {
+	freshReports(t)
+	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	runID := "run-7"
+
+	var c Context
+	got := captureLog(t, func() {
+		c = PromoteWithDelta(nilDeltaInvocation{InvocationContext: enclosing},
+			&CommonContextDelta{RunID: &runID})
+	})
+	if got != "" {
+		t.Errorf("log = %q, want silence — no invocation delta was asked for", got)
+	}
+	if c.RunID() != runID {
+		t.Errorf("RunID() = %q, want %q", c.RunID(), runID)
 	}
 }
