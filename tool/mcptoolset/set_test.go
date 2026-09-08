@@ -1705,7 +1705,14 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			var offered []string
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: clientTransport,
+				ToolFilter: func(ctx agent.ReadonlyContext, t tool.Tool) bool {
+					offered = append(offered, t.Name())
+					return true
+				},
+			})
 			if err != nil {
 				t.Fatalf("Failed to create MCP tool set: %v", err)
 			}
@@ -1717,6 +1724,10 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 			}
 			if len(tools) != 1 || tools[0].Name() != "get_weather" {
 				t.Fatalf("Tools() = %v, want only get_weather", toolNames(tools))
+			}
+			// The filter decides first, so it is offered the reserved name too.
+			if diff := cmp.Diff([]string{"get_weather", name}, offered, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Errorf("names offered to ToolFilter mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

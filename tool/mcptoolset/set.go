@@ -185,6 +185,14 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 }
 
 // Config provides initial configuration for the MCP ToolSet.
+//
+// A server tool whose name the framework dispatches itself is dropped from the
+// toolset and logged, because a call to that name never reaches the tool. The
+// drop is unconditional: transfer_to_agent is registered only for an agent
+// that has transfer targets, and task_completed only by sequentialagent during
+// RunLive, so an agent that registers neither still loses a server tool that
+// carries one of those names. ToolFilter runs first and cannot keep such a
+// tool.
 type Config struct {
 	// Client is an optional custom MCP client to use. If nil, a default client will be created.
 	Client *mcp.Client
