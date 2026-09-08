@@ -231,11 +231,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
-	// Build the canonical stored event from the trimmed delta. The shared suite
-	// asserts persisted Actions.StateDelta has no temp: keys after Get();
-	// session state alone cannot catch that leak (ExtractStateDeltas already
-	// drops temp:). This overlaps open #1356 (inmemory-only); kept to the
-	// store-path line so #1410's suite hardening can land without waiting.
+	// Store trimmed StateDelta so temp: keys are not in the canonical record.
 	trimmed := trimTempDeltaState(event)
 
 	eventCopy := &Event{
