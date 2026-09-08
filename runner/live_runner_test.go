@@ -373,3 +373,82 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 		t.Errorf("expected second saved event to be function call, but got %v", events.At(1))
 	}
 }
+
+func TestRunner_RunLive_FlushesBufferedToolCallWhenStreamEnds(t *testing.T) {
+	ctx := t.Context()
+	appName, userID, sessionID := "testApp", "testUser", "testSessionEOF"
+
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
+	mockLive := &mockLiveAgent{
+		Agent: testAgent,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+				partial := session.NewEvent(ctx, ctx.InvocationID())
+				partial.LLMResponse.Partial = true
+				partial.LLMResponse.InputTranscription = &genai.Transcription{Text: "book me a "}
+				if !yield(partial, nil) {
+					return
+				}
+
+				call := session.NewEvent(ctx, ctx.InvocationID())
+				call.LLMResponse.Content = &genai.Content{
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "book_flight"}}},
+				}
+				yield(call, nil)
+			}, nil
+		},
+	}
+
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          mockLive,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	var delivered []*session.Event
+	for event, err := range iter {
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		delivered = append(delivered, event)
+	}
+
+	if len(delivered) != 2 {
+		t.Fatalf("consumer received %d events, want partial transcription and buffered tool call", len(delivered))
+	}
+	if delivered[1].LLMResponse.Content == nil || delivered[1].LLMResponse.Content.Parts[0].FunctionCall == nil {
+		t.Fatalf("consumer did not receive the buffered tool call: %v", delivered[1])
+	}
+
+	got, err := sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Session.Events().Len() != 1 {
+		t.Fatalf("session persisted %d events, want the buffered tool call", got.Session.Events().Len())
+	}
+	if got.Session.Events().At(0).LLMResponse.Content == nil || got.Session.Events().At(0).LLMResponse.Content.Parts[0].FunctionCall == nil {
+		t.Fatalf("session did not persist the buffered tool call: %v", got.Session.Events().At(0))
+	}
+}

@@ -1045,6 +1045,20 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				return
 			}
 		}
+
+		// The stream may end while a transcription is in progress. In that
+		// case there is no final transcription event to trigger the flush above.
+		for _, bufferedEvent := range bufferedEvents {
+			if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(bufferedEvent, nil) {
+				return
+			}
+		}
 	}
 
 	return &runnerLiveSession{
