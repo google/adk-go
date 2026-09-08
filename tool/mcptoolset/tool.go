@@ -344,7 +344,12 @@ func hasMIMECharsetParameter(value string) bool {
 				}
 				continue
 			case '"':
-				if !inQuote {
+				if inQuote {
+					// Validate the complete quoted parameter before trusting its boundaries.
+					if _, _, err := mime.ParseMediaType("text/plain;" + params[start:i+1]); err != nil {
+						return true
+					}
+				} else {
 					_, prefix, ok := strings.Cut(params[start:i], "=")
 					// Only a parameter value may open a quote; other positions are ambiguous.
 					if !ok || strings.TrimSpace(prefix) != "" {

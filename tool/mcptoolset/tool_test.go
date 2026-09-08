@@ -205,6 +205,54 @@ func TestMCPToolRunContent(t *testing.T) {
 				`mimeType="text/plain; \"charset\"=utf-16", size=4 bytes]`},
 		},
 		{
+			name: "empty parameter name before quote is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///empty-name.txt",
+					MIMEType: `text/plain; ="a; charset=utf-16"`,
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///empty-name.txt\", " +
+				`mimeType="text/plain; =\"a; charset=utf-16\"", size=4 bytes]`},
+		},
+		{
+			name: "invalid parameter name before quote is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///invalid-name.txt",
+					MIMEType: `text/plain; bad name="a; charset=utf-16"`,
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///invalid-name.txt\", " +
+				`mimeType="text/plain; bad name=\"a; charset=utf-16\"", size=4 bytes]`},
+		},
+		{
+			name: "carriage return inside quoted value is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///quoted-cr.txt",
+					MIMEType: "text/plain; name=\"a\r; charset=utf-16\"",
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///quoted-cr.txt\", " +
+				`mimeType="text/plain; name=\"a\r; charset=utf-16\"", size=4 bytes]`},
+		},
+		{
+			name: "line feed inside quoted value is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///quoted-lf.txt",
+					MIMEType: "text/plain; name=\"a\n; charset=utf-16\"",
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///quoted-lf.txt\", " +
+				`mimeType="text/plain; name=\"a\n; charset=utf-16\"", size=4 bytes]`},
+		},
+		{
 			name: "charset text inside quoted value does not block decoding",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -591,6 +639,36 @@ func TestHasMIMECharsetParameter(t *testing.T) {
 		{
 			name:     "quoted charset name is ambiguous",
 			mimeType: `text/plain; "charset"=utf-16`,
+			want:     true,
+		},
+		{
+			name:     "empty parameter name before quote is ambiguous",
+			mimeType: `text/plain; ="a; charset=utf-16"`,
+			want:     true,
+		},
+		{
+			name:     "invalid parameter name before quote is ambiguous",
+			mimeType: `text/plain; bad name="a; charset=utf-16"`,
+			want:     true,
+		},
+		{
+			name:     "carriage return inside quoted value is ambiguous",
+			mimeType: "text/plain; name=\"a\r; charset=utf-16\"",
+			want:     true,
+		},
+		{
+			name:     "line feed inside quoted value is ambiguous",
+			mimeType: "text/plain; name=\"a\n; charset=utf-16\"",
+			want:     true,
+		},
+		{
+			name:     "backslash before carriage return inside quoted value is ambiguous",
+			mimeType: "text/plain; name=\"a\\\r; charset=utf-16\"",
+			want:     true,
+		},
+		{
+			name:     "backslash before line feed inside quoted value is ambiguous",
+			mimeType: "text/plain; name=\"a\\\n; charset=utf-16\"",
 			want:     true,
 		},
 		{
