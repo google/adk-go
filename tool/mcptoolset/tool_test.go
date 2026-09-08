@@ -181,6 +181,42 @@ func TestMCPToolRunContent(t *testing.T) {
 				"mimeType=\"text/plain; name=\\\"a; charset=utf-16\", size=4 bytes]"},
 		},
 		{
+			name: "mid-token quotes are represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///mid-token.txt",
+					MIMEType: `text/plain; name=a"; charset=utf-16; x="b`,
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///mid-token.txt\", " +
+				`mimeType="text/plain; name=a\"; charset=utf-16; x=\"b", size=4 bytes]`},
+		},
+		{
+			name: "quoted charset name is represented by metadata",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///quoted-name.txt",
+					MIMEType: `text/plain; "charset"=utf-16`,
+					Blob:     []byte{0x68, 0x00, 0x69, 0x00},
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///quoted-name.txt\", " +
+				`mimeType="text/plain; \"charset\"=utf-16", size=4 bytes]`},
+		},
+		{
+			name: "charset text inside quoted value does not block decoding",
+			result: &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "file:///quoted-value.txt",
+					MIMEType: `text/plain; name="foo;charset=utf-16" invalid`,
+					Blob:     []byte("hello"),
+				}},
+			}},
+			want: map[string]any{"output": "[MCP embedded resource: uri=\"file:///quoted-value.txt\", " +
+				`mimeType="text/plain; name=\"foo;charset=utf-16\" invalid"]` + "\nhello"},
+		},
+		{
 			name: "US-ASCII text blob is decoded",
 			result: &mcp.CallToolResult{Content: []mcp.Content{
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
@@ -548,9 +584,49 @@ func TestHasMIMECharsetParameter(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "mid-token quotes are ambiguous",
+			mimeType: `text/plain; name=a"; charset=utf-16; x="b`,
+			want:     true,
+		},
+		{
+			name:     "quoted charset name is ambiguous",
+			mimeType: `text/plain; "charset"=utf-16`,
+			want:     true,
+		},
+		{
 			name:     "charset text inside quoted value",
 			mimeType: `text/plain; name="foo;charset=utf-16" invalid`,
 			want:     false,
+		},
+		{
+			name:     "whitespace before quoted value",
+			mimeType: "text/plain; name= \t\"foo;charset=utf-16\" invalid",
+			want:     false,
+		},
+		{
+			name:     "quoted value after unrelated parameter",
+			mimeType: `text/plain; name=a; note="foo;charset=utf-16" invalid`,
+			want:     false,
+		},
+		{
+			name:     "equals inside quoted value",
+			mimeType: `text/plain; name="a=b;charset=utf-16" invalid`,
+			want:     false,
+		},
+		{
+			name:     "escaped quote inside quoted value",
+			mimeType: `text/plain; name="a\";charset=utf-16" invalid`,
+			want:     false,
+		},
+		{
+			name:     "extra equals before quote is ambiguous",
+			mimeType: `text/plain; name=a="; charset=utf-16; x="b`,
+			want:     true,
+		},
+		{
+			name:     "quote after closed value is ambiguous",
+			mimeType: `text/plain; name="a""; charset=utf-16; x="b`,
+			want:     true,
 		},
 	}
 

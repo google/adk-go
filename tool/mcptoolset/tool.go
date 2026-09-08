@@ -344,6 +344,13 @@ func hasMIMECharsetParameter(value string) bool {
 				}
 				continue
 			case '"':
+				if !inQuote {
+					_, prefix, ok := strings.Cut(params[start:i], "=")
+					// Only a parameter value may open a quote; other positions are ambiguous.
+					if !ok || strings.TrimSpace(prefix) != "" {
+						return true
+					}
+				}
 				inQuote = !inQuote
 				continue
 			}
