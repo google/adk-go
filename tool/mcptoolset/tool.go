@@ -148,17 +148,19 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
 
+	meta := serverMeta(res.Meta)
+
 	if res.IsError {
 		details := formatMCPContent(res.Content)
 
-		return nil, &ToolError{Details: details, Meta: serverMeta(res.Meta)}
+		return nil, &ToolError{Details: details, Meta: meta}
 	}
 
 	if res.StructuredContent != nil {
-		return functionResponse(res, res.StructuredContent), nil
+		return functionResponse(meta, res.StructuredContent), nil
 	}
 
-	return functionResponse(res, formatMCPContent(res.Content)), nil
+	return functionResponse(meta, formatMCPContent(res.Content)), nil
 }
 
 type formattedMCPContent struct {
@@ -423,19 +425,18 @@ func (e *ToolError) Error() string {
 	return "Tool execution failed. Details: " + e.Details
 }
 
-// functionResponse builds the function response map for a tool result.
-// The map is the function response returned to the model, so anything placed
-// in it reaches the LLM and is persisted to session and traces, in addition to
-// being available to callbacks and the embedding application.
+// functionResponse builds the function response map for a tool result whose
+// server metadata is meta. The map is the function response returned to the
+// model, so anything placed in it reaches the LLM and is persisted to session
+// and traces, in addition to being available to callbacks and the embedding
+// application.
 //
-// Server metadata from the result's _meta field is preserved under the "_meta"
-// key, minus keys in prefixes the MCP protocol reserves for itself. The key is
-// absent when the server attached no metadata of its own.
-func functionResponse(res *mcp.CallToolResult, output any) map[string]any {
+// meta is preserved under the "_meta" key, which is absent when meta is empty.
+func functionResponse(meta map[string]any, output any) map[string]any {
 	response := map[string]any{
 		"output": output,
 	}
-	if meta := serverMeta(res.Meta); len(meta) > 0 {
+	if len(meta) > 0 {
 		response["_meta"] = meta
 	}
 	return response
@@ -458,22 +459,15 @@ func serverMeta(meta mcp.Meta) map[string]any {
 	return serverKeys
 }
 
-// unprefixedReservedMetaKeys are the _meta keys the MCP protocol reserves
-// without a prefix, as an exception to the prefix rule: the progress token of a
-// request and the W3C trace context that carries it.
-var unprefixedReservedMetaKeys = map[string]bool{
-	"progressToken": true,
-	"traceparent":   true,
-	"tracestate":    true,
-	"baggage":       true,
-}
-
 // isReservedMetaKey reports whether an MCP _meta key belongs to the protocol
 // rather than to the server. A key is reserved when it is one of the
 // unprefixed protocol keys, or when the second label of its prefix (the part
 // before the first slash) is "modelcontextprotocol" or "mcp".
 func isReservedMetaKey(key string) bool {
-	if unprefixedReservedMetaKeys[key] {
+	// The progress token of a request and the W3C trace context that carries
+	// it are reserved without a prefix, as an exception to the prefix rule.
+	switch key {
+	case "progressToken", "traceparent", "tracestate", "baggage":
 		return true
 	}
 	// The prefix ends at the first slash, and a key name holds no slash, so a
