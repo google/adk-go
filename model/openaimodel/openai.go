@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -192,6 +193,17 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 				yield(nil, err)
 				return
 			}
+		} else if term.completed() {
+			// A completed response can contain text that never arrived as a
+			// delta. Use its content for the final response without re-emitting
+			// it as a delta. Keep the aggregate if the snapshot is unusable or
+			// omits content that was already streamed.
+			if genaiResp, err := convertResponse(term.resp); err == nil {
+				content := genaiResp.Candidates[0].Content
+				if completedContentSupersedes(final.Content, content) {
+					final.Content = content
+				}
+			}
 		}
 		if final == nil {
 			// No aggregated turn and nothing to rebuild one from.
@@ -215,6 +227,14 @@ type terminalEvent struct {
 	// ended. It implies resp != nil.
 	seen       bool
 	incomplete bool
+}
+
+// completed reports whether the turn ended on a "response.completed", the only
+// terminal event that states the turn's whole output. An incomplete one states
+// as much of it as the model got to, so its payload cannot stand in for what
+// streamed.
+func (t terminalEvent) completed() bool {
+	return t.seen && !t.incomplete
 }
 
 // carriesResponse reports whether an event delivered the response object the
@@ -483,6 +503,66 @@ func partsWithoutCalls(content *genai.Content) ([]*genai.Part, []*genai.Function
 		at = len(kept)
 	}
 	return kept, calls, at
+}
+
+// completedContentSupersedes reports whether a terminal snapshot can safely
+// replace content assembled from stream deltas. Reasoning alone is not a usable
+// replacement, and the snapshot must retain all visible text and function calls
+// that callers already received from the stream.
+// When replacement is allowed, reasoning follows the completed response to match
+// the blocking path. Streamed thoughts absent from that snapshot are not added
+// back; they have already been delivered as partial responses.
+func completedContentSupersedes(aggregate, completed *genai.Content) bool {
+	if completed == nil {
+		return false
+	}
+
+	var aggregateText, completedText strings.Builder
+	var aggregateCalls, completedCalls []*genai.FunctionCall
+	usable := false
+	for _, part := range aggregate.Parts {
+		if part == nil {
+			continue
+		}
+		if part.Text != "" && !part.Thought {
+			aggregateText.WriteString(part.Text)
+		}
+		if part.FunctionCall != nil {
+			aggregateCalls = append(aggregateCalls, part.FunctionCall)
+		}
+	}
+	for _, part := range completed.Parts {
+		if part == nil {
+			continue
+		}
+		if part.Text != "" && !part.Thought {
+			completedText.WriteString(part.Text)
+			usable = true
+		}
+		if part.FunctionCall != nil {
+			completedCalls = append(completedCalls, part.FunctionCall)
+			usable = true
+		}
+	}
+	if !usable || !strings.Contains(completedText.String(), aggregateText.String()) {
+		return false
+	}
+
+	matched := make([]bool, len(completedCalls))
+	for _, aggregateCall := range aggregateCalls {
+		found := false
+		for i, completedCall := range completedCalls {
+			if !matched[i] && reflect.DeepEqual(aggregateCall, completedCall) {
+				matched[i] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // finalizeStreamResponse closes out a streamed turn on the aggregated response.
