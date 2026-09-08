@@ -228,12 +228,22 @@ func promptTokenEstimator(ctx agent.InvocationContext) compactioninternal.TokenC
 			return 0
 		}
 		state := llmAgent.internal()
+		// Resolve the mode the way the contents processor resolves it for the
+		// NUDGE. Reading the declaration instead would estimate a prompt
+		// without the single-turn nudge for an agent whose placement resolved
+		// single_turn, and the estimate decides when to compact.
+		//
+		// It does not mirror that processor's other half: the estimate always
+		// builds with buildContentsDefault below, so for a placement that hides
+		// history it counts turns the real prompt will not carry. That
+		// divergence predates this change — an explicit IncludeContents="none"
+		// reached it the same way — and a placement is now a second route in.
 		contents, err := buildContentsDefault(
 			ctx.Agent().Name(),
 			ctx.Branch(),
 			ctx.IsolationScope(),
 			events,
-			state.Mode == ModeSingleTurn,
+			ModeFor(ctx, ctx.Agent().Name(), state) == ModeSingleTurn,
 			ctx.UserContent(),
 		)
 		if err != nil {
