@@ -135,7 +135,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 		},
 		{
 			name:            "helloAndGoodBye",
-			includeContents: "default", // default == ""
+			includeContents: "default", // same as "" here: nothing is bound, so there is no placement to opt out of
 			events:          helloAndGoodBye,
 			want: []*genai.Content{
 				genai.NewContentFromText("hello", "user"),
