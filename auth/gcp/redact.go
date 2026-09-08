@@ -46,9 +46,17 @@ const redactedMarker = "[redacted]"
 // bound fails closed.
 //
 // 4 KiB rather than something tighter because it has to clear every real
-// identifier by a wide margin: an address is at most 320 bytes (RFC 5321) and a
-// redirect URI is held under 2 KiB by what servers and browsers accept. At this
-// bound the worst case is milliseconds.
+// identifier by a wide margin: an address is at most 320 bytes and a redirect URI
+// is held under 2 KiB by what servers and browsers accept. At this bound the
+// worst case is milliseconds.
+//
+// The bound is measured on the RAW value while matching runs on the lowered copy,
+// and the two differ: strings.ToLower expands a byte that is not valid UTF-8 into
+// a three-byte U+FFFD, so a value at this bound can be matched as up to three
+// times its length. Left as it is because the factor is constant and the result
+// stays inside the budget — the same shape measures 38 ms in valid UTF-8 and
+// 230 ms built from invalid bytes, against a 5-second ceiling — while folding the
+// value first to measure it would reject callers this bound is not aimed at.
 const maxScrubbableSecret = 4096
 
 // redactedForError prepares service-controlled text so that an error may carry
@@ -175,16 +183,19 @@ func showable(s string, secrets []string) (string, bool) {
 // Decoding x rather than trusting redact's own bookkeeping is the point: it asks
 // what an attacker gets from the bytes being returned, so it cannot be steered by
 // what the service put in the bytes that were measured.
+//
+// The marker this scrub writes must be kept out of the search, or a one-character
+// user id of "e" occurs inside "[redacted]" and every response that redacted
+// anything is suppressed. It is kept out by POSITION: an occurrence belongs to us
+// only when every byte of it came from a marker. Excluding it by splitting x on
+// the marker instead excluded whole occurrences rather than marker bytes, so a
+// value containing or abutting the marker spanned a split, landed whole in no
+// part, and was matched by nothing — `a[redacted]b` came back verbatim.
 func recoverable(x string, secrets []string) bool {
-	// Built once, outside the loop over parts. These depend only on the secrets,
-	// and the SERVICE picks how many parts there are by writing the marker into
-	// its own response — a kilobyte of markers is about a hundred of them, so
-	// rebuilding these per part let a 1 KiB body multiply the per-secret cost a
-	// hundredfold. Measured before the hoist: 3m33.6s for one call, 2.35s after.
-	//
-	// Decoded spelling too, because decoding is what mangles a secret. An
-	// identifier containing \/ survives a decoded copy's scrub as the slash it
-	// decodes to, which is not the secret and is still the identity.
+	// Built once, outside the search, and the decoded spelling too, because
+	// decoding is what mangles a secret. An identifier containing \/ survives a
+	// decoded copy's scrub as the slash it decodes to, which is not the secret and
+	// is still the identity.
 	var forms []string
 	for _, v := range secrets {
 		if v == "" {
@@ -206,19 +217,85 @@ func recoverable(x string, secrets []string) bool {
 	if len(forms) == 0 {
 		return false
 	}
-	for _, part := range strings.Split(x, redactedMarker) {
-		decoded, done := decodeFully(part)
-		if !done {
-			return true
-		}
-		lx, lu := strings.ToLower(part), strings.ToLower(decoded)
+	// Decoded once for the whole text rather than once per marker-separated part.
+	// The SERVICE picked how many parts there were by writing the marker into its
+	// own response — a kilobyte of markers is about a hundred — and per-part work
+	// is what measured 3m33.6s for one call.
+	decoded, done := decodeFully(x)
+	if !done {
+		return true
+	}
+	for _, text := range []string{strings.ToLower(x), strings.ToLower(decoded)} {
+		// Lowered first, then scanned: the marker is already lower case, so it
+		// survives the fold unchanged and its offsets are the folded copy's own.
+		ours := markerBytes(text)
 		for _, form := range forms {
-			if strings.Contains(lx, form) || strings.Contains(lu, form) {
+			if readableOutsideMarkers(text, ours, form) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// markerBytes marks every byte of text belonging to an occurrence of the marker,
+// and returns nil when there is none — the common case, which then costs one
+// search rather than an allocation.
+func markerBytes(text string) []bool {
+	i := strings.Index(text, redactedMarker)
+	if i < 0 {
+		return nil
+	}
+	ours := make([]bool, len(text))
+	for i >= 0 {
+		for k := i; k < i+len(redactedMarker); k++ {
+			ours[k] = true
+		}
+		next := strings.Index(text[i+len(redactedMarker):], redactedMarker)
+		if next < 0 {
+			break
+		}
+		i += len(redactedMarker) + next
+	}
+	return ours
+}
+
+// readableOutsideMarkers reports whether form occurs anywhere in text other than
+// wholly inside bytes this scrub wrote.
+//
+// Overlapping occurrences are walked one byte at a time rather than skipped past,
+// since a masked hit says nothing about the next one. Stepping by len(form)
+// instead passes every test here, and that is a property of the marker rather
+// than a gap in them: "[redacted]" has no non-empty border, so its occurrences
+// never overlap and a fully masked hit always sits inside a run periodic in ten.
+// The byte step costs nothing at these sizes and does not rest on that argument.
+func readableOutsideMarkers(text string, ours []bool, form string) bool {
+	for i := 0; i+len(form) <= len(text); {
+		j := strings.Index(text[i:], form)
+		if j < 0 {
+			return false
+		}
+		at := i + j
+		if !allOurs(ours, at, at+len(form)) {
+			return true
+		}
+		i = at + 1
+	}
+	return false
+}
+
+// allOurs reports whether every byte of [lo,hi) came from a marker. A text with
+// no marker in it owns nothing, so nothing is excused.
+func allOurs(ours []bool, lo, hi int) bool {
+	if ours == nil {
+		return false
+	}
+	for i := lo; i < hi; i++ {
+		if !ours[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // maxDecodePasses bounds decodeFully. Legitimate text needs one pass, or two

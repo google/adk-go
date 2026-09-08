@@ -225,6 +225,19 @@ type Request struct {
 	// Resource is a full resource name. A name matching
 	// projects/*/locations/*/connectors/* is routed to the IAM Connector
 	// service; anything else (e.g. .../authProviders/*) to Agent Identity.
+	//
+	// Validated before anything is sent, and rejected with an error naming the
+	// reason. Letters, digits, and "._~/-:" are allowed, and every path segment
+	// must be non-empty and be neither "." nor "..". So a trailing slash, a
+	// doubled slash, and a relative segment are refused, while a domain-scoped
+	// project id such as projects/example.com:my-project/... is accepted.
+	//
+	// The segment rule is what keeps routing and normalization from disagreeing:
+	// the routing pattern above is matched on the name as given, and a name that
+	// normalizes to a different one would be routed by one and served as the
+	// other. Both rules moved relative to v2.3.0, in opposite directions: the
+	// colon was rejected there and is accepted here, and those segment shapes
+	// were accepted there and are rejected here.
 	Resource string
 	// UserID is the acting end user's identity. Required.
 	UserID string

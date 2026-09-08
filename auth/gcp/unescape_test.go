@@ -435,3 +435,79 @@ func TestDecodeFullyShrinksWheneverItChanges(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretSpanningOurOwnMarkerIsNotShown pins the half of the marker rule that
+// excluding the marker got wrong.
+//
+// The marker has to be kept out of the search somehow: a one-character user id of
+// "e" occurs inside "[redacted]" and would otherwise suppress every response that
+// redacted anything. Keeping it out by splitting the text on it kept out too much
+// — a value whose own bytes contain or abut the marker spans a split, lands whole
+// in no part, and is matched by nothing, so `a[redacted]b` came back verbatim.
+//
+// What every row asserts is the contract itself: the value is not readable out of
+// what comes back. Withholding satisfies that too, and so does scrubbing, so
+// neither outcome is prescribed — the two leak rows are in fact scrubbed rather
+// than withheld, because rejecting the first candidate lets the second one decode
+// and match. The controls additionally assert the response is SHOWN, since
+// suppressing them is the failure the split was introduced to prevent.
+func TestSecretSpanningOurOwnMarkerIsNotShown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		secrets  []string
+		mustShow bool
+	}{{
+		name:    "the marker sits inside the value",
+		body:    `\u0061[redacted]b`,
+		secrets: []string{"a[redacted]b"},
+	}, {
+		name:    "the value abuts the marker and shares its opening",
+		body:    `\u0061lice[redacted]`,
+		secrets: []string{"alice[red"},
+	}, {
+		// The marker here is one WE wrote, over the first value, and the second
+		// value starts inside it and runs on into the service's own bytes. Every
+		// byte of the occurrence has to be checked, and both ends of it: the first
+		// byte is ours, the last is not, and either one alone answers wrong.
+		name:    "the value begins inside our marker and runs into service text",
+		body:    "uabc",
+		secrets: []string{"u", "ted]a"},
+	}, {
+		name:     "CONTROL a one-character value that occurs inside the marker",
+		body:     "denied for user e, retry later",
+		secrets:  []string{"e"},
+		mustShow: true,
+	}, {
+		name:     "CONTROL an ordinary value, ordinary body",
+		body:     "denied for alice@example.test",
+		secrets:  []string{"alice@example.test"},
+		mustShow: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactedForError(tc.body, tc.secrets...)
+			t.Logf("returned %q", got)
+			if tc.mustShow && got == withheldText {
+				t.Fatal("withheld, want the body shown with the value redacted out of it")
+			}
+			if got == withheldText {
+				return
+			}
+			if !strings.Contains(got, redactedMarker) {
+				t.Errorf("nothing was redacted from %q", got)
+			}
+			decoded, _ := decodeFully(got)
+			for _, secret := range tc.secrets {
+				// A value that fits inside the marker is readable out of the marker
+				// by construction, and excusing exactly that is why the marker is
+				// excluded at all. Every other value must be gone.
+				if strings.Contains(redactedMarker, strings.ToLower(secret)) {
+					continue
+				}
+				if strings.Contains(strings.ToLower(decoded), strings.ToLower(secret)) {
+					t.Errorf("%q is readable out of %q", secret, decoded)
+				}
+			}
+		})
+	}
+}
