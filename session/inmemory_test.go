@@ -401,3 +401,53 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
 	}
 }
+
+// TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta covers the
+// one input class where stripping changes the shape of the stored delta rather
+// than its contents: every key is temp:, so the map goes from populated to
+// allocated-but-empty. It must not become nil — EventActions.MarshalJSON
+// distinguishes the two, and a nil delta would break the JSON round trip with
+// adk-python.
+func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"temp:a": 1},
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	stored := getResp.Session.Events().At(0)
+	if stored == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if stored.Actions.StateDelta == nil {
+		t.Fatal("stored StateDelta is nil; stripping every key must leave an empty map, not nil")
+	}
+	if n := len(stored.Actions.StateDelta); n != 0 {
+		t.Errorf("stored StateDelta = %v, want empty", stored.Actions.StateDelta)
+	}
+}
