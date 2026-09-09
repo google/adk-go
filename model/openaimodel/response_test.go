@@ -450,34 +450,221 @@ func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
 	}
 }
 
+// decodeResponse builds a response the way the wire does, so a test can pin
+// behavior that turns on whether a field was sent — which a struct literal
+// cannot express.
+func decodeResponse(t *testing.T, body string) *responses.Response {
+	t.Helper()
+	var resp responses.Response
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return &resp
+}
+
 func TestFinishReason(t *testing.T) {
 	tests := []struct {
-		reason string
-		want   genai.FinishReason
+		name string
+		// body is the response as the provider sent it, so a field's presence is
+		// part of the case rather than an artifact of construction.
+		body string
+		// incompleteEvent is what only the streaming path can know: the
+		// terminal event was a "response.incomplete".
+		incompleteEvent bool
+		want            genai.FinishReason
 	}{
-		{"stop", genai.FinishReasonOther},
-		{"max_output_tokens", genai.FinishReasonMaxTokens},
-		{"content_filter", genai.FinishReasonSafety},
-		{"", genai.FinishReasonStop},
-		{"other", genai.FinishReasonOther},
+		{name: "max output tokens", body: `{"incomplete_details":{"reason":"max_output_tokens"}}`, want: genai.FinishReasonMaxTokens},
+		{name: "content filter", body: `{"incomplete_details":{"reason":"content_filter"}}`, want: genai.FinishReasonSafety},
+		{name: "an unmapped reason", body: `{"incomplete_details":{"reason":"something_new"}}`, want: genai.FinishReasonOther},
+		{name: "nothing at all", body: `{}`, want: genai.FinishReasonStop},
+		{name: "completed", body: `{"status":"completed"}`, want: genai.FinishReasonStop},
+		{
+			// A finished turn carries incomplete_details as null.
+			name: "completed, incomplete_details null",
+			body: `{"status":"completed","incomplete_details":null}`,
+			want: genai.FinishReasonStop,
+		},
+		{
+			// Cut short, but not saying why. Reading that silence as a clean
+			// stop would have a caller accept a truncated answer as final.
+			name: "incomplete without a reason",
+			body: `{"status":"incomplete"}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "incomplete with a reason", body: `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}`, want: genai.FinishReasonMaxTokens},
+		{name: "failed", body: `{"status":"failed"}`, want: genai.FinishReasonOther},
+		{name: "cancelled", body: `{"status":"cancelled"}`, want: genai.FinishReasonOther},
+		{
+			// openai-go documents six statuses and marks none required; an
+			// unfinished one is no more a clean stop than an empty reason is.
+			name: "queued",
+			body: `{"status":"queued"}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "in progress", body: `{"status":"in_progress"}`, want: genai.FinishReasonOther},
+		{
+			// No status, but an incomplete_details object the provider did
+			// send: a schema-legal way to report a truncated turn, and all the
+			// blocking path gets.
+			name: "empty incomplete_details, no status",
+			body: `{"incomplete_details":{}}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "empty reason, no status", body: `{"incomplete_details":{"reason":""}}`, want: genai.FinishReasonOther},
+		{
+			// The payload says nothing; only the event does.
+			name:            "silent payload behind an incomplete event",
+			body:            `{}`,
+			incompleteEvent: true,
+			want:            genai.FinishReasonOther,
+		},
+		{
+			name:            "an incomplete event never downgrades a real reason",
+			body:            `{"incomplete_details":{"reason":"max_output_tokens"}}`,
+			incompleteEvent: true,
+			want:            genai.FinishReasonMaxTokens,
+		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.reason, func(t *testing.T) {
-			resp := &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: tc.reason,
-				},
-			}
-			got := finishReason(resp)
+		t.Run(tc.name, func(t *testing.T) {
+			got := finishReason(decodeResponse(t, tc.body), tc.incompleteEvent)
 			if got != tc.want {
-				t.Errorf("finishReason(%q) = %v, want %v", tc.reason, got, tc.want)
+				t.Errorf("finishReason(%s, incompleteEvent=%v) = %v, want %v", tc.body, tc.incompleteEvent, got, tc.want)
 			}
 		})
 	}
 
 	t.Run("nil response", func(t *testing.T) {
-		if got := finishReason(nil); got != genai.FinishReasonUnspecified {
+		if got := finishReason(nil, false); got != genai.FinishReasonUnspecified {
 			t.Errorf("finishReason(nil) = %v, want Unspecified", got)
+		}
+	})
+}
+
+// TestFinishMessage pins which of the provider's own words are reported, since
+// the finish reason flattens a failure and an unmapped truncation both to OTHER.
+func TestFinishMessage(t *testing.T) {
+	tests := []struct {
+		name            string
+		resp            *responses.Response
+		incompleteEvent bool
+		want            string
+	}{
+		{name: "nil response"},
+		{
+			name: "the server's error message outranks the rest",
+			resp: &responses.Response{
+				Status:            responses.ResponseStatusFailed,
+				Error:             responses.ResponseError{Message: "upstream exploded"},
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "content_filter"},
+			},
+			want: "upstream exploded",
+		},
+		{
+			name: "then the incomplete reason",
+			resp: &responses.Response{
+				Status:            responses.ResponseStatusIncomplete,
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "something_new"},
+			},
+			want: "something_new",
+		},
+		{
+			name: "and the status when that is all there is",
+			resp: &responses.Response{Status: responses.ResponseStatusIncomplete},
+			want: "incomplete",
+		},
+		{
+			// A silent payload behind an event whose name is the only account.
+			name:            "the event's own name when the payload is silent",
+			resp:            &responses.Response{},
+			incompleteEvent: true,
+			want:            "incomplete",
+		},
+		{
+			// The precedence truncated() applies, applied here too: a turn the
+			// event says did not finish cannot report "completed" as why.
+			name:            "the event's name outranks a payload calling the turn completed",
+			resp:            &responses.Response{Status: responses.ResponseStatusCompleted},
+			incompleteEvent: true,
+			want:            "incomplete",
+		},
+		{
+			// Only that contradiction is overridden. A status agreeing the turn
+			// did not finish is still the provider's own wording for why.
+			name:            "a status the event does not contradict is reported",
+			resp:            &responses.Response{Status: responses.ResponseStatusFailed},
+			incompleteEvent: true,
+			want:            "failed",
+		},
+		{
+			name: "a completed payload behind no such event stands",
+			resp: &responses.Response{Status: responses.ResponseStatusCompleted},
+			want: "completed",
+		},
+		{name: "nothing to say", resp: &responses.Response{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := finishMessage(tc.resp, tc.incompleteEvent); got != tc.want {
+				t.Errorf("finishMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogprobsFor pins that logprobs are handed out only against the text they
+// describe, so a streamed turn cannot report the terminal event's probabilities
+// over what the deltas built.
+func TestLogprobsFor(t *testing.T) {
+	resp := &responses.Response{
+		Output: []responses.ResponseOutputItemUnion{
+			{
+				Type: "message",
+				Content: []responses.ResponseOutputMessageContentUnion{
+					{
+						Type: "output_text",
+						Text: "hello",
+						Logprobs: []responses.ResponseOutputTextLogprob{
+							{Token: "hello", Logprob: -0.5},
+						},
+					},
+				},
+			},
+		},
+	}
+	if got := logprobsFor(resp, "hello"); got == nil {
+		t.Error("logprobsFor(matching text) = nil, want the logprobs")
+	}
+	if got := logprobsFor(resp, "hel"); got != nil {
+		t.Errorf("logprobsFor(different text) = %+v, want nil", got)
+	}
+	if got := logprobsFor(nil, ""); got != nil {
+		t.Errorf("logprobsFor(nil) = %+v, want nil", got)
+	}
+
+	// A refusal becomes a text part like any other (see convertOutputItems), so
+	// it counts towards the answer the logprobs describe.
+	t.Run("a refusal is part of the answer", func(t *testing.T) {
+		refused := &responses.Response{
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{
+							Type:     "output_text",
+							Text:     "hello",
+							Logprobs: []responses.ResponseOutputTextLogprob{{Token: "hello", Logprob: -0.5}},
+						},
+						{Type: "refusal", Refusal: "I cannot"},
+					},
+				},
+			},
+		}
+		if got := logprobsFor(refused, "helloI cannot"); got == nil {
+			t.Error("logprobsFor(text including the refusal) = nil, want the logprobs")
+		}
+		if got := logprobsFor(refused, "hello"); got != nil {
+			t.Errorf("logprobsFor(text missing the refusal) = %+v, want nil", got)
 		}
 	})
 }
@@ -578,50 +765,6 @@ func TestConvertOutputItems(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, parts); diff != "" {
 				t.Errorf("convertOutputItems() mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestPromptFeedback(t *testing.T) {
-	tests := []struct {
-		name string
-		resp *responses.Response
-		want *genai.GenerateContentResponsePromptFeedback
-	}{
-		{
-			name: "content filter",
-			resp: &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: "content_filter",
-				},
-			},
-			want: &genai.GenerateContentResponsePromptFeedback{
-				BlockReason:        genai.BlockedReasonSafety,
-				BlockReasonMessage: "content_filter",
-			},
-		},
-		{
-			name: "max_output_tokens",
-			resp: &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: "max_output_tokens",
-				},
-			},
-			want: nil,
-		},
-		{
-			name: "nil response",
-			resp: nil,
-			want: nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := promptFeedback(tc.resp)
-			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("promptFeedback() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
