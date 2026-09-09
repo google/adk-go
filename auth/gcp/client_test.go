@@ -173,8 +173,11 @@ func TestRetrieveCredential(t *testing.T) {
 				if !errors.As(err, &consent) {
 					t.Fatalf("error = %v, want *auth.ConsentRequiredError", err)
 				}
+				// Print the fields, not consent: %v on a *ConsentRequiredError
+				// goes through Error(), which reports neither of them.
 				if consent.AuthURI != tc.wantConsent[0] || consent.Nonce != tc.wantConsent[1] {
-					t.Errorf("consent = %+v, want {authURI:%q nonce:%q}", consent, tc.wantConsent[0], tc.wantConsent[1])
+					t.Errorf("consent = {authURI:%q nonce:%q}, want {authURI:%q nonce:%q}",
+						consent.AuthURI, consent.Nonce, tc.wantConsent[0], tc.wantConsent[1])
 				}
 			case tc.wantErrIs != nil:
 				if !errors.Is(err, tc.wantErrIs) {
