@@ -451,3 +451,70 @@ func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testi
 		t.Errorf("stored StateDelta = %v, want empty", stored.Actions.StateDelta)
 	}
 }
+
+// TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta pins
+// that the canonical record's StateDelta is a map of its own, not the one the
+// live session handle publishes.
+//
+// AppendEvent builds that field from the delta the session returns while
+// holding only the service lock, never the session's own mutex. The map the
+// session appends to its event list is reachable by anyone holding the handle
+// the moment that mutex is released, so if the canonical record takes the map
+// itself rather than a copy made under the lock, a caller walking session
+// history writes into a map AppendEvent reads. A concurrent map read and write
+// is a runtime throw rather than a recoverable panic.
+//
+// Sharing is what this can observe; the lock the copy is taken under is not.
+// Proving that needs a concurrent writer, which reproduces only
+// probabilistically and takes the test binary down with it when it fires.
+func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	live := createResp.Session
+
+	event := &session.Event{
+		ID:        "e1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"temp:scratch": "x", "keep": "y"},
+		},
+	}
+	if err := service.AppendEvent(ctx, live, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// Write through the handle the caller still holds, the way a goroutine
+	// reading session history would reach it.
+	stored := live.Events().At(0)
+	if stored == nil {
+		t.Fatal("expected an event on the live session handle")
+	}
+	stored.Actions.StateDelta["injected"] = true
+	// And through the caller's own event.
+	event.Actions.StateDelta["also-injected"] = true
+
+	got, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: live.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	canonical := got.Session.Events().At(0).Actions.StateDelta
+	if _, ok := canonical["injected"]; ok {
+		t.Errorf("canonical StateDelta = %v: it shares the map the live handle publishes, "+
+			"so a reader of session history can write into a map AppendEvent clones without the session lock", canonical)
+	}
+	if _, ok := canonical["also-injected"]; ok {
+		t.Errorf("canonical StateDelta = %v: it shares the caller's map", canonical)
+	}
+	if canonical["keep"] != "y" {
+		t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
+	}
+}
