@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log"
 	"reflect"
 	"slices"
 	"sort"
@@ -114,6 +115,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
 func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
+	return buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope, events, events, isSingleTurn, userContent)
+}
+
+func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
@@ -209,6 +214,8 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 	}
 	filtered = processedEvents
 
+	filtered = dropOrphanedFunctionResponses(filtered, allEvents)
+
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
 	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered)
@@ -257,6 +264,64 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
+}
+
+func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*session.Event {
+	callIDs := make(map[string]struct{})
+	for _, event := range allEvents {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if call.ID != "" {
+				callIDs[call.ID] = struct{}{}
+			}
+		}
+	}
+
+	isOrphan := func(part *genai.Part) bool {
+		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.ID == "" {
+			return false
+		}
+		_, found := callIDs[part.FunctionResponse.ID]
+		return !found
+	}
+
+	var orphanedIDs []string
+	result := make([]*session.Event, 0, len(events))
+	for _, event := range events {
+		content := utils.Content(event)
+		if content == nil {
+			result = append(result, event)
+			continue
+		}
+
+		if !slices.ContainsFunc(content.Parts, isOrphan) {
+			result = append(result, event)
+			continue
+		}
+
+		cloned := cloneEvent(event)
+		parts := cloned.LLMResponse.Content.Parts[:0]
+		for _, part := range content.Parts {
+			if isOrphan(part) {
+				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
+				cleaned := *part
+				cleaned.FunctionResponse = nil
+				if reflect.ValueOf(cleaned).IsZero() {
+					continue
+				}
+				part = &cleaned
+			}
+			parts = append(parts, part)
+		}
+		cloned.LLMResponse.Content.Parts = parts
+		if len(cloned.LLMResponse.Content.Parts) > 0 {
+			result = append(result, cloned)
+		}
+	}
+
+	if len(orphanedIDs) > 0 {
+		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
+	}
+	return result
 }
 
 // rearrangeEventsForLatestFunctionResponse
@@ -589,7 +654,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 			continue
 		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, isolationScope, events[i:], isSingleTurn, userContent)
+			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
@@ -764,6 +829,7 @@ func cloneEvent(e *session.Event) *session.Event {
 		IsolationScope: e.IsolationScope,
 		Author:         e.Author,
 		Actions:        e.Actions,
+		LLMResponse:    e.LLMResponse,
 	}
 
 	// 2. Deep copy the LongRunningToolIDs slice
@@ -772,8 +838,7 @@ func cloneEvent(e *session.Event) *session.Event {
 		copy(newEvent.LongRunningToolIDs, e.LongRunningToolIDs)
 	}
 
-	// TODO check if copy parts is needed
-	// 3. Deep copy the LLMResponse pointer struct and content
+	// Own the parts array so pruning and rearrangement cannot mutate session history.
 	if e.LLMResponse.Content != nil {
 		newEvent.LLMResponse.Content = &genai.Content{
 			Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),
