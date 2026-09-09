@@ -185,12 +185,22 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
-		// The node produced this event, so it has acted on every answer
-		// already in history. Recorded per interrupt, not per node: a
-		// node that re-entered on one answer and paused again must still
-		// act on the answer to the new interrupt.
-		for id := range s.resolved {
-			s.consumed[id] = true
+		// The node SETTLED on every answer already in history: it either
+		// produced its output or paused again on a new interrupt.
+		//
+		// Any other event is work in progress, and an activation that
+		// emitted one and then failed must stay resumable. History never
+		// un-answers an interrupt, so marking those answers consumed
+		// wedges the run for good — every later retry is skipped as a
+		// replay and the approved side effect never settles.
+		//
+		// Recorded per interrupt, not per node: a node that re-entered
+		// on one answer and paused again must still act on the answer to
+		// the new interrupt.
+		if ev.Output != nil || len(ev.LongRunningToolIDs) > 0 {
+			for id := range s.resolved {
+				s.consumed[id] = true
+			}
 		}
 		if ev.Output != nil {
 			s.branch = ev.Branch
@@ -348,6 +358,19 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 
 	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
 
+	// A response seen for the first time this turn (count == 1) marks a
+	// genuine first resume; a duplicate turn replays an already-counted
+	// response (>= 2) and must stay a no-op. Every arm needs this, not just
+	// the completed one: a node left waiting on its other interrupts still
+	// took delivery of the answer that did arrive, so the turn is not the
+	// empty no-op ErrNothingToResume reports.
+	for id := range resumed {
+		if scan.resolvedCount[id] == 1 {
+			ns.answeredThisTurn = true
+			break
+		}
+	}
+
 	switch {
 	case len(unresolved) > 0 && reenter && len(resumed) > 0:
 		// Partial resume: re-run with resolved responses so the node
@@ -384,15 +407,6 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodeCompleted
 		ns.Output = resumeOutput(resumed)
 		ns.ResumedInputs = resumed
-		// A response seen for the first time this turn (count == 1)
-		// marks a genuine first resume; a duplicate turn replays an
-		// already-counted response (>= 2) and must stay a no-op.
-		for id := range resumed {
-			if scan.resolvedCount[id] == 1 {
-				ns.answeredThisTurn = true
-				break
-			}
-		}
 	}
 	return ns, nil
 }

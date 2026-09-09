@@ -171,6 +171,21 @@ func (w *Workflow) Resume(
 				ns.Status = NodePending
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
 				scheduled++
+			} else if remaining := unansweredInterrupts(ns, freshMatched); len(remaining) > 0 {
+				// Handoff, but the node raised interrupts nobody has
+				// answered yet. It is still waiting: completing it here
+				// would drop the unanswered ones and hand successors an
+				// output standing in for a decision that was never made
+				// — for a rejected confirmation, one gating the very
+				// work it rejected. Mirrors adk-python's replay
+				// interceptor, which keeps such a node waiting and
+				// re-bubbles the unresolved IDs.
+				ns.Interrupts = remaining
+				// The answer that did arrive is recorded, so the turn is
+				// not the empty no-op ErrNothingToResume reports.
+				if ns.answeredThisTurn || len(freshMatched) > 0 {
+					scheduled++
+				}
 			} else {
 				// Handoff: the response is the asker's output for its
 				// successors; the asker does not re-run.
@@ -266,4 +281,19 @@ func validateResumeResponse(resp any, schema *jsonschema.Schema) (any, error) {
 		return nil, fmt.Errorf("resolve schema: %w", err)
 	}
 	return typeutil.ConvertToWithJSONSchema[any, any](resp, resolved)
+}
+
+// unansweredInterrupts returns the interrupts a node raised that still have no
+// answer: those rehydration left unresolved, minus any answered directly this
+// turn via the runner's node path. A handoff node with any of these left is not
+// finished, whatever else the turn resolved.
+func unansweredInterrupts(ns *NodeState, freshMatched map[string]any) []string {
+	var remaining []string
+	for _, id := range ns.Interrupts {
+		if _, answered := freshMatched[id]; answered {
+			continue
+		}
+		remaining = append(remaining, id)
+	}
+	return remaining
 }
