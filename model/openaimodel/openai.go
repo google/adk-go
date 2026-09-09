@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -87,14 +88,26 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if err != nil {
 		return singleErrorSequence(err)
 	}
+	timeout := requestTimeout(req.Config)
 	if stream {
-		return m.generateStream(ctx, params)
+		return m.generateStream(ctx, params, timeout)
 	}
-	return m.generate(ctx, params)
+	return m.generate(ctx, params, timeout)
 }
 
-func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Shadowed, not reassigned: the closure captures ctx by reference, so
+		// assigning to it would leave the second range over this sequence
+		// starting from the deadline the first one already cancelled.
+		ctx := ctx
+		// Bounds the call, retries included, and is released when the caller
+		// stops consuming.
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 		resp, err := m.client.Responses.New(ctx, params)
 		if err != nil {
 			yield(nil, fmt.Errorf("openai: call failed: %w", err))
@@ -112,8 +125,19 @@ func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNew
 	}
 }
 
-func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams) iter.Seq2[*model.LLMResponse, error] {
+func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Shadowed for the same reason as in generate: reassigning the captured
+		// ctx would poison a second range with the first one's cancellation.
+		ctx := ctx
+		// Bounds the whole stream rather than its first byte, the caller's time
+		// in the range body included, so a slow consumer can exhaust its own
+		// deadline while the provider keeps up.
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 		stream := m.client.Responses.NewStreaming(ctx, params)
 		defer func() { _ = stream.Close() }()
 
