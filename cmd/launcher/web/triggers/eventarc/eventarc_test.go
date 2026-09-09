@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package pubsub
+package eventarc
 
 import (
 	"fmt"
@@ -27,78 +27,6 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher"
 )
 
-func TestParse(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		wantPrefix string
-		wantRetry  int
-		wantErr    bool
-	}{
-		{
-			name:       "default values",
-			args:       []string{},
-			wantPrefix: "/api",
-			wantRetry:  3,
-			wantErr:    false,
-		},
-		{
-			name:       "custom prefix and retries",
-			args:       []string{"-path_prefix=/custom", "-trigger_max_retries=5"},
-			wantPrefix: "/custom",
-			wantRetry:  5,
-			wantErr:    false,
-		},
-		{
-			name:       "invalid retry count",
-			args:       []string{"-trigger_max_retries=-1"},
-			wantPrefix: "/api",
-			wantRetry:  3,
-			wantErr:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			l := NewLauncher().(*pubsubLauncher)
-			_, err := l.Parse(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if tt.wantErr {
-				return
-			}
-			if l.config.pathPrefix != tt.wantPrefix {
-				t.Errorf("Parse() pathPrefix = %v, want %v", l.config.pathPrefix, tt.wantPrefix)
-			}
-			if l.config.triggerMaxRetries != tt.wantRetry {
-				t.Errorf("Parse() triggerMaxRetries = %v, want %v", l.config.triggerMaxRetries, tt.wantRetry)
-			}
-		})
-	}
-}
-
-func TestSetupSubrouters(t *testing.T) {
-	l := NewLauncher().(*pubsubLauncher)
-	_, _ = l.Parse([]string{"-path_prefix=/api"})
-
-	router := mux.NewRouter()
-	config := &launcher.Config{}
-
-	err := l.SetupSubrouters(router, config)
-	if err != nil {
-		t.Fatalf("SetupSubrouters() failed: %v", err)
-	}
-
-	// Verify route is registered
-	req := httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", nil)
-	var match mux.RouteMatch
-	if !router.Match(req, &match) {
-		t.Errorf("SetupSubrouters() did not register expected route")
-	}
-}
-
 // TestSetupSubroutersWiresOIDCConfig checks that -trigger_oidc_audience actually
 // reaches the controller, not just the launcher's own config struct. The
 // startup warning reads the flag field, so config that never gets threaded
@@ -106,7 +34,7 @@ func TestSetupSubrouters(t *testing.T) {
 // leaving the endpoint open. An unauthenticated request is rejected before any
 // service on launcher.Config is touched, so the empty Config here is fine.
 func TestSetupSubroutersWiresOIDCConfig(t *testing.T) {
-	l := NewLauncher().(*pubsubLauncher)
+	l := NewLauncher().(*eventarcLauncher)
 	if _, err := l.Parse([]string{"-path_prefix=/api", "-trigger_oidc_audience=https://example-agent.example.com"}); err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
@@ -116,7 +44,7 @@ func TestSetupSubroutersWiresOIDCConfig(t *testing.T) {
 		t.Fatalf("SetupSubrouters() failed: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/eventarc", nil)
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 
@@ -151,7 +79,7 @@ func TestParseOIDCFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := NewLauncher().(*pubsubLauncher)
+			l := NewLauncher().(*eventarcLauncher)
 			_, err := l.Parse(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Parse() error = %v, wantErr %v", err, tt.wantErr)
@@ -210,7 +138,7 @@ func TestTriggerConfigWiresOIDC(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := NewLauncher().(*pubsubLauncher)
+			l := NewLauncher().(*eventarcLauncher)
 			if _, err := l.Parse(tt.args); err != nil {
 				t.Fatalf("Parse() failed: %v", err)
 			}
@@ -265,7 +193,7 @@ func TestUserMessageWarnsFromBuiltConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := NewLauncher().(*pubsubLauncher)
+			l := NewLauncher().(*eventarcLauncher)
 			if _, err := l.Parse(tt.args); err != nil {
 				t.Fatalf("Parse() failed: %v", err)
 			}

@@ -138,6 +138,49 @@ func setupTest(t *testing.T, a agent.Agent) *triggers.PubSubController {
 	return triggers.NewPubSubController(sessionService, agentLoader, nil, nil, runner.PluginConfig{}, defaultTriggerConfig)
 }
 
+// TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured guards against
+// the endpoint accepting unauthenticated requests once an operator has opted
+// in to OIDC verification via TriggerConfig.OIDC: without a bearer token at all
+// (the realistic "reachable from the open internet" case) the request must be
+// rejected before the agent is ever invoked.
+func TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T) {
+	mockAgentRunCount := 0
+	testAgent := createMockAgent(t, nil, &mockAgentRunCount, nil)
+
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	agentLoader := agent.NewSingleLoader(testAgent)
+	config := defaultTriggerConfig
+	config.OIDC = &triggers.OIDCConfig{ExpectedAudience: "https://example-agent.example.com"}
+	apiController := triggers.NewPubSubController(sessionService, agentLoader, nil, nil, runner.PluginConfig{}, config)
+
+	reqObj := models.PubSubTriggerRequest{
+		Message: models.PubSubMessage{
+			Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent"))),
+		},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+
+	apiController.PubSubTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected status %d for a request with no bearer token, got %d. Body: %s", http.StatusUnauthorized, rr.Code, rr.Body.String())
+	}
+	if mockAgentRunCount != 0 {
+		t.Errorf("expected the agent not to run for an unauthenticated request, got %d run attempts", mockAgentRunCount)
+	}
+}
+
 func createMockAgent(t *testing.T, results []error, runCount *int, expectedAttributes map[string]string) agent.Agent {
 	t.Helper()
 	testAgent, err := agent.New(agent.Config{

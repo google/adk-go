@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	"google.golang.org/adk/v2/agent"
@@ -43,17 +44,27 @@ type EventarcController struct {
 // released API and every existing call site still compiles; it is a candidate
 // for removal at the next major version.
 func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
-	// No compaction, so nothing that can be rejected. The error return exists
-	// for the config form, which can be handed a configuration that cannot
-	// serve the apps behind this controller.
-	c, _ := NewEventarcControllerWithConfig(ControllerConfig{
+	cfg := ControllerConfig{
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
 		MemoryService:   memoryService,
 		ArtifactService: artifactService,
 		PluginConfig:    pluginConfig,
 		TriggerConfig:   triggerConfig,
-	})
+	}
+	c, err := NewEventarcControllerWithConfig(cfg)
+	if err != nil {
+		// No compaction here, so the only reachable rejection is an OIDC
+		// block with no audience. This signature has no error to return and
+		// handing back nil would panic on the first request, so build the
+		// controller anyway: verifyPushRequestAuth fails closed on exactly
+		// that configuration, which is the safe end of it.
+		log.Printf("adk: %v; this trigger controller will reject every request", err)
+		return &EventarcController{
+			runner:    newRetriableRunner(cfg),
+			semaphore: make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns),
+		}
+	}
 	return c
 }
 
@@ -65,6 +76,9 @@ func NewEventarcController(sessionService session.Service, agentLoader agent.Loa
 // is released API.
 func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController, error) {
 	retriable := newRetriableRunner(cfg)
+	if err := retriable.validateOIDC(); err != nil {
+		return nil, err
+	}
 	if err := retriable.validateCompaction(); err != nil {
 		return nil, err
 	}
@@ -76,6 +90,11 @@ func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController,
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.
 func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *http.Request) {
+	if err := c.runner.verifyPushRequestAuth(r); err != nil {
+		respondAuthError(w, err)
+		return
+	}
+
 	var event models.EventarcTriggerRequest
 	contentType := r.Header.Get("Content-Type")
 	// The HTTP Content-Type header MUST be set to the media type of an event format for structured mode.
