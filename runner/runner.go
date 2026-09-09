@@ -953,6 +953,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				if len(bufferedEvents) > 0 {
+					ids := make([]string, 0, len(bufferedEvents))
+					for _, bufferedEvent := range bufferedEvents {
+						ids = append(ids, bufferedEvent.ID)
+					}
+					err = fmt.Errorf("%w; discarded buffered event IDs: %q", err, ids)
+				}
 				log.Printf("%v", err)
 				yield(nil, err)
 				return
