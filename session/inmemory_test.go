@@ -468,53 +468,66 @@ func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testi
 // Proving that needs a concurrent writer, which reproduces only
 // probabilistically and takes the test binary down with it when it fires.
 func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *testing.T) {
-	ctx := t.Context()
-	service := session.InMemoryService()
+	// Both delta shapes matter. trimTempDeltaState returns the event unchanged
+	// when it strips nothing, so with no temp: key the live session publishes
+	// the caller's own map and the canonical record is one careless assignment
+	// away from sharing it. With a temp: key the published map is a fresh one,
+	// and it is that map the canonical record must not take.
+	for _, tc := range []struct {
+		name  string
+		delta map[string]any
+	}{
+		{"temp key stripped", map[string]any{"temp:scratch": "x", "keep": "y"}},
+		{"nothing stripped", map[string]any{"keep": "y"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := session.InMemoryService()
 
-	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	live := createResp.Session
+			createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			live := createResp.Session
 
-	event := &session.Event{
-		ID:        "e1",
-		Timestamp: time.Now(),
-		Actions: session.EventActions{
-			StateDelta: map[string]any{"temp:scratch": "x", "keep": "y"},
-		},
-	}
-	if err := service.AppendEvent(ctx, live, event); err != nil {
-		t.Fatalf("AppendEvent: %v", err)
-	}
+			event := &session.Event{
+				ID:        "e1",
+				Timestamp: time.Now(),
+				Actions:   session.EventActions{StateDelta: tc.delta},
+			}
+			if err := service.AppendEvent(ctx, live, event); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
 
-	// Write through the handle the caller still holds, the way a goroutine
-	// reading session history would reach it.
-	stored := live.Events().At(0)
-	if stored == nil {
-		t.Fatal("expected an event on the live session handle")
-	}
-	stored.Actions.StateDelta["injected"] = true
-	// And through the caller's own event.
-	event.Actions.StateDelta["also-injected"] = true
+			// Write through the handle the caller still holds, the way a
+			// goroutine reading session history would reach it.
+			stored := live.Events().At(0)
+			if stored == nil {
+				t.Fatal("expected an event on the live session handle")
+			}
+			stored.Actions.StateDelta["injected"] = true
+			// And through the caller's own event.
+			event.Actions.StateDelta["also-injected"] = true
 
-	got, err := service.Get(ctx, &session.GetRequest{
-		AppName:   "app",
-		UserID:    "user",
-		SessionID: live.ID(),
-	})
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	canonical := got.Session.Events().At(0).Actions.StateDelta
-	if _, ok := canonical["injected"]; ok {
-		t.Errorf("canonical StateDelta = %v: it shares the map the live handle publishes, "+
-			"so a reader of session history can write into a map AppendEvent clones without the session lock", canonical)
-	}
-	if _, ok := canonical["also-injected"]; ok {
-		t.Errorf("canonical StateDelta = %v: it shares the caller's map", canonical)
-	}
-	if canonical["keep"] != "y" {
-		t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
+			got, err := service.Get(ctx, &session.GetRequest{
+				AppName:   "app",
+				UserID:    "user",
+				SessionID: live.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			canonical := got.Session.Events().At(0).Actions.StateDelta
+			if _, ok := canonical["injected"]; ok {
+				t.Errorf("canonical StateDelta = %v: it shares the map the live handle publishes, "+
+					"so a reader of session history can write into a map AppendEvent reads without the session lock", canonical)
+			}
+			if _, ok := canonical["also-injected"]; ok {
+				t.Errorf("canonical StateDelta = %v: it shares the caller's map", canonical)
+			}
+			if canonical["keep"] != "y" {
+				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
+			}
+		})
 	}
 }

@@ -226,17 +226,21 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
 
+	// Trim here, before sess.appendEvent publishes its own trimmed event into
+	// the live session's event list: the map cloned below is then one no other
+	// goroutine can reach. The database backend trims twice for the same
+	// reason, once for the live session and once for what it persists.
+	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
+
 	// update the in-memory session
-	trimmedDelta, err := sess.appendEvent(event)
-	if err != nil {
+	if err := sess.appendEvent(event); err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
-	// Only StateDelta comes from sess.appendEvent, which has already stripped
-	// the temp: keys; every other field below is read off event. The canonical
-	// record is not a mirror of the one appendEvent stored locally — it clones
-	// Compaction, ArtifactDelta and RequestedToolConfirmations where the local
-	// record aliases them.
+	// Only StateDelta comes from the trim above; every other field below is
+	// read off event. The canonical record is not a mirror of the one
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
+	// RequestedToolConfirmations where the local record aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -364,25 +368,22 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-func (s *session) appendEvent(event *Event) (map[string]any, error) {
+func (s *session) appendEvent(event *Event) error {
 	if event.Partial {
-		return nil, nil
+		return nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := updateSessionState(s, event); err != nil {
-		return nil, fmt.Errorf("error on appendEvent: %w", err)
+		return fmt.Errorf("error on appendEvent: %w", err)
 	}
 	processedEvent := trimTempDeltaState(event)
 
 	s.events = append(s.events, processedEvent)
 	s.updatedAt = event.Timestamp
-	// Clone under s.mu: processedEvent is already published into s.events, so
-	// a caller holding the live handle can write into this map the moment the
-	// lock is released.
-	return maps.Clone(processedEvent.Actions.StateDelta), nil
+	return nil
 }
 
 type events []*Event
