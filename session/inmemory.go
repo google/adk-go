@@ -109,7 +109,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 
 	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("session %+v not found", req.SessionID)
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, req.SessionID)
 	}
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
@@ -204,6 +204,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, the same way a
+	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
+	// event built as a struct literal by an agent or a tool never goes through
+	// it, and anything that identifies events by ID cannot tell two ID-less
+	// events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	sess, ok := curSession.(*session)
 	if !ok {
@@ -215,7 +223,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	stored_session, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
-		return fmt.Errorf("session not found, cannot apply event")
+		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
 
 	// update the in-memory session
@@ -241,6 +249,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
+			Compaction:                 event.Actions.Compaction.clone(),
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		Routes:             slices.Clone(event.Routes),

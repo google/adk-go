@@ -489,10 +489,17 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		}
 	})
 
-	// Clean up.
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
 	}); err != nil {
 		t.Fatalf("Delete(%s) failed: %v", fileName, err)
 	}
+	t.Run(fmt.Sprintf("GetArtifactVersionAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("GetArtifactVersion() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
 }
