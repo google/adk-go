@@ -278,9 +278,11 @@ func TestRetrieveHTTPError(t *testing.T) {
 
 func TestRetrieveValidatesRequest(t *testing.T) {
 	// Each row names the message it expects, not a substring true of every error
-	// this method returns. "resource " appears in the validation messages
-	// themselves, so an assertion on it passes with validateResource deleted
-	// outright — and naming the message also keeps the two rejection reasons apart
+	// this method returns. Delete validateResource and these requests run past the
+	// validation returns to the deferred wrap installed below them, which appends
+	// `(resource %q)` to everything after it — so an assertion on "resource "
+	// alone stays green with the guard gone, which is the guard against path
+	// traversal. Naming the message also keeps the two rejection reasons apart
 	// from each other, which is the distinction the charset and the segment check
 	// exist to draw.
 	const (

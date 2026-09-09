@@ -78,8 +78,12 @@ const maxScrubbableSecret = 4096
 // A value longer than [maxScrubbableSecret] is not matched at all and nothing is
 // returned, because scrubbing it costs more than the diagnostic is worth.
 //
-// A response longer than [maxStraddleWindow] is withheld whenever the visible cap
-// cut it, because past that window an occurrence cannot be seen whole.
+// A CANDIDATE longer than [maxStraddleWindow] is withheld whenever the visible
+// cap cut it, because past that length an occurrence cannot be seen whole. The
+// candidate is what is measured, not the response: the second one is decoded a
+// pass before it is offered, so a response that falls under the threshold once
+// decoded is examined in full and can still be shown. 120,000 bytes of \u0041
+// decode to 20,000 and come back scrubbed rather than withheld.
 //
 // The ContinueURI is covered less thoroughly than the UserID in one shape. Where
 // the UserID is a substring of the URI and the service escapes the URI so the

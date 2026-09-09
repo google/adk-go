@@ -105,12 +105,20 @@ type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
-	// request's own UserID and ContinueURI are removed and replaced with
-	// "[redacted]", the text is lowercased wherever anything matched, and only
-	// the first kilobyte of the response is drawn on, with "..." marking that the
-	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
-	// not the same promise: one matched run becomes a ten-byte marker whatever it
-	// replaced, so bounding the source alone left the result several times larger.
+	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
+	// THEM and replaced with "[redacted]", the text is lowercased wherever
+	// anything matched, and only the first kilobyte of the response is drawn on,
+	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
+	// on Body itself, which is not the same promise: one matched run becomes a
+	// ten-byte marker whatever it replaced, so bounding the source alone left the
+	// result several times larger.
+	//
+	// Removal is best effort, and the guarantee is narrower than removal: no value
+	// this package was given is recoverable from Body by this package's own
+	// decoder. A value can still be partly legible. Where the UserID is a
+	// substring of the ContinueURI and the service spells the URI with escapes the
+	// scrub cannot match, the UserID's marker lands inside the URI and the rest of
+	// the URI reads plainly around it, as "my-[redacted].test/oauth/callback".
 	//
 	// It can also be none of the response. Where the identifiers could not be
 	// shown to be gone, Body is a fixed sentence saying so and bears no relation
