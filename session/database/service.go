@@ -33,7 +33,16 @@ import (
 // databaseService is an database implementation of sessionService.Service.
 type databaseService struct {
 	db *gorm.DB
+
+	// retryOnStale controls whether AppendEvent refreshes a stale handle and
+	// retries once instead of returning errStaleSession. Off by default: a
+	// caller that gets errStaleSession may want to recompute its event against
+	// the newer state rather than have it silently last-writer-wins merged.
+	// Enable with EnableStaleRetry.
+	retryOnStale bool
 }
+
+var errStaleSession = errors.New("stale session error")
 
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
@@ -79,6 +88,22 @@ func AutoMigrate(service session.Service) error {
 	if err != nil {
 		return fmt.Errorf("auto migrate failed: %w", err)
 	}
+	return nil
+}
+
+// EnableStaleRetry opts a database session service into refreshing a stale
+// OCC handle and retrying an append once, instead of returning
+// errStaleSession to the caller. See issue #1229.
+//
+// NOTE: This function relies on a type assertion to the concrete
+// *databaseService implementation. It will return an error if the provided
+// session.Service is a different implementation.
+func EnableStaleRetry(service session.Service) error {
+	dbservice, ok := service.(*databaseService)
+	if !ok {
+		return fmt.Errorf("invalid session service type")
+	}
+	dbservice.retryOnStale = true
 	return nil
 }
 
@@ -377,21 +402,70 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
-	// append it to session
-	if err := sess.appendEvent(event); err != nil {
-		return err
-	}
+	// Persist a trimmed copy so temp: keys never reach the database, but keep
+	// passing the untrimmed event to sess.appendEvent below: it updates the
+	// live session state before trimming its own stored copy, and trimming
+	// here first would make those keys invisible to that update too.
+	persistEvent := trimTempDeltaState(event)
 
-	// Trim temp state before persisting
-	event = trimTempDeltaState(event)
-	// applyChanges and persist them
-	err := s.applyEvent(ctx, sess, event)
+	maxAttempts := 1
+	if s.retryOnStale {
+		// A session returned by Get is normally an OCC write lease. A
+		// legitimate second writer can advance that lease, though, so refresh
+		// once and retry the append when the database reports a stale handle.
+		maxAttempts = 2
+	}
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = s.applyEvent(ctx, sess, persistEvent)
+		if err == nil {
+			// Update the local handle only after the transaction commits. This
+			// keeps a failed append from leaving the caller with a phantom event.
+			if err := sess.appendEvent(event); err != nil {
+				return err
+			}
+			sess.mu.Lock()
+			if event.Timestamp.After(sess.updatedAt) {
+				sess.updatedAt = event.Timestamp
+			}
+			sess.mu.Unlock()
+			return nil
+		}
+		if !errors.Is(err, errStaleSession) || attempt == maxAttempts-1 {
+			return err
+		}
+		if refreshErr := s.refreshSession(ctx, sess); refreshErr != nil {
+			return fmt.Errorf("failed to refresh stale session (original error: %w): %w", err, refreshErr)
+		}
+	}
+	return err
+}
+
+// refreshSession replaces the mutable contents of a local handle with the
+// current database snapshot after another writer advances its OCC lease.
+func (s *databaseService) refreshSession(ctx context.Context, sess *localSession) error {
+	resp, err := s.Get(ctx, &session.GetRequest{
+		AppName: sess.AppName(), UserID: sess.UserID(), SessionID: sess.ID(),
+	})
 	if err != nil {
 		return err
 	}
+	current, ok := resp.Session.(*localSession)
+	if !ok {
+		return fmt.Errorf("unexpected refreshed session type %T", resp.Session)
+	}
 
-	// update local session last update time
-	sess.updatedAt = event.Timestamp
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	// Keep the existing map identity so State values already handed to callers
+	// remain attached to the live session. Temporary state is local-only, so
+	// refresh the persisted keys without deleting it.
+	maps.DeleteFunc(sess.state, func(key string, _ any) bool {
+		return !strings.HasPrefix(key, session.KeyPrefixTemp)
+	})
+	maps.Copy(sess.state, current.state)
+	sess.events = current.events
+	sess.updatedAt = current.updatedAt
 	return nil
 }
 
@@ -417,7 +491,8 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		sessionUpdateTime := sess.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
-				"stale session error: last update time from request (%s) is older than in database (%s)",
+				"%w: last update time from request (%s) is older than in database (%s)",
+				errStaleSession,
 				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
 				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
@@ -467,14 +542,15 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			return fmt.Errorf("failed to save event: %w", err)
 		}
 
-		storageSess.UpdateTime = event.Timestamp
+		if event.Timestamp.After(storageSess.UpdateTime) {
+			storageSess.UpdateTime = event.Timestamp
+		}
 		// Save the session to update its state and UpdateTime.
 		if err := tx.Save(&storageSess).Error; err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
 		sess.updatedAt = storageSess.UpdateTime
-
 		return nil // Returning nil commits the transaction.
 	})
 
