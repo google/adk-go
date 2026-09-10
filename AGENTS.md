@@ -128,6 +128,56 @@ A change is complete only when all of these pass locally:
   (e.g. `tool.ErrConfirmationRequired`).
 - Prefer an existing helper over a new one; keep packages small and focused.
 
+## Logging and error messages
+
+Never put user or model data into a log line or an error message. Prompts,
+model output, tool arguments and results, session and event contents, request
+and response bodies, headers, credentials, tokens and API keys are customer
+content or security material, at every level including debug. Log the shape
+instead — a type, a count, a length, an ID you generated — so a failure stays
+diagnosable without recording what the user said.
+
+The rule covers any error you construct or wrap, and any test assertion message
+that would echo a payload. URLs are not exempt: query parameters carry tokens
+and identifiers.
+
+## Comments
+
+Doc comments are the public API documentation. `pkg.go.dev` renders them, so
+write for a reader who cannot see the implementation, and follow
+[Go Doc Comments](https://go.dev/doc/comment).
+
+Length is not the measure — content is. Say what a caller cannot infer from the
+signature, and leave out what they can.
+
+Worth the words, however many it takes: invariants, what the zero value means,
+whether the type is safe for concurrent use, ownership and lifetime, error
+conditions, special cases, and a short example when the shape of the call is
+not obvious. `agent.InvocationContext` runs to several paragraphs and a diagram
+because the invocation, agent-call and step hierarchy cannot be read off the
+method set. That is the standard, not an exception.
+
+Not worth the words, at any length:
+
+- Restating the signature.
+- `Parameters:`, `Returns:`, `Args:` and `Usage:` headings, carried over from
+  other languages' docstring conventions. Go has no equivalent, and `go doc`
+  does not treat them as headings — it renders them as body text, and folds a
+  lone `Usage:` into the paragraph beneath it. Name parameters and results
+  inline in prose instead.
+- The algorithm the implementation happens to use. That belongs in the body,
+  where it will be updated alongside the code.
+
+Inline comments say why, not what. One restating the statement below it is
+noise, and reasoning too long to sit in the code belongs in the PR description.
+
+Check that a doc comment describes the function it sits on. One copied from a
+neighbour and left unedited is a recurring defect here.
+
+Every `TODO` carries a marker — `TODO(username)` as the style guide asks and
+most of this repo does, or `TODO(#1234)` when an issue tracks it. A bare
+`TODO:` belongs to nobody and gets forgotten.
+
 ## Extending the framework
 
 - **Add a tool:** wrap a Go function with
@@ -140,6 +190,27 @@ A change is complete only when all of these pass locally:
   directly.
 - **Add cross-cutting behavior:** register a `plugin.New(plugin.Config{...})`
   hook (`Before*`/`After*` for run/agent/model/tool) instead of editing the loop.
+
+## API shape
+
+- **Prefer a config struct to functional options for a new constructor** —
+  `New(cfg Config)`, as in `runner.New`, `llmagent.New` and `agenttool.New`.
+  Both styles exist today (`workflow.New` and `telemetry.New` take options), so
+  this is the direction for new code rather than a description of the repo.
+  Match the package you are working in before reaching for the other style.
+- Export as little as you can. A new exported symbol is a permanent commitment,
+  and `apidiff` holds you to it.
+- Error messages name what failed and give the context needed to place it —
+  `parallel worker %s expects a slice input, got %T`, not `invalid input type`.
+  Match the messages already in that package.
+- Sentinel errors are package-level vars, wrapped as
+  `fmt.Errorf("%w: …", ErrX)` and tested with `errors.Is`, never by string
+  match.
+- In new code, keep `fmt.Print*` out of library and server packages, and
+  `context.Background()` out of anything but `main`, tests and examples — plumb
+  the caller's context through, or use `context.WithoutCancel(ctx)` when a
+  resource must outlive the request. Neither is linted, and existing code has
+  exceptions, so fix one only in a PR that is already about that code.
 
 ## Multi-module development
 
@@ -178,6 +249,12 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
   `TestHTTPRecordDirectivesPartitionCassettes` in `internal`, keeps an older
   name for the same thing.
 - Prefer table-driven tests; shared helpers live in `internal/testutil`.
+- **A green suite does not prove the live path works.** Recorded traffic is
+  replayed, so nothing in CI exercises a real model or API. If your change
+  touches request or response conversion, a model backend, or any outbound
+  integration, run it once against the real thing and say so in the PR — which
+  model or API, and what you asserted. If you cannot, say that instead. Both
+  answers are useful. Silence reads as "tested".
 
 ## Boundaries
 
@@ -204,7 +281,8 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
 ## Before you open a PR
 
 Run the module loop under [Setup & core commands](#setup--core-commands) first.
-Then three things no command does for you.
+Then three things no command does for you, and the [Self-review](#self-review)
+pass that follows them.
 
 **1. Prove your tests fail without your fix.** Revert your source change, keep
 your tests, and run the package. If it stays green your test pins nothing, which
@@ -226,6 +304,42 @@ subject to choose the next version and build the release notes, and it skips
 anything with no recognized type without reporting an error. A mistitled PR
 merges green and then goes missing from the changelog.
 
+## Self-review
+
+Read the change as if someone else wrote it, before you open the PR and again
+before any later push that changes code. Small documentation and typo fixes are
+exempt, as they are from the linked-issue and testing requirements. Everything
+else gets the pass regardless of size, because most review rounds here go on
+defects the author's own agent could have found.
+
+**Review in a fresh context.** Start a new session, or hand the diff to a
+subagent that did not write the code. An agent reviewing work it produced in
+the same session re-reads its own intent rather than the diff, and passes it.
+Give the reviewer the whole diff (`git diff origin/main...HEAD`), never a
+summary — the summary is the author's account of the change, which is the thing
+being checked. If that command prints nothing, work out why before continuing.
+
+Five things to check:
+
+1. **Correctness and tests** — edge cases (nil, empty, cancellation, concurrent
+   use, partial streams), every caller of a function you changed, and whether
+   the revert check reached each new guard rather than only the headline fix.
+2. **Scope** — one concern per PR, and nothing the issue did not ask for. A
+   drive-by CI, formatting or refactor fix belongs in its own PR.
+3. **Simplicity** — duplicated logic, single-use indirection, dead code,
+   defensive branches for cases that cannot happen, and comments that restate
+   what the code does.
+4. **Style** — the
+   [Google Go Style Guide](https://google.github.io/styleguide/go/index) and
+   the conventions in this file.
+5. **Parity** — what adk-python does, cited by file and line.
+
+What comes back is a set of claims, not facts. Check each one against the code
+yourself, and drop the ones that do not hold.
+
+`.agents/skills/adk-go-self-review/SKILL.md` carries the method and the
+checklist behind each of the five.
+
 ## PRs & commits
 
 See `CONTRIBUTING.md` for the full process and CLA. Key points for agents:
@@ -239,8 +353,16 @@ See `CONTRIBUTING.md` for the full process and CLA. Key points for agents:
 ## Alignment with adk-python
 
 [adk-python](https://github.com/google/adk-python) is the source of truth for
-feature behavior. When porting or validating a feature, check parity with the
-Python implementation.
+feature behavior. Before you port or change behavior, read the Python
+implementation and cite the file and line you checked in the PR description.
+Diverging deliberately is fine and needs one sentence saying why, in the code
+comment where it will be read and in the PR.
+
+When the question is design rather than behavior, the other ports are worth a
+look — [Java](https://github.com/google/adk-java),
+[Kotlin](https://github.com/google/adk-kotlin),
+[TypeScript](https://github.com/google/adk-js). If one already solved this,
+match it instead of inventing a third answer.
 
 ## Resources
 
