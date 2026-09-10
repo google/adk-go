@@ -65,7 +65,7 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 			return err
 		}
 		if info.IsDir() {
-			if ignore[path] {
+			if ignore[filepath.ToSlash(path)] {
 				return filepath.SkipDir
 			}
 			return nil

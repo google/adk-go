@@ -202,6 +202,53 @@ func TestSaveZeroByteArtifact(t *testing.T) {
 	}
 }
 
+// TestNotFoundIsWrappedSentinel checks that Load and GetArtifactVersion
+// recognize storage.ErrObjectNotExist even when the storage client wraps it,
+// which is how cloud.google.com/go/storage actually returns it in production
+// (see storage.formatObjectErr, which always wraps NotFound as
+// fmt.Errorf("%w: %w", ErrObjectNotExist, err)). A caller checking
+// errors.Is(err, fs.ErrNotExist) must still get a match.
+func TestNotFoundIsWrappedSentinel(t *testing.T) {
+	wrapped := fmt.Errorf("%w: %w", storage.ErrObjectNotExist, errors.New("googleapi: Error 404: Not Found"))
+
+	for _, tc := range []struct {
+		name string
+		call func(svc *gcsService) error
+	}{
+		{
+			name: "Load",
+			call: func(svc *gcsService) error {
+				_, err := svc.Load(t.Context(), &artifact.LoadRequest{
+					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+					Version: 1,
+				})
+				return err
+			},
+		},
+		{
+			name: "GetArtifactVersion",
+			call: func(svc *gcsService) error {
+				_, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+					Version: 1,
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("wrapped-not-exist")
+			fb := svc.bucket.(*fakeBucket)
+			fb.attrsErr = wrapped
+
+			err := tc.call(svc)
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("err = %v, want errors.Is(err, fs.ErrNotExist) = true", err)
+			}
+		})
+	}
+}
+
 // TestBackoffDelayBounds checks the jittered backoff stays within [0, saveRetryMaxDelay].
 func TestBackoffDelayBounds(t *testing.T) {
 	for attempt := range maxSaveAttempts {
@@ -290,6 +337,12 @@ type fakeBucket struct {
 	// return it (a simulated write failure); closeCalls counts Close calls.
 	closeErr   error
 	closeCalls int
+
+	// attrsErr, when set, is returned by every object's attrs() call in place
+	// of the default not-found/found behavior. Used to simulate the GCS
+	// client library's wrapped storage.ErrObjectNotExist (see
+	// TestNotFoundIsWrappedSentinel).
+	attrsErr error
 }
 
 // object returns a handle to the named blob, creating an empty backing store on
@@ -358,6 +411,14 @@ func (o *fakeObject) ifNotExist() gcsObject {
 
 // attrs returns fake attributes for the object.
 func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
+	if o.bucket != nil {
+		o.bucket.mu.Lock()
+		forced := o.bucket.attrsErr
+		o.bucket.mu.Unlock()
+		if forced != nil {
+			return nil, forced
+		}
+	}
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()

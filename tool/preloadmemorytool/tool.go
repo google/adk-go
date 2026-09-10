@@ -122,7 +122,7 @@ func extractText(mem memory.Entry) string {
 
 	var b strings.Builder
 	for _, part := range mem.Content.Parts {
-		if part.Text == "" {
+		if part == nil || part.Text == "" {
 			continue
 		}
 		if b.Len() > 0 {

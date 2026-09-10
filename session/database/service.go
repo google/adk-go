@@ -51,6 +51,19 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	return &databaseService{db: db}, nil
 }
 
+// NewSessionServiceFromDB creates a new [session.Service] implementation using
+// an existing [*gorm.DB] connection. This is useful when the application
+// already manages a database connection and wants to share it across multiple
+// services.
+//
+// It returns an error if db is nil.
+func NewSessionServiceFromDB(db *gorm.DB) (session.Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+	return &databaseService{db: db}, nil
+}
+
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
 //
@@ -111,12 +124,16 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		// apply state delta
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly: an unset time.Time serializes to
+			// a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = createdSession.UpdateTime
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
@@ -157,7 +174,9 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		}).
 		First(&foundSession).Error
 	if err != nil {
-		// For any error including ErrRecordNotFound, return it as a system error.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: %q: %w", session.ErrNotFound, sessionID, err)
+		}
 		return nil, fmt.Errorf("database error while fetching session: %w", err)
 	}
 
@@ -173,8 +192,22 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		eventQuery = eventQuery.Where("timestamp >= ?", req.After)
 	}
 
-	// Order by timestamp DESC to get the most recent events when limiting
-	eventQuery = eventQuery.Order("timestamp DESC")
+	// Order by timestamp DESC to get the most recent events when limiting, with
+	// id as a tiebreak so the order is total.
+	//
+	// Without the tiebreak, events sharing a timestamp come back in whatever
+	// order the engine happens to yield and the reversal below then flips them:
+	// SQLite's sort is stable, so a tie is returned in reverse insertion order.
+	// Timestamps are truncated to microseconds on write, so ties are ordinary
+	// rather than exotic. Compaction reads this order to choose what a summary
+	// stands for, and a pair that swaps between two reads means a record can
+	// cover an event nothing summarized, which is that event gone from every
+	// later prompt.
+	//
+	// The id is arbitrary as an ordering, but it is stable, and stable is what
+	// callers need. adk-python orders the same way, by timestamp then id, so
+	// this also removes a divergence rather than creating one.
+	eventQuery = eventQuery.Order("timestamp DESC, id DESC")
 
 	if req.NumRecentEvents > 0 {
 		eventQuery = eventQuery.Limit(req.NumRecentEvents)
@@ -329,6 +362,13 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, matching the
+	// in-memory service. An event built as a struct literal by an agent or a
+	// tool never passes through session.NewEvent, and anything that identifies
+	// events by ID cannot tell two ID-less events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
 	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
@@ -357,16 +397,16 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 
 // applyEvent fetches the session, validates it, applies state changes from an
 // event, and saves the event atomically.
-func (s *databaseService) applyEvent(ctx context.Context, session *localSession, event *session.Event) error {
+func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Fetch the session object from storage.
 		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: session.AppName(), UserID: session.UserID(), ID: session.ID()}).
+		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
 			First(&storageSess).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("session not found, cannot apply event")
+				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
 			}
 			return fmt.Errorf("failed to get session: %w", err)
 		}
@@ -374,21 +414,21 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := session.updatedAt.UnixMicro()
+		sessionUpdateTime := sess.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
 		// Fetch App and User states.
-		storageApp, err := fetchStorageAppState(tx, session.AppName())
+		storageApp, err := fetchStorageAppState(tx, sess.AppName())
 		if err != nil {
 			return err
 		}
-		storageUser, err := fetchStorageUserState(tx, session.AppName(), session.UserID())
+		storageUser, err := fetchStorageUserState(tx, sess.AppName(), sess.UserID())
 		if err != nil {
 			return err
 		}
@@ -399,12 +439,16 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
+			// Maintain UpdateTime explicitly (see Create): an unset time.Time
+			// serializes to a zero datetime that MySQL rejects under strict mode.
+			storageApp.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
 		}
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
+			storageUser.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
@@ -415,7 +459,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Create the new event record in the database.
-		storageEv, err := createStorageEvent(session, event)
+		storageEv, err := createStorageEvent(sess, event)
 		if err != nil {
 			return fmt.Errorf("failed to map event to storage model: %w", err)
 		}
@@ -429,7 +473,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
-		session.updatedAt = storageSess.UpdateTime
+		sess.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})
@@ -479,7 +523,7 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 
 // extractStateDeltas splits a single state delta map into three separate maps
 // for app, user, and session states based on key prefixes.
-// Temporary keys (starting with TempStatePrefix) are ignored.
+// Temporary keys (starting with session.KeyPrefixTemp) are ignored.
 func extractStateDeltas(delta map[string]any) (
 	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
 ) {
