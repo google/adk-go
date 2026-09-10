@@ -71,6 +71,111 @@ func TestModel_Generate(t *testing.T) {
 	}
 }
 
+// TestModel_FailedStatus pins every way a failure can arrive to one outcome: an
+// error naming what the server said, and no response claiming the turn
+// finished. Streamed, it need not come as "response.failed" — an ordinary
+// terminal event can carry it, after the deltas have gone out.
+func TestModel_FailedStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		// Exactly one of these: a body for the blocking path, or an SSE script
+		// for the streaming one.
+		body   string
+		events []string
+		// Text the caller must still have been handed. Blocking yields a whole
+		// turn or nothing; a stream keeps the deltas it already delivered,
+		// because a failure ends a turn rather than rewinding it.
+		wantDelivered string
+	}{
+		{name: "blocking with no output", body: bodyFailedEmpty},
+		{name: "blocking with partial output", body: bodyFailedPartial},
+		{
+			name:          "streamed as response.failed",
+			events:        []string{evCreated, evDelta1, evFailed},
+			wantDelivered: "hel",
+		},
+		{
+			name:          "streamed in the terminal body after deltas",
+			events:        []string{evCreated, evDelta1, `{"type":"response.completed","response":` + bodyFailedPartial + `}`},
+			wantDelivered: "hel",
+		},
+		{
+			// Nothing to deliver, so the failure is all there is — and it must
+			// still be reported, not passed off as an empty turn.
+			name:   "streamed in the terminal body with no deltas",
+			events: []string{evCreated, `{"type":"response.completed","response":` + bodyFailedEmpty + `}`},
+		},
+		{
+			name:          "streamed in an incomplete body",
+			events:        []string{evCreated, evDelta1, `{"type":"response.incomplete","response":` + bodyFailedPartial + `}`},
+			wantDelivered: "hel",
+		},
+		{
+			// Announced on "response.created" and never taken back: the stream
+			// stops, so the announcement is the last word.
+			name:          "announced at creation, no terminal event",
+			events:        []string{evCreatedFailed, evDelta1},
+			wantDelivered: "hel",
+		},
+		{
+			// No status anywhere, so the error object is the only thing saying
+			// this is not an answer.
+			name: "error object with no status at all",
+			body: bodyFailedNoStatus,
+		},
+		{
+			// The same, streamed, with the deltas already gone out.
+			name:          "error object with no status at all, streamed",
+			events:        []string{evCreated, evDelta1, `{"type":"response.completed","response":` + bodyFailedNoStatus + `}`},
+			wantDelivered: "hel",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			streamed := len(tc.events) > 0
+			var got []*model.LLMResponse
+			var err error
+			if streamed {
+				got, err = runStream(t, tc.events...)
+			} else {
+				got, err = runBlocking(t, tc.body)
+			}
+			if !errors.Is(err, ErrResponseFailed) {
+				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, ErrResponseFailed)", err)
+			}
+			for _, want := range []string{"upstream exploded", "resp_123", "server_error"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("GenerateContent() err = %q, want it to mention %q", err, want)
+				}
+			}
+			var delivered string
+			for i, resp := range got {
+				delivered += allText(resp.Content)
+				// Nothing handed over may say the turn ended well.
+				if resp.TurnComplete {
+					t.Errorf("response %d has TurnComplete = true, want the failure to end the turn instead", i)
+				}
+			}
+			if delivered != tc.wantDelivered {
+				t.Errorf("text delivered before the failure = %q, want %q", delivered, tc.wantDelivered)
+			}
+		})
+	}
+}
+
+// TestModel_FailedStatus_PathsAgree pins the invariant the fix exists for: one
+// failed body reads the same whole as it does at the end of a stream.
+func TestModel_FailedStatus_PathsAgree(t *testing.T) {
+	_, blocking := runBlocking(t, bodyFailedPartial)
+	_, streamed := runStream(t, evCreated, evDelta1, `{"type":"response.completed","response":`+bodyFailedPartial+`}`)
+	if blocking == nil || streamed == nil {
+		t.Fatalf("both paths must fail: blocking err = %v, streamed err = %v", blocking, streamed)
+	}
+	if blocking.Error() != streamed.Error() {
+		t.Errorf("paths disagree:\n blocking = %q\n streamed = %q", blocking, streamed)
+	}
+}
+
 func TestModel_GenerateStream_Metadata(t *testing.T) {
 	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -137,15 +242,16 @@ func TestModel_GenerateStream_Metadata(t *testing.T) {
 }
 
 // Synthetic Responses-API stream events shared by the streaming tests, carrying
-// only the fields those tests assert on.
+// only the fields those tests assert on, plus the status every real response
+// object states. evCompletedNoStatus is the deliberate exception.
 const (
-	evCreated   = `{"type":"response.created","response":{"id":"resp_1","model":"stream-model"}}`
+	evCreated   = `{"type":"response.created","response":{"id":"resp_1","model":"stream-model","status":"in_progress"}}`
 	evDelta1    = `{"type":"response.output_text.delta","delta":"hel"}`
 	evDelta2    = `{"type":"response.output_text.delta","delta":"lo"}`
 	evCompleted = `{"type":"response.completed","response":` + bodyCompleted + `}`
-	evMaxTokens = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"max_output_tokens"}}}`
-	evFiltered  = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"content_filter"}}}`
-	evFailed    = `{"type":"response.failed","response":{"id":"resp_1","model":"stream-model","error":{"message":"upstream exploded"}}}`
+	evMaxTokens = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`
+	evFiltered  = `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"}}}`
+	evFailed    = `{"type":"response.failed","response":` + bodyFailedEmpty + `}`
 	evError     = `{"type":"error","message":"stream blew up"}`
 	evReasoning = `{"type":"response.reasoning_text.delta","delta":"thinking"}`
 	// A completed event restating the reasoning alongside the answer, as a
@@ -161,15 +267,33 @@ const (
 	// "response.output_item.added" having introduced the item.
 	evArgsDoneUnnamed = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{\"city\":\"SF\"}"}`
 
+	// What a compatible endpoint that does not implement "status" sends. Nothing
+	// contradicts the event's name, so it must still read as a clean stop.
+	evCompletedNoStatus = `{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`
+
+	// A failure announced before a single delta. It does not latch, so a
+	// terminal event replaces it; it stands only when nothing follows.
+	evCreatedFailed = `{"type":"response.created","response":` + bodyFailedEmpty + `}`
+
 	// The blocking-mode body carrying exactly the output evCompleted does, so
 	// the two paths can be compared on the same model output.
-	bodyCompleted = `{"id":"resp_1","model":"stream-model","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[{"type":"message","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5,"top_logprobs":[{"token":"hello","logprob":-0.5}]}]}]}]}`
+	bodyCompleted = `{"id":"resp_1","model":"stream-model","status":"completed","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[{"type":"message","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5,"top_logprobs":[{"token":"hello","logprob":-0.5}]}]}]}]}`
 	// bodyCompleted with the reasoning the model streamed restated ahead of the
 	// answer.
-	bodyCompletedReasoning = `{"id":"resp_1","model":"stream-model","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"thinking"}]},{"type":"message","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5,"top_logprobs":[{"token":"hello","logprob":-0.5}]}]}]}]}`
+	bodyCompletedReasoning = `{"id":"resp_1","model":"stream-model","status":"completed","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"thinking"}]},{"type":"message","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.5,"top_logprobs":[{"token":"hello","logprob":-0.5}]}]}]}]}`
 	// The blocking-mode bodies for the streams asserted on above.
 	bodyFiltered = `{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}`
-	bodyToolCall = `{"id":"resp_1","model":"stream-model","output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"}]}`
+	bodyToolCall = `{"id":"resp_1","model":"stream-model","status":"completed","output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"}]}`
+
+	// A failure as HTTP 200 with status "failed": once with nothing to show,
+	// once with text a stream would already have delivered. Served whole or
+	// carried by a terminal event, which is how the two paths meet.
+	bodyFailedEmpty   = `{"id":"resp_123","model":"stream-model","status":"failed","error":{"code":"server_error","message":"upstream exploded"},"output":[]}`
+	bodyFailedPartial = `{"id":"resp_123","model":"stream-model","status":"failed","error":{"code":"server_error","message":"upstream exploded"},"output":[{"type":"message","content":[{"type":"output_text","text":"hel"}]}]}`
+
+	// The same failure with no status at all, so only the error object says it
+	// is not an answer.
+	bodyFailedNoStatus = `{"id":"resp_123","model":"stream-model","error":{"code":"server_error","message":"upstream exploded"},"output":[{"type":"message","content":[{"type":"output_text","text":"hel"}]}]}`
 )
 
 // incompleteEvent builds a "response.incomplete" whose response carries the
@@ -368,6 +492,25 @@ func TestModel_GenerateStream_TurnComplete(t *testing.T) {
 			name:             "trailing response.created does not reopen the turn",
 			events:           []string{evCreated, evDelta1, evDelta2, evMaxTokens, evCreated},
 			wantFinishReason: genai.FinishReasonMaxTokens,
+			wantModelVersion: "stream-model",
+			wantText:         "hello",
+		},
+		{
+			// Reading the status must not cost a provider that omits it its
+			// clean stop.
+			name:             "terminal body states no status",
+			events:           []string{evCreated, evDelta1, evDelta2, evCompletedNoStatus},
+			wantFinishReason: genai.FinishReasonStop,
+			wantModelVersion: "stream-model",
+			wantText:         "hello",
+		},
+		{
+			// A failure the turn then recovers from. Only a terminal event
+			// settles how a turn ended, so this is an answer.
+			name:             "failure announced at creation, then completed",
+			events:           []string{evCreatedFailed, evDelta1, evDelta2, evCompleted},
+			wantFinishReason: genai.FinishReasonStop,
+			wantLogprobs:     helloLogprobs,
 			wantModelVersion: "stream-model",
 			wantText:         "hello",
 		},
@@ -2112,7 +2255,7 @@ func TestModel_GenerateStream_NoOutputItems(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("stream emitted %d responses, want none", len(got))
 	}
-	const filteredBody = `{"id":"resp_1","model":"stream-model","incomplete_details":{"reason":"content_filter"}}`
+	const filteredBody = `{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"}}`
 	if _, err := runBlocking(t, filteredBody); !errors.Is(err, ErrNoOutputItems) {
 		t.Errorf("blocking err = %v, want %v", err, ErrNoOutputItems)
 	}
