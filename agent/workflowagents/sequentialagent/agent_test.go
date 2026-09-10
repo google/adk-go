@@ -393,6 +393,19 @@ func (m *mockInvocationContext) Done() <-chan struct{}       { return m.ctx.Done
 func (m *mockInvocationContext) Err() error                  { return m.ctx.Err() }
 func (m *mockInvocationContext) Value(key any) any           { return m.ctx.Value(key) }
 
+func (m *mockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	cp := *m
+	if d != nil {
+		if d.Agent != nil {
+			cp.agent = *d.Agent
+		}
+		if d.Context != nil {
+			cp.ctx = *d.Context
+		}
+	}
+	return &cp
+}
+
 func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	subAgent1 := newCustomAgent(t, 1)
 	subAgent2 := newCustomAgent(t, 2)
@@ -448,6 +461,8 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 		if !hasTaskCompleted {
 			t.Errorf("sub-agent 1 does not have task_completed tool injected after RunLive")
 		}
+	} else {
+		t.Fatalf("subAgent1 is not an llminternal.Agent")
 	}
 }
 
@@ -503,6 +518,59 @@ func TestSequentialAgent_RunLive_NestedSequentialInjection(t *testing.T) {
 		if !hasTaskCompleted {
 			t.Errorf("nested sub-agent B does not have task_completed tool injected after RunLive")
 		}
+	} else {
+		t.Fatalf("subAgentB is not an llminternal.Agent")
+	}
+}
+
+func TestSequentialAgent_RunLive_NonLiveCompositeNotMutated(t *testing.T) {
+	subAgentA := newCustomAgent(t, 1)
+	subAgentB := newCustomAgent(t, 2)
+
+	// A composite agent that does not implement liveRunner (standard agent without RunLive)
+	nonLiveComposite, err := agent.New(agent.Config{
+		Name:      "non_live_composite",
+		SubAgents: []agent.Agent{subAgentB},
+	})
+	if err != nil {
+		t.Fatalf("failed to create non_live_composite agent: %v", err)
+	}
+
+	outerSeq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "outer_seq",
+			SubAgents: []agent.Agent{subAgentA, nonLiveComposite},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create outer sequential agent: %v", err)
+	}
+
+	invCtx := &mockInvocationContext{
+		agent:        outerSeq,
+		invocationID: "test_id",
+		ctx:          t.Context(),
+	}
+
+	liveAgent, ok := outerSeq.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	_, _, _ = liveAgent.RunLive(invCtx)
+
+	// subAgentB inside nonLiveComposite must NOT have task_completed injected!
+	if llmAgentB, ok := subAgentB.(llminternal.Agent); ok {
+		state := llminternal.Reveal(llmAgentB)
+		for _, tool := range state.Tools {
+			if tool.Name() == "task_completed" {
+				t.Errorf("nested sub-agent B inside non-live composite must not have task_completed tool injected")
+			}
+		}
+	} else {
+		t.Fatalf("subAgentB is not an llminternal.Agent")
 	}
 }
 
@@ -586,7 +654,12 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	if err := sess.Send(req1); err != nil {
 		t.Fatalf("failed to Send to sess: %v", err)
 	}
-	gotReq1 := <-sendChan1
+	var gotReq1 agent.LiveRequest
+	select {
+	case gotReq1 = <-sendChan1:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for request to subSess1: %v", ctx.Err())
+	}
 	if gotReq1.Content.Parts[0].Text != "to agent 1" {
 		t.Errorf("expected request to subSess1, got: %v", gotReq1)
 	}
@@ -597,7 +670,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		t.Fatalf("expected second event, got ok=%v, err=%v", ok, err2)
 	}
 	if ev2.Author != "sub_agent_2" {
-		t.Errorf("expected event from sub_agent_2, got %s", ev2.Author)
+		t.Fatalf("expected event from sub_agent_2, got %s", ev2.Author)
 	}
 
 	// Now seqSess should route to subSess2
@@ -605,7 +678,12 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	if err := sess.Send(req2); err != nil {
 		t.Fatalf("failed to Send to sess: %v", err)
 	}
-	gotReq2 := <-sendChan2
+	var gotReq2 agent.LiveRequest
+	select {
+	case gotReq2 = <-sendChan2:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for request to subSess2: %v", ctx.Err())
+	}
 	if gotReq2.Content.Parts[0].Text != "to agent 2" {
 		t.Errorf("expected request to subSess2, got: %v", gotReq2)
 	}
@@ -717,7 +795,12 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 	if err := sess.Send(req1); err != nil {
 		t.Fatalf("failed to Send to sess: %v", err)
 	}
-	gotReq1 := <-sendChan1
+	var gotReq1 agent.LiveRequest
+	select {
+	case gotReq1 = <-sendChan1:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for request to subSess1: %v", ctx.Err())
+	}
 	if gotReq1.Content.Parts[0].Text != "to agent 1" {
 		t.Errorf("expected request to subSess1, got: %v", gotReq1)
 	}
@@ -728,7 +811,7 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 		t.Fatalf("expected second event, got ok=%v, err=%v", ok, err2)
 	}
 	if ev2.Author != "sub_agent_2" {
-		t.Errorf("expected event from sub_agent_2, got %s", ev2.Author)
+		t.Fatalf("expected event from sub_agent_2, got %s", ev2.Author)
 	}
 
 	// Route to subSess2
@@ -736,7 +819,12 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 	if err := sess.Send(req2); err != nil {
 		t.Fatalf("failed to Send to sess: %v", err)
 	}
-	gotReq2 := <-sendChan2
+	var gotReq2 agent.LiveRequest
+	select {
+	case gotReq2 = <-sendChan2:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for request to subSess2: %v", ctx.Err())
+	}
 	if gotReq2.Content.Parts[0].Text != "to agent 2" {
 		t.Errorf("expected request to subSess2, got: %v", gotReq2)
 	}
