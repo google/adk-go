@@ -293,7 +293,7 @@ func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
 //
 // Removing the circularity is not the same as buying independence, and the oracle
 // does not claim the second — see readable, which is a frozen copy of recoverable
-// making the same three structural choices. So this catches a future weakening of
+// making the same structural choices, re-frozen whenever it moves. So this catches a future weakening of
 // recoverable, and not a blind spot the two share today.
 func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
 	const user = "alice@example.test"
@@ -345,14 +345,19 @@ func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
 
 // readable is the test's own oracle for "an attacker can read a secret out of this
 // string". It is a frozen COPY of recoverable, not an independent one: it makes
-// the same three structural choices — split on the literal marker, decode then
+// the same three structural choices — exclude the marker by position, decode then
 // fold, the same unescapeJSON. So it catches a future weakening of recoverable,
 // which is worth having, and it cannot catch a blind spot the two share today.
 // \U0040 is one they share: unescapeJSON matches the introducer case-sensitively
 // while redact folds case, and neither this nor recoverable folds before decoding.
 //
-// Markers are dropped rather than searched, since text redact itself inserted is
-// not something the service disclosed. Decoding runs to a fixpoint under an
+// Being a copy is the whole contract, so it has to be re-frozen when the original
+// moves. It split on the marker while recoverable split, and went on splitting for
+// a commit after recoverable stopped — which cost it exactly the case that commit
+// was about, since a value spanning a marker lands whole in no part.
+//
+// Marker bytes are excused rather than searched, since text redact itself inserted
+// is not something the service disclosed. Decoding runs to a fixpoint under an
 // explicit bound: relying on the production loop's termination argument here would
 // hand the oracle the same assumption it is supposed to be testing.
 func readable(t *testing.T, x string, secrets []string) bool {
@@ -368,12 +373,37 @@ func readable(t *testing.T, x string, secrets []string) bool {
 		t.Fatalf("decoding %q never reached a fixpoint in 64 passes", x)
 		return ""
 	}
-	for _, part := range strings.Split(x, "[redacted]") {
-		lp, ld := strings.ToLower(part), strings.ToLower(decode(part))
+	const marker = "[redacted]"
+	for _, text := range []string{strings.ToLower(x), strings.ToLower(decode(x))} {
+		ours := make([]bool, len(text))
+		for i := 0; ; {
+			j := strings.Index(text[i:], marker)
+			if j < 0 {
+				break
+			}
+			for k := i + j; k < i+j+len(marker); k++ {
+				ours[k] = true
+			}
+			i += j + len(marker)
+		}
 		for _, v := range secrets {
 			for _, form := range []string{strings.ToLower(v), strings.ToLower(decode(v))} {
-				if form != "" && (strings.Contains(lp, form) || strings.Contains(ld, form)) {
-					return true
+				if form == "" {
+					continue
+				}
+				for i := 0; i+len(form) <= len(text); {
+					j := strings.Index(text[i:], form)
+					if j < 0 {
+						break
+					}
+					at, all := i+j, true
+					for k := at; k < at+len(form); k++ {
+						all = all && ours[k]
+					}
+					if !all {
+						return true
+					}
+					i = at + 1
 				}
 			}
 		}

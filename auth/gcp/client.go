@@ -115,10 +115,22 @@ type APIError struct {
 	//
 	// Removal is best effort, and the guarantee is narrower than removal: no value
 	// this package was given is recoverable from Body by this package's own
-	// decoder. A value can still be partly legible. Where the UserID is a
-	// substring of the ContinueURI and the service spells the URI with escapes the
-	// scrub cannot match, the UserID's marker lands inside the URI and the rest of
-	// the URI reads plainly around it, as "my-[redacted].test/oauth/callback".
+	// decoder, unless the value is spelled entirely out of the characters of
+	// "[redacted]" and laid out as a run of them.
+	//
+	// That carve-out is deliberate. The marker is text this package writes, so a
+	// value found only inside one was never disclosed by the service, and counting
+	// it would suppress every response — a UserID of "e" occurs in "[redacted]".
+	// It cannot reach the values this path actually carries: the excused class is
+	// the substrings of "[redacted][redacted]…", which is eight distinct letters
+	// with no "@", ":" or "/" among them, so no address and no redirect URI is in
+	// it. A service can put such a marker in its own body and be excused the same
+	// way, since there is no telling its markers from ours.
+	//
+	// A value can also be partly legible. Where the UserID is a substring of the
+	// ContinueURI and the service spells the URI with escapes the scrub cannot
+	// match, the UserID's marker lands inside the URI and the rest of the URI
+	// reads plainly around it, as "my-[redacted].test/oauth/callback".
 	//
 	// It can also be none of the response. Where the identifiers could not be
 	// shown to be gone, Body is a fixed sentence saying so and bears no relation
@@ -243,9 +255,14 @@ type Request struct {
 	// The segment rule is what keeps routing and normalization from disagreeing:
 	// the routing pattern above is matched on the name as given, and a name that
 	// normalizes to a different one would be routed by one and served as the
-	// other. Both rules moved relative to v2.3.0, in opposite directions: the
-	// colon was rejected there and is accepted here, and those segment shapes
-	// were accepted there and are rejected here.
+	// other.
+	//
+	// Against v2.3.0, which took ^[A-Za-z0-9._~/-]+$ and refused any name
+	// containing "..", four shapes moved and one did not. Newly refused: a
+	// trailing slash, a doubled slash, and a "." segment. Newly accepted: the
+	// colon, and ".." INSIDE a segment, so projects/example..com/... is a name
+	// v2.3.0 refused and this one takes. Unchanged: a ".." segment was refused
+	// there by that substring test and is refused here by the segment rule.
 	Resource string
 	// UserID is the acting end user's identity. Required.
 	UserID string
