@@ -125,7 +125,8 @@ type A2AConfig struct {
 	// If no callback is provided, the default behavior is to make a CancelTask RPC request.
 	// During streaming, if Run is canceled before task information arrives, it may wait up to five seconds
 	// for that information, bounded by the caller's deadline. CancelTask uses the remainder of that budget
-	// when available; otherwise, it gets a new detached five-second timeout.
+	// if at least 100 milliseconds remain; otherwise, it gets a new detached five-second timeout.
+	// This fallback can extend total cleanup time beyond the shared budget and the caller's deadline.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 

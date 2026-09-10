@@ -321,7 +321,8 @@ type A2AConfig struct {
 	// If no callback is provided, the default behavior is to make a CancelTask RPC request.
 	// During streaming, if Run is canceled before task information arrives, it may wait up to five seconds
 	// for that information, bounded by the caller's deadline. CancelTask uses the remainder of that budget
-	// when available; otherwise, it gets a new detached five-second timeout.
+	// if at least 100 milliseconds remain; otherwise, it gets a new detached five-second timeout.
+	// This fallback can extend total cleanup time beyond the shared budget and the caller's deadline.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
@@ -371,8 +372,12 @@ type a2aAgent struct {
 }
 
 // remoteTaskCleanupTimeout sets the shared streaming cleanup budget and the
-// timeout for a detached default cancel RPC when no shared budget remains.
+// timeout for a detached default cancel RPC when insufficient shared budget remains.
 const remoteTaskCleanupTimeout = 5 * time.Second
+
+// remoteTaskCleanupMinRemaining avoids starting a cancel RPC with a nearly expired
+// context. This is a best-effort floor, not a guarantee of network completion.
+const remoteTaskCleanupMinRemaining = 100 * time.Millisecond
 
 // remoteTaskCleanupBudget detaches cancellation from the invocation while
 // preserving its deadline. The timeout starts lazily so normal long-running
@@ -613,7 +618,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		streamCtx = newRemoteTaskStreamContext(ctx, remoteTaskCleanupTimeout)
 		cleanupTargetKnown := false
-		directResponseReceived := false
+		finalMessageReceived := false
 		for a2aEvent, a2aErr := range sender.SendStreamingMessage(streamCtx, req) {
 			if a2aEvent != nil {
 				if rememberCleanupTarget(a2aEvent) {
@@ -624,13 +629,13 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				}
 				if msg, ok := a2aEvent.(*a2a.Message); ok && msg != nil {
 					lastCleanupTarget = nil
-					directResponseReceived = true
+					finalMessageReceived = true
 					streamCtx.stopWaiting()
 				}
 			}
 			if ctx.Err() != nil {
 				streamCtx.cleanupBudget.start()
-				if cleanupTargetKnown || directResponseReceived || a2aErr != nil {
+				if cleanupTargetKnown || finalMessageReceived || a2aErr != nil {
 					return
 				}
 				continue
@@ -676,7 +681,7 @@ func contextHasUsableTime(ctx context.Context) bool {
 		return false
 	}
 	deadline, ok := ctx.Deadline()
-	return !ok || time.Until(deadline) > 0
+	return !ok || time.Until(deadline) >= remoteTaskCleanupMinRemaining
 }
 
 func cleanupRemoteTask(
