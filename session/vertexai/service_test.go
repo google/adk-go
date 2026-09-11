@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,6 +235,7 @@ func deleteSessionRPC(ctx context.Context, v session.Service, appName, sessionID
 func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), error) {
 	filePath := filepath.Join("testdata", filename)
 	var grpcOpts []grpc.DialOption
+	var clientOpts []option.ClientOption
 	var teardown func() error
 
 	if os.Getenv("UPDATE_REPLAYS") == "true" {
@@ -251,16 +253,16 @@ func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), 
 		if err != nil {
 			return nil, nil, err
 		}
-		grpcOpts = rep.DialOptions()
+		conn, err := rep.Connection()
+		if err != nil {
+			return nil, nil, err
+		}
+		clientOpts = append(clientOpts, option.WithGRPCConn(conn))
 		teardown = rep.Close
 	}
 
-	var clientOpts []option.ClientOption
 	for _, opt := range grpcOpts {
 		clientOpts = append(clientOpts, option.WithGRPCDialOption(opt))
-		if os.Getenv("UPDATE_REPLAYS") != "true" {
-			clientOpts = append(clientOpts, option.WithoutAuthentication())
-		}
 	}
 
 	return clientOpts, func() {
@@ -301,5 +303,23 @@ func Test_trimTempDeltaState_PreservesInputEvent(t *testing.T) {
 	}
 	if trimmed.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on trimmed event, got: %v", trimmed.Actions.StateDelta)
+	}
+}
+
+func TestSetupReplay_InitializesWithoutExternalNetwork(t *testing.T) {
+	t.Setenv("UPDATE_REPLAYS", "")
+	opts, teardown, err := setupReplay(t, "Test_vertexaiService_Create_full_key.replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(teardown)
+	opts = append(opts, option.WithGRPCDialOption(grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return nil, errors.New("network disabled during replay")
+	})))
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	_, err = newVertexAiClient(ctx, Location, ProjectID, EngineID, opts...)
+	if err != nil {
+		t.Fatalf("replay client must initialize without a network connection: %v", err)
 	}
 }
