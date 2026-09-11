@@ -19,14 +19,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
+	"google.golang.org/api/option"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -411,5 +416,47 @@ func TestStreamWriter_SendError(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErrMsg)
 			}
 		})
+	}
+}
+
+func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
+	ctx := context.Background()
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+
+	config := DefaultConfig()
+	config.RetryConfig.MaxRetries = 1
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	dead := &mockStream{sendErr: io.EOF, recvErr: io.EOF}
+	bp.streamWriter.stream = dead
+
+	if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "retry_probe"}}); err != nil {
+		t.Errorf("attempt 1 did not open a fresh stream: %v", err)
+	}
+	if got := atomic.LoadInt32(&dead.sendCount); got != 1 {
+		t.Errorf("the aborted stream was reused: Send called %d times on it, want 1", got)
 	}
 }
