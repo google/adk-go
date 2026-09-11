@@ -24,16 +24,28 @@ import (
 
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
 type ArtifactsAPIController struct {
 	artifactService artifact.Service
+	authorizer      authz.Authorizer
 }
 
 // NewArtifactsAPIController creates an ArtifactsAPIController backed by the given artifact service.
 func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
-	return &ArtifactsAPIController{artifactService: artifactService}
+	ac := &ArtifactsAPIController{
+		artifactService: artifactService,
+		authorizer:      authz.NewNoop(),
+	}
+	return ac
+}
+
+// WithAuthorizer sets the authorizer for the controller. Can be used as an option
+// in [NewArtifactsAPIController].
+func (c *ArtifactsAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
 }
 
 // serviceUnavailable writes a 503 and reports true when no artifact service is
@@ -68,6 +80,13 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
@@ -103,6 +122,13 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -149,6 +175,13 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -198,6 +231,13 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)

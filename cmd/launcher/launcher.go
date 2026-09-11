@@ -25,6 +25,8 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/telemetry"
@@ -81,6 +83,19 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+
+	// Authenticator, when non-nil, authenticates inbound requests to every restapi
+	// endpoint except the public ones (like /health and /version): a request
+	// without valid credentials is answered 401, and an authenticated
+	// request carries the caller's identity on its context. Providers back different schemes (API key,
+	// bearer token, ...); see the [authn] package. Nil, the default, uses [authn.NewNoop]
+	Authenticator authn.Authenticator
+
+	// Authorizer provides a way to check whether the calling user and user from payload match.
+	// You can leave nil if you accept any combination. You will get [authz.Noop] as a default.
+	// You can also use [authz.Strict] which will ensure that the calling user and the
+	// user from the payload are matching exactly
+	Authorizer authz.Authorizer
 
 	// Compaction enables context compaction for the sessions the
 	// runners created here drive, replacing older events with summaries. Nil,
