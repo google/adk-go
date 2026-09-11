@@ -83,7 +83,7 @@ func (v *vertexAIClient) addSession(ctx context.Context, s session.Session, star
 	req := &aiplatformpb.GenerateMemoriesRequest{
 		Parent: v.parent,
 		Source: &aiplatformpb.GenerateMemoriesRequest_VertexSessionSource_{VertexSessionSource: vss},
-		Scope:  createUserScope(s.UserID()),
+		Scope:  createScope(s.AppName(), s.UserID()),
 	}
 
 	op, err := v.client.GenerateMemories(ctx, req)
@@ -113,7 +113,7 @@ func (v *vertexAIClient) searchMemory(ctx context.Context, req *memory.SearchReq
 				},
 			},
 			Parent: v.parent,
-			Scope:  createUserScope(req.UserID),
+			Scope:  createScope(req.AppName, req.UserID),
 		},
 	)
 	if err != nil {
@@ -133,7 +133,15 @@ func (v *vertexAIClient) searchMemory(ctx context.Context, req *memory.SearchReq
 	return res, nil
 }
 
-// Scope is used to structure the information in MemoryBank. Here we use only the user scope
-func createUserScope(userID string) map[string]string {
-	return map[string]string{"user_id": userID}
+// createScope builds the MemoryBank scope that partitions memories by
+// (app_name, user_id). Memory Bank matches the scope map exactly on retrieval,
+// so including app_name keeps each application's memories in its own partition;
+// without it, applications sharing a MemoryBank for the same user write into and
+// read from a single shared partition. This is a namespacing convention rather
+// than an authenticated confidentiality boundary — on the REST path the app name
+// comes from the request and the handler does not authenticate the caller — and
+// it matches the (app_name, user_id) keying used by the in-memory memory service
+// (memory/inmemory.go) and the adk-python MemoryBank implementation.
+func createScope(appName, userID string) map[string]string {
+	return map[string]string{"app_name": appName, "user_id": userID}
 }
