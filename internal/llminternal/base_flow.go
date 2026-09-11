@@ -937,6 +937,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
 		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			if resp == nil && err == nil {
+				// Third-party model implementations may yield an empty response.
+				continue
+			}
 			response := newResponseWithEventID(ctx, resp)
 			lastResponse = *response
 			lastErr = err
