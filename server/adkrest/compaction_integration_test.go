@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -144,6 +146,7 @@ func newCompactionServer(t *testing.T, m model.LLM, sessionService session.Servi
 		SessionService: sessionService,
 		AgentLoader:    agent.NewSingleLoader(root),
 		Compaction:     cfg,
+		Authenticator:  authn.NewCustom(func(r *http.Request) (*authn.Caller, error) { return &authn.Caller{UserID: "u"}, nil }),
 	})
 	if err != nil {
 		t.Fatalf("adkrest.NewServer() error = %v", err)
