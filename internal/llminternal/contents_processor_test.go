@@ -31,6 +31,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -38,6 +39,67 @@ import (
 
 type testModel struct {
 	model.LLM
+}
+
+func TestContentsRequestProcessor_PayloadIsolation(t *testing.T) {
+	const agentName = "testAgent"
+	timestamp := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.FixedZone("test", 3600))
+	newContents := func() []*genai.Content {
+		return []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-1", Name: "load_memory",
+				Args: map[string]any{"filters": map[string]any{"tags": []string{"original"}}},
+			}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID: "call-1", Name: "load_memory",
+				Response: map[string]any{
+					"result": map[string]any{"tags": []any{"original"}},
+					// loadmemorytool returns entries directly, including time.Time values.
+					"memories": []memory.Entry{{
+						Timestamp:      timestamp,
+						Content:        genai.NewContentFromText("original", "user"),
+						CustomMetadata: map[string]any{"source": map[string]any{"name": "original"}},
+					}},
+				},
+			}}}},
+		}
+	}
+	original := newContents()
+	var events []*session.Event
+	for _, content := range original {
+		events = append(events, &session.Event{Author: agentName, LLMResponse: model.LLMResponse{Content: content}})
+	}
+	a := utils.Must(llmagent.New(llmagent.Config{Name: agentName, Model: &testModel{}}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: a, Session: &fakeSession{events: events},
+	})
+	requests := []*model.LLMRequest{{}, {}}
+	for _, req := range requests {
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if diff := cmp.Diff(original, req.Contents); diff != "" {
+			t.Fatalf("request contents mismatch (-want +got):\n%s", diff)
+		}
+	}
+	copied := requests[0].Contents
+	copied[0].Parts[0].FunctionCall.Args["filters"].(map[string]any)["tags"].([]string)[0] = "changed"
+	response := copied[1].Parts[0].FunctionResponse.Response
+	response["result"].(map[string]any)["tags"].([]any)[0] = "changed"
+	memories := response["memories"].([]memory.Entry)
+	if memories[0].Timestamp != timestamp {
+		t.Errorf("timestamp = %v, want exact value %v", memories[0].Timestamp, timestamp)
+	}
+	memories[0].Timestamp = timestamp.Add(time.Hour)
+	memories[0].Content.Parts[0].Text = "changed"
+	memories[0].CustomMetadata["source"].(map[string]any)["name"] = "changed"
+	for name, got := range map[string][]*genai.Content{"session": original, "other request": requests[1].Contents} {
+		if diff := cmp.Diff(newContents(), got); diff != "" {
+			t.Errorf("%s contents mutated (-want +got):\n%s", name, diff)
+		}
+	}
 }
 
 // Test behavior around Agent's IncludeContents.

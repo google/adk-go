@@ -230,7 +230,10 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(utils.Content(ev))
+		content, err := clone(utils.Content(ev))
+		if err != nil {
+			return nil, fmt.Errorf("clone event content: %w", err)
+		}
 		if content == nil {
 			continue
 		}
