@@ -149,18 +149,34 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	for _, subAgent := range subAgents {
 		if llmAgent, ok := subAgent.(llminternal.Agent); ok {
 			state := llminternal.Reveal(llmAgent)
-			hasTaskCompleted := false
-			for _, t := range state.Tools {
-				if t.Name() == "task_completed" {
-					hasTaskCompleted = true
-					break
+			// Reveal returns the sub-agent's shared, persistent State, so
+			// concurrent live sessions driving one agent tree would race
+			// this read-then-append on Tools/Instruction. state.LiveModeInjection
+			// runs it once per agent and gives every other RunLive caller a
+			// happens-before edge before they read Tools.
+			state.LiveModeInjection.Do(func() {
+				hasTaskCompleted := false
+				for _, t := range state.Tools {
+					// llmagent.New assigns the caller's cfg.Tools slice
+					// without validating it (#1490), so a nil element can
+					// reach here; skip an untyped nil. A typed nil may panic
+					// in t.Name(), depending on its implementation. When it
+					// does, LiveModeInjection.Do does not latch the panic, so
+					// the next call retries the scan.
+					if t == nil {
+						continue
+					}
+					if t.Name() == "task_completed" {
+						hasTaskCompleted = true
+						break
+					}
 				}
-			}
-			if !hasTaskCompleted {
-				state.Tools = append(state.Tools, taskCompletedTool)
-				instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-				state.Instruction += instructionSuffix
-			}
+				if !hasTaskCompleted {
+					state.Tools = append(state.Tools, taskCompletedTool)
+					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
+					state.Instruction += instructionSuffix
+				}
+			})
 		}
 	}
 
