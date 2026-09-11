@@ -635,3 +635,44 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 		t.Errorf("expected json payload at the end to contain 'hello_intent', got %q", receivedInput)
 	}
 }
+
+// A *genai.Part element can be nil
+// userInput must skip those rather than dereference them.
+func TestWorkflowRunSkipsNilUserContentParts(t *testing.T) {
+	hi := &genai.Part{Text: "hi"}
+
+	for _, tc := range []struct {
+		name  string
+		parts []*genai.Part
+		want  any
+	}{
+		{"leading", []*genai.Part{nil, hi}, "hi"},
+		{"middle", []*genai.Part{hi, nil, hi}, "hihi"},
+		{"trailing", []*genai.Part{hi, nil}, "hi"},
+		{"only", []*genai.Part{nil}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			echo := NewFunctionNode("echo", func(ctx agent.Context, input any) (any, error) {
+				return input, nil
+			}, defaultNodeConfig)
+			w := mustNew(t, Chain(Start, echo))
+
+			mockCtx := newMockCtx(t)
+			mockCtx.userContent = &genai.Content{Parts: tc.parts}
+
+			var got any
+			for ev, err := range w.Run(mockCtx) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if ev.Output != nil {
+					got = ev.Output
+				}
+			}
+
+			if got != tc.want {
+				t.Errorf("seed input = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

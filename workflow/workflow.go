@@ -339,7 +339,7 @@ func userInput(ctx agent.Context) any {
 	}
 	var sb strings.Builder
 	for _, part := range uc.Parts {
-		if part.Text != "" {
+		if part != nil && part.Text != "" {
 			sb.WriteString(part.Text)
 		}
 	}
