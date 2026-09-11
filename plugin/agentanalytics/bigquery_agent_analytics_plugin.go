@@ -102,6 +102,10 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 		err = tableRef.Create(ctx, &bq.TableMetadata{
 			Schema: EventsSchema(),
+			TimePartitioning: &bq.TimePartitioning{
+				Field: "timestamp",
+				Type:  bq.DayPartitioningType,
+			},
 			Clustering: &bq.Clustering{
 				Fields: config.ClusteringFields,
 			},
@@ -129,6 +133,26 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 
 	// Helper closure func to construct log events
 	logEvent := func(ctx context.Context, eventType string, content any, extraAttrs map[string]any) {
+		if len(config.EventDenylist) > 0 {
+			for _, d := range config.EventDenylist {
+				if d == eventType {
+					return
+				}
+			}
+		}
+		if len(config.EventAllowlist) > 0 {
+			allowed := false
+			for _, a := range config.EventAllowlist {
+				if a == eventType {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return
+			}
+		}
+
 		row := make(map[string]any)
 		row["timestamp"] = time.Now()
 		row["event_type"] = eventType
