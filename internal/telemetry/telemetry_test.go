@@ -271,7 +271,7 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIUsageOutputTokensKey:     "35",
 				genAIUsageCacheReadInputTokens:        "5",
 				genAIUsageReasoningOutputTokens:       "15",
-				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
+				semconv.GenAIResponseFinishReasonsKey: "[\"stop\"]",
 				gcpVertexAgentInvocationID:            invocationID,
 			},
 		},
@@ -287,9 +287,10 @@ func TestGenerateContent(t *testing.T) {
 			wantName:   "generate_content test-model",
 			wantStatus: codes.Error,
 			wantAttrs: map[attribute.Key]string{
-				semconv.GenAIOperationNameKey: "generate_content",
-				semconv.GenAIRequestModelKey:  "test-model",
-				gcpVertexAgentInvocationID:    invocationID,
+				semconv.GenAIOperationNameKey:         "generate_content",
+				semconv.GenAIRequestModelKey:          "test-model",
+				semconv.GenAIResponseFinishReasonsKey: "[\"error\"]",
+				gcpVertexAgentInvocationID:            invocationID,
 			},
 		},
 	}
@@ -328,6 +329,83 @@ func TestGenerateContent(t *testing.T) {
 						t.Errorf("attribute %q: got %q, want %q", k, gotAttrs[k], v)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		response    *model.LLMResponse
+		err         error
+		want        string
+		wantMissing bool
+	}{
+		{
+			name:     "stop",
+			response: &model.LLMResponse{FinishReason: genai.FinishReasonStop},
+			want:     "stop",
+		},
+		{
+			name: "tool call",
+			response: &model.LLMResponse{
+				Content:      &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "lookup"}}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+			want: "tool_call",
+		},
+		{
+			name:     "length",
+			response: &model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens},
+			want:     "length",
+		},
+		{
+			name:     "safety error code",
+			response: &model.LLMResponse{FinishReason: genai.FinishReasonSafety, ErrorCode: "SAFETY"},
+			want:     "error",
+		},
+		{
+			name: "stream error",
+			response: &model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{{Text: "partial"}}},
+				Partial: true,
+			},
+			err:  errTest,
+			want: "error",
+		},
+		{
+			name: "stream error without response",
+			err:  errTest,
+			want: "error",
+		},
+		{
+			name:        "without response or error",
+			wantMissing: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exporter := setupTestTracer(t)
+			_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
+			TraceGenerateContentResult(span, TraceGenerateContentResultParams{Response: tc.response, Error: tc.err})
+			span.End()
+
+			spans := exporter.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("expected 1 span, got %d", len(spans))
+			}
+			attrs := attributesToMap(spans[0].Attributes)
+			if tc.wantMissing {
+				if _, ok := attrs[semconv.GenAIResponseFinishReasonsKey]; ok {
+					t.Errorf("finish reason is present, want it to be absent")
+				}
+				return
+			}
+			want := "[\"" + tc.want + "\"]"
+			if got := attrs[semconv.GenAIResponseFinishReasonsKey]; got != want {
+				t.Errorf("finish reason = %q, want %q", got, want)
 			}
 		})
 	}
