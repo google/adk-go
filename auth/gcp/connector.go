@@ -54,7 +54,7 @@ func (o connectorOperation) result(req Request) (outcome, error) {
 		if o.Response == nil {
 			return nil, errors.New("gcp: connector operation done but returned no credential")
 		}
-		return credOutcome{header: o.Response.Header, token: o.Response.Token}, nil
+		return credOutcome{header: o.Response.Header, token: o.Response.Token, expiresAt: parseExpireTime(o.Response.ExpireTime)}, nil
 	}
 	if md := o.Metadata; md != nil {
 		switch {
