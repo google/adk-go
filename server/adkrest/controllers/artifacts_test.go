@@ -26,8 +26,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
-	"google.golang.org/adk/v2/server/adkrest/authn"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/authn"
 )
 
 const (

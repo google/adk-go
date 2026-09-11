@@ -23,8 +23,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/artifact"
-	"google.golang.org/adk/v2/server/adkrest/authz"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.

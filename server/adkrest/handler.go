@@ -30,11 +30,11 @@ import (
 	"google.golang.org/adk/v2/internal/compactionvalidate"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/server/adkrest/authn"
-	"google.golang.org/adk/v2/server/adkrest/authz"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/routers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -78,11 +78,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 
-	authenticator := cfg.Authenticator
-	if authenticator == nil {
-		authenticator = authn.NewNoop()
-	}
-
 	authorizer := cfg.Authorizer
 	if authorizer == nil {
 		authorizer = &authz.Noop{}
@@ -117,6 +112,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
 		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+	}
+
+	authenticator := cfg.Authenticator
+	if authenticator == nil {
+		authenticator = authn.NewNoop()
 	}
 
 	setupRouter(router, authenticator, subrouters...)

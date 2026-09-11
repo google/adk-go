@@ -24,9 +24,9 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/server/adkrest/authz"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 

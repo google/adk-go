@@ -32,7 +32,7 @@ import (
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest"
-	"google.golang.org/adk/v2/server/adkrest/authn"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )

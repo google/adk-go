@@ -33,9 +33,9 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/server/adkrest/authn"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )

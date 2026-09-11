@@ -21,8 +21,8 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
-	"google.golang.org/adk/v2/server/adkrest/authn"
-	"google.golang.org/adk/v2/server/adkrest/authz"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 

@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/server/adkrest"
-	"google.golang.org/adk/v2/server/adkrest/authn"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )

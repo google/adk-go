@@ -21,7 +21,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/v2/server/adkrest/authn"
+	"google.golang.org/adk/v2/server/authn"
 )
 
 // DevPrefix is the path prefix ADK v2 clients use for developer-only

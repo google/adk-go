@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk/v2/server/adkrest/authn"
+	"google.golang.org/adk/v2/server/authn"
 )
 
 // Strict is an [Authorizer] which ensures exact match between

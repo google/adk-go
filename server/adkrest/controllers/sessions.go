@@ -28,8 +28,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/platform"
-	"google.golang.org/adk/v2/server/adkrest/authz"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 
