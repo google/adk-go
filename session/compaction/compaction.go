@@ -51,17 +51,42 @@
 // carried forward verbatim. Measured with eight arbitrary facts stated early
 // and probed after the events holding them had been summarized away, a prompt
 // without that instruction lost every one of them in five conversations out of
-// ten; the default lost none in nine. A custom PromptTemplate that drops the
-// instruction reintroduces the loss, and asking only for a "concise" summary is
-// enough to do it.
+// ten; the default lost no conversation entirely across nine, recalling 70 of
+// 72 probes. A custom PromptTemplate that drops the instruction reintroduces
+// the loss, and asking only for a "concise" summary is enough to do it.
 //
 // Carrying values forward costs summarizer calls, because larger summaries
-// cross TokenThreshold sooner: about twice as many in the same measurement.
-// Where that matters, or where the detail absolutely cannot be lost, keep it
-// out of the summary altogether. Compaction does not touch session state, and
-// an Instruction referencing state with a {key} placeholder is re-templated on
+// cross TokenThreshold sooner: about twice as many in one measurement, though
+// that figure was taken with a threshold small enough to be in the pathology
+// described below, so treat it as an upper bound rather than a typical cost.
+// Where it matters, or where the detail absolutely cannot be lost, keep it out
+// of the summary altogether. Compaction does not touch session state, and an
+// Instruction referencing state with a {key} placeholder is re-templated on
 // every request, so a value held there reaches the model however many passes
 // have run.
+//
+// # Choosing TokenThreshold
+//
+// TokenThreshold has to be a multiple of the summary size, not comparable to
+// it. Tail retention leaves a prompt of one summary plus the retained tail, so
+// if a summary on its own already exceeds the threshold, the prompt is over it
+// again the moment compaction finishes, and the next turn compacts again. That
+// costs a model call every turn and never gets under the line.
+//
+// The summaries behind the measurements above ran 1,000 to 4,000 characters,
+// so roughly 250 to 1,000 tokens, and the fact-retention instruction puts them
+// at the upper end. A threshold in the low thousands of tokens is therefore
+// close enough to the summary size to re-trigger constantly; at 700 the
+// measurement compacted on roughly nine turns in ten. Something in the tens of
+// thousands leaves room for the tail to be what crosses the line, which is the
+// case the strategy is for.
+//
+// Larger summaries also press against MaxToolContentChars. A rolling summary is
+// re-ingested as an ordinary turn, so before it was exempted it was trimmed by
+// that cap and the trimmed part was unrecoverable. Summaries around twice the
+// 2,000-character default were measured, so a custom LLMSummarizer that
+// reintroduces a per-item cap over its own prior summary reintroduces the loss
+// with it.
 //
 // # Enabling both together
 //
