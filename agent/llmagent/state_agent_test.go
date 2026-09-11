@@ -27,13 +27,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // FakeLLM is a mock implementation of model.LLM for testing.
@@ -70,7 +71,7 @@ type assertSessionParams struct {
 
 func assertSessionValues(
 	t *testing.T,
-	cctx agent.CallbackContext,
+	cctx agent.Context,
 	params *assertSessionParams,
 ) {
 	t.Helper()
@@ -107,7 +108,7 @@ func assertSessionValues(
 
 // --- Callbacks (Modified to use *testing.T) ---
 func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
-	return func(cctx agent.CallbackContext) (*genai.Content, error) {
+	return func(cctx agent.Context) (*genai.Content, error) {
 		if _, err := cctx.State().Get("before_agent_callback_state_key"); err == nil {
 			return genai.NewContentFromText("Sorry, I can only reply once.", genai.RoleModel), nil
 		}
@@ -125,8 +126,8 @@ func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
 	}
 }
 
-func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
-	return func(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+func beforeModelCallback(t *testing.T) func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+	return func(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 		if err := cctx.State().Set("before_model_callback_state_key", "before_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -141,8 +142,8 @@ func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmReques
 	}
 }
 
-func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
-	return func(cctx agent.CallbackContext, llmResponse *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func afterModelCallback(t *testing.T) func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+	return func(cctx agent.Context, llmResponse *model.LLMResponse, err error) (*model.LLMResponse, error) {
 		if err := cctx.State().Set("after_model_callback_state_key", "after_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -158,7 +159,7 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 }
 
 func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
-	return func(cctx agent.CallbackContext) (*genai.Content, error) {
+	return func(cctx agent.Context) (*genai.Content, error) {
 		if err := cctx.State().Set("after_agent_callback_state_key", "after_agent_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -174,7 +175,7 @@ func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
 }
 
 func TestAgentSessionLifecycle(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	testSessionService = session.InMemoryService()
 
 	// Setup Fake LLM
@@ -262,7 +263,7 @@ type WeatherResult struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-func GetWeather(ctx tool.Context, args WeatherArgs) (WeatherResult, error) {
+func GetWeather(ctx agent.Context, args WeatherArgs) (WeatherResult, error) {
 	// Simulate weather data
 	temperatures := []int{-10, -5, 0, 5, 10, 15, 20, 25, 30, 35}
 	conditions := []string{"sunny", "cloudy", "rainy", "snowy", "windy"}
@@ -290,7 +291,7 @@ type CalculationResult struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func Calculate(ctx tool.Context, args CalculationArgs) (CalculationResult, error) {
+func Calculate(ctx agent.Context, args CalculationArgs) (CalculationResult, error) {
 	operations := map[string]float64{
 		"add":      args.X + args.Y,
 		"subtract": args.X - args.Y,
@@ -340,7 +341,7 @@ type LogActivityResult struct {
 	err          error
 }
 
-func LogActivity(ctx tool.Context, params LogActivityParams) (LogActivityResult, error) {
+func LogActivity(ctx agent.Context, params LogActivityParams) (LogActivityResult, error) {
 	var activityLog []LogEntry
 	val, err := ctx.State().Get("activity_log")
 	if err == nil {
@@ -365,7 +366,7 @@ func LogActivity(ctx tool.Context, params LogActivityParams) (LogActivityResult,
 
 // --- Before Tool Callbacks ---
 
-func beforeToolAuditCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolAuditCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	fmt.Printf("🔍 AUDIT: About to call tool '%s' with args: %v\n", t.Name(), args)
 
 	var auditLog []map[string]any
@@ -386,7 +387,7 @@ func beforeToolAuditCallback(ctx tool.Context, t tool.Tool, args map[string]any)
 	return nil, nil // Continue execution
 }
 
-func beforeToolSecurityCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolSecurityCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "get_weather" {
 		location := ""
 		if loc, ok := args["location"].(string); ok {
@@ -410,7 +411,7 @@ func beforeToolSecurityCallback(ctx tool.Context, t tool.Tool, args map[string]a
 	return nil, nil // Continue execution
 }
 
-func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolValidationCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "calculate" {
 		operation, _ := args["operation"].(string)
 		y, yOK := args["y"].(float64)
@@ -429,7 +430,7 @@ func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string
 
 // --- After Tool Callbacks ---
 
-func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolEnhancementCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err // Don't enhance if there was an error
 	}
@@ -443,7 +444,7 @@ func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args, result ma
 	return enhancedResponse, nil
 }
 
-func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolAsyncCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err
 	}
@@ -632,7 +633,7 @@ func TestToolCallbacksAgent(t *testing.T) {
 
 			// Check state for log activity
 			if len(tc.wantStateKeys) > 0 {
-				currentSession, err := service.Get(context.Background(), &session.GetRequest{
+				currentSession, err := service.Get(t.Context(), &session.GetRequest{
 					AppName:   "test_app",
 					UserID:    "test_user",
 					SessionID: sessionID,
@@ -647,5 +648,74 @@ func TestToolCallbacksAgent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type mockToolset struct{}
+
+func (m *mockToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	utils.AppendInstructions(req, "Extra instruction from mockToolset")
+	return nil
+}
+func (m *mockToolset) Name() string                                         { return "test_toolset" }
+func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
+
+var _ tool.Toolset = &mockToolset{}
+
+func TestAgentToolsetPreprocessEffect(t *testing.T) {
+	var capturedReq *model.LLMRequest
+	ctx := t.Context()
+	service := session.InMemoryService()
+	fakeLLM := &FakeLLM{
+		GenerateContentFunc: func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error) {
+			capturedReq = req
+			return model.LLMResponse{
+				Content: genai.NewContentFromText("fake response", genai.RoleModel),
+			}, nil
+		},
+	}
+	toolset := &mockToolset{}
+	agentConfig := llmagent.Config{
+		Name:        "toolset_effect_agent",
+		Instruction: "Agent instruction.",
+		Model:       fakeLLM,
+		Toolsets:    []tool.Toolset{toolset},
+	}
+	rootAgent, err := llmagent.New(agentConfig)
+	if err != nil {
+		t.Fatalf("Failed to create LLM Agent: %v", err)
+	}
+	runner, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          rootAgent,
+		SessionService: service,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	createSessionReq := &session.CreateRequest{AppName: "test_app", UserID: "test_user"}
+	createSessionResp, err := service.Create(ctx, createSessionReq)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	sessionID := createSessionResp.Session.ID()
+	userContent := genai.NewContentFromText("Hello", genai.RoleUser)
+
+	eventStream := runner.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
+
+	for _, err := range eventStream {
+		if err != nil {
+			t.Fatalf("Error during agent run: %v", err)
+		}
+	}
+	if capturedReq == nil {
+		t.Fatalf("LLMRequest was not captured")
+	}
+	systemInstruction := ""
+	if capturedReq.Config != nil && capturedReq.Config.SystemInstruction != nil {
+		systemInstruction = strings.Join(utils.TextParts(capturedReq.Config.SystemInstruction), " ")
+	}
+	if got, want := systemInstruction, "Extra instruction from mockToolset"; !strings.Contains(got, want) {
+		t.Errorf("got SystemInstruction = %q, want it to contain %q", got, want)
 	}
 }

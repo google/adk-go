@@ -23,14 +23,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 type dummyLLM struct {
@@ -422,14 +422,14 @@ func TestDrawNode(t *testing.T) {
 			visitedNodes := make(map[string]bool)
 			nodeName := ""
 			if tt.agent != nil {
-				err = drawNode(graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes)
+				err = drawNode(graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
 				nodeName = tt.agent.Name()
 			}
 			if tt.tool != nil {
-				err = drawNode(graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes)
+				err = drawNode(graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
@@ -463,7 +463,7 @@ func TestDrawClusterNode(t *testing.T) {
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
 	agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
-	err = drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
+	err = drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("drawNode failed: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestDrawEdge(t *testing.T) {
 				}
 			}
 
-			err = drawEdge(graph, tt.from, tt.to, tt.highlightedPairs)
+			err = drawEdge(graph, tt.from, tt.to, tt.highlightedPairs, DarkTheme)
 			if err != nil {
 				t.Fatalf("drawEdge failed: %v", err)
 			}
@@ -606,7 +606,7 @@ func TestDrawCluster(t *testing.T) {
 			parentAgent := newTestAgent(t, "ParentAgent", "", tt.agentType, []agent.Agent{subAgent1, subAgent2}, nil)
 
 			clusterGraph := gographviz.NewGraph()
-			err = drawCluster(parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes)
+			err = drawCluster(parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes, DarkTheme)
 			if err != nil {
 				t.Fatalf("drawCluster failed: %v", err)
 			}
@@ -664,7 +664,7 @@ func TestBuildGraph(t *testing.T) {
 	subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
 	mainAgent := newTestAgent(t, "MainAgent", "", agentinternal.TypeLLMAgent, []agent.Agent{subAgent1, subAgent2}, []tool.Tool{tool2})
 
-	err = buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes)
+	err = buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("buildGraph failed: %v", err)
 	}

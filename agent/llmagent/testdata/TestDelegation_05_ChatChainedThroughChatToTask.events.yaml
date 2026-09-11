@@ -1,0 +1,132 @@
+- author: user
+  role: user
+  parts:
+    - text: 'Please edit this draft: ''me and him goes to the store yesterdy''.'
+- author: root
+  role: model
+  parts:
+    - function_call:
+        name: transfer_to_agent
+        id: oeiyn4lc
+        args:
+            agent_name: writer
+  node_info:
+    path: root
+- author: root
+  role: user
+  parts:
+    - function_response:
+        name: transfer_to_agent
+        id: oeiyn4lc
+  node_info:
+    path: root
+  actions:
+    transfer_to_agent: writer
+- author: writer
+  role: model
+  parts:
+    - function_call:
+        name: editor
+        id: ybkehx4t
+        args:
+            request: 'Please edit this draft for clarity and grammatical correctness: "me and him goes to the store yesterdy"'
+  node_info:
+    path: root
+- author: editor
+  isolation_scope: ybkehx4t
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: 505x03aj
+        args:
+            edited: He and I went to the store yesterday.
+  node_info:
+    path: root/editor@ybkehx4t
+- author: editor
+  isolation_scope: ybkehx4t
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: 505x03aj
+        response:
+            result: Task completed.
+  output:
+    edited: He and I went to the store yesterday.
+  node_info:
+    path: root/editor@ybkehx4t
+    output_for:
+        - root/editor@ybkehx4t
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: editor
+        id: ybkehx4t
+        response:
+            edited: He and I went to the store yesterday.
+  node_info:
+    path: root
+- author: writer
+  role: model
+  parts:
+    - text: 'Here is the edited text: "He and I went to the store yesterday."'
+  node_info:
+    path: root
+- author: user
+  role: user
+  parts:
+    - text: 'Now polish this draft: ''they was eatin lunch quick''.'
+- author: writer
+  role: model
+  parts:
+    - function_call:
+        name: editor
+        id: 2r3rrloe
+        args:
+            request: 'Please edit this draft for clarity and grammatical correctness: "they was eatin lunch quick"'
+  node_info:
+    path: writer
+- author: editor
+  isolation_scope: 2r3rrloe
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: s4txpxl7
+        args:
+            edited: They were eating lunch quickly.
+  node_info:
+    path: writer/editor@2r3rrloe
+- author: editor
+  isolation_scope: 2r3rrloe
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: s4txpxl7
+        response:
+            result: Task completed.
+  output:
+    edited: They were eating lunch quickly.
+  node_info:
+    path: writer/editor@2r3rrloe
+    output_for:
+        - writer/editor@2r3rrloe
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: editor
+        id: 2r3rrloe
+        response:
+            edited: They were eating lunch quickly.
+  node_info:
+    path: writer
+- author: writer
+  role: model
+  parts:
+    - text: 'Here is the polished version of your draft: "They were eating lunch quickly."'
+  node_info:
+    path: writer

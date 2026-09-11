@@ -1,0 +1,119 @@
+httprr trace v1
+1099 2311
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 847
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:42 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1104
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"b": 3,"a": 2},"id": "3ae8iwca"},"thoughtSignature": "EukBCuYBAb4+9vt/vxxSqnu1O2VmsspptIIuZ5UI1XKt5qIGVw+l6Wp8gHTOskqE5v3VzNm9TnfsQQoZiWn9SnbjHsEB8zT4ABquQukeRIimRFRDehFQR0+Q8d1Ycq/8nu9h9pPtATCiVhb7L705JKNsMPhSk/k8i3XDw/jhFa11w9YWuCP2/nsul7SZP1/AfDJRroE/3/J5U8vUXnBFgmh9ZOAqEpTQvro03WSEEXy7XL5E5lMuPBEu/9CcH+N1OX32GeV0JQgZFA1vnh6DYJRwmWAbqEYqBZj8ruO7cY6FRIKagh+o7gVb+dk="}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 16,"totalTokenCount": 222,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 45},"modelVersion": "gemini-3-flash-preview","responseId": "aiS5abqwJJf7nsEPuIy3wQQ"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 4,"b": 5},"id": "up3kf30e"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 32,"totalTokenCount": 238,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 45},"modelVersion": "gemini-3-flash-preview","responseId": "aiS5abqwJJf7nsEPuIy3wQQ"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"b": 7,"a": 6},"id": "ycroch25"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 48,"totalTokenCount": 254,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 45},"modelVersion": "gemini-3-flash-preview","responseId": "aiS5abqwJJf7nsEPuIy3wQQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 161,"candidatesTokenCount": 48,"totalTokenCount": 254,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 161}],"thoughtsTokenCount": 45},"modelVersion": "gemini-3-flash-preview","responseId": "aiS5abqwJJf7nsEPuIy3wQQ"}
+
+1918 1764
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1665
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"3ae8iwca","name":"sum"},"thoughtSignature":"EukBCuYBAb4+9vt/vxxSqnu1O2VmsspptIIuZ5UI1XKt5qIGVw+l6Wp8gHTOskqE5v3VzNm9TnfsQQoZiWn9SnbjHsEB8zT4ABquQukeRIimRFRDehFQR0+Q8d1Ycq/8nu9h9pPtATCiVhb7L705JKNsMPhSk/k8i3XDw/jhFa11w9YWuCP2/nsul7SZP1/AfDJRroE/3/J5U8vUXnBFgmh9ZOAqEpTQvro03WSEEXy7XL5E5lMuPBEu/9CcH+N1OX32GeV0JQgZFA1vnh6DYJRwmWAbqEYqBZj8ruO7cY6FRIKagh+o7gVb+dk="},{"functionCall":{"args":{"a":4,"b":5},"id":"up3kf30e","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"ycroch25","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"3ae8iwca","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"up3kf30e","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"ycroch25","name":"sum","response":{"sum":13}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:43 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1232
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "The sum"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 2,"totalTokenCount": 238,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}]},"modelVersion": "gemini-3-flash-preview","responseId": "ayS5abiBOIGzkdUPttS9wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " of 2 and 3 is 5, the sum of 4 and"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 18,"totalTokenCount": 254,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}]},"modelVersion": "gemini-3-flash-preview","responseId": "ayS5abiBOIGzkdUPttS9wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 5 is 9, and the sum of 6 and 7 is 13."}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 236,"candidatesTokenCount": 38,"totalTokenCount": 274,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 236}]},"modelVersion": "gemini-3-flash-preview","responseId": "ayS5abiBOIGzkdUPttS9wAQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 281,"candidatesTokenCount": 38,"totalTokenCount": 319,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 281}]},"modelVersion": "gemini-3-flash-preview","responseId": "ayS5abiBOIGzkdUPttS9wAQ"}
+
+2138 2509
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1885
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"3ae8iwca","name":"sum"},"thoughtSignature":"EukBCuYBAb4+9vt/vxxSqnu1O2VmsspptIIuZ5UI1XKt5qIGVw+l6Wp8gHTOskqE5v3VzNm9TnfsQQoZiWn9SnbjHsEB8zT4ABquQukeRIimRFRDehFQR0+Q8d1Ycq/8nu9h9pPtATCiVhb7L705JKNsMPhSk/k8i3XDw/jhFa11w9YWuCP2/nsul7SZP1/AfDJRroE/3/J5U8vUXnBFgmh9ZOAqEpTQvro03WSEEXy7XL5E5lMuPBEu/9CcH+N1OX32GeV0JQgZFA1vnh6DYJRwmWAbqEYqBZj8ruO7cY6FRIKagh+o7gVb+dk="},{"functionCall":{"args":{"a":4,"b":5},"id":"up3kf30e","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"ycroch25","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"3ae8iwca","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"up3kf30e","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"ycroch25","name":"sum","response":{"sum":13}}}],"role":"user"},{"parts":[{"text":"The sum of 2 and 3 is 5, the sum of 4 and 5 is 9, and the sum of 6 and 7 is 13."}],"role":"model"},{"parts":[{"text":"Great, now can you add 10 and 20? Also 40 and 50? And 60 and 70?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:45 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1324
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 10,"b": 20},"id": "to7c5o31"},"thoughtSignature": "EvUCCvICAb4+9vvPcHezYjAM+dPVIaGQOAMn5M6STamapCVVfguQGZpzFbuKSAshItSRvLBweSrybnG3JEtPI7Pk1DW7y04z1upmBUjkE99fC5bi8EYBpr3qkLJ4cGgO2r8PQbR5NbUEjcNAwBg32hMEerc5kJca7KQYYknU08Ft0/u7peN4JlfW8z97YI7Pp6h7xIWSWNCV03mY3zudV7E2fgLrfB8tNGbFO9Nw3uEIOoVucfU2+AM4DBi0f3tET9kyZh4MEmXfKWzfceImj5hF1EKWnj1Qbue1LuDKTBWe8WJSMQQmfTiGE0mdMBcf6+1HuEEvixx9e9jLC+xkgnOBBQDlBJi75ZZ2Mn5GIYITJWU7GCu+g9Bm7/bVjidyWezp8I8lp1b73ppdxBaXJMRH7m/UcfKI8SySi8q4RdpyWsCVqvakYRNqqNcMVnq5nEzGZYWQMPfeR56cdRIhDKAIawV5dXXbwHajS2jtkq8iW0QqoN6P0w=="}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 308,"candidatesTokenCount": 18,"totalTokenCount": 432,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 308}],"thoughtsTokenCount": 106},"modelVersion": "gemini-3-flash-preview","responseId": "bSS5acb2Fr6vnsEPyL-o6Qc"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 40,"b": 50},"id": "4v64pue3"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 308,"candidatesTokenCount": 36,"totalTokenCount": 450,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 308}],"thoughtsTokenCount": 106},"modelVersion": "gemini-3-flash-preview","responseId": "bSS5acb2Fr6vnsEPyL-o6Qc"}
+
+data: {"candidates": [{"content": {"parts": [{"functionCall": {"name": "sum","args": {"a": 60,"b": 70},"id": "dwwo765i"}}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 308,"candidatesTokenCount": 54,"totalTokenCount": 468,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 308}],"thoughtsTokenCount": 106},"modelVersion": "gemini-3-flash-preview","responseId": "bSS5acb2Fr6vnsEPyL-o6Qc"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 308,"candidatesTokenCount": 54,"totalTokenCount": 468,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 308}],"thoughtsTokenCount": 106},"modelVersion": "gemini-3-flash-preview","responseId": "bSS5acb2Fr6vnsEPyL-o6Qc"}
+
+3153 2103
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2900
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 3? Also 4 and 5? And 6 and 7?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":2,"b":3},"id":"3ae8iwca","name":"sum"},"thoughtSignature":"EukBCuYBAb4+9vt/vxxSqnu1O2VmsspptIIuZ5UI1XKt5qIGVw+l6Wp8gHTOskqE5v3VzNm9TnfsQQoZiWn9SnbjHsEB8zT4ABquQukeRIimRFRDehFQR0+Q8d1Ycq/8nu9h9pPtATCiVhb7L705JKNsMPhSk/k8i3XDw/jhFa11w9YWuCP2/nsul7SZP1/AfDJRroE/3/J5U8vUXnBFgmh9ZOAqEpTQvro03WSEEXy7XL5E5lMuPBEu/9CcH+N1OX32GeV0JQgZFA1vnh6DYJRwmWAbqEYqBZj8ruO7cY6FRIKagh+o7gVb+dk="},{"functionCall":{"args":{"a":4,"b":5},"id":"up3kf30e","name":"sum"}},{"functionCall":{"args":{"a":6,"b":7},"id":"ycroch25","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"3ae8iwca","name":"sum","response":{"sum":5}}},{"functionResponse":{"id":"up3kf30e","name":"sum","response":{"sum":9}}},{"functionResponse":{"id":"ycroch25","name":"sum","response":{"sum":13}}}],"role":"user"},{"parts":[{"text":"The sum of 2 and 3 is 5, the sum of 4 and 5 is 9, and the sum of 6 and 7 is 13."}],"role":"model"},{"parts":[{"text":"Great, now can you add 10 and 20? Also 40 and 50? And 60 and 70?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":10,"b":20},"id":"to7c5o31","name":"sum"},"thoughtSignature":"EvUCCvICAb4+9vvPcHezYjAM+dPVIaGQOAMn5M6STamapCVVfguQGZpzFbuKSAshItSRvLBweSrybnG3JEtPI7Pk1DW7y04z1upmBUjkE99fC5bi8EYBpr3qkLJ4cGgO2r8PQbR5NbUEjcNAwBg32hMEerc5kJca7KQYYknU08Ft0/u7peN4JlfW8z97YI7Pp6h7xIWSWNCV03mY3zudV7E2fgLrfB8tNGbFO9Nw3uEIOoVucfU2+AM4DBi0f3tET9kyZh4MEmXfKWzfceImj5hF1EKWnj1Qbue1LuDKTBWe8WJSMQQmfTiGE0mdMBcf6+1HuEEvixx9e9jLC+xkgnOBBQDlBJi75ZZ2Mn5GIYITJWU7GCu+g9Bm7/bVjidyWezp8I8lp1b73ppdxBaXJMRH7m/UcfKI8SySi8q4RdpyWsCVqvakYRNqqNcMVnq5nEzGZYWQMPfeR56cdRIhDKAIawV5dXXbwHajS2jtkq8iW0QqoN6P0w=="},{"functionCall":{"args":{"a":40,"b":50},"id":"4v64pue3","name":"sum"}},{"functionCall":{"args":{"a":60,"b":70},"id":"dwwo765i","name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"to7c5o31","name":"sum","response":{"sum":30}}},{"functionResponse":{"id":"4v64pue3","name":"sum","response":{"sum":90}}},{"functionResponse":{"id":"dwwo765i","name":"sum","response":{"sum":130}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator assistant. You will recieve requests to add two integers. Respond with the sum of the two integers and you must use the sum tool to calculate the sum.\n\nYou are an agent. Your internal name is \"calculator\". The description about you is \"A calculator that can add two integers\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"sums two integers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Tue, 17 Mar 2026 09:52:46 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=885
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "The sum of "}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 392,"candidatesTokenCount": 4,"totalTokenCount": 396,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 392}]},"modelVersion": "gemini-3-flash-preview","responseId": "biS5aeW-FbyNkdUPpfGxwQY"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "10 and 20 is 30, the sum of 4"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 392,"candidatesTokenCount": 20,"totalTokenCount": 412,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 392}]},"modelVersion": "gemini-3-flash-preview","responseId": "biS5aeW-FbyNkdUPpfGxwQY"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "0 and 50 is 90, and the sum of 60 and 70 is 1"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 392,"candidatesTokenCount": 44,"totalTokenCount": 436,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 392}]},"modelVersion": "gemini-3-flash-preview","responseId": "biS5aeW-FbyNkdUPpfGxwQY"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "30."}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 392,"candidatesTokenCount": 47,"totalTokenCount": 439,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 392}]},"modelVersion": "gemini-3-flash-preview","responseId": "biS5aeW-FbyNkdUPpfGxwQY"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 498,"candidatesTokenCount": 47,"totalTokenCount": 545,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 498}]},"modelVersion": "gemini-3-flash-preview","responseId": "biS5aeW-FbyNkdUPpfGxwQY"}
+

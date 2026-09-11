@@ -1,0 +1,535 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package agentengine handles command line parameters and execution logic for agentengine deployment.
+package agentengine
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
+	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"github.com/spf13/cobra"
+	"google.golang.org/api/option"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
+
+	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/server/agentengine"
+)
+
+type gCloudFlags struct {
+	region      string
+	projectName string
+}
+
+type memoryBankFlags struct {
+	deploy bool
+	model  string
+	ttl    time.Duration
+}
+
+type agentEngineServiceFlags struct {
+	name          string
+	displayName   string
+	serverPort    int
+	agentEngineID string
+	memoryBank    memoryBankFlags
+}
+
+type buildFlags struct {
+	tempDir             string
+	execPath            string
+	execFile            string
+	dockerfileBuildPath string
+	archivePath         string
+}
+
+type sourceFlags struct {
+	srcBasePath        string
+	entryPointPath     string
+	origEntryPointPath string
+	sourceDir          string
+}
+
+type deployAgentEngineFlags struct {
+	gcloud      gCloudFlags
+	agentEngine agentEngineServiceFlags
+	build       buildFlags
+	source      sourceFlags
+}
+
+var flags deployAgentEngineFlags
+
+// agentEngineCmd represents the agentEngine command
+var agentEngineCmd = &cobra.Command{
+	Use:   "agentengine",
+	Short: "Deploys the application to Agent Engine.",
+	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return flags.deployOnAgentEngine()
+	},
+}
+
+// init creates flags and adds subcommand to parent
+func init() {
+	deploy.DeployCmd.AddCommand(agentEngineCmd)
+
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.gcloud.region, "region", "r", "", "GCP Region")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "project_name", "p", "", "GCP Project Name")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.agentEngine.name, "name", "s", "", "Agent Engine name")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
+	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
+	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.memoryBank.deploy, "mem_deploy", false, "If set to true then memory bank will be deployed too")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "publishers/google/models/gemini-2.5-flash", "Name of the model to be used for memory generation - for list you can GET"+
+		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models. It will be prefixed with projects/<project_name>/locations/<region> forming for instance full model name like "+
+		" 'projects/project_name/locations/us-central1/publishers/google/models/gemini-2.5-flash'")
+	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+}
+
+// computeFlags uses command line arguments to create a full config
+func (f *deployAgentEngineFlags) computeFlags() error {
+	return util.LogStartStop("Computing flags & preparing temp",
+		func(p util.Printer) error {
+			f.source.origEntryPointPath = f.source.entryPointPath
+			absp, err := filepath.Abs(f.source.entryPointPath)
+			if err != nil {
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
+			}
+			f.source.entryPointPath = absp
+
+			// come up with a executable name based on entry point path.
+			// Deriving and checking it happens before the temp dir is created:
+			// everything here can fail, and cleanTemp only runs after a fully
+			// successful deploy, so a rejected value would otherwise leave an
+			// empty agentEngine_<timestamp>_* directory behind. Nothing above
+			// needs the directory; every field that resolves against it
+			// (execPath, dockerfileBuildPath, archivePath) is assigned below.
+			dir, file := path.Split(f.source.entryPointPath)
+			f.source.srcBasePath = dir
+			f.source.entryPointPath = file
+			if f.build.execPath == "" {
+				exec, err := util.StripExtension(f.source.entryPointPath, ".go")
+				if err != nil {
+					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
+				}
+				f.build.execFile = exec
+			}
+
+			// Both values are embedded in a Dockerfile RUN (shell-form)
+			// instruction, so they need the stricter shell-safe allowlist,
+			// not just the quote/newline blocklist used where a value only
+			// reaches a non-shell-form context (COPY path, CMD exec array).
+			if err := util.ValidateShellArgSafe(f.build.execFile,
+				fmt.Sprintf("executable name derived from --entry_point_path %q:", f.source.origEntryPointPath)); err != nil {
+				return err
+			}
+			if err := util.ValidateShellArgSafe(f.source.origEntryPointPath, "--entry_point_path"); err != nil {
+				return err
+			}
+
+			if f.build.tempDir == "" {
+				f.build.tempDir = os.TempDir()
+			}
+			absp, err = filepath.Abs(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
+			}
+			f.build.tempDir, err = os.MkdirTemp(absp, "agentEngine_"+time.Now().Format("20060102_150405__")+"*")
+			if err != nil {
+				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
+			}
+			p("Using temp dir:", f.build.tempDir)
+
+			if f.build.execPath == "" {
+				f.build.execPath = path.Join(f.build.tempDir, f.build.execFile)
+			}
+			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
+			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
+
+			dateTimeString := time.Now().Format(time.RFC3339)
+			f.agentEngine.displayName = f.agentEngine.name
+			if f.agentEngine.displayName == "" {
+				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
+			}
+
+			// add provided model as suffix
+			f.agentEngine.memoryBank.model = fmt.Sprintf("projects/%s/locations/%s/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.memoryBank.model)
+
+			return nil
+		})
+}
+
+func (f *deployAgentEngineFlags) cleanTemp() error {
+	return util.LogStartStop("Cleaning temp",
+		func(p util.Printer) error {
+			p("Clean temp starting with", f.build.tempDir)
+			err := os.RemoveAll(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
+			}
+			return nil
+		})
+}
+
+// defaultBuilderGoVersion is a last-resort builder image tag, used only when the
+// application's go.mod cannot be read and the running toolchain version cannot
+// be determined. It is a rolling tag rather than a pinned version: since this
+// branch is reached only when the required toolchain is entirely unknown, a
+// pinned default would re-rot exactly like the hardcoded tag this change removes,
+// whereas "latest" can never be too old for the app. GOTOOLCHAIN=auto in the
+// builder stage still downgrades in-image if the module needs an older toolchain.
+const defaultBuilderGoVersion = "latest"
+
+// builderGoVersion returns the Go version tag for the builder image. It prefers
+// the go directive declared in the application's go.mod so the managed build
+// uses a toolchain that satisfies what the app requires, falling back to the
+// version of the toolchain running adkgo, then to defaultBuilderGoVersion.
+func builderGoVersion(sourceDir string) string {
+	dir := sourceDir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if v := goVersionFromModFile(data); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimPrefix(runtime.Version(), "go"); isGoVersion(v) {
+		return v
+	}
+	return defaultBuilderGoVersion
+}
+
+// goVersionFromModFile extracts the value of the top-level `go` directive
+// (e.g. "1.26.5") from go.mod contents, or "" if it is absent or malformed.
+func goVersionFromModFile(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		// Drop a trailing line comment (e.g. `go 1.26.5 // pinned`) so it does
+		// not leak into the FROM instruction and break the Dockerfile.
+		if i := strings.Index(rest, "//"); i >= 0 {
+			rest = rest[:i]
+		}
+		if v := strings.TrimSpace(rest); isGoVersion(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+// goVersionPattern matches a Go version number such as "1", "1.26", "1.26.5",
+// or "1.26rc1". Validating the whole shape (not just the leading digit) guards
+// against matching a module path inside a require block and against carrying a
+// malformed value like "1abc" into a "golang:1abc" tag that does not exist.
+var goVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}([a-z]+[0-9]+)?$`)
+
+// isGoVersion reports whether s looks like a Go version number.
+func isGoVersion(s string) bool {
+	return goVersionPattern.MatchString(s)
+}
+
+// prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
+func (f *deployAgentEngineFlags) prepareDockerfile() error {
+	return util.LogStartStop("Preparing Dockerfile",
+		func(p util.Printer) error {
+			p("Writing:", f.build.dockerfileBuildPath)
+
+			// Every value below is read off the receiver, not off the package
+			// global. computeFlags validates the receiver, so a read of the
+			// global here would let the guard and the line it guards come apart
+			// for any caller that is not the cobra RunE.
+			var b strings.Builder
+			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
+			// GOTOOLCHAIN=auto lets the in-image go command fetch the toolchain
+			// go.mod requires when the base tag is older than the module needs.
+			// The official golang images pin GOTOOLCHAIN=local, so without this a
+			// residual version mismatch (Docker Hub publishing lag, or a transitive
+			// dependency requiring a newer toolchain) is fatal instead of recoverable.
+			b.WriteString("ENV GOTOOLCHAIN=auto\n")
+			b.WriteString(`WORKDIR /app
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
+
+FROM gcr.io/distroless/static-debian11
+
+COPY --from=builder /app/` + f.build.execFile + `  /app/` + f.build.execFile + `
+EXPOSE ` + strconv.Itoa(f.agentEngine.serverPort) + `
+# Command to run the executable when the container starts
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(f.agentEngine.serverPort) + `"`)
+
+			b.WriteString(`, "agentengine"`)
+
+			b.WriteString(`]`)
+			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
+		})
+}
+
+// createArchive creates a tar archive containing the source code and Dockerfile
+func (f *deployAgentEngineFlags) createArchive() error {
+	return util.LogStartStop("Creating source archive",
+		func(p util.Printer) error {
+			workspaceRoot := f.source.sourceDir
+			if workspaceRoot == "" {
+				var err error
+				workspaceRoot, err = os.Getwd()
+				if err != nil {
+					return fmt.Errorf("cannot get current working directory: %w", err)
+				}
+			}
+			p("Creating:", f.build.archivePath)
+			cmd := exec.Command("tar", "-czf", f.build.archivePath,
+				"-C", workspaceRoot, "--exclude=.git", "--exclude=adkgo", ".",
+				"-C", f.build.tempDir, "Dockerfile")
+			return util.LogCommand(cmd, p)
+		})
+}
+
+// gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
+func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
+	return util.LogStartStop("Deploying to Agent Engine",
+		func(p util.Printer) error {
+			ctx := context.Background()
+			parent := fmt.Sprintf("projects/%s/locations/%s", f.gcloud.projectName, f.gcloud.region)
+			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			if err != nil {
+				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
+			}
+			defer func() {
+				if err := client.Close(); err != nil {
+					p("Warning: failed to close ReasoningEngineClient: %v", err)
+				}
+			}()
+
+			archiveContent, err := os.ReadFile(f.build.archivePath)
+			if err != nil {
+				return fmt.Errorf("cannot read archive file: %w", err)
+			}
+
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
+			req := &aiplatformpb.CreateReasoningEngineRequest{
+				Parent: parent,
+				ReasoningEngine: &aiplatformpb.ReasoningEngine{
+					DisplayName: f.agentEngine.displayName,
+					Spec: &aiplatformpb.ReasoningEngineSpec{
+						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+										SourceArchive: archiveContent,
+									},
+								},
+								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+								},
+							},
+						},
+						AgentFramework: "google-adk",
+						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+							Env: []*aiplatformpb.EnvVar{
+								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+								{Name: "NUM_WORKERS", Value: "1"},
+								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+							},
+						},
+						ClassMethods: methods,
+					},
+				},
+			}
+
+			if f.agentEngine.memoryBank.deploy {
+				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
+					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
+						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
+							Model: f.agentEngine.memoryBank.model,
+						},
+						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
+							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
+								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
+							},
+						},
+					},
+				}
+			}
+
+			p("Sending CreateReasoningEngine request...")
+			op, err := client.CreateReasoningEngine(ctx, req)
+			if err != nil {
+				return fmt.Errorf("CreateReasoningEngine failed: %w", err)
+			}
+
+			p("Waiting for operation to complete...")
+			re, err := op.Wait(ctx)
+			if err != nil {
+				return fmt.Errorf("operation failed: %w", err)
+			}
+
+			p("Deployed Reasoning Engine:", re.Name)
+			p("Display Name:", re.DisplayName)
+
+			return nil
+		})
+}
+
+// gcloudUpdateAgentEngine invokes gcloud to update source on agentEngine
+func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
+	return util.LogStartStop("Updating Agent Engine",
+		func(p util.Printer) error {
+			ctx := context.Background()
+			name := fmt.Sprintf("projects/%s/locations/%s/reasoningEngines/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.agentEngineID)
+			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			if err != nil {
+				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
+			}
+			defer func() {
+				if err := client.Close(); err != nil {
+					p("Warning: failed to close ReasoningEngineClient: %v", err)
+				}
+			}()
+
+			archiveContent, err := os.ReadFile(f.build.archivePath)
+			if err != nil {
+				return fmt.Errorf("cannot read archive file: %w", err)
+			}
+
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
+			req := &aiplatformpb.UpdateReasoningEngineRequest{
+				ReasoningEngine: &aiplatformpb.ReasoningEngine{
+					Name: name,
+					Spec: &aiplatformpb.ReasoningEngineSpec{
+						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+										SourceArchive: archiveContent,
+									},
+								},
+								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+								},
+							},
+						},
+						ClassMethods: methods,
+					},
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
+			}
+
+			if f.agentEngine.memoryBank.deploy {
+				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
+					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
+						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
+							Model: f.agentEngine.memoryBank.model,
+						},
+						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
+							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
+								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
+							},
+						},
+					},
+				}
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.context_spec")
+			}
+
+			p("Sending UpdateReasoningEngine request...")
+			op, err := client.UpdateReasoningEngine(ctx, req)
+			if err != nil {
+				return fmt.Errorf("UpdateReasoningEngine failed: %w", err)
+			}
+
+			p("Waiting for operation to complete...")
+			re, err := op.Wait(ctx)
+			if err != nil {
+				return fmt.Errorf("operation failed: %w", err)
+			}
+
+			p("Updated Reasoning Engine:", re.Name)
+			p("Display Name:", re.DisplayName)
+
+			return nil
+		})
+}
+
+// deployOnAgentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
+func (f *deployAgentEngineFlags) deployOnAgentEngine() error {
+	fmt.Println(flags)
+
+	err := f.computeFlags()
+	if err != nil {
+		return err
+	}
+	err = f.prepareDockerfile()
+	if err != nil {
+		return err
+	}
+	err = f.createArchive()
+	if err != nil {
+		return err
+	}
+	if f.agentEngine.agentEngineID != "" {
+		err = f.gcloudUpdateAgentEngine()
+	} else {
+		err = f.gcloudDeployToAgentEngine()
+	}
+	if err != nil {
+		return err
+	}
+	err = f.cleanTemp()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

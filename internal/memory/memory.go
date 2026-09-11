@@ -17,8 +17,8 @@ package memory
 import (
 	"context"
 
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/session"
 )
 
 type Memory struct {
@@ -28,12 +28,12 @@ type Memory struct {
 	AppName   string
 }
 
-func (a *Memory) AddSession(ctx context.Context, session session.Session) error {
-	return a.Service.AddSession(ctx, session)
+func (a *Memory) AddSessionToMemory(ctx context.Context, session session.Session) error {
+	return a.Service.AddSessionToMemory(ctx, session)
 }
 
-func (a *Memory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	return a.Service.Search(ctx, &memory.SearchRequest{
+func (a *Memory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return a.Service.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: a.AppName,
 		UserID:  a.UserID,
 		Query:   query,

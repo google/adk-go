@@ -18,7 +18,6 @@
 // Unlike loadmemorytool which is called explicitly by the model, this tool
 // runs automatically for each LLM request and injects relevant memory context
 // into the system instructions.
-
 package preloadmemorytool
 
 import (
@@ -26,10 +25,10 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
 )
 
 const preloadInstructions = `The following content is from your previous conversations with the user.
@@ -71,7 +70,7 @@ func (t *preloadMemoryTool) IsLongRunning() bool {
 
 // ProcessRequest processes the LLM request by searching memory using the user's
 // current query and injecting relevant past conversations into system instructions.
-func (t *preloadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	userContent := ctx.UserContent()
 	if userContent == nil || len(userContent.Parts) == 0 ||
 		userContent.Parts[0] == nil || userContent.Parts[0].Text == "" {
@@ -81,7 +80,7 @@ func (t *preloadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMReque
 
 	searchResponse, err := ctx.SearchMemory(ctx, userQuery)
 	if err != nil {
-		return fmt.Errorf("preload memory search failed: %v", err)
+		return fmt.Errorf("preload memory search failed: %w", err)
 	}
 
 	if searchResponse == nil || len(searchResponse.Memories) == 0 {
@@ -123,7 +122,7 @@ func extractText(mem memory.Entry) string {
 
 	var b strings.Builder
 	for _, part := range mem.Content.Parts {
-		if part.Text == "" {
+		if part == nil || part.Text == "" {
 			continue
 		}
 		if b.Len() > 0 {

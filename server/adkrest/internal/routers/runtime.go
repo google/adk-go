@@ -17,7 +17,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/server/adkrest/controllers"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
 // RuntimeAPIRouter defines the routes for the Runtime API.
@@ -35,15 +35,21 @@ func (r *RuntimeAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "RunAgent",
-			Methods:     []string{http.MethodPost, http.MethodOptions},
+			Methods:     []string{http.MethodPost},
 			Pattern:     "/run",
 			HandlerFunc: controllers.NewErrorHandler(r.runtimeController.RunHandler),
 		},
 		Route{
 			Name:        "RunAgentSse",
-			Methods:     []string{http.MethodPost, http.MethodOptions},
+			Methods:     []string{http.MethodPost},
 			Pattern:     "/run_sse",
-			HandlerFunc: controllers.NewErrorHandler(r.runtimeController.RunSSEHandler),
+			HandlerFunc: r.runtimeController.RunSSEHandler,
+		},
+		Route{
+			Name:        "RunAgentLive",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/run_live",
+			HandlerFunc: controllers.NewErrorHandler(r.runtimeController.RunLiveHandler),
 		},
 	}
 }

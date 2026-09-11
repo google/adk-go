@@ -23,13 +23,12 @@ import (
 
 	"google.golang.org/genai"
 
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/preloadmemorytool"
+	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/preloadmemorytool"
 )
 
 type mockMemory struct {
@@ -37,11 +36,11 @@ type mockMemory struct {
 	err      error
 }
 
-func (m *mockMemory) AddSession(ctx context.Context, s session.Session) error {
+func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) error {
 	return nil
 }
 
-func (m *mockMemory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
+func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -104,6 +103,28 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			searchErr:       errors.New("search failed"),
 			wantErr:         true,
 			wantInstruction: false,
+		},
+		{
+			name:        "memories with nil and empty parts",
+			userContent: genai.NewContentFromText("test query", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author:    "user",
+					Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							nil,
+							{Text: "valid memory"},
+							nil,
+							{Text: ""},
+						},
+					},
+				},
+			},
+			wantInstruction: true,
+			wantTextContains: []string{
+				"user: valid memory",
+			},
 		},
 		{
 			name:        "single memory entry",
@@ -207,7 +228,7 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 	}
 }
 
-func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content) tool.Context {
+func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content) agent.Context {
 	t.Helper()
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
@@ -215,5 +236,5 @@ func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content
 		UserContent: userContent,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }

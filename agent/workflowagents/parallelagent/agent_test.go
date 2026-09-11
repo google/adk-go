@@ -23,24 +23,26 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 const modelName = "gemini-2.5-flash"
@@ -164,7 +166,10 @@ func TestNewParallelAgent(t *testing.T) {
 				slices.SortFunc(tt.wantEvents, eventCompareFunc)
 				slices.SortFunc(gotEvents, eventCompareFunc)
 
-				if diff := cmp.Diff(tt.wantEvents, gotEvents); diff != "" {
+				// IDs are assigned at append and are fresh UUIDs, so they
+				// cannot be expressed in a fixture. This test is about which
+				// events came out and who authored them.
+				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "ID")); diff != "" {
 					t.Errorf("events mismatch (-want +got):\n%s", diff)
 				}
 			}
@@ -236,6 +241,112 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 	}
 }
 
+// TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop verifies that when the
+// consumer stops early, Run does not return until every sub-agent goroutine has
+// finished its deferred teardown. Otherwise teardown can outlive the run and
+// touch an already-ended context.
+func TestParallelAgent_AwaitsSubAgentTeardownOnEarlyStop(t *testing.T) {
+	t.Parallel()
+
+	const numSubAgents = 3
+	// Each sub-agent teardown announces it began (buffered so it never blocks) and
+	// then blocks on releaseTeardown, so the test can prove Run waits for teardown
+	// without relying on wall-clock timing.
+	teardownStarted := make(chan struct{}, numSubAgents)
+	releaseTeardown := make(chan struct{})
+	var teardownFinished atomic.Int32
+
+	var subAgents []agent.Agent
+	for i := 1; i <= numSubAgents; i++ {
+		subAgents = append(subAgents, must(agent.New(agent.Config{
+			Name: fmt.Sprintf("sub%d", i),
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					defer func() {
+						teardownStarted <- struct{}{}
+						<-releaseTeardown
+						teardownFinished.Add(1)
+					}()
+					for {
+						if !yield(&session.Event{
+							LLMResponse: model.LLMResponse{
+								Content: genai.NewContentFromText(fmt.Sprintf("hello %d", i), genai.RoleModel),
+							},
+						}, nil) {
+							return
+						}
+					}
+				}
+			},
+		})))
+	}
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "test_agent",
+			SubAgents: subAgents,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentRunner, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             parallelAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runReturned := make(chan struct{})
+	go func() {
+		defer close(runReturned)
+		for _, err := range agentRunner.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Errorf("Run() yielded error: %v", err)
+			}
+			break // stop after the first event
+		}
+	}()
+
+	// Always release gated teardowns so no goroutine is left blocked, even if an
+	// assertion fails. Safe to call twice (same goroutine as the explicit release).
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(releaseTeardown)
+		}
+	}
+	defer release()
+
+	// Every sub-agent must reach teardown once the consumer stops early.
+	for range numSubAgents {
+		select {
+		case <-teardownStarted:
+		case <-runReturned:
+			t.Fatal("Run returned before all sub-agent teardowns started")
+		}
+	}
+
+	// Teardowns are now gated; Run must still be blocked waiting for them.
+	select {
+	case <-runReturned:
+		t.Fatal("Run returned while sub-agent teardowns were still in progress")
+	default:
+	}
+
+	release()
+	<-runReturned
+
+	if got := teardownFinished.Load(); got != numSubAgents {
+		t.Errorf("teardownFinished = %d, want %d", got, numSubAgents)
+	}
+}
+
 func TestParallelAgentWithTools(t *testing.T) {
 	agent1 := createAgentWithGemini(t, "agent1")
 	agent2 := createAgentWithGemini(t, "agent2")
@@ -298,7 +409,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("search_tool_%s", name),
 			Description: "Search for information on the web",
 		},
-		func(ctx tool.Context, args struct{ Query string }) (string, error) {
+		func(ctx agent.Context, args struct{ Query string }) (string, error) {
 			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
 		},
 	)
@@ -311,7 +422,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("analyze_tool_%s", name),
 			Description: "Analyze data and return insights",
 		},
-		func(ctx tool.Context, args struct{ Data string }) (string, error) {
+		func(ctx agent.Context, args struct{ Data string }) (string, error) {
 			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
 		},
 	)
@@ -483,7 +594,7 @@ func TestParallelAgent_StateSync(t *testing.T) {
 			}
 		},
 		AfterAgentCallbacks: []agent.AfterAgentCallback{
-			func(c agent.CallbackContext) (*genai.Content, error) {
+			func(c agent.Context) (*genai.Content, error) {
 				gotValue, gotErr = c.State().Get("test_key")
 				return nil, nil
 			},

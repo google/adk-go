@@ -20,19 +20,24 @@ import (
 	"fmt"
 	"net/url"
 
-	a2acore "github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	a2acore "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/server/adka2a/v2"
 )
 
-// apiPath is a suffix used to build an A2A invocation URL
-const apiPath = "/a2a/invoke"
+// compatAPIPath is a suffix used to build an A2A invocation URL for 0.3
+const compatAPIPath = "/a2a/invoke"
+
+// apiPath is a suffix used to build an A2A invocation URL for 1.0
+const apiPath = "/a2a/v1/invoke"
 
 // a2aConfig contains parameters for launching ADK A2A server
 type a2aConfig struct {
@@ -79,6 +84,24 @@ func (a *a2aLauncher) Parse(args []string) ([]string, error) {
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds A2A paths to the main router.
 func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	// Refuse a compaction config this surface cannot serve, before it serves
+	// anything. A config can pass its own shape check and still be unservable,
+	// the plainest case being no Summarizer over a root agent with no model to
+	// default to, and without this the process starts healthy and then fails
+	// every request. The other surfaces do the same dry run.
+	if err := compactionvalidate.AgainstRootAgent(config.Compaction, config.AgentLoader.RootAgent(), runner.Config{
+		SessionService:  config.SessionService,
+		MemoryService:   config.MemoryService,
+		ArtifactService: config.ArtifactService,
+		PluginConfig:    config.PluginConfig,
+	}); err != nil {
+		return err
+	}
+
+	publicCompatURL, err := url.JoinPath(a.config.agentURL, compatAPIPath)
+	if err != nil {
+		return err
+	}
 	publicURL, err := url.JoinPath(a.config.agentURL, apiPath)
 	if err != nil {
 		return err
@@ -86,30 +109,53 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 
 	rootAgent := config.AgentLoader.RootAgent()
 	agentCard := &a2acore.AgentCard{
-		Name:                              rootAgent.Name(),
-		Description:                       rootAgent.Description(),
-		DefaultInputModes:                 []string{"text/plain"},
-		DefaultOutputModes:                []string{"text/plain"},
-		URL:                               publicURL,
-		PreferredTransport:                a2acore.TransportProtocolJSONRPC,
-		Skills:                            adka2a.BuildAgentSkills(rootAgent),
-		Capabilities:                      a2acore.AgentCapabilities{Streaming: true},
-		SupportsAuthenticatedExtendedCard: false,
+		Name:               rootAgent.Name(),
+		Description:        rootAgent.Description(),
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		SupportedInterfaces: []*a2acore.AgentInterface{
+			{
+				URL:             publicURL,
+				ProtocolBinding: a2acore.TransportProtocolJSONRPC,
+				ProtocolVersion: a2acore.Version,
+			},
+			{
+				URL:             publicCompatURL,
+				ProtocolBinding: a2acore.TransportProtocolJSONRPC,
+				ProtocolVersion: a2av0.Version,
+			},
+		},
+		Version: "2.0.0",
+		Skills:  adka2a.BuildAgentSkills(rootAgent),
+		Capabilities: a2acore.AgentCapabilities{
+			Streaming: true,
+			Extensions: []a2acore.AgentExtension{{
+				URI:         adka2a.ADKExtensionURI,
+				Description: "Content is spread across task artifacts and the status message, which carries long-running function calls.",
+			}},
+		},
 	}
-	router.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	compatProducer := a2av0.NewStaticAgentCardProducer(agentCard)
+	router.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewAgentCardHandler(compatProducer))
 
 	agent := config.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:         agent.Name(),
 			Agent:           agent,
+			MemoryService:   config.MemoryService,
 			SessionService:  config.SessionService,
 			ArtifactService: config.ArtifactService,
 			PluginConfig:    config.PluginConfig,
+			Compaction:      config.Compaction,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
+
 	router.Handle(apiPath, a2asrv.NewJSONRPCHandler(reqHandler))
+	router.Handle(compatAPIPath, a2av0.NewJSONRPCHandler(reqHandler))
+
 	return nil
 }
 

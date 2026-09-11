@@ -20,17 +20,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/configurable"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/configurable"
+	"google.golang.org/adk/v2/session"
 )
 
-func beforeAgentCallback1(ctx agent.CallbackContext) (*genai.Content, error) {
+func beforeAgentCallback1(ctx agent.Context) (*genai.Content, error) {
 	err := ctx.State().Set("before_agent_callback_state_key", "value1")
 	return nil, err
 }
 
-func beforeAgentCallback2(ctx agent.CallbackContext) (*genai.Content, error) {
+func beforeAgentCallback2(ctx agent.Context) (*genai.Content, error) {
 	val, err := ctx.State().Get("before_agent_callback_state_key")
 	if err != nil {
 		return nil, err
@@ -43,7 +43,7 @@ func beforeAgentCallback2(ctx agent.CallbackContext) (*genai.Content, error) {
 	return nil, err
 }
 
-func shortcutAgentExecution(ctx agent.CallbackContext) (*genai.Content, error) {
+func shortcutAgentExecution(ctx agent.Context) (*genai.Content, error) {
 	val, err := ctx.State().Get("conversation_limit_reached")
 	if err != nil {
 		if !errors.Is(err, session.ErrStateKeyNotExist) {
@@ -63,12 +63,12 @@ func shortcutAgentExecution(ctx agent.CallbackContext) (*genai.Content, error) {
 	return nil, nil
 }
 
-func afterAgentCallback1(ctx agent.CallbackContext) (*genai.Content, error) {
+func afterAgentCallback1(ctx agent.Context) (*genai.Content, error) {
 	err := ctx.State().Set("after_agent_callback_state_key", "value1")
 	return nil, err
 }
 
-func afterAgentCallback2(ctx agent.CallbackContext) (*genai.Content, error) {
+func afterAgentCallback2(ctx agent.Context) (*genai.Content, error) {
 	val, err := ctx.State().Get("after_agent_callback_state_key")
 	if err != nil {
 		return nil, err

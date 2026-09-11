@@ -19,38 +19,48 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // EventActions represent a data model for session.EventActions
 type EventActions struct {
-	StateDelta        map[string]any   `json:"stateDelta"`
-	ArtifactDelta     map[string]int64 `json:"artifactDelta"`
-	Escalate          bool             `json:"escalate,omitempty"`
-	SkipSummarization bool             `json:"skipSummarization,omitempty"`
-	TransferToAgent   string           `json:"transferToAgent,omitempty"`
+	StateDelta                 map[string]any                               `json:"stateDelta"`
+	ArtifactDelta              map[string]int64                             `json:"artifactDelta"`
+	Escalate                   bool                                         `json:"escalate,omitempty"`
+	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
+	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
+	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 }
 
 // Event represents a single event in a session.
 type Event struct {
-	ID                 string                                      `json:"id"`
-	InvocationID       string                                      `json:"invocationId"`
-	Branch             string                                      `json:"branch,omitempty"`
-	Author             string                                      `json:"author"`
-	Partial            bool                                        `json:"partial,omitempty"`
-	LongRunningToolIDs []string                                    `json:"longRunningToolIds,omitempty"`
-	Content            *genai.Content                              `json:"content"`
-	GroundingMetadata  *genai.GroundingMetadata                    `json:"groundingMetadata"`
-	UsageMetadata      *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata"`
-	TurnComplete       bool                                        `json:"turnComplete,omitempty"`
-	Interrupted        bool                                        `json:"interrupted,omitempty"`
-	ErrorCode          string                                      `json:"errorCode,omitempty"`
-	ErrorMessage       string                                      `json:"errorMessage,omitempty"`
-	AvgLogprobs        float64                                     `json:"avgLogprobs,omitempty"`
-	FinishReason       genai.FinishReason                          `json:"finishReason,omitempty"`
-	ModelVersion       string                                      `json:"modelVersion,omitempty"`
-	Actions            EventActions                                `json:"actions"`
+	ID                  string                                      `json:"id"`
+	InvocationID        string                                      `json:"invocationId"`
+	Branch              string                                      `json:"branch,omitempty"`
+	Author              string                                      `json:"author"`
+	Partial             bool                                        `json:"partial,omitempty"`
+	LongRunningToolIDs  []string                                    `json:"longRunningToolIds,omitempty"`
+	Content             *genai.Content                              `json:"content"`
+	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata"`
+	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata"`
+	TurnComplete        bool                                        `json:"turnComplete,omitempty"`
+	Interrupted         bool                                        `json:"interrupted,omitempty"`
+	ErrorCode           string                                      `json:"errorCode,omitempty"`
+	ErrorMessage        string                                      `json:"errorMessage,omitempty"`
+	AvgLogprobs         float64                                     `json:"avgLogprobs,omitempty"`
+	FinishReason        genai.FinishReason                          `json:"finishReason,omitempty"`
+	ModelVersion        string                                      `json:"modelVersion,omitempty"`
+	InputTranscription  *genai.Transcription                        `json:"inputTranscription,omitempty"`
+	OutputTranscription *genai.Transcription                        `json:"outputTranscription,omitempty"`
+	Actions             EventActions                                `json:"actions"`
+	Output              any                                         `json:"output,omitempty"`
+	NodeInfo            *session.NodeInfo                           `json:"nodeInfo,omitempty"`
+	IsolationScope      string                                      `json:"isolationScope,omitempty"`
+	Routes              []string                                    `json:"routes,omitempty"`
+	RequestedInput      *session.RequestInput                       `json:"requestedInput,omitempty"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -61,25 +71,40 @@ func ToSessionEvent(event Event) *session.Event {
 		Branch:             event.Branch,
 		Author:             event.Author,
 		LongRunningToolIDs: event.LongRunningToolIDs,
+		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
+		IsolationScope:     event.IsolationScope,
+		Routes:             event.Routes,
+		RequestedInput:     event.RequestedInput,
 		LLMResponse: model.LLMResponse{
-			AvgLogprobs:       event.AvgLogprobs,
-			Content:           event.Content,
-			GroundingMetadata: event.GroundingMetadata,
-			UsageMetadata:     event.UsageMetadata,
-			Partial:           event.Partial,
-			TurnComplete:      event.TurnComplete,
-			Interrupted:       event.Interrupted,
-			ErrorCode:         event.ErrorCode,
-			ErrorMessage:      event.ErrorMessage,
-			FinishReason:      event.FinishReason,
-			ModelVersion:      event.ModelVersion,
+			AvgLogprobs:         event.AvgLogprobs,
+			Content:             event.Content,
+			GroundingMetadata:   event.GroundingMetadata,
+			UsageMetadata:       event.UsageMetadata,
+			Partial:             event.Partial,
+			TurnComplete:        event.TurnComplete,
+			Interrupted:         event.Interrupted,
+			ErrorCode:           event.ErrorCode,
+			ErrorMessage:        event.ErrorMessage,
+			FinishReason:        event.FinishReason,
+			ModelVersion:        event.ModelVersion,
+			InputTranscription:  event.InputTranscription,
+			OutputTranscription: event.OutputTranscription,
 		},
 		Actions: session.EventActions{
-			StateDelta:        event.Actions.StateDelta,
-			ArtifactDelta:     event.Actions.ArtifactDelta,
-			Escalate:          event.Actions.Escalate,
-			SkipSummarization: event.Actions.SkipSummarization,
-			TransferToAgent:   event.Actions.TransferToAgent,
+			StateDelta:                 event.Actions.StateDelta,
+			ArtifactDelta:              event.Actions.ArtifactDelta,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+			TransferToAgent:            event.Actions.TransferToAgent,
+			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			// Actions.Compaction is deliberately not mapped inbound. A
+			// compaction record tells prompt assembly to drop a span of history
+			// and substitute content in its place, so honouring one from a
+			// request body would let a client erase a conversation and inject
+			// text into it as a model turn. Only the runner writes these.
+			// FromSessionEvent still returns them, so a client can read
+			// summaries it did not author.
 		},
 	}
 }
@@ -87,28 +112,37 @@ func ToSessionEvent(event Event) *session.Event {
 // FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
 	return Event{
-		ID:                 event.ID,
-		InvocationID:       event.InvocationID,
-		Branch:             event.Branch,
-		Author:             event.Author,
-		Partial:            event.Partial,
-		LongRunningToolIDs: event.LongRunningToolIDs,
-		AvgLogprobs:        event.LLMResponse.AvgLogprobs,
-		Content:            event.LLMResponse.Content,
-		GroundingMetadata:  event.LLMResponse.GroundingMetadata,
-		UsageMetadata:      event.LLMResponse.UsageMetadata,
-		TurnComplete:       event.LLMResponse.TurnComplete,
-		Interrupted:        event.LLMResponse.Interrupted,
-		ErrorCode:          event.LLMResponse.ErrorCode,
-		ErrorMessage:       event.LLMResponse.ErrorMessage,
-		FinishReason:       event.LLMResponse.FinishReason,
-		ModelVersion:       event.LLMResponse.ModelVersion,
+		ID:                  event.ID,
+		InvocationID:        event.InvocationID,
+		Branch:              event.Branch,
+		Author:              event.Author,
+		Partial:             event.Partial,
+		LongRunningToolIDs:  event.LongRunningToolIDs,
+		Output:              event.Output,
+		NodeInfo:            event.NodeInfo,
+		IsolationScope:      event.IsolationScope,
+		Routes:              event.Routes,
+		RequestedInput:      event.RequestedInput,
+		AvgLogprobs:         event.LLMResponse.AvgLogprobs,
+		Content:             event.LLMResponse.Content,
+		GroundingMetadata:   event.LLMResponse.GroundingMetadata,
+		UsageMetadata:       event.LLMResponse.UsageMetadata,
+		TurnComplete:        event.LLMResponse.TurnComplete,
+		Interrupted:         event.LLMResponse.Interrupted,
+		ErrorCode:           event.LLMResponse.ErrorCode,
+		ErrorMessage:        event.LLMResponse.ErrorMessage,
+		FinishReason:        event.LLMResponse.FinishReason,
+		ModelVersion:        event.LLMResponse.ModelVersion,
+		InputTranscription:  event.LLMResponse.InputTranscription,
+		OutputTranscription: event.LLMResponse.OutputTranscription,
 		Actions: EventActions{
-			StateDelta:        event.Actions.StateDelta,
-			ArtifactDelta:     event.Actions.ArtifactDelta,
-			Escalate:          event.Actions.Escalate,
-			SkipSummarization: event.Actions.SkipSummarization,
-			TransferToAgent:   event.Actions.TransferToAgent,
+			StateDelta:                 event.Actions.StateDelta,
+			ArtifactDelta:              event.Actions.ArtifactDelta,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+			TransferToAgent:            event.Actions.TransferToAgent,
+			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			Compaction:                 event.Actions.Compaction,
 		},
 	}
 }

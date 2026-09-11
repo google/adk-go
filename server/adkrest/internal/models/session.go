@@ -20,7 +20,7 @@ import (
 
 	"github.com/mitchellh/mapstructure"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // Session represents an agent's session.
@@ -36,6 +36,14 @@ type Session struct {
 type CreateSessionRequest struct {
 	State  map[string]any `json:"state"`
 	Events []Event        `json:"events"`
+}
+
+// UpdateSessionRequest is the body of a PATCH session request.
+//
+// StateDelta holds the state keys to add or overwrite; keys it does not mention
+// are left as they are. An empty or absent delta is a no-op.
+type UpdateSessionRequest struct {
+	StateDelta map[string]any `json:"stateDelta"`
 }
 
 type SessionID struct {

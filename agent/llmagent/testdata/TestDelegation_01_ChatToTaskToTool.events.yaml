@@ -1,0 +1,98 @@
+- author: user
+  role: user
+  parts:
+    - text: 'Fetch and store the following items: apple, banana, cherry.'
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: data_fetcher
+        id: gzbp0yzp
+        args:
+            request: 'Fetch the following items: apple, banana, cherry.'
+  node_info:
+    path: coordinator
+- author: data_fetcher
+  isolation_scope: gzbp0yzp
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: 37rgmeqm
+        args:
+            items:
+                - apple
+                - banana
+                - cherry
+  node_info:
+    path: coordinator/data_fetcher@gzbp0yzp
+- author: data_fetcher
+  isolation_scope: gzbp0yzp
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: 37rgmeqm
+        response:
+            result: Task completed.
+  output:
+    items:
+        - apple
+        - banana
+        - cherry
+  node_info:
+    path: coordinator/data_fetcher@gzbp0yzp
+    output_for:
+        - coordinator/data_fetcher@gzbp0yzp
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: data_fetcher
+        id: gzbp0yzp
+        response:
+            items:
+                - apple
+                - banana
+                - cherry
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: store_report
+        id: chnsu55g
+        args:
+            items:
+                - apple
+                - banana
+                - cherry
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: user
+  parts:
+    - function_response:
+        name: store_report
+        id: chnsu55g
+        response:
+            stored: 3
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: I have successfully stored the 3 items.
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: What items did I just ask you to store?
+- author: coordinator
+  role: model
+  parts:
+    - text: You asked me to store apple, banana, and cherry.
+  node_info:
+    path: coordinator

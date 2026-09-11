@@ -16,10 +16,13 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 /*
@@ -84,6 +87,11 @@ type InvocationContext interface {
 	// Applicable to parallel agent because its sub-agents run concurrently.
 	Branch() string
 
+	// IsolationScope of the invocation context. When set, the agent's LLM
+	// prompt history includes only session events whose IsolationScope
+	// matches exactly. Empty means unscoped.
+	IsolationScope() string
+
 	// UserContent that started this invocation.
 	UserContent() *genai.Content
 
@@ -96,10 +104,18 @@ type InvocationContext interface {
 	// Ended returns whether the invocation has ended.
 	Ended() bool
 
+	// ResumedInput returns the user-supplied response payload
+	// associated with the given InterruptID for the current
+	// activation, or (nil, false) if none. Implementations that
+	// do not carry resume payloads always return (nil, false).
+	ResumedInput(interruptID string) (any, bool)
+
 	// WithContext returns a new instance of the context with overridden embedded context.
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
+
+	WithICDelta(d *InvocationContextDelta) InvocationContext
 }
 
 // ReadonlyContext provides read-only access to invocation context data.
@@ -119,10 +135,106 @@ type ReadonlyContext interface {
 	Branch() string
 }
 
-// CallbackContext is passed to user callbacks during agent execution.
-type CallbackContext interface {
+// Context is the unified context passed to user callbacks during agent
+// execution and to tools when they are called. It provides access to the
+// originating function call, mutable event actions, long-term memory search,
+// and the Human-in-the-Loop (HITL) confirmation flow.
+type Context interface {
 	ReadonlyContext
+	InvocationContext
 
+	// Callback context
 	Artifacts() Artifacts
 	State() session.State
+
+	// Tool context section
+
+	// FunctionCallID returns the unique identifier of the function call
+	// that triggered this tool execution.
+	FunctionCallID() string
+
+	// Actions returns the EventActions for the current event. This can be
+	// used by the tool to modify the agent's state, transfer to another
+	// agent, or perform other actions.
+	Actions() *session.EventActions
+
+	// SearchMemory performs a semantic search on the agent's memory.
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
+
+	// ToolConfirmation returns a handler for checking the Human-in-the-Loop
+	// confirmation status for the current tool context. This should be used
+	// within a tool's logic *before* performing any sensitive operations that
+	// require user approval.
+	//
+	// Example Usage:
+	//   if confirmation := ctx.ToolConfirmation(); confirmation == nil {
+	//       // Confirmation required, create confirmation or handle appropriately
+	//       ctx.RequestConfirmation("hint", payload)
+	//   }
+	//
+	// The returned *toolconfirmation.ToolConfirmation object provides methods
+	// to check the actual confirmation state.
+	ToolConfirmation() *toolconfirmation.ToolConfirmation
+
+	// RequestConfirmation initiates the Human-in-the-Loop (HITL) process to
+	// ask the user for approval before the tool proceeds with a specific
+	// action. Call this method when a tool needs explicit user consent.
+	//
+	// This will typically result in the ADK emitting a special event
+	// (e.g., a FunctionCall like "adk_request_confirmation") to the client
+	// application/UI, prompting the user for a decision.
+	//
+	// Args:
+	//   - hint: A human-readable string explaining why confirmation is needed.
+	//     This is usually displayed to the user in the confirmation prompt.
+	//   - payload: Any additional data or context about the action requiring
+	//     confirmation.
+	//
+	// Returns:
+	//   - nil: If the confirmation request was successfully enqueued or
+	//     initiated within the ADK. This indicates that the process of asking
+	//     the user has begun. It does NOT mean the action is approved. The
+	//     tool's execution will likely pause or be suspended until the user
+	//     responds.
+	//   - error: If there was a failure in initiating the confirmation process
+	//     itself (e.g., invalid arguments, issue with the event system). The
+	//     request to ask the user has not been sent.
+	RequestConfirmation(hint string, payload any) error
+
+	// Workflow node section
+
+	// ResumedInput returns the response payload for a re-entry resume
+	// activation keyed by InterruptID, or (nil, false) otherwise.
+	ResumedInput(interruptID string) (any, bool)
+
+	// Path returns the composite path of the currently-executing node.
+	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"
+	// for dynamic children.
+	Path() string
+
+	// RunID returns the per-invocation identifier. Empty for top-level
+	// static nodes; auto-counter or user-supplied via WithRunID for
+	// dynamic children.
+	RunID() string
+
+	// SubScheduler is non-nil only when this context belongs to a
+	// dynamic-node activation; RunNode uses it to schedule children.
+	SubScheduler() DynamicSubScheduler
+
+	// WithAgentContext creates a new context as a shallow copy setting the internal contexts to ctx.
+	WithAgentContext(ctx context.Context) Context
+
+	// WithAgentTimeout creates a new context as a shallow copy, adding timeout to the top of the underlying context.Context.
+	WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc)
+
+	// WithAgentCancel creates a new context as a shallow copy, adding cancellation to the top of the underlying context.Context.
+	WithAgentCancel() (Context, context.CancelFunc)
+
+	// OutputForAncestors are the delegating-ancestor paths carried
+	// into this activation when it runs as a WithUseAsOutput child;
+	// its dynamic sub-scheduler reads them to stamp OutputFor.
+	OutputForAncestors() []string
+
+	// WithDelta returns a copy of source context with applied delta d
+	WithDelta(d *CommonContextDelta) Context
 }

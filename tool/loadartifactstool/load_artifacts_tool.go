@@ -25,11 +25,11 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
@@ -85,7 +85,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -117,7 +117,10 @@ func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
-func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("load_artifacts tool requires an artifact service to be configured")
+	}
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -127,7 +130,7 @@ func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) 
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *artifactsTool) appendInitialInstructions(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -151,7 +154,7 @@ func (t *artifactsTool) appendInitialInstructions(ctx tool.Context, req *model.L
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
@@ -159,23 +162,39 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx tool.Context, req *
 	if lastContent == nil || len(lastContent.Parts) == 0 {
 		return nil
 	}
-	firstPart := lastContent.Parts[0]
-	if firstPart.FunctionResponse == nil {
-		return nil
+	var functionResponse *genai.FunctionResponse
+	// Iterate over all parts in the last content turn to find load_artifacts responses.
+	// Note: adk-python only checks parts[0]; scanning all parts is intentional in Go to
+	// support parallel/multi-tool turns where load_artifacts may not be the first part.
+	for _, part := range lastContent.Parts {
+		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+			functionResponse = part.FunctionResponse
+			// Keep only the first load_artifacts response if multiple exist in one turn.
+			break
+		}
 	}
-
-	functionResponse := firstPart.FunctionResponse
-
-	if functionResponse.Name != "load_artifacts" {
+	if functionResponse == nil {
 		return nil
 	}
 	artifactNamesRaw, ok := functionResponse.Response["artifact_names"]
 	if !ok {
 		return nil
 	}
-	artifactNames, ok := artifactNamesRaw.([]string)
-	if !ok {
-		return fmt.Errorf("invalid artifact names type: %T, expected []string", artifactNamesRaw)
+	var artifactNames []string
+	switch names := artifactNamesRaw.(type) {
+	case []string:
+		artifactNames = names
+	case []any:
+		artifactNames = make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			artifactNames[i] = s
+		}
+	default:
+		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
 	}
 	if len(artifactNames) == 0 {
 		return nil

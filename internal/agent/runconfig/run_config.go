@@ -14,7 +14,11 @@
 
 package runconfig
 
-import "context"
+import (
+	"context"
+
+	"google.golang.org/adk/v2/agent"
+)
 
 type StreamingMode string
 
@@ -26,9 +30,11 @@ const (
 
 type RunConfig struct {
 	StreamingMode StreamingMode
+	Live          *agent.LiveRunConfig
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {
+	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, runConfigCtxKey, cfg)
 }
 

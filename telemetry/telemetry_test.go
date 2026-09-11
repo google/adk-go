@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -78,13 +79,13 @@ func TestTelemetrySmoke(t *testing.T) {
 	logBody := "test-log"
 
 	var record log.Record
-	record.SetBody(log.StringValue(logBody))
+	record.SetBody(attribute.StringValue(logBody))
 	logger.Emit(ctx, record)
 
-	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
-	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.LoggerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush logs: %v", err)
 	}
 
@@ -154,7 +155,7 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName)
 	span.End()
 
-	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 
@@ -201,10 +202,10 @@ func TestTelemetryCustomLoggerProvider(t *testing.T) {
 	logBody := "test-log"
 
 	var record log.Record
-	record.SetBody(log.StringValue(logBody))
+	record.SetBody(attribute.StringValue(logBody))
 	logger.Emit(ctx, record)
 
-	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+	if err := providers.LoggerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush logs: %v", err)
 	}
 
