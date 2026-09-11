@@ -1104,6 +1104,50 @@ func TestMetadataOnlyChunkDoesNotAbortStream(t *testing.T) {
 	}
 }
 
+func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	usageMetadata := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     3,
+		CandidatesTokenCount: 5,
+		TotalTokenCount:      8,
+	}
+	chunks := []*genai.GenerateContentResponse{
+		{
+			Candidates:    []*genai.Candidate{{Content: genai.NewContentFromText("Hello", "model")}},
+			UsageMetadata: usageMetadata,
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content:      genai.NewContentFromText(" world", "model"),
+				FinishReason: genai.FinishReasonStop,
+			}},
+		},
+	}
+
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if finalResponse.UsageMetadata == nil {
+		t.Fatal("expected usage metadata in the final aggregated response, got nil")
+	}
+	if finalResponse.UsageMetadata.PromptTokenCount != usageMetadata.PromptTokenCount ||
+		finalResponse.UsageMetadata.CandidatesTokenCount != usageMetadata.CandidatesTokenCount ||
+		finalResponse.UsageMetadata.TotalTokenCount != usageMetadata.TotalTokenCount {
+		t.Errorf("usage metadata was not retained: got %+v, want %+v", finalResponse.UsageMetadata, usageMetadata)
+	}
+}
+
 func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()

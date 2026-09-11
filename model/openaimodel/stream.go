@@ -50,6 +50,13 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		}
 		// For text deltas, we create a response with a single text part.
 		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
+	case responseRefusalDelta:
+		delta := evt.AsResponseRefusalDelta()
+		if delta.Delta == "" {
+			return nil, nil
+		}
+		// Blocking responses expose refusals as text, so streaming does the same.
+		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseReasoningTextDelta:
 		delta := evt.AsResponseReasoningTextDelta()
 		if delta.Delta == "" {
@@ -82,12 +89,15 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		return singlePartResponse(part), nil
 	case responseFailed:
 		failed := evt.AsResponseFailed()
-		// If the response failed, we return an error with the message.
-		return nil, fmt.Errorf("openai response failed: %s", failed.Response.Error.Message)
+		// Built by the same renderer the blocking path uses, so one server
+		// failure reads the same however it arrived.
+		return nil, failedResponseError(&failed.Response)
 	case errorEvent:
 		// Generic stream errors are also returned.
-		if evt.Message != "" {
-			return nil, fmt.Errorf("openai stream error: %s", evt.Message)
+		// Same treatment as a failed response body: the text is the server's,
+		// so it is capped, and quoted rather than interpolated bare.
+		if msg := clipServerText(evt.Message); msg != "" {
+			return nil, fmt.Errorf("openai stream error: %q", msg)
 		}
 		return nil, fmt.Errorf("openai stream error")
 	case responseOutputItemAdded:
@@ -100,12 +110,15 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		}
 		return nil, nil
 	case responseOutputTextDone,
+		responseRefusalDone,
 		responseReasoningTextDone,
 		responseReasoningSummaryTextDone,
 		responseCompleted,
+		responseIncomplete,
 		responseInProgress,
 		responseOutputItemDone:
-		// These are informational events that don't directly translate to a new part.
+		// Informational events with no part of their own. generateStream reads
+		// the finish reason off the terminal ones directly.
 		return nil, nil
 	default:
 		// We ignore any other unknown event types.
@@ -159,6 +172,10 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 	if err := json.Unmarshal([]byte(payload), &args); err != nil {
 		return nil, fmt.Errorf("openai: parse streamed function args: %w", err)
 	}
+	if args == nil {
+		// Match the blocking path: JSON null means the call takes no arguments.
+		args = map[string]any{}
+	}
 	return &genai.Part{
 		FunctionCall: &genai.FunctionCall{
 			Name: name,
@@ -168,6 +185,12 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 	}, nil
 }
 
+// singlePartResponse wraps one streamed part as a genai response.
+//
+// The candidate deliberately carries no finish reason: the aggregator treats any
+// non-empty one as terminal, and genai.FinishReasonUnspecified is the non-empty
+// string "FINISH_REASON_UNSPECIFIED", so setting it marks every delta the end of
+// the turn. generateStream reports the real reason on the final response.
 func singlePartResponse(part *genai.Part) *genai.GenerateContentResponse {
 	if part == nil {
 		return nil
@@ -179,7 +202,6 @@ func singlePartResponse(part *genai.Part) *genai.GenerateContentResponse {
 					Role:  string(genai.RoleModel),
 					Parts: []*genai.Part{part},
 				},
-				FinishReason: genai.FinishReasonUnspecified,
 			},
 		},
 	}

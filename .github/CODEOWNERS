@@ -1,0 +1,8 @@
+# Dependency + Dependabot PR review routing.
+# "Normal" PRs (features, tests, docs) are intentionally NOT owned here —
+# those go through the internal review rotation (reviewer self-assigns).
+/go.mod                        @google/adk-go-maintainers-team
+/go.sum                        @google/adk-go-maintainers-team
+/.github/dependabot.yml        @google/adk-go-maintainers-team
+/plugin/agentanalytics/go.mod  @google/adk-go-maintainers-team
+/plugin/agentanalytics/go.sum  @google/adk-go-maintainers-team

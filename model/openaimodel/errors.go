@@ -39,6 +39,8 @@ var (
 	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
+	// ErrUnsupportedConfigField is returned when a generation config field has no Responses API equivalent; the message names it.
+	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
 	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
@@ -46,10 +48,17 @@ var (
 	ErrEmptyResponse = errors.New("openai: empty response")
 	// ErrNoOutputItems is returned when the response contains no output items.
 	ErrNoOutputItems = errors.New("openai: response included no output items")
+	// ErrResponseFailed is returned when the server reports the response itself
+	// as failed, whatever output it came with. Such a failure arrives as HTTP
+	// 200, and both a blocking call and a stream report it in place of the
+	// output that would otherwise have read as a turn.
+	ErrResponseFailed = errors.New("openai: response failed")
 	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
 	ErrUnsupportedMessageContentType = errors.New("openai: unsupported message content type")
 	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
 	ErrUnsupportedOutputItemType = errors.New("openai: unsupported output item type")
+	// ErrFunctionCallArgs is returned when a function call's arguments are not a decodable JSON object.
+	ErrFunctionCallArgs = errors.New("openai: parse function call args")
 	// ErrNoTextOrToolContent is returned when the response output does not contain text or tool content.
 	ErrNoTextOrToolContent = errors.New("openai: response output did not contain text or tool content")
 )

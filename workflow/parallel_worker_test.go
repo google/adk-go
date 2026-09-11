@@ -492,6 +492,75 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	close(blockCh)
 }
 
+func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
+	// jjsasha63's finding on #1239: runWorker's retry-delay select only
+	// calls reportFailure on the "cannot retry or exhausted attempts" path,
+	// not on the `case <-ctx.Done()` arm inside the delay wait. A worker
+	// parked in that delay when the top-level context is cancelled sends
+	// workerResult{err: ctx.Err()} straight to resCh without ever setting
+	// firstErr, and the aggregation loop only reads res.ev, never res.err,
+	// so a cancellation that lands here is silently dropped: nil error, nil
+	// output for that item.
+	wrapped := NewFunctionNode("always_fails", func(ctx agent.Context, input any) (any, error) {
+		return nil, errors.New("boom")
+	}, defaultNodeConfig)
+
+	rc := DefaultRetryConfig()
+	rc.MaxAttempts = 5
+	rc.InitialDelay = 2 * time.Second
+	rc.MaxDelay = 2 * time.Second
+	rc.Jitter = 0
+	rc.ShouldRetry = func(err error) bool { return true }
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, NodeConfig{RetryConfig: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	mockCtx := &MockInvocationContext{Context: ctx}
+	exCtx := agent.NewContext(mockCtx)
+	input := []any{1}
+
+	done := make(chan struct{})
+	var gotErr error
+	var hasFinalResult bool
+
+	go func() {
+		for ev, err := range pw.Run(exCtx, input) {
+			if err != nil {
+				gotErr = err
+			}
+			if _, ok := extractOutput(ev); ok {
+				hasFinalResult = true
+			}
+		}
+		close(done)
+	}()
+
+	// The single attempt fails immediately (well inside InitialDelay), so
+	// by the time we cancel, the worker is parked in the retry select
+	// waiting on time.After(2s), not mid-attempt.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during retry delay to complete")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error on cancellation during retry delay, got nil")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", gotErr)
+	}
+	if hasFinalResult {
+		t.Error("expected no final result to be yielded when cancelled mid-retry")
+	}
+}
+
 func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
@@ -770,5 +839,63 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 	}
 	if errCount != 1 || unsetCount != 1 {
 		t.Errorf("status multiset = {Error:%d, Unset:%d}, want {Error:1, Unset:1}", errCount, unsetCount)
+	}
+}
+
+func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
+	const nItems = 5
+	var started int32
+
+	wrapped := NewFunctionNode("slow_or_fail", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			return 0, errors.New("error 0")
+		}
+		atomic.AddInt32(&started, 1)
+		time.Sleep(50 * time.Millisecond)
+		return input, nil
+	}, defaultNodeConfig)
+
+	// maxConcurrency=1 forces every item after the first to wait on the
+	// dispatch loop's semaphore, which is exactly the path where fail-fast
+	// cancellation must reach still-undispatched items.
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockCtx := newMockCtx(t)
+	exCtx := agent.NewContext(mockCtx)
+	input := []any{0, 1, 2, 3, 4}
+
+	var gotErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, err := range pw.Run(exCtx, input) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for execution to complete")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotErr.Error() != "error 0" {
+		t.Errorf("expected error 'error 0', got %v", gotErr)
+	}
+
+	// The item at index 0 fails immediately, before any other item has a
+	// chance to run under maxConcurrency=1. Fail-fast cancellation should
+	// stop the remaining items from ever being dispatched, so well under
+	// nItems-1 of them should have started.
+	if got := atomic.LoadInt32(&started); got >= nItems-1 {
+		t.Errorf("started = %d, want well under %d (fail-fast should stop dispatch of items still waiting on the semaphore)", got, nItems-1)
 	}
 }

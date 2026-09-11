@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The name-based model registry lets an [LLM] be constructed from just a
-// model-name string via [NewLLM], mirroring Python ADK's
+// Package model provides a name-based registry that lets an [LLM] be constructed
+// from just a model-name string via [NewLLM], mirroring Python ADK's
 // LLMRegistry.new_llm(name).
 //
 // Registration is opt-in: provider packages do not register themselves on

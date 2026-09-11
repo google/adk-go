@@ -15,7 +15,9 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -78,6 +80,255 @@ func TestConvertResponse_NoOutput(t *testing.T) {
 	_, err := convertResponse(&responses.Response{})
 	if err == nil {
 		t.Fatalf("expected error for empty output")
+	}
+}
+
+func TestConvertResponse_FailedStatus(t *testing.T) {
+	output := []responses.ResponseOutputItemUnion{
+		{
+			Type: "message",
+			Content: []responses.ResponseOutputMessageContentUnion{
+				{Type: "output_text", Text: "half an answer"},
+			},
+		},
+	}
+	// The error text is compared in full: a partially rendered detail, such as
+	// the empty "()" left by a missing code, only shows up in an exact match.
+	tests := []struct {
+		name    string
+		resp    *responses.Response
+		wantErr string
+	}{
+		{
+			name: "no output",
+			resp: &responses.Response{
+				ID:     "resp_123",
+				Status: responses.ResponseStatusFailed,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "the model failed to generate a response",
+				},
+			},
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`,
+		},
+		{
+			name: "partial output",
+			resp: &responses.Response{
+				ID:     "resp_123",
+				Status: responses.ResponseStatusFailed,
+				Output: output,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "the model failed to generate a response",
+				},
+			},
+			wantErr: `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`,
+		},
+		{
+			name: "message only",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Message: "upstream exploded"},
+			},
+			wantErr: `openai: response failed: "upstream exploded"`,
+		},
+		{
+			name: "code only",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: "rate_limit_exceeded"},
+			},
+			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
+		},
+		{
+			name: "id only",
+			// Nothing but the status and the ID, still the handle to quote back
+			// to the provider.
+			resp:    &responses.Response{ID: "resp_123", Status: responses.ResponseStatusFailed},
+			wantErr: `openai: response failed (id "resp_123")`,
+		},
+		{
+			name: "no error object",
+			resp: &responses.Response{Status: responses.ResponseStatusFailed},
+			// The bare sentinel, with nothing appended to it.
+			wantErr: "openai: response failed",
+		},
+		{
+			name: "blank message",
+			// Nothing but spaces must not leave a dangling separator.
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: "server_error", Message: "  \n "},
+			},
+			wantErr: `openai: response failed (code "server_error")`,
+		},
+		{
+			name: "message already names the code",
+			// Reported twice rather than elided: dropping a code because the
+			// message appears to contain it loses it whenever the message
+			// merely embeds it in a longer token.
+			resp: &responses.Response{
+				Status: responses.ResponseStatusFailed,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "server_error: upstream exploded",
+				},
+			},
+			wantErr: `openai: response failed (code "server_error"): "server_error: upstream exploded"`,
+		},
+		{
+			name: "code embedded in a longer token in the message",
+			// The case an unanchored substring test would silently drop.
+			resp: &responses.Response{
+				ID:     "resp_1",
+				Status: responses.ResponseStatusFailed,
+				Error: responses.ResponseError{
+					Code:    "server_error",
+					Message: "Downstream returned server_error_5xx; retry later.",
+				},
+			},
+			wantErr: `openai: response failed (id "resp_1", code "server_error"): "Downstream returned server_error_5xx; retry later."`,
+		},
+		{
+			name: "message already names the id",
+			// Same rule for the ID, which had no de-duplication of its own.
+			resp: &responses.Response{
+				ID:     "resp_123",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Message: "resp_123 could not be completed"},
+			},
+			wantErr: `openai: response failed (id "resp_123"): "resp_123 could not be completed"`,
+		},
+		{
+			name: "id forging a second field",
+			// The whole reason the values are quoted: bare, this renders
+			// identically to an id of "resp_123" beside a code of
+			// "invalid_prompt".
+			resp: &responses.Response{
+				ID:     "resp_123, code invalid_prompt",
+				Status: responses.ResponseStatusFailed,
+			},
+			wantErr: `openai: response failed (id "resp_123, code invalid_prompt")`,
+		},
+		{
+			name: "id and code that merely have padding",
+			// Distinct from the whitespace-only row below: these trim to
+			// something, so a one-sided trim would leave the padding in.
+			resp: &responses.Response{
+				ID:     "  resp_123  ",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: "\tserver_error "},
+			},
+			wantErr: `openai: response failed (id "resp_123", code "server_error")`,
+		},
+		{
+			name: "blank id and code",
+			// Both trims, which nothing else exercises: whitespace-only values
+			// must contribute no label at all.
+			resp: &responses.Response{
+				ID:     "  ",
+				Status: responses.ResponseStatusFailed,
+				Error:  responses.ResponseError{Code: " \t ", Message: "upstream exploded"},
+			},
+			wantErr: `openai: response failed: "upstream exploded"`,
+		},
+		{
+			// The two halves of the absent-status rule, one at a time. With
+			// both set, flipping its || to && would go unnoticed.
+			name: "no status, message only",
+			resp: &responses.Response{
+				Error: responses.ResponseError{Message: "upstream exploded"},
+			},
+			wantErr: `openai: response failed: "upstream exploded"`,
+		},
+		{
+			name: "no status, code only",
+			resp: &responses.Response{
+				Error: responses.ResponseError{Code: "rate_limit_exceeded"},
+			},
+			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertResponse(tc.resp)
+			if got != nil {
+				t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
+			}
+			if !errors.Is(err, ErrResponseFailed) {
+				t.Fatalf("error = %v, want errors.Is(err, ErrResponseFailed)", err)
+			}
+			if got := err.Error(); got != tc.wantErr {
+				t.Errorf("error = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestConvertResponse_StatusOtherThanFailed pins how narrow the failure check
+// is: "failed" alone costs the caller its output, while a truncation, a
+// cancellation, a queued or in-progress body and an unknown status all still
+// convert. Widening the check to any of them — easy, since every other status
+// is also "not completed" — breaks a row here.
+func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
+	tests := []struct {
+		name   string
+		status responses.ResponseStatus
+		reason string
+		want   genai.FinishReason
+	}{
+		{name: "completed", status: responses.ResponseStatusCompleted, want: genai.FinishReasonStop},
+		{
+			name:   "truncated",
+			status: responses.ResponseStatusIncomplete,
+			reason: "max_output_tokens",
+			want:   genai.FinishReasonMaxTokens,
+		},
+		{
+			name:   "content filtered",
+			status: responses.ResponseStatusIncomplete,
+			reason: "content_filter",
+			want:   genai.FinishReasonSafety,
+		},
+		{name: "incomplete with no reason", status: responses.ResponseStatusIncomplete, want: genai.FinishReasonOther},
+		{name: "cancelled", status: responses.ResponseStatusCancelled, want: genai.FinishReasonOther},
+		{name: "queued", status: responses.ResponseStatusQueued, want: genai.FinishReasonOther},
+		{name: "in progress", status: responses.ResponseStatusInProgress, want: genai.FinishReasonOther},
+		{name: "unknown to this SDK", status: "moderated", want: genai.FinishReasonOther},
+		{name: "absent", status: "", want: genai.FinishReasonStop},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &responses.Response{
+				ID:                "resp_123",
+				Status:            tc.status,
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: tc.reason},
+				Output: []responses.ResponseOutputItemUnion{
+					{
+						Type: "message",
+						Content: []responses.ResponseOutputMessageContentUnion{
+							{Type: "output_text", Text: "half an answer"},
+						},
+					},
+				},
+			}
+			// An error object rides along wherever a status is stated, to pin
+			// that it does not override one. The absent-status row omits it,
+			// since there it would be a failure rather than a turn.
+			if tc.status != "" {
+				resp.Error = responses.ResponseError{Code: "server_error", Message: "ignore me"}
+			}
+			got, err := convertResponse(resp)
+			if err != nil {
+				t.Fatalf("convertResponse(status %q) err = %v, want the response converted", tc.status, err)
+			}
+			if text := got.Candidates[0].Content.Parts[0].Text; text != "half an answer" {
+				t.Errorf("text = %q, want the output the server did produce", text)
+			}
+			if reason := got.Candidates[0].FinishReason; reason != tc.want {
+				t.Errorf("FinishReason = %q, want %q", reason, tc.want)
+			}
+		})
 	}
 }
 
@@ -206,7 +457,7 @@ func TestConvertFunctionCall(t *testing.T) {
 			call: responses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: `{"arg":"val"}`,
+				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{"arg":"val"}`},
 			},
 			wantID:   "call-1",
 			wantName: "test_fn",
@@ -217,7 +468,7 @@ func TestConvertFunctionCall(t *testing.T) {
 			call: responses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: `{bad`,
+				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{bad`},
 			},
 			wantErr: true,
 		},
@@ -245,34 +496,424 @@ func TestConvertFunctionCall(t *testing.T) {
 	}
 }
 
+// TestConvertFunctionCall_DecodedArguments exercises the arguments field
+// through the SDK's real UnmarshalJSON path. Constructing
+// ResponseOutputItemUnionArguments as a struct literal bypasses that decoding
+// entirely, so it cannot tell which union arm a given wire payload populates.
+func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		wantArgs map[string]any
+		wantErr  bool
+	}{
+		{
+			name:     "string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"{\"location\":\"Paris\"}"}`,
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			// OpenAI-compatible endpoints commonly send a bare JSON object
+			// here rather than a string. These arguments must not be dropped.
+			name:     "object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{"location":"Paris"}}`,
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "empty object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{}}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "empty string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":""}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "null arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":null}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			name:     "absent arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c"}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			// A JSON string holding the literal null means "no arguments",
+			// matching a null in the bare arm. It must not yield a nil map:
+			// a tool wrapper writing to one would panic.
+			name:     "null string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"null"}`,
+			wantArgs: map[string]any{},
+		},
+		{
+			// Both arms must follow encoding/json's last-one-wins rule, as
+			// every other JSON consumer in the package does. The SDK decodes
+			// with gjson, which keeps the first occurrence, so decoding the
+			// bare arm from anything but the original bytes would resolve
+			// this to /tmp/safe and make the two arms disagree.
+			name:     "duplicate keys in object arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":{"path":"/tmp/safe","path":"/etc/shadow"}}`,
+			wantArgs: map[string]any{"path": "/etc/shadow"},
+		},
+		{
+			name:     "duplicate keys in string arguments",
+			raw:      `{"type":"function_call","name":"f","call_id":"c","arguments":"{\"path\":\"/tmp/safe\",\"path\":\"/etc/shadow\"}"}`,
+			wantArgs: map[string]any{"path": "/etc/shadow"},
+		},
+		{
+			// A non-object payload must surface an error rather than degrade
+			// into an empty argument map.
+			name:    "array arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":[1,2]}`,
+			wantErr: true,
+		},
+		{
+			name:    "number arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":42}`,
+			wantErr: true,
+		},
+		{
+			name:    "bool arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":true}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-object string arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":"[1,2]"}`,
+			wantErr: true,
+		},
+		{
+			// Out of range for float64. The SDK's decoder turns this into
+			// +Inf, so it must be rejected from the original bytes rather
+			// than reported as a re-encoding failure.
+			name:    "out of range number in object arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":{"x":1e400}}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed string arguments",
+			raw:     `{"type":"function_call","name":"f","call_id":"c","arguments":"{not json"}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var item responses.ResponseOutputItemUnion
+			if err := json.Unmarshal([]byte(tc.raw), &item); err != nil {
+				t.Fatalf("json.Unmarshal(%s) err = %v", tc.raw, err)
+			}
+			got, err := convertFunctionCall(item)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("convertFunctionCall() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if !errors.Is(err, ErrFunctionCallArgs) {
+					t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+				}
+				return
+			}
+			if got.FunctionCall.Args == nil {
+				t.Errorf("Args = nil, want non-nil (a nil map panics on write)")
+			}
+			if diff := cmp.Diff(tc.wantArgs, got.FunctionCall.Args); diff != "" {
+				t.Errorf("Args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestConvertFunctionCall_HandBuiltArguments covers values constructed as struct
+// literals rather than decoded from the wire, as callers do in their own tests.
+// These carry no JSON metadata and no original bytes, so neither arm can be
+// discriminated by presence alone.
+func TestConvertFunctionCall_HandBuiltArguments(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     responses.ResponseOutputItemUnionArguments
+		wantArgs map[string]any
+	}{
+		{
+			name:     "string arm",
+			args:     responses.ResponseOutputItemUnionArguments{OfString: `{"location":"Paris"}`},
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "bare arm",
+			args:     responses.ResponseOutputItemUnionArguments{OfResponseToolSearchCallArguments: map[string]any{"location": "Paris"}},
+			wantArgs: map[string]any{"location": "Paris"},
+		},
+		{
+			name:     "zero value",
+			args:     responses.ResponseOutputItemUnionArguments{},
+			wantArgs: map[string]any{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertFunctionCall(responses.ResponseOutputItemUnion{Arguments: tc.args})
+			if err != nil {
+				t.Fatalf("convertFunctionCall() err = %v", err)
+			}
+			if diff := cmp.Diff(tc.wantArgs, got.FunctionCall.Args); diff != "" {
+				t.Errorf("Args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestConvertResponse_BadFunctionCallArgs covers what the convertFunctionCall
+// tests structurally cannot, by going through the whole conversion:
+// convertOutputItems stops at the first error, so a single undecodable
+// arguments payload discards the entire response — the model's text is lost
+// with it, rather than the response degrading to its remaining parts. The
+// sentinel must also survive that wrapping chain, and the error must name the
+// offending call, since nothing else survives to identify it.
+func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
+	const raw = `{"id":"r","model":"m","output":[
+		{"type":"message","content":[{"type":"output_text","text":"hello"}]},
+		{"type":"function_call","name":"write_file","call_id":"call-1","arguments":[1,2]}]}`
+
+	var resp responses.Response
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v", err)
+	}
+	got, err := convertResponse(&resp)
+	if err == nil {
+		t.Fatalf("convertResponse() = %+v, want error", got)
+	}
+	// The preceding text part does not survive.
+	if got != nil {
+		t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
+	}
+	if !errors.Is(err, ErrFunctionCallArgs) {
+		t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+	}
+	for _, want := range []string{`write_file`, `call-1`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// decodeResponse builds a response the way the wire does, so a test can pin
+// behavior that turns on whether a field was sent — which a struct literal
+// cannot express.
+func decodeResponse(t *testing.T, body string) *responses.Response {
+	t.Helper()
+	var resp responses.Response
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return &resp
+}
+
 func TestFinishReason(t *testing.T) {
 	tests := []struct {
-		reason string
-		want   genai.FinishReason
+		name string
+		// body is the response as the provider sent it, so a field's presence is
+		// part of the case rather than an artifact of construction.
+		body string
+		// incompleteEvent is what only the streaming path can know: the
+		// terminal event was a "response.incomplete".
+		incompleteEvent bool
+		want            genai.FinishReason
 	}{
-		{"stop", genai.FinishReasonOther},
-		{"max_output_tokens", genai.FinishReasonMaxTokens},
-		{"content_filter", genai.FinishReasonSafety},
-		{"", genai.FinishReasonStop},
-		{"other", genai.FinishReasonOther},
+		{name: "max output tokens", body: `{"incomplete_details":{"reason":"max_output_tokens"}}`, want: genai.FinishReasonMaxTokens},
+		{name: "content filter", body: `{"incomplete_details":{"reason":"content_filter"}}`, want: genai.FinishReasonSafety},
+		{name: "an unmapped reason", body: `{"incomplete_details":{"reason":"something_new"}}`, want: genai.FinishReasonOther},
+		{name: "nothing at all", body: `{}`, want: genai.FinishReasonStop},
+		{name: "completed", body: `{"status":"completed"}`, want: genai.FinishReasonStop},
+		{
+			// A finished turn carries incomplete_details as null.
+			name: "completed, incomplete_details null",
+			body: `{"status":"completed","incomplete_details":null}`,
+			want: genai.FinishReasonStop,
+		},
+		{
+			// Cut short, but not saying why. Reading that silence as a clean
+			// stop would have a caller accept a truncated answer as final.
+			name: "incomplete without a reason",
+			body: `{"status":"incomplete"}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "incomplete with a reason", body: `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}`, want: genai.FinishReasonMaxTokens},
+		{name: "failed", body: `{"status":"failed"}`, want: genai.FinishReasonOther},
+		{name: "cancelled", body: `{"status":"cancelled"}`, want: genai.FinishReasonOther},
+		{
+			// openai-go documents six statuses and marks none required; an
+			// unfinished one is no more a clean stop than an empty reason is.
+			name: "queued",
+			body: `{"status":"queued"}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "in progress", body: `{"status":"in_progress"}`, want: genai.FinishReasonOther},
+		{
+			// No status, but an incomplete_details object the provider did
+			// send: a schema-legal way to report a truncated turn, and all the
+			// blocking path gets.
+			name: "empty incomplete_details, no status",
+			body: `{"incomplete_details":{}}`,
+			want: genai.FinishReasonOther,
+		},
+		{name: "empty reason, no status", body: `{"incomplete_details":{"reason":""}}`, want: genai.FinishReasonOther},
+		{
+			// The payload says nothing; only the event does.
+			name:            "silent payload behind an incomplete event",
+			body:            `{}`,
+			incompleteEvent: true,
+			want:            genai.FinishReasonOther,
+		},
+		{
+			name:            "an incomplete event never downgrades a real reason",
+			body:            `{"incomplete_details":{"reason":"max_output_tokens"}}`,
+			incompleteEvent: true,
+			want:            genai.FinishReasonMaxTokens,
+		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.reason, func(t *testing.T) {
-			resp := &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: tc.reason,
-				},
-			}
-			got := finishReason(resp)
+		t.Run(tc.name, func(t *testing.T) {
+			got := finishReason(decodeResponse(t, tc.body), tc.incompleteEvent)
 			if got != tc.want {
-				t.Errorf("finishReason(%q) = %v, want %v", tc.reason, got, tc.want)
+				t.Errorf("finishReason(%s, incompleteEvent=%v) = %v, want %v", tc.body, tc.incompleteEvent, got, tc.want)
 			}
 		})
 	}
 
 	t.Run("nil response", func(t *testing.T) {
-		if got := finishReason(nil); got != genai.FinishReasonUnspecified {
+		if got := finishReason(nil, false); got != genai.FinishReasonUnspecified {
 			t.Errorf("finishReason(nil) = %v, want Unspecified", got)
+		}
+	})
+}
+
+// TestFinishMessage pins which of the provider's own words are reported, since
+// the finish reason flattens a failure and an unmapped truncation both to OTHER.
+func TestFinishMessage(t *testing.T) {
+	tests := []struct {
+		name            string
+		resp            *responses.Response
+		incompleteEvent bool
+		want            string
+	}{
+		{name: "nil response"},
+		{
+			name: "the server's error message outranks the rest",
+			resp: &responses.Response{
+				Status:            responses.ResponseStatusFailed,
+				Error:             responses.ResponseError{Message: "upstream exploded"},
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "content_filter"},
+			},
+			want: "upstream exploded",
+		},
+		{
+			name: "then the incomplete reason",
+			resp: &responses.Response{
+				Status:            responses.ResponseStatusIncomplete,
+				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "something_new"},
+			},
+			want: "something_new",
+		},
+		{
+			name: "and the status when that is all there is",
+			resp: &responses.Response{Status: responses.ResponseStatusIncomplete},
+			want: "incomplete",
+		},
+		{
+			// A silent payload behind an event whose name is the only account.
+			name:            "the event's own name when the payload is silent",
+			resp:            &responses.Response{},
+			incompleteEvent: true,
+			want:            "incomplete",
+		},
+		{
+			// The precedence truncated() applies, applied here too: a turn the
+			// event says did not finish cannot report "completed" as why.
+			name:            "the event's name outranks a payload calling the turn completed",
+			resp:            &responses.Response{Status: responses.ResponseStatusCompleted},
+			incompleteEvent: true,
+			want:            "incomplete",
+		},
+		{
+			// Only that contradiction is overridden. A status agreeing the turn
+			// did not finish is still the provider's own wording for why.
+			name:            "a status the event does not contradict is reported",
+			resp:            &responses.Response{Status: responses.ResponseStatusFailed},
+			incompleteEvent: true,
+			want:            "failed",
+		},
+		{
+			name: "a completed payload behind no such event stands",
+			resp: &responses.Response{Status: responses.ResponseStatusCompleted},
+			want: "completed",
+		},
+		{name: "nothing to say", resp: &responses.Response{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := finishMessage(tc.resp, tc.incompleteEvent); got != tc.want {
+				t.Errorf("finishMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogprobsFor pins that logprobs are handed out only against the text they
+// describe, so a streamed turn cannot report the terminal event's probabilities
+// over what the deltas built.
+func TestLogprobsFor(t *testing.T) {
+	resp := &responses.Response{
+		Output: []responses.ResponseOutputItemUnion{
+			{
+				Type: "message",
+				Content: []responses.ResponseOutputMessageContentUnion{
+					{
+						Type: "output_text",
+						Text: "hello",
+						Logprobs: []responses.ResponseOutputTextLogprob{
+							{Token: "hello", Logprob: -0.5},
+						},
+					},
+				},
+			},
+		},
+	}
+	if got := logprobsFor(resp, "hello"); got == nil {
+		t.Error("logprobsFor(matching text) = nil, want the logprobs")
+	}
+	if got := logprobsFor(resp, "hel"); got != nil {
+		t.Errorf("logprobsFor(different text) = %+v, want nil", got)
+	}
+	if got := logprobsFor(nil, ""); got != nil {
+		t.Errorf("logprobsFor(nil) = %+v, want nil", got)
+	}
+
+	// A refusal becomes a text part like any other (see convertOutputItems), so
+	// it counts towards the answer the logprobs describe.
+	t.Run("a refusal is part of the answer", func(t *testing.T) {
+		refused := &responses.Response{
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{
+							Type:     "output_text",
+							Text:     "hello",
+							Logprobs: []responses.ResponseOutputTextLogprob{{Token: "hello", Logprob: -0.5}},
+						},
+						{Type: "refusal", Refusal: "I cannot"},
+					},
+				},
+			},
+		}
+		if got := logprobsFor(refused, "helloI cannot"); got == nil {
+			t.Error("logprobsFor(text including the refusal) = nil, want the logprobs")
+		}
+		if got := logprobsFor(refused, "hello"); got != nil {
+			t.Errorf("logprobsFor(text missing the refusal) = %+v, want nil", got)
 		}
 	})
 }
@@ -298,7 +939,7 @@ func TestConvertOutputItems(t *testing.T) {
 					Type:      "function_call",
 					CallID:    "call-1",
 					Name:      "fn",
-					Arguments: `{}`,
+					Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{}`},
 				},
 				{
 					Type: "reasoning",
@@ -373,50 +1014,6 @@ func TestConvertOutputItems(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, parts); diff != "" {
 				t.Errorf("convertOutputItems() mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestPromptFeedback(t *testing.T) {
-	tests := []struct {
-		name string
-		resp *responses.Response
-		want *genai.GenerateContentResponsePromptFeedback
-	}{
-		{
-			name: "content filter",
-			resp: &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: "content_filter",
-				},
-			},
-			want: &genai.GenerateContentResponsePromptFeedback{
-				BlockReason:        genai.BlockedReasonSafety,
-				BlockReasonMessage: "content_filter",
-			},
-		},
-		{
-			name: "max_output_tokens",
-			resp: &responses.Response{
-				IncompleteDetails: responses.ResponseIncompleteDetails{
-					Reason: "max_output_tokens",
-				},
-			},
-			want: nil,
-		},
-		{
-			name: "nil response",
-			resp: nil,
-			want: nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := promptFeedback(tc.resp)
-			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("promptFeedback() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

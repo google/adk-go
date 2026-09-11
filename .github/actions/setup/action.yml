@@ -22,5 +22,11 @@ runs:
         path: |
           ~/.cache/go-build
           ~/go/pkg/mod
-        key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
-        restore-keys: ${{ runner.os }}-go-build-
+        # The Go version has to be part of the key. The build cache holds export
+        # data written by the toolchain that produced it, and a bare restore-keys
+        # prefix will happily restore a cache written by an older Go. Analyses
+        # that read stdlib facts then work from stale data: staticcheck stops
+        # seeing the runtime.Goexit behind t.Fatal and reports SA5011 nil
+        # dereferences throughout the tests.
+        key: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+        restore-keys: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-build-

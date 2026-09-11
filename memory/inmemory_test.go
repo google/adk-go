@@ -17,6 +17,8 @@ package memory_test
 import (
 	"iter"
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,4 +227,44 @@ func must[V any](v V, err error) V {
 		panic(err)
 	}
 	return v
+}
+
+// Test_inMemoryService_SearchMemory_Concurrent runs SearchMemory and
+// AddSessionToMemory on the same app/user in parallel. The service is
+// documented as thread-safe, so under -race (as CI runs it) the two must not
+// touch the per-user session map without synchronization.
+func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
+	s := memory.InMemoryService()
+	ctx := t.Context()
+
+	// Seed a matching event so searchers also exercise scoring and sorting.
+	if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", "seed", []*session.Event{memoryTextEvent("seed", "x")})); err != nil {
+		t.Fatalf("AddSessionToMemory() error = %v", err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				id := "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
+				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, []*session.Event{memoryTextEvent(id, "x")})); err != nil {
+					t.Errorf("AddSessionToMemory() error = %v", err)
+					return
+				}
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if _, err := s.SearchMemory(ctx, &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "x"}); err != nil {
+					t.Errorf("SearchMemory() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

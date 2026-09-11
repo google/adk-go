@@ -83,7 +83,7 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 
 	err := json.Unmarshal(payload, &req)
 	if err != nil {
-		return fmt.Errorf("json.Unmarshal() failed: %v", err)
+		return fmt.Errorf("json.Unmarshal() failed: %w", err)
 	}
 
 	ssReq := &session.DeleteRequest{
@@ -93,13 +93,13 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	}
 	err = g.sessionservice.Delete(ctx, ssReq)
 	if err != nil {
-		return fmt.Errorf("g.sessionservice.Delete() failed: %v", err)
+		return fmt.Errorf("g.sessionservice.Delete() failed: %w", err)
 	}
 
 	result := models.DeleteSessionResponse{}
 	err = json.NewEncoder(rw).Encode(result)
 	if err != nil {
-		return fmt.Errorf("json.NewEncoder failed: %v", err)
+		return fmt.Errorf("json.NewEncoder failed: %w", err)
 	}
 	return nil
 }

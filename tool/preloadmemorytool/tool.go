@@ -18,7 +18,6 @@
 // Unlike loadmemorytool which is called explicitly by the model, this tool
 // runs automatically for each LLM request and injects relevant memory context
 // into the system instructions.
-
 package preloadmemorytool
 
 import (
@@ -81,7 +80,7 @@ func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequ
 
 	searchResponse, err := ctx.SearchMemory(ctx, userQuery)
 	if err != nil {
-		return fmt.Errorf("preload memory search failed: %v", err)
+		return fmt.Errorf("preload memory search failed: %w", err)
 	}
 
 	if searchResponse == nil || len(searchResponse.Memories) == 0 {
@@ -123,7 +122,7 @@ func extractText(mem memory.Entry) string {
 
 	var b strings.Builder
 	for _, part := range mem.Content.Parts {
-		if part.Text == "" {
+		if part == nil || part.Text == "" {
 			continue
 		}
 		if b.Len() > 0 {

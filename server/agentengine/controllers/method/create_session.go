@@ -82,7 +82,7 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 
 	err := json.Unmarshal(payload, &req)
 	if err != nil {
-		return fmt.Errorf("json.Unmarshal() failed: %v", err)
+		return fmt.Errorf("json.Unmarshal() failed: %w", err)
 	}
 
 	ssReq := &session.CreateRequest{
@@ -92,7 +92,7 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	}
 	resp, err := c.sessionService.Create(ctx, ssReq)
 	if err != nil {
-		return fmt.Errorf("c.sessionservice.Create() failed: %v", err)
+		return fmt.Errorf("c.sessionservice.Create() failed: %w", err)
 	}
 
 	sd := models.FromSession(resp.Session)
@@ -102,7 +102,7 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	}
 	err = json.NewEncoder(rw).Encode(result)
 	if err != nil {
-		return fmt.Errorf("json.NewEncoder failed: %v", err)
+		return fmt.Errorf("json.NewEncoder failed: %w", err)
 	}
 	return nil
 }

@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,7 +31,9 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
@@ -42,19 +45,106 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+	authorizer        authz.Authorizer
+
+	eventsCompactionConfig *compaction.Config
+}
+
+// RuntimeAPIControllerConfig carries everything [NewRuntimeAPIControllerWithConfig]
+// needs.
+//
+// A config struct rather than functional options, which is what the rest of
+// this repository does and what this constructor should have taken from the
+// start. Options would have solved only the new field and left the seven
+// positional parameters in place, so every later addition would need a third
+// constructor; a struct absorbs both problems at once, and adding a field to it
+// breaks nobody.
+type RuntimeAPIControllerConfig struct {
+	SessionService    session.Service
+	MemoryService     memory.Service
+	AgentLoader       agent.Loader
+	ArtifactService   artifact.Service
+	SSETimeout        time.Duration
+	PluginConfig      runner.PluginConfig
+	AutoCreateSession bool
+	Authorizer        authz.Authorizer
+
+	// Compaction enables context compaction for the runners this controller
+	// creates, replacing older session events with summaries.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and it only fires when
+	// more events accumulate between sliding-window compactions than
+	// EventRetentionSize holds back, so a short interval with a large retention
+	// size leaves it idle. See [compaction.Config].
+	//
+	// optional
+	Compaction *compaction.Config
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
+//
+// Deprecated: use [NewRuntimeAPIControllerWithConfig], which does not have to
+// grow a parameter every time the controller gains a setting. This one is kept
+// because it is released API and every existing call site still compiles; it is
+// a candidate for removal at the next major version.
 func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
+	return NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService:    sessionService,
+		MemoryService:     memoryService,
+		AgentLoader:       agentLoader,
+		ArtifactService:   artifactService,
+		SSETimeout:        sseTimeout,
+		PluginConfig:      pluginConfig,
+		AutoCreateSession: autoCreateSession,
+	})
 }
 
-// RunAgent executes a non-streaming agent run for a given session and message.
+// WithAuthorizer sets the authorizer. Provided to be compatible with [NewRuntimeAPIController]
+// Deprecated: use [NewRuntimeAPIControllerWithConfig] to set authorizer directly in RuntimeAPIControllerConfig.
+func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
+// NewRuntimeAPIControllerWithConfig creates the controller for the Runtime API.
+//
+// A separate constructor rather than a variadic parameter on the one above:
+// adding a parameter would change that function's type, which breaks any caller
+// holding it as a value even though ordinary call sites still compile, and it
+// is released API.
+func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+
+	return &RuntimeAPIController{
+		sessionService:         cfg.SessionService,
+		memoryService:          cfg.MemoryService,
+		agentLoader:            cfg.AgentLoader,
+		artifactService:        cfg.ArtifactService,
+		sseTimeout:             cfg.SSETimeout,
+		pluginConfig:           cfg.PluginConfig,
+		autoCreateSession:      cfg.AutoCreateSession,
+		eventsCompactionConfig: cfg.Compaction,
+		authorizer:             authorizer,
+	}
+}
+
+// RunHandler executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
 		return err
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
@@ -88,6 +178,14 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so failing
+			// the request would discard work the caller asked for and paid for
+			// in order to report that a later prompt will be larger.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
 		}
 		events = append(events, event)
@@ -110,6 +208,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -142,6 +247,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
+			// Bookkeeping, not the turn: see the RunHandler comment. Streaming
+			// an error event here would tell a client its answer failed after
+			// it has already received it.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
@@ -218,6 +330,7 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		MemoryService:     c.memoryService,
 		ArtifactService:   c.artifactService,
 		PluginConfig:      c.pluginConfig,
+		Compaction:        c.eventsCompactionConfig,
 		AutoCreateSession: c.autoCreateSession,
 	},
 	)
@@ -244,6 +357,8 @@ func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	return runAgentRequest, nil
 }
 
+// RunLiveHandler upgrades the request to a WebSocket and streams a live agent
+// session.
 func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.Request) error {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -259,6 +374,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if userID == "" {
 		userID = q.Get("user_id")
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), userID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionID := q.Get("sessionId")
 	if sessionID == "" {
 		sessionID = q.Get("session_id")

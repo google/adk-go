@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestConvertersRoundTrip(t *testing.T) {
@@ -89,7 +90,7 @@ func TestConvertersRoundTrip(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Convert to log.Value
+			// Convert to attribute.Value
 			val := toLogValue(tc.val)
 			// Convert back to any
 			got := FromLogValue(val)
@@ -97,6 +98,28 @@ func TestConvertersRoundTrip(t *testing.T) {
 			// Assert that result is the same as the expected want
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Round trip conversion mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFromLogValueTypedSlices(t *testing.T) {
+	tests := []struct {
+		name string
+		val  attribute.Value
+		want any
+	}{
+		{name: "bool", val: attribute.BoolSliceValue([]bool{true, false}), want: []bool{true, false}},
+		{name: "int64", val: attribute.Int64SliceValue([]int64{1, 2}), want: []int64{1, 2}},
+		{name: "float64", val: attribute.Float64SliceValue([]float64{1.5, 2.5}), want: []float64{1.5, 2.5}},
+		{name: "string", val: attribute.StringSliceValue([]string{"a", "b"}), want: []string{"a", "b"}},
+		{name: "bytes", val: attribute.ByteSliceValue([]byte{1, 2}), want: []byte{1, 2}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, FromLogValue(tc.val)); diff != "" {
+				t.Errorf("FromLogValue() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

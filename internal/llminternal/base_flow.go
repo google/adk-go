@@ -15,7 +15,9 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,6 +85,9 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
+		// Compaction must run before contentsRequestProcessor so a summary it
+		// appends is reflected in the history assembled for this very request.
+		CompactionRequestProcessor,
 		ContentsRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
@@ -100,8 +105,23 @@ var (
 	}
 )
 
+// maxConsecutiveThoughtOnlyTurns bounds how many thought-only ("thinking")
+// turns in a row the flow accepts before giving up, so the model is re-called
+// at most maxConsecutiveThoughtOnlyTurns-1 times waiting for an answer. A model
+// that keeps emitting thoughts without ever surfacing an answer would otherwise
+// spin forever, appending an event per turn and re-sending an ever-growing
+// history. Any turn that is not a final response resets the count.
+//
+// This is a safety net against a degenerate model, not a tuning knob: it is
+// deliberately not configurable, because a caller has no basis for choosing a
+// value. It is set high on purpose. A bound that is too low never requests an
+// answer the model was about to give, which is worse than a few wasted calls
+// before a degenerate model is cut off.
+const maxConsecutiveThoughtOnlyTurns = 10
+
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		thoughtOnlyTurns := 0
 		for {
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
@@ -115,15 +135,34 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			// A thought-only ("thinking") turn reports as final but has no
-			// answer; don't stop on it — call the model again.
-			if lastEvent == nil || (lastEvent.IsFinalResponse() && !isThoughtOnlyTurn(lastEvent)) {
+			if lastEvent == nil {
 				return
 			}
+			if lastEvent.IsFinalResponse() {
+				// A thought-only ("thinking") turn reports as final but has no
+				// answer; don't stop on it — call the model again. Give up once
+				// the model has produced only thoughts too many times in a row,
+				// leaving the last thinking event as the result.
+				if !isThoughtOnlyTurn(lastEvent) {
+					return
+				}
+				thoughtOnlyTurns++
+				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
+					return
+				}
+			} else {
+				thoughtOnlyTurns = 0
+			}
 			if lastEvent.LLMResponse.Partial {
-				// We may have reached max token limit during streaming mode.
-				// TODO: handle Partial response in model level. CL 781377328
-				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				// The last event is a partial streaming response. The realistic cause
+				// is a producer that ends a stream without a terminal aggregate (e.g.,
+				// an a2a peer whose stream ends on an appended artifact chunk with no
+				// terminal status). The turn was truncated, not completed, which is
+				// not expected, so we log a warning and return instead of looping again.
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
+					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
 		}
@@ -370,6 +409,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			eventsChan := make(chan *session.Event)
+			// Producers must guard sends with connCtx: once a reconnect (or any
+			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
+			// what unblocks them (issue #1152).
 			errChan := make(chan error)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
@@ -377,6 +419,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err)
 					sess.pushError(err)
+					// cleanup, not a bare return: genai dials the live socket
+					// with a context-less websocket.DefaultDialer.Dial, and
+					// nothing in the SDK watches a context, so only an explicit
+					// Close releases it. Returning without cleanup strands the
+					// connection for the life of the process.
+					cleanup()
 					return
 				}
 			}
@@ -386,7 +434,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
-						errChan <- err
+						select {
+						case errChan <- err:
+						case <-connCtx.Done():
+						}
 						return
 					}
 					if resp != nil {
@@ -427,7 +478,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -436,7 +490,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
-								errChan <- err
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
 								return
 							}
 						}
@@ -525,6 +582,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						break // Break the select
 					}
 					sess.pushError(err)
+					cleanup()
+					return
+				case <-sess.done:
 					cleanup()
 					return
 				case <-ctx.Done():
@@ -778,7 +838,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		// Streaming mode comes from the invocation context's RunConfig rather than
+		// the runconfig context value: agent.Run() may be invoked directly (outside
+		// the runner), in which case no runconfig is stored in the Go context and
+		// runconfig.FromContext returns nil (issue #586).
+		useStream := false
+		if rc := ctx.RunConfig(); rc != nil {
+			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
@@ -844,6 +911,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
 			ModelName:    m.Name(),
 			InvocationID: ctx.InvocationID(),
+			Request:      req,
 		})
 		ctx = ctx.WithContext(spanCtx)
 		backend := googlellm.GetGoogleLLMVariant(m)
@@ -1038,6 +1106,53 @@ func (c *cancelledToolContext) Value(key any) any {
 	return c.cancelCtx.Value(key)
 }
 
+// displayableToolResultText renders a tool result as text for the case where
+// SkipSummarization suppresses the LLM's own summary of it. It returns
+// ok=false for results that carry nothing worth showing: error responses,
+// and empty or null results such as those from control-flow-only tools
+// (e.g. exitlooptool), which return no meaningful output of their own.
+//
+// Tools that wrap a single plain-text result under a "result" key (the
+// convention used by agenttool) are shown as-is; anything else is rendered
+// as JSON so structured results remain readable.
+func displayableToolResultText(result map[string]any) (string, bool) {
+	if len(result) == 0 {
+		return "", false
+	}
+	if _, isErr := result["error"]; isErr {
+		return "", false
+	}
+	if len(result) == 1 {
+		if v, ok := result["result"]; ok {
+			if v == nil {
+				return "", false
+			}
+			if text, ok := v.(string); ok {
+				return text, text != ""
+			}
+		}
+	}
+	b, err := marshalJSONNoHTMLEscape(result)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// marshalJSONNoHTMLEscape is json.Marshal without HTML-escaping the output.
+// json.Marshal escapes '<', '>' and '&' (e.g. a URL's "&" becomes "&"),
+// which is meant for embedding JSON in HTML but only hurts readability of
+// text meant for a chat transcript.
+func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
@@ -1170,24 +1285,50 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
+			parts := []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       fnCall.ID,
+						Name:     fnCall.Name,
+						Response: result,
+					},
+				},
+			}
+			// SkipSummarization causes the parent agent loop to terminate on this
+			// event (see session.Event.IsFinalResponse) without the LLM ever
+			// seeing the function response. Since most UIs don't render function
+			// response parts, attach the result as a visible text part so it
+			// isn't silently dropped from the terminal event.
+			//
+			// This only applies to tools that opt in via
+			// SkipSummarizationResultDisplayer (agenttool): SkipSummarization is
+			// also set by tools whose result is an internal detail never meant
+			// for display - e.g. a pending tool confirmation (see
+			// RequestedToolConfirmations above) or a UI/widget tool's
+			// acknowledgement - and those must not have their result leaked into
+			// a visible text part.
+			if actions := toolCtx.Actions(); actions.SkipSummarization {
+				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
+					if text, ok := displayableToolResultText(result); ok {
+						parts = append(parts, &genai.Part{Text: text})
+					}
+				}
+			}
+
 			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
-					Role: "user",
-					Parts: []*genai.Part{
-						{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       fnCall.ID,
-								Name:     fnCall.Name,
-								Response: result,
-							},
-						},
-					},
+					Role:  "user",
+					Parts: parts,
 				},
 			}
 			ev.Author = ctx.Agent().Name()
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
+			// A tool handler holds this EventActions for the whole call, and
+			// everything on it lands on the persisted event. Compaction is the
+			// framework's to write: see session.EventActions.Compaction.
+			ev.Actions.Compaction = nil
 
 			traceTool := curTool
 			if traceTool == nil {
@@ -1378,7 +1519,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -1386,6 +1529,22 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions.
+// This is a deliberate divergance from adk-python which uses last-write-wins.
+func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		return maps.Clone(src)
+	}
+	for key, value := range src {
+		if dstVal, ok := dst[key]; ok {
+			dst[key] = max(dstVal, value)
+		} else {
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {

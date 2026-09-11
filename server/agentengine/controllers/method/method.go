@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package method defines MethodHandler which is used to serve requests for
-// an application deployed on agent engine
+// Package method defines MethodHandler which is used to serve requests for
+// an application deployed on agent engine.
 package method
 
 import (

@@ -22,6 +22,7 @@ const (
 	agentEngineSessionTemplate = agentEngineTemplate + "/sessions/%s"
 )
 
+// AgentEngineData identifies a Vertex AI Agent Engine (reasoning engine) instance.
 type AgentEngineData struct {
 	Location        string
 	ProjectID       string
