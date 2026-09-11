@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/genai"
@@ -218,6 +219,13 @@ func (c *commonContext) EndInvocation() {
 // Ended implements [InvocationContext].
 func (c *commonContext) Ended() bool {
 	return c.invocationContext.Ended()
+}
+
+func (c *commonContext) EndInvocationPtr() *atomic.Bool {
+	if carrier, ok := c.invocationContext.(interface{ EndInvocationPtr() *atomic.Bool }); ok {
+		return carrier.EndInvocationPtr()
+	}
+	return nil
 }
 
 // IsolationScope implements [InvocationContext].
