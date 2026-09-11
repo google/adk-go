@@ -1,0 +1,183 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs the spam-detection bot in examples/githubbots/spam-detection.
+#
+# The bot reads open issues and their comments -- text any stranger can write --
+# and feeds it to a language model while the job holds a token scoped
+# `issues: write`. The whole design assumes the model can be talked into
+# anything, so the authority limits live in Go (per-issue session scope, one
+# tool, an at-most-once claim, a nonce fence around untrusted text) rather than
+# in the prompt. This file's job is to keep the blast radius of a run small.
+name: Spam detection bot
+
+on:
+  # A sweep every six hours is the only automatic trigger. There is
+  # deliberately no `issues:`/`issue_comment:` trigger: those let any drive-by
+  # commenter start a model run holding a write-scoped token, which is the
+  # widest attack surface this bot could have and is the reason adk-python
+  # removed the equivalent agents. The sweep looks at issues updated in the
+  # last day, so four consecutive runs cover the same issue and a run that
+  # fails or is skipped costs coverage rather than losing it.
+  schedule:
+    - cron: '15 */6 * * *'
+
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Review only this issue number (blank sweeps recent issues)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without labeling or commenting'
+        required: false
+        type: boolean
+        default: true
+
+# A constant group, not one keyed on the ref or the event. Two overlapping runs
+# would each see the issue unlabeled and could both post the maintainer alert,
+# and the in-process at-most-once claim only spans a single run.
+# cancel-in-progress is false so a queued run waits rather than killing a run
+# that may be mid-write.
+concurrency:
+  group: spam-detection-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    # Never run on a fork: a fork's schedule would point this bot's writes at
+    # whatever OWNER/REPO resolve to there.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    # Comfortably above the bot's own RUN_TIMEOUT of 15m, so an overrun is
+    # reported by the bot rather than the job being killed mid-write. The margin
+    # has to absorb the checkout and a cold compile of the whole dependency tree
+    # as well, since cache: false below means every run builds from source.
+    timeout-minutes: 30
+    permissions:
+      # The two the bot actually needs: read the checkout, label and comment.
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The bot authenticates its own API calls from GITHUB_TOKEN in the
+          # env. Leaving the checkout credentials in .git/config would hand the
+          # same write-scoped token to anything else the job runs.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/githubbots/spam-detection/go.mod
+          # No build cache. This job holds `issues: write`, and a restored cache
+          # is state written by another workflow run; a six-hourly job has
+          # nothing to gain from it that is worth that.
+          cache: false
+
+      # Built as its own step so the compile is outside the bot's RUN_TIMEOUT
+      # budget. With `cache: false` this is a cold build of the whole ADK and
+      # genai dependency tree; folding it into `go run .` would spend the budget
+      # on compilation and let the runner's timeout-minutes fire first, which is
+      # the silent kill the budget exists to prevent.
+      - name: Build the spam-detection bot
+        working-directory: examples/githubbots/spam-detection
+        run: |
+          set -euo pipefail
+          go build -o ./bot .
+
+      - name: Run the spam-detection bot
+        working-directory: examples/githubbots/spam-detection
+        env:
+          # The built-in token, narrowed by the job's permissions block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # An explicit model version rather than the code's default, which is
+          # the floating `gemini-flash-latest` alias. The first reason is not
+          # stylistic: measured on the Gemini API path this workflow uses, that
+          # alias does not currently serve, so a sweep here would fail on every
+          # run. The second is that an alias can be repointed with no change to
+          # this repository, which silently invalidates the detection and
+          # evasion rates recorded in the module's README -- those are
+          # properties of a specific model as much as of the prompt. Pinning
+          # also matches adk-python and adk-java, which both name a version.
+          LLM_MODEL_NAME: gemini-3.6-flash
+          # Both come from GITHUB_REPOSITORY, a default environment variable
+          # present for every event. `github.event.repository` was used here
+          # before, and the schedule event is documented as having no webhook
+          # payload at all -- so on the bot's only automatic trigger that field
+          # may be empty, which loadConfig rejects as a missing REPO.
+          OWNER: ${{ github.repository_owner }}
+          # The login this bot posts as, stated rather than looked up. GET /user
+          # is user-scoped and GitHub refuses it for the built-in GITHUB_TOKEN,
+          # which is an App installation token, so a bot that resolved its own
+          # identity through the API would fail every run. The bot needs to know
+          # its login to recognize its own alert comments and skip them.
+          BOT_LOGIN: 'github-actions[bot]'
+          # Logins whose comments are never sent to the model. Empty is the
+          # fail-safe setting: every comment is reviewed, which costs tokens and
+          # risks flagging a maintainer, but never misses spam. A login listed
+          # here is trusted unconditionally, so an over-broad list is the
+          # dangerous direction -- add only current maintainers.
+          MAINTAINERS: ''
+          ISSUE_COUNT: '30'
+          CONCURRENCY_LIMIT: '3'
+          FRESHNESS_WINDOW_DAYS: '1'
+          # These four have to satisfy loadConfig's budget check, which refuses
+          # to start on a configuration that cannot cover its own work set:
+          # ceil(ISSUE_COUNT / CONCURRENCY_LIMIT) waves x ISSUE_TIMEOUT must fit
+          # inside RUN_TIMEOUT. Here that is 10 waves of 1m against 15m, leaving
+          # 5m for startup and the candidate search.
+          #
+          # A minute is generous for one review, not tight: a review is one model
+          # call and at most two REST writes, and the end-to-end suite measures
+          # them at 2-10 seconds. The previous 5m looked safer and was not -- 10
+          # waves of it is 50m against a 15m budget, so a sweep that ever took
+          # its worst case would report failure for a reason that is not one.
+          ISSUE_TIMEOUT: 1m
+          # Below timeout-minutes so the bot reports the overrun and exits
+          # non-zero instead of the runner killing it silently.
+          RUN_TIMEOUT: 15m
+          # Dispatch inputs reach the script as environment values. A ${{ }}
+          # expansion inside run: is substituted into the shell text before the
+          # shell sees it, so anything controllable in the value becomes code.
+          # On a scheduled run `inputs` is null and both expand to the empty
+          # string: no -issue flag, and DRY_RUN unset, which means a real sweep.
+          ISSUE_INPUT: ${{ inputs.issue }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY#*/}"
+          export REPO
+
+          if [[ -z "$ISSUE_INPUT" ]]; then
+            ./bot
+            exit 0
+          fi
+          # A leading zero is rejected, not just non-digits: Go's flag package
+          # parses an int with strconv.ParseInt(s, 0, ...), so -issue 0123 is
+          # octal and reviews issue 83. The audited issue number would be wrong
+          # before the session is ever scoped, so no downstream check can catch
+          # it. Validated as data and never echoed back: a value carrying a
+          # newline printed to stdout would be read as a workflow command.
+          if [[ ! "$ISSUE_INPUT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::the issue input must be a positive integer with no leading zero"
+            exit 1
+          fi
+          ./bot -issue "$ISSUE_INPUT"
