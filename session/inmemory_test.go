@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,6 +238,119 @@ func TestInMemoryService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 }
 
+// TestInMemoryService_AppendEvent_StripsTempKeysFromCanonicalRecord covers
+// what TestInMemoryService_AppendEvent_PreservesInputEventTempState does not:
+// Create() and AppendEvent() hand callers a session.Session distinct from the
+// service's own canonical record, so re-reading temp: stripping through that
+// same handle cannot catch a bug in how the canonical record is built. A fresh Get() call is
+// required to observe what any other caller (e.g. a later turn, a different
+// goroutine) actually sees.
+func TestInMemoryService_AppendEvent_StripsTempKeysFromCanonicalRecord(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"temp:k1": "v1",
+				"sk":      "v2",
+			},
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	var storedEvent *session.Event
+	for ev := range getResp.Session.Events().All() {
+		storedEvent = ev
+	}
+	if storedEvent == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if _, exists := storedEvent.Actions.StateDelta["temp:k1"]; exists {
+		t.Errorf("temp:k1 leaked into the canonical record returned by Get(): %v", storedEvent.Actions.StateDelta)
+	}
+	if storedEvent.Actions.StateDelta["sk"] != "v2" {
+		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestInMemoryService_AppendEvent_MultipleEventsAllStripped guards against a
+// narrower fix that only handles the first appended event: each event in a
+// multi-turn session must independently have its temp: keys stripped from
+// the canonical record.
+func TestInMemoryService_AppendEvent_MultipleEventsAllStripped(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	for i, tempVal := range []string{"first", "second", "third"} {
+		event := &session.Event{
+			ID:        fmt.Sprintf("event%d", i),
+			Timestamp: time.Now(),
+			Actions: session.EventActions{
+				StateDelta: map[string]any{
+					"temp:turn": tempVal,
+					"turn":      i,
+				},
+			},
+		}
+		if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%d) failed: %v", i, err)
+		}
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	i := 0
+	for ev := range getResp.Session.Events().All() {
+		if _, exists := ev.Actions.StateDelta["temp:turn"]; exists {
+			t.Errorf("event %d: temp:turn leaked into the canonical record: %v", i, ev.Actions.StateDelta)
+		}
+		if ev.Actions.StateDelta["turn"] != i {
+			t.Errorf("event %d: expected non-temp key turn=%d, got: %v", i, i, ev.Actions.StateDelta)
+		}
+		i++
+	}
+	if i != 3 {
+		t.Fatalf("expected 3 stored events, got %d", i)
+	}
+}
+
 // TestInMemoryService_AppendEvent_CopiesCompaction pins that a stored
 // compaction cannot be edited through the pointer the caller passed in.
 //
@@ -285,5 +399,135 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	}
 	if txt := stored.CompactedContent.Parts[0].Text; txt != "summary" {
 		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
+	}
+}
+
+// TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta covers the
+// one input class where stripping changes the shape of the stored delta rather
+// than its contents: every key is temp:, so the map goes from populated to
+// allocated-but-empty. It must not become nil — EventActions.MarshalJSON
+// distinguishes the two, and a nil delta would break the JSON round trip with
+// adk-python.
+func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	event := &session.Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"temp:a": 1},
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	stored := getResp.Session.Events().At(0)
+	if stored == nil {
+		t.Fatalf("expected stored event in session, got nil")
+	}
+	if stored.Actions.StateDelta == nil {
+		t.Fatal("stored StateDelta is nil; stripping every key must leave an empty map, not nil")
+	}
+	if n := len(stored.Actions.StateDelta); n != 0 {
+		t.Errorf("stored StateDelta = %v, want empty", stored.Actions.StateDelta)
+	}
+}
+
+// TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta pins
+// that the canonical record's StateDelta is a map of its own, not the one the
+// live session handle publishes.
+//
+// AppendEvent builds that field from the delta the session returns while
+// holding only the service lock, never the session's own mutex. The map the
+// session appends to its event list is reachable by anyone holding the handle
+// the moment that mutex is released, so if the canonical record takes the map
+// itself rather than a copy made under the lock, a caller walking session
+// history writes into a map AppendEvent reads. A concurrent map read and write
+// is a runtime throw rather than a recoverable panic.
+//
+// Sharing is what this can observe; the lock the copy is taken under is not.
+// Proving that needs a concurrent writer, which reproduces only
+// probabilistically and takes the test binary down with it when it fires.
+func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *testing.T) {
+	// Both delta shapes matter. trimTempDeltaState returns the event unchanged
+	// when it strips nothing, so with no temp: key the live session publishes
+	// the caller's own map and the canonical record is one careless assignment
+	// away from sharing it. With a temp: key the published map is a fresh one,
+	// and it is that map the canonical record must not take.
+	for _, tc := range []struct {
+		name  string
+		delta map[string]any
+	}{
+		{"temp key stripped", map[string]any{"temp:scratch": "x", "keep": "y"}},
+		{"nothing stripped", map[string]any{"keep": "y"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := session.InMemoryService()
+
+			createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			live := createResp.Session
+
+			event := &session.Event{
+				ID:        "e1",
+				Timestamp: time.Now(),
+				Actions:   session.EventActions{StateDelta: tc.delta},
+			}
+			if err := service.AppendEvent(ctx, live, event); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+
+			// Write through the handle the caller still holds, the way a
+			// goroutine reading session history would reach it.
+			stored := live.Events().At(0)
+			if stored == nil {
+				t.Fatal("expected an event on the live session handle")
+			}
+			stored.Actions.StateDelta["injected"] = true
+			// And through the caller's own event.
+			event.Actions.StateDelta["also-injected"] = true
+
+			got, err := service.Get(ctx, &session.GetRequest{
+				AppName:   "app",
+				UserID:    "user",
+				SessionID: live.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			canonical := got.Session.Events().At(0).Actions.StateDelta
+			if _, ok := canonical["injected"]; ok {
+				t.Errorf("canonical StateDelta = %v: it shares the map the live handle publishes, "+
+					"so a reader of session history can write into a map AppendEvent reads without the session lock", canonical)
+			}
+			if _, ok := canonical["also-injected"]; ok {
+				t.Errorf("canonical StateDelta = %v: it shares the caller's map", canonical)
+			}
+			if canonical["keep"] != "y" {
+				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
+			}
+		})
 	}
 }
