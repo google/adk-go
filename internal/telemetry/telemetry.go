@@ -48,6 +48,10 @@ var (
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
+	// genAIUsageToolUsePromptTokens has no entry in the semantic-conventions
+	// registry yet; it reports the Gemini-specific share of input_tokens that came
+	// from server-side tool executions.
+	genAIUsageToolUsePromptTokens = attribute.Key("gen_ai.usage.tool_use_prompt_tokens")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -133,13 +137,18 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	span.SetAttributes(responseContentAttributes(params.Response)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
+			// Tool-use prompt tokens are reported separately from PromptTokenCount and
+			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
+			// matches the semantic-conventions reference implementation for google-genai:
+			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
+			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.
 			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
 			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			genAIUsageToolUsePromptTokens.Int(int(params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 		)
 	}
 }
