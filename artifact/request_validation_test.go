@@ -111,6 +111,31 @@ func TestSaveRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid save request: missing required fields: AppName, UserID, SessionID, FileName, Part",
 		},
 		{
+			name: "Valid artifact reference part",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "alias.txt",
+				Part: &genai.Part{FileData: &genai.FileData{
+					FileURI: "artifact://apps/MyApp/users/user-123/sessions/sess-abc/artifacts/file.txt/versions/1",
+				}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Non-artifact FileData part is still rejected",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+				Part:      &genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/file.txt"}},
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid save request: Part.InlineData or Part.Text has to be set",
+		},
+		{
 			name: "FileName with path separator",
 			req: &SaveRequest{
 				AppName:   "MyApp",
