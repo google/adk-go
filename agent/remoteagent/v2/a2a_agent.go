@@ -537,7 +537,7 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
-	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
+	if userFnCall := getUserFunctionCallAt(events, events.Len()-1, ctx.IsolationScope()); userFnCall != nil {
 		event := userFnCall.response
 		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
@@ -550,6 +550,21 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	}
 
 	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
+	// A scoped node dispatch receives its input through UserContent, which is
+	// not an event in the shared session. Seed from it when the scope has no
+	// history of its own yet.
+	if ctx.IsolationScope() != "" && !hasIsolationScopeHistory(events, ctx.IsolationScope()) {
+		if uc := ctx.UserContent(); uc != nil && len(uc.Parts) > 0 {
+			event := session.NewEvent(ctx, ctx.InvocationID())
+			event.Author = "user"
+			event.Content = uc
+			seeded, err := convertParts(ctx, cfg, event)
+			if err != nil {
+				return nil, fmt.Errorf("event part conversion failed: %w", err)
+			}
+			parts = seeded
+		}
+	}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
