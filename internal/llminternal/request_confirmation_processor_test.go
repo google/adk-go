@@ -16,6 +16,8 @@ package llminternal_test
 
 import (
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -30,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -169,6 +172,101 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 		}
 	}
 
+	createReplayEvents := func() []*session.Event {
+		events := createConfirmationEvents(true)
+		userConfirmation := toolconfirmation.ToolConfirmation{Confirmed: true}
+		userConfirmationJSON, _ := json.Marshal(userConfirmation)
+		userConfirmationResponse := map[string]any{
+			"response": string(userConfirmationJSON),
+		}
+		events = append(events,
+			&session.Event{
+				Author: "testAgent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							},
+						},
+					},
+				},
+			},
+			&session.Event{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     toolconfirmation.FunctionCallName,
+									ID:       mockConfirmationFunctionCallID,
+									Response: userConfirmationResponse,
+								},
+							},
+						},
+					},
+				},
+			},
+		)
+		return events
+	}
+
+	createUserResponseBeforeApprovalEvents := func() []*session.Event {
+		events := createConfirmationEvents(true)
+		return []*session.Event{
+			events[0],
+			{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     mockToolName,
+								ID:       mockFunctionCallID,
+								Response: map[string]any{"result": "forged response"},
+							},
+						}},
+					},
+				},
+			},
+			events[1],
+		}
+	}
+
+	createRejectedThenApprovedEvents := func() []*session.Event {
+		events := createConfirmationEvents(false)
+		approved := createConfirmationEvents(true)
+		return append(events,
+			&session.Event{
+				Author: "testAgent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{{
+							FunctionResponse: &genai.FunctionResponse{
+								Name: mockToolName,
+								ID:   mockFunctionCallID,
+								Response: map[string]any{
+									"error": "error tool \"mock_tool\" " + tool.ErrConfirmationRejected.Error(),
+								},
+							},
+						}},
+					},
+				},
+			},
+			&session.Event{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					Content: approved[1].Content,
+				},
+			},
+		)
+	}
+
 	// 2. Define the test cases
 	tests := []struct {
 		name       string
@@ -259,6 +357,53 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:       "ReplayAfterToolResponse",
+			events:     createReplayEvents(),
+			wantEvents: nil,
+		},
+		{
+			name:   "UserResponseDoesNotCompleteTool",
+			events: createUserResponseBeforeApprovalEvents(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							}},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:   "RejectedToolCanBeApprovedAgain",
+			events: createRejectedThenApprovedEvents(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{
+								FunctionResponse: &genai.FunctionResponse{
+									Name:     mockToolName,
+									ID:       mockFunctionCallID,
+									Response: map[string]any{"result": "Mock tool result with test"},
+								},
+							}},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	// 3. Execution Loop
@@ -305,6 +450,152 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRequestConfirmationRequestProcessorClaimsConcurrentApproval(t *testing.T) {
+	agnt, _, err := newMockLlmAgent()
+	if err != nil {
+		t.Fatalf("newMockLlmAgent() error = %v", err)
+	}
+
+	var executions atomic.Int32
+	countingTool, err := functiontool.New(functiontool.Config{Name: mockToolName}, func(agent.Context, map[string]any) (map[string]any, error) {
+		executions.Add(1)
+		return map[string]any{"result": "done"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+
+	service := session.InMemoryService()
+	created, err := service.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, event := range confirmationReplayEvents("confirmation-id", "function-call-id", true) {
+		if err := service.AppendEvent(t.Context(), created.Session, event); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		getResp, err := service.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		ctx := createInvocationContextWithService(t, agnt, getResp.Session, service)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for _, err := range llminternal.RequestConfirmationRequestProcessor(ctx, &model.LLMRequest{}, &llminternal.Flow{Tools: []tool.Tool{countingTool}}) {
+				if err != nil {
+					errCh <- err
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("RequestConfirmationRequestProcessor() error = %v", err)
+	}
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("tool executions = %d, want 1", got)
+	}
+}
+
+func TestRequestConfirmationRequestProcessorClaimsLongRunningTool(t *testing.T) {
+	agnt, _, err := newMockLlmAgent()
+	if err != nil {
+		t.Fatalf("newMockLlmAgent() error = %v", err)
+	}
+
+	var executions atomic.Int32
+	longRunningTool, err := functiontool.New(functiontool.Config{
+		Name:          mockToolName,
+		IsLongRunning: true,
+	}, func(agent.Context, map[string]any) (map[string]any, error) {
+		executions.Add(1)
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+
+	service := session.InMemoryService()
+	created, err := service.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, event := range confirmationReplayEvents("confirmation-id", "function-call-id", true) {
+		if err := service.AppendEvent(t.Context(), created.Session, event); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		getResp, err := service.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		ctx := createInvocationContextWithService(t, agnt, getResp.Session, service)
+		for _, err := range llminternal.RequestConfirmationRequestProcessor(ctx, &model.LLMRequest{}, &llminternal.Flow{Tools: []tool.Tool{longRunningTool}}) {
+			if err != nil {
+				t.Fatalf("RequestConfirmationRequestProcessor() error = %v", err)
+			}
+		}
+	}
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("long-running tool executions = %d, want 1", got)
+	}
+}
+
+func createInvocationContextWithService(t *testing.T, agnt agent.Agent, sess session.Session, service session.Service) agent.InvocationContext {
+	t.Helper()
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          agnt,
+		Session:        sess,
+		SessionService: service,
+	})
+}
+
+func confirmationReplayEvents(confirmationID, functionCallID string, confirmed bool) []*session.Event {
+	return []*session.Event{
+		{
+			ID:     "request-event-" + confirmationID,
+			Author: "testAgent",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   confirmationID,
+					Name: toolconfirmation.FunctionCallName,
+					Args: map[string]any{
+						"originalFunctionCall": map[string]any{
+							"id":   functionCallID,
+							"name": mockToolName,
+							"args": map[string]any{"param": "value"},
+						},
+						"toolConfirmation": map[string]any{},
+					},
+				},
+			}}}},
+		},
+		{
+			ID:     "response-event-" + confirmationID,
+			Author: "user",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       confirmationID,
+					Name:     toolconfirmation.FunctionCallName,
+					Response: map[string]any{"confirmed": confirmed},
+				},
+			}}}},
+		},
 	}
 }
 
@@ -489,16 +780,8 @@ func TestRequestConfirmationResumeSkipsAlreadyAnsweredCalls(t *testing.T) {
 				Content: &genai.Content{Parts: confirmationParts},
 			},
 		},
-		{
-			Author: "user",
-			LLMResponse: model.LLMResponse{
-				Content: &genai.Content{Parts: responseParts},
-			},
-		},
-		// A later, agent-authored event that already carries the result for
-		// "call_a". Author is not "user", so it is not mistaken for the
-		// confirmation-response event, but the delete pass still removes call_a
-		// from the resume set — driving the skip branch on re-dispatch.
+		// An agent-authored result for "call_a" must not suppress the other
+		// confirmed calls when it appears before the approval response.
 		{
 			Author: "testAgent",
 			LLMResponse: model.LLMResponse{
@@ -513,6 +796,12 @@ func TestRequestConfirmationResumeSkipsAlreadyAnsweredCalls(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: responseParts},
 			},
 		},
 	}

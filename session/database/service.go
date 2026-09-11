@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -395,11 +396,50 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	return nil
 }
 
+// AppendEventIfAbsent appends event exactly once according to its ID. The
+// uniqueness constraint is enforced by the database transaction, so separate
+// service instances cannot claim the same event concurrently.
+func (s *databaseService) AppendEventIfAbsent(ctx context.Context, curSession session.Session, event *session.Event) (bool, error) {
+	if curSession == nil {
+		return false, fmt.Errorf("session is nil")
+	}
+	if event == nil {
+		return false, fmt.Errorf("event is nil")
+	}
+	if event.Partial {
+		return false, nil
+	}
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
+	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
+
+	sess, ok := curSession.(*localSession)
+	if !ok {
+		return false, fmt.Errorf("unexpected session type %T", curSession)
+	}
+
+	inserted, err := s.applyEventInternal(ctx, sess, trimTempDeltaState(event), true)
+	if err != nil || !inserted {
+		return inserted, err
+	}
+	if err := sess.appendEvent(event); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // applyEvent fetches the session, validates it, applies state changes from an
 // event, and saves the event atomically.
 func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
+	_, err := s.applyEventInternal(ctx, sess, event, false)
+	return err
+}
+
+func (s *databaseService) applyEventInternal(ctx context.Context, sess *localSession, event *session.Event, ifAbsent bool) (inserted bool, err error) {
+	inserted = true
 	// Wrap database operations in a single transaction.
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Fetch the session object from storage.
 		var storageSess storageSession
 		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
@@ -421,6 +461,26 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
 				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
+		}
+
+		// Insert the event before applying deltas. For append-if-absent, this
+		// makes the uniqueness constraint the gate: a duplicate must not apply
+		// the event's state changes a second time.
+		storageEv, err := createStorageEvent(sess, event)
+		if err != nil {
+			return fmt.Errorf("failed to map event to storage model: %w", err)
+		}
+		create := tx
+		if ifAbsent {
+			create = create.Clauses(clause.OnConflict{DoNothing: true})
+		}
+		result := create.Create(storageEv)
+		if result.Error != nil {
+			return fmt.Errorf("failed to save event: %w", result.Error)
+		}
+		if ifAbsent && result.RowsAffected == 0 {
+			inserted = false
+			return nil
 		}
 
 		// Fetch App and User states.
@@ -458,15 +518,6 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			// The session state update will be saved along with the event timestamp update.
 		}
 
-		// Create the new event record in the database.
-		storageEv, err := createStorageEvent(sess, event)
-		if err != nil {
-			return fmt.Errorf("failed to map event to storage model: %w", err)
-		}
-		if err := tx.Create(storageEv).Error; err != nil {
-			return fmt.Errorf("failed to save event: %w", err)
-		}
-
 		storageSess.UpdateTime = event.Timestamp
 		// Save the session to update its state and UpdateTime.
 		if err := tx.Save(&storageSess).Error; err != nil {
@@ -478,7 +529,7 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		return nil // Returning nil commits the transaction.
 	})
 
-	return err
+	return inserted, err
 }
 
 func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error) {

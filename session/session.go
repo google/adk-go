@@ -255,6 +255,10 @@ type EventActions struct {
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	// ConfirmationClaim records a framework-owned, already-dispatched
+	// confirmation. It is persisted as an event action rather than session
+	// state so it cannot collide with application data.
+	ConfirmationClaim *ConfirmationClaim `json:"confirmationClaim,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.
@@ -274,6 +278,13 @@ type EventActions struct {
 	// content in their place, which is not a decision the code running inside a
 	// turn gets to make about the conversation it is running in.
 	Compaction *EventCompaction `json:"compaction,omitempty"`
+}
+
+// ConfirmationClaim identifies a confirmation-gated tool dispatch that has
+// been atomically claimed by the runtime.
+type ConfirmationClaim struct {
+	ConfirmationID string `json:"confirmationId"`
+	FunctionCallID string `json:"functionCallId"`
 }
 
 // MarshalJSON omits StateDelta and ArtifactDelta when they are nil and writes

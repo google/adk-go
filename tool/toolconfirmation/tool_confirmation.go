@@ -43,6 +43,9 @@ import (
 //
 // Based on the boolean value in "confirmed", the ADK will either proceed to execute
 // the 'originalFunctionCall' or block it and return an error.
+// A rejection does not consume the pending confirmation, so a client may send
+// another response for the same confirmation request. Once the original tool
+// has produced a response, later responses for that confirmation are ignored.
 const FunctionCallName = "adk_request_confirmation"
 
 // ToolConfirmation represents the state and details of a user confirmation request
