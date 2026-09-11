@@ -165,10 +165,6 @@ func (t *mcpTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 		}
 	}
 
-	if textResponse.Len() == 0 {
-		return nil, errors.New("no text content in tool response")
-	}
-
 	return map[string]any{
 		"output": textResponse.String(),
 	}, nil
