@@ -176,7 +176,7 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 		return nil, fmt.Errorf("%w: %q", session.ErrNotFound, req.SessionID)
 	}
 	if sessRpcResp.UserId != req.UserID {
-		return nil, fmt.Errorf("session %s does not belong to user %s", req.SessionID, req.UserID)
+		return nil, fmt.Errorf("%w: session %s does not belong to user %s", session.ErrNotFound, req.SessionID, req.UserID)
 	}
 
 	return &localSession{
