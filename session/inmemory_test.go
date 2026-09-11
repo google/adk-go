@@ -47,7 +47,7 @@ func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
 }
 
 func Test_inMemoryService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, SupportsGetUserState: true} // InMemory supports custom IDs
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return session.InMemoryService()
 	})
