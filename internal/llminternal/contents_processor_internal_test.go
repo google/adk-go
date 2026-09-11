@@ -41,7 +41,7 @@ func TestDropOrphanedFunctionResponses_LogAndClone(t *testing.T) {
 	want.LLMResponse.Content = genai.NewContentFromText("Keep this", "user")
 	want.LLMResponse.Content.Parts = append(want.LLMResponse.Content.Parts, &genai.Part{Text: "Keep this too"})
 	output := captureLog(t, func() {
-		got := dropOrphanedFunctionResponses([]*session.Event{event}, nil)
+		got, _ := dropOrphanedFunctionResponses([]*session.Event{event}, nil)
 		if diff := cmp.Diff([]*session.Event{&want}, got); diff != "" {
 			t.Errorf("pruned events mismatch (-want +got):\n%s", diff)
 		}
