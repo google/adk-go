@@ -473,3 +473,41 @@ func TestSetupSubroutersServesRealRESTAPI(t *testing.T) {
 		})
 	}
 }
+
+// TestUserMessageNamesWhatTheDebugFlagCosts covers the startup hint.
+//
+// The graph and trace routes are off by default because they expose tool-call
+// arguments, responses and tool names. That is the right default, but it leaves
+// two web UI panels answering 404, and until now the only signal was an error
+// in the browser console. The startup banner says it instead.
+func TestUserMessageNamesWhatTheDebugFlagCosts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantHint bool
+	}{
+		{"flag absent", nil, true},
+		{"flag set", []string{"--include_debug_api"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+
+			var lines []string
+			l.UserMessage("http://localhost:8080", func(v ...any) {
+				lines = append(lines, fmt.Sprint(v...))
+			})
+			out := strings.Join(lines, "\n")
+
+			got := strings.Contains(out, "-include_debug_api")
+			if got != tc.wantHint {
+				t.Errorf("hint present = %v, want %v; output:\n%s", got, tc.wantHint, out)
+			}
+			if tc.wantHint && !strings.Contains(out, "Traces") {
+				t.Errorf("hint does not name the panels it costs; output:\n%s", out)
+			}
+		})
+	}
+}

@@ -48,12 +48,36 @@ func TestServerHealth(t *testing.T) {
 	}
 }
 
-// debugRoutes are every route owned by the debug API router, including the
-// event graph route, whose path does not contain "debug".
+// debugRoutes are every route the IncludeDebugAPI gate covers, including the
+// event graph route, whose path does not contain "debug", and the agent-graph
+// routes, which disclose the agent tree and every tool name through the DOT
+// source they return.
 var debugRoutes = []string{
 	"/debug/trace/evt1",
 	"/debug/trace/session/sess1",
 	"/apps/app1/users/user1/sessions/sess1/events/evt1/graph",
+	"/dev/apps/app1/build_graph",
+	"/dev/apps/app1/build_graph_image",
+}
+
+// ungatedDevRoutes are every route the agent builder owns. They must answer
+// whether or not the debug API is enabled.
+//
+// None of them reads an agent or reveals anything about one. The GET answers an
+// empty 200 on purpose, so the UI disables its builder toggle, and a 404 there
+// is the error status that handler exists to avoid. The writes answer 501,
+// which tells a client the feature is missing rather than the path is wrong.
+//
+// All three are listed, not just the GET, because the regression this guards
+// against is a whole router moving inside the gate.
+var ungatedDevRoutes = []struct {
+	method     string
+	path       string
+	wantStatus int
+}{
+	{http.MethodGet, "/dev/apps/app1/builder", http.StatusOK},
+	{http.MethodPost, "/dev/apps/app1/builder/save", http.StatusNotImplemented},
+	{http.MethodPost, "/dev/apps/app1/builder/cancel", http.StatusNotImplemented},
 }
 
 // muxNotFound is what gorilla/mux writes when no route matches. A registered
@@ -71,9 +95,16 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 		{name: "included when opted in", include: true, wantRouted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A real agent, because the gated routes now include the agent
+			// graph, which loads one. agent.NewSingleLoader(nil) panics inside
+			// LoadAgent rather than returning an error.
+			rootAgent, err := agent.New(agent.Config{Name: "app1", Description: "root agent"})
+			if err != nil {
+				t.Fatalf("agent.New() failed: %v", err)
+			}
 			srv, err := NewServer(ServerConfig{
 				SessionService: session.InMemoryService(),
-				AgentLoader:    agent.NewSingleLoader(nil),
+				AgentLoader:    agent.NewSingleLoader(rootAgent),
 				DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: tc.include},
 			})
 			if err != nil {
@@ -86,6 +117,18 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 				if routed != tc.wantRouted {
 					t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
 						route, routed, tc.wantRouted, rr.Code, rr.Body.String())
+				}
+			}
+			for _, route := range ungatedDevRoutes {
+				rr := httptest.NewRecorder()
+				srv.ServeHTTP(rr, httptest.NewRequest(route.method, route.path, nil))
+				if rr.Body.String() == muxNotFound {
+					t.Errorf("%s %s: not routed, want it served regardless of the gate",
+						route.method, route.path)
+				}
+				if rr.Code != route.wantStatus {
+					t.Errorf("%s %s: status = %d, want %d",
+						route.method, route.path, rr.Code, route.wantStatus)
 				}
 			}
 		})
