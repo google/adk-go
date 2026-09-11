@@ -15,7 +15,9 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -154,9 +156,13 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
-				// We may have reached max token limit during streaming mode.
-				// TODO: handle Partial response in model level. CL 781377328
-				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				// The last event is a partial streaming response. The realistic cause
+				// is a producer that ends a stream without a terminal aggregate (e.g.,
+				// an a2a peer whose stream ends on an appended artifact chunk with no
+				// terminal status). The turn was truncated, not completed, which is
+				// not expected, so we log a warning and return instead of looping again.
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
+					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
 		}
@@ -1100,6 +1106,53 @@ func (c *cancelledToolContext) Value(key any) any {
 	return c.cancelCtx.Value(key)
 }
 
+// displayableToolResultText renders a tool result as text for the case where
+// SkipSummarization suppresses the LLM's own summary of it. It returns
+// ok=false for results that carry nothing worth showing: error responses,
+// and empty or null results such as those from control-flow-only tools
+// (e.g. exitlooptool), which return no meaningful output of their own.
+//
+// Tools that wrap a single plain-text result under a "result" key (the
+// convention used by agenttool) are shown as-is; anything else is rendered
+// as JSON so structured results remain readable.
+func displayableToolResultText(result map[string]any) (string, bool) {
+	if len(result) == 0 {
+		return "", false
+	}
+	if _, isErr := result["error"]; isErr {
+		return "", false
+	}
+	if len(result) == 1 {
+		if v, ok := result["result"]; ok {
+			if v == nil {
+				return "", false
+			}
+			if text, ok := v.(string); ok {
+				return text, text != ""
+			}
+		}
+	}
+	b, err := marshalJSONNoHTMLEscape(result)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// marshalJSONNoHTMLEscape is json.Marshal without HTML-escaping the output.
+// json.Marshal escapes '<', '>' and '&' (e.g. a URL's "&" becomes "&"),
+// which is meant for embedding JSON in HTML but only hurts readability of
+// text meant for a chat transcript.
+func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
@@ -1232,19 +1285,41 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
+			parts := []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       fnCall.ID,
+						Name:     fnCall.Name,
+						Response: result,
+					},
+				},
+			}
+			// SkipSummarization causes the parent agent loop to terminate on this
+			// event (see session.Event.IsFinalResponse) without the LLM ever
+			// seeing the function response. Since most UIs don't render function
+			// response parts, attach the result as a visible text part so it
+			// isn't silently dropped from the terminal event.
+			//
+			// This only applies to tools that opt in via
+			// SkipSummarizationResultDisplayer (agenttool): SkipSummarization is
+			// also set by tools whose result is an internal detail never meant
+			// for display - e.g. a pending tool confirmation (see
+			// RequestedToolConfirmations above) or a UI/widget tool's
+			// acknowledgement - and those must not have their result leaked into
+			// a visible text part.
+			if actions := toolCtx.Actions(); actions.SkipSummarization {
+				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
+					if text, ok := displayableToolResultText(result); ok {
+						parts = append(parts, &genai.Part{Text: text})
+					}
+				}
+			}
+
 			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
-					Role: "user",
-					Parts: []*genai.Part{
-						{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       fnCall.ID,
-								Name:     fnCall.Name,
-								Response: result,
-							},
-						},
-					},
+					Role:  "user",
+					Parts: parts,
 				},
 			}
 			ev.Author = ctx.Agent().Name()

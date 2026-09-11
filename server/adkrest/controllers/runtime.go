@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -44,6 +45,7 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+	authorizer        authz.Authorizer
 
 	eventsCompactionConfig *compaction.Config
 }
@@ -65,6 +67,7 @@ type RuntimeAPIControllerConfig struct {
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
+	Authorizer        authz.Authorizer
 
 	// Compaction enables context compaction for the runners this controller
 	// creates, replacing older session events with summaries.
@@ -97,6 +100,12 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 	})
 }
 
+// WithAuthorizer sets the authorizer. Provided to be compatible with [NewRuntimeAPIController]
+// Deprecated: use [NewRuntimeAPIControllerWithConfig] to set authorizer directly in RuntimeAPIControllerConfig.
+func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
 // NewRuntimeAPIControllerWithConfig creates the controller for the Runtime API.
 //
 // A separate constructor rather than a variadic parameter on the one above:
@@ -104,6 +113,11 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 // holding it as a value even though ordinary call sites still compile, and it
 // is released API.
 func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
@@ -113,6 +127,7 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
 		eventsCompactionConfig: cfg.Compaction,
+		authorizer:             authorizer,
 	}
 }
 
@@ -122,6 +137,14 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
@@ -185,6 +208,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -344,6 +374,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if userID == "" {
 		userID = q.Get("user_id")
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), userID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionID := q.Get("sessionId")
 	if sessionID == "" {
 		sessionID = q.Get("session_id")

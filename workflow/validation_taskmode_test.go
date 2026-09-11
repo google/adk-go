@@ -87,13 +87,13 @@ func TestValidateNoTaskModeGraphNodes(t *testing.T) {
 		}
 	})
 
-	t.Run("accepts mode-unset (chat) agent as static node", func(t *testing.T) {
+	t.Run("accepts mode-unset (single_turn at a node) agent as static node", func(t *testing.T) {
 		t.Parallel()
 		anyAgent := newAgent(t, "default", llmagent.ModeUnset)
 		if _, err := workflow.New("wf-default", []workflow.Edge{
 			{From: workflow.Start, To: newNode(t, anyAgent)},
 		}); err != nil {
-			t.Errorf("mode-unset (chat) agent should be accepted as static node; got %v", err)
+			t.Errorf("mode-unset agent should be accepted as static node; got %v", err)
 		}
 	})
 }
@@ -165,4 +165,48 @@ func TestValidateChatModeWiring(t *testing.T) {
 			t.Errorf("single_turn agent mid-graph should be accepted; got %v", err)
 		}
 	})
+}
+
+// An undeclared sub-agent of a chat coordinator resolves single_turn at a graph
+// node, so it may sit mid-chain. The merge base rejected the same graph, but
+// only when the coordinator happened to be constructed first: installTaskTools
+// stamped the sub-agent chat, and validateChatModeWiring then saw a chat agent
+// following another node. Which error workflow.New returns is part of a public
+// constructor's surface, and every other subtest here passes an explicit mode,
+// so nothing else would notice this moving.
+func TestValidateChatModeWiring_UndeclaredSubAgentMayFollowANode(t *testing.T) {
+	t.Parallel()
+
+	sub, err := llmagent.New(llmagent.Config{Name: "w"})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub): %v", err)
+	}
+	// Coordinator first, which is the order that used to decide the answer.
+	if _, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{sub},
+	}); err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	other, err := llmagent.New(llmagent.Config{Name: "other", Mode: llmagent.ModeSingleTurn})
+	if err != nil {
+		t.Fatalf("llmagent.New(other): %v", err)
+	}
+	first, err := workflow.NewAgentNode(other, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode(other): %v", err)
+	}
+	second, err := workflow.NewAgentNode(sub, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode(sub): %v", err)
+	}
+
+	if _, err := workflow.New("wf-undeclared-midchain", []workflow.Edge{
+		{From: workflow.Start, To: first},
+		{From: first, To: second},
+	}); err != nil {
+		t.Errorf("an undeclared sub-agent resolves single_turn at a node and may follow one; got %v", err)
+	}
 }

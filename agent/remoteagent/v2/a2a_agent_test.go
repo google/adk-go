@@ -916,6 +916,83 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 	}
 }
 
+// TestRemoteAgent_AfterCallbackRunsOnAggregatedArtifact guards that
+// AfterRequestCallbacks run on the non-partial event synthesized from partial
+// artifact chunks (the reassembled artifact), not only on the raw incoming
+// events. Streaming an artifact as Append chunks ending with LastChunk routes
+// through buildNonPartialAggregation, which previously bypassed the callbacks —
+// so a callback that acts only on non-partial events never saw a chunked
+// artifact.
+func TestRemoteAgent_AfterCallbackRunsOnAggregatedArtifact(t *testing.T) {
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				first := a2a.NewArtifactEvent(execCtx, a2a.NewTextPart("Hello"))
+				last := a2a.NewArtifactUpdateEvent(execCtx, first.Artifact.ID, a2a.NewTextPart(", world!"))
+				last.Append = true
+				last.LastChunk = true // routes through buildNonPartialAggregation
+				events := []a2a.Event{
+					a2a.NewSubmittedTask(execCtx, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("..."))),
+					first,
+					last,
+					a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil),
+				}
+				for _, ev := range events {
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	}
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
+	}
+
+	// Record the text of every non-partial event handed to the callback. The
+	// callback deliberately ignores partial chunks, so its metadata can't leak
+	// into the aggregated event via chunk aggregation — only a direct call on
+	// the aggregated event can record it.
+	var nonPartialSeen []string
+	after := []AfterA2ARequestCallback{
+		func(ctx agent.Context, req *a2a.SendMessageRequest, result *session.Event, err error) (*session.Event, error) {
+			if result != nil && !result.Partial && result.Content != nil && len(result.Content.Parts) > 0 {
+				nonPartialSeen = append(nonPartialSeen, result.Content.Parts[0].Text)
+			}
+			return nil, nil
+		},
+	}
+
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:                  "a2a",
+		AgentCard:             card,
+		AfterRequestCallbacks: after,
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	found := false
+	for _, txt := range nonPartialSeen {
+		if txt == "Hello, world!" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("after-callback was not invoked on the aggregated artifact event; non-partial events seen = %v, want to include %q", nonPartialSeen, "Hello, world!")
+	}
+}
+
 func TestRemoteAgent_RequestPayload(t *testing.T) {
 	remoteAgentName, notRemoteAgentName := "a2a", "not-a2a"
 	testCases := []struct {

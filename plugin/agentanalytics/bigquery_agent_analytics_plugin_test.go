@@ -327,7 +327,7 @@ func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
 			case req := <-requestsChan:
 				totalRows += int(req.GetArrowRows().GetRows().GetRowCount())
 			case <-time.After(time.Second):
-				return
+				return totalRows
 			}
 		}
 	}

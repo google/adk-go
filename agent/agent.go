@@ -353,8 +353,12 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = eventActionsFrom(actions)
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		// Deliberately not ending the invocation here, which matches the Python
+		// ADK. Ended reports whether the invocation should stop early, and nothing
+		// reads it after this point: running the after-agent callbacks is the last
+		// step of the agent's Run loop. The flag is also local to this agent's
+		// context and never propagates to a parent, so setting it here would imply
+		// an effect it does not have.
 		return event, nil
 	}
 
