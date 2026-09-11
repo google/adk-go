@@ -105,7 +105,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			return
 		}
 
-		emit := makeEmit(yield, ctx)
+		emit, consumerGone := makeEmit(yield, ctx)
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
 
 		outputForAncestors := sub.OutputForAncestors()
@@ -117,6 +117,9 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		orchestratorCtx := ctx.WithDelta(delta)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
+		if consumerGone() {
+			return
+		}
 		if err != nil {
 			// WaitForOutput park emitted no interrupt event, so surface
 			// the sentinel for the scheduler to park the parent.
@@ -185,27 +188,32 @@ func (n *dynamicNode[IN, OUT]) composePath(parent agent.Context) string {
 	return n.Name()
 }
 
-// makeEmit wraps yield as an emit callback. Contract: nil return =
-// delivered, non-nil = orchestrator must stop (calling yield after
-// it returned false is a runtime error per the iter spec).
+// makeEmit wraps yield as an emit callback and reports whether the
+// consumer rejected an event. Contract: nil return = delivered,
+// non-nil = orchestrator must stop (calling yield after it returned
+// false is a runtime error per the iter spec).
 //
-// When yield returns false without ctx cancellation (no current
-// consumer triggers this, but the contract must not depend on it),
-// return context.Canceled as a stand-in.
+// When yield returns false without ctx cancellation, return
+// context.Canceled as a stand-in.
 //
 // A single mutex serializes yield: a DynamicFn may run concurrent
 // children (see WithUseSubBranch) that all emit through this one
 // callback, and calling the same yield from multiple goroutines panics
 // the iterator and races the parent runNode's completion accumulator.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) func(*session.Event) error {
+func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) (func(*session.Event) error, func() bool) {
 	var mu sync.Mutex
-	return func(ev *session.Event) error {
+	stopped := false
+	emit := func(ev *session.Event) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err := parentCtx.Err(); err != nil {
 			return err
 		}
+		if stopped {
+			return context.Canceled
+		}
 		if !yield(ev, nil) {
+			stopped = true
 			if err := parentCtx.Err(); err != nil {
 				return err
 			}
@@ -213,4 +221,11 @@ func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) f
 		}
 		return nil
 	}
+	consumerGone := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		// Once true, the caller must return without yielding again.
+		return stopped
+	}
+	return emit, consumerGone
 }
