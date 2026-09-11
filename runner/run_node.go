@@ -277,6 +277,7 @@ func (r *Runner) newNodeInvocationContext(
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+		MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 	})
 	ctx = plugininternal.ToContext(ctx, r.pluginManager)
 
