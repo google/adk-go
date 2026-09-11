@@ -17,6 +17,7 @@ package tool_test
 import (
 	"context"
 	"errors"
+	"iter"
 	"strings"
 	"testing"
 	"time"
@@ -439,5 +440,178 @@ func TestWithConfirmation_ProcessRequest_Packing(t *testing.T) {
 	}
 	if !ctx.requestConfirmationCalled {
 		t.Errorf("expected RequestConfirmation to be called on ctx, but it was not")
+	}
+}
+
+// dualTool implements both the runnable and the streaming runnable shapes. The
+// flow dispatches on the streaming shape first, so the confirmation wrapper has
+// to do the same or the guard is applied to a method that is never called.
+type dualTool struct {
+	streamRan bool
+	runRan    bool
+}
+
+func (d *dualTool) Name() string        { return "dualTool" }
+func (d *dualTool) Description() string { return "" }
+func (d *dualTool) IsLongRunning() bool { return false }
+func (d *dualTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: d.Name()}
+}
+
+func (d *dualTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	d.runRan = true
+	return map[string]any{}, nil
+}
+
+func (d *dualTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		d.streamRan = true
+		yield("chunk", nil)
+	}
+}
+
+func TestWithConfirmation_StreamingTool(t *testing.T) {
+	tests := []struct {
+		name                      string
+		requireConfirmation       bool
+		provider                  tool.ConfirmationProvider
+		toolConfirmation          *toolconfirmation.ToolConfirmation
+		wantConfirmationRequested bool
+		wantSkipSummarization     bool
+		wantErrMsg                string
+		wantHandlerRan            bool
+	}{
+		{
+			name:                      "confirmation required, no confirmation in context",
+			requireConfirmation:       true,
+			wantConfirmationRequested: true,
+			wantSkipSummarization:     true,
+			wantErrMsg:                "requires confirmation",
+			wantHandlerRan:            false,
+		},
+		{
+			name:                "confirmation required, confirmed in context",
+			requireConfirmation: true,
+			toolConfirmation:    &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantHandlerRan:      true,
+		},
+		{
+			name:                "confirmation required, rejected in context",
+			requireConfirmation: true,
+			toolConfirmation:    &toolconfirmation.ToolConfirmation{Confirmed: false},
+			wantErrMsg:          "call is rejected",
+			wantHandlerRan:      false,
+		},
+		{
+			name:                "confirmation not required",
+			requireConfirmation: false,
+			wantHandlerRan:      true,
+		},
+		{
+			name:                      "provider requires confirmation",
+			provider:                  func(string, any) bool { return true },
+			wantConfirmationRequested: true,
+			wantSkipSummarization:     true,
+			wantErrMsg:                "requires confirmation",
+			wantHandlerRan:            false,
+		},
+		{
+			name:                "requireConfirmation=true but provider returns false",
+			requireConfirmation: true,
+			provider:            func(string, any) bool { return false },
+			wantHandlerRan:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlerRan := false
+			// The tool itself asks for no confirmation. Only the toolset does,
+			// which is the case the wrapper exists to serve.
+			streamTool, err := functiontool.NewStreaming(
+				functiontool.Config{Name: "streamTool", RequireConfirmation: false},
+				func(ctx agent.Context, in struct{}) iter.Seq2[string, error] {
+					return func(yield func(string, error) bool) {
+						handlerRan = true
+						yield("did the thing", nil)
+					}
+				})
+			if err != nil {
+				t.Fatalf("functiontool.NewStreaming() failed: %v", err)
+			}
+
+			ts := &testToolset{tools: []tool.Tool{streamTool}}
+			cts := tool.WithConfirmation(ts, tt.requireConfirmation, tt.provider)
+			tools, err := cts.Tools(nil)
+			if err != nil {
+				t.Fatalf("cts.Tools() failed: %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("cts.Tools() returned %d tools, want 1", len(tools))
+			}
+			wrapped, ok := tools[0].(toolinternal.StreamingFunctionTool)
+			if !ok {
+				t.Fatalf("tools[0] is not a StreamingFunctionTool, the flow could not execute it")
+			}
+
+			ctx := &testContext{Context: t.Context(), toolConfirmationResult: tt.toolConfirmation}
+			var gotErr error
+			for _, err := range wrapped.RunStream(ctx, map[string]any{}) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+
+			if tt.wantErrMsg == "" && gotErr != nil {
+				t.Errorf("RunStream() error = %v, want none", gotErr)
+			}
+			if tt.wantErrMsg != "" {
+				if gotErr == nil {
+					t.Errorf("RunStream() error = nil, want it to contain %q", tt.wantErrMsg)
+				} else if !strings.Contains(gotErr.Error(), tt.wantErrMsg) {
+					t.Errorf("RunStream() error msg = %q, want it to contain %q", gotErr.Error(), tt.wantErrMsg)
+				}
+			}
+			if handlerRan != tt.wantHandlerRan {
+				t.Errorf("handlerRan = %v, want %v", handlerRan, tt.wantHandlerRan)
+			}
+			if ctx.requestConfirmationCalled != tt.wantConfirmationRequested {
+				t.Errorf("requestConfirmationCalled = %v, want %v", ctx.requestConfirmationCalled, tt.wantConfirmationRequested)
+			}
+			if ctx.Actions().SkipSummarization != tt.wantSkipSummarization {
+				t.Errorf("SkipSummarization = %v, want %v", ctx.Actions().SkipSummarization, tt.wantSkipSummarization)
+			}
+		})
+	}
+}
+
+func TestWithConfirmation_ToolWithBothRunAndRunStream(t *testing.T) {
+	dt := &dualTool{}
+	ts := &testToolset{tools: []tool.Tool{dt}}
+	tools, err := tool.WithConfirmation(ts, true, nil).Tools(nil)
+	if err != nil {
+		t.Fatalf("Tools() failed: %v", err)
+	}
+
+	// The flow checks StreamingFunctionTool before FunctionTool, so the wrapper
+	// must present the streaming shape and must not leak an unguarded Run.
+	if _, ok := tools[0].(toolinternal.StreamingFunctionTool); !ok {
+		t.Fatalf("wrapped tool is not a StreamingFunctionTool")
+	}
+	if _, ok := tools[0].(toolinternal.FunctionTool); ok {
+		t.Errorf("wrapped tool also satisfies FunctionTool, so an unguarded Run is reachable")
+	}
+
+	ctx := &testContext{Context: t.Context()}
+	for _, err := range tools[0].(toolinternal.StreamingFunctionTool).RunStream(ctx, map[string]any{}) {
+		if err == nil || !errors.Is(err, tool.ErrConfirmationRequired) {
+			t.Errorf("RunStream() error = %v, want ErrConfirmationRequired", err)
+		}
+	}
+	if dt.streamRan || dt.runRan {
+		t.Errorf("tool executed without confirmation: streamRan=%v runRan=%v", dt.streamRan, dt.runRan)
+	}
+	if !ctx.requestConfirmationCalled {
+		t.Errorf("requestConfirmationCalled = false, want true")
 	}
 }
