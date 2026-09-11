@@ -45,7 +45,7 @@ func newAuthenticatedServer(t *testing.T, authenticatedUserID string) *Server {
 					UserID: authenticatedUserID,
 				}, nil
 			}),
-		Authorizer: &authz.Strict{},
+		Authorizer: authz.NewStrict(),
 	})
 	if err != nil {
 		t.Fatalf("NewServer() failed: %v", err)
@@ -107,7 +107,7 @@ func TestAuthPreflightNotBlocked(t *testing.T) {
 
 // TestCrossUserAuthorization exercises the full authorization path through the
 // user-scoped controllers: the caller is authenticated as "alice" with an
-// [authz.Strict] authorizer, so a request for alice's own resources is allowed
+// [authz.strict] authorizer, so a request for alice's own resources is allowed
 // while a request naming another user is answered 403 before the handler acts.
 func TestCrossUserAuthorization(t *testing.T) {
 	srv := newAuthenticatedServer(t, "alice")
@@ -158,7 +158,7 @@ func TestDebugEventGraphCrossUserForbidden(t *testing.T) {
 		Authenticator: authn.NewCustom(func(*http.Request) (*authn.Identity, error) {
 			return &authn.Identity{UserID: "alice"}, nil
 		}),
-		Authorizer:     &authz.Strict{},
+		Authorizer:     authz.NewStrict(),
 		DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: true},
 	})
 	if err != nil {

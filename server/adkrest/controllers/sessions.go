@@ -43,7 +43,7 @@ type SessionsAPIController struct {
 
 // NewSessionsAPIController creates a new SessionsAPIController.
 func NewSessionsAPIController(service session.Service) *SessionsAPIController {
-	return &SessionsAPIController{service: service, authorizer: &authz.Noop{}}
+	return &SessionsAPIController{service: service, authorizer: authz.NewNoop()}
 }
 
 // WithAuthorizer sets the authorizer for the Controller. Provided in order not to change NewSessionsAPIController.

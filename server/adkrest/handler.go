@@ -80,7 +80,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	authorizer := cfg.Authorizer
 	if authorizer == nil {
-		authorizer = &authz.Noop{}
+		authorizer = authz.NewNoop()
 	}
 
 	sessionsController := controllers.NewSessionsAPIController(cfg.SessionService)

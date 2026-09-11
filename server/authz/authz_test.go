@@ -82,7 +82,7 @@ func TestStrictCanActAsUser(t *testing.T) {
 		},
 	}
 
-	s := &authz.Strict{}
+	s := authz.NewStrict()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := s.CanActAsUser(tt.ctx, tt.pathUserID)
@@ -107,7 +107,7 @@ func TestStrictCanActAsUser(t *testing.T) {
 // with no identity (for example Strict wired without an authenticator) must be
 // denied, not allowed, and must not panic on a nil context.
 func TestStrictDeniesWithoutIdentity(t *testing.T) {
-	s := &authz.Strict{}
+	s := authz.NewStrict()
 
 	tests := []struct {
 		name string
@@ -133,7 +133,7 @@ func TestStrictDeniesWithoutIdentity(t *testing.T) {
 // TestNoopAllowsEverything checks Noop is a permit-all authorizer: it returns
 // nil for any user regardless of whether the context carries an identity.
 func TestNoopAllowsEverything(t *testing.T) {
-	n := &authz.Noop{}
+	n := authz.NewNoop()
 
 	tests := []struct {
 		name       string
@@ -166,7 +166,7 @@ func TestWriteHTTPStatusForAuthError(t *testing.T) {
 	}{
 		{
 			name:     "with error appends its message",
-			err:      (&authz.Strict{}).CanActAsUser(ctxWithUser("alice"), "bob"),
+			err:      (authz.NewStrict()).CanActAsUser(ctxWithUser("alice"), "bob"),
 			wantBody: "forbidden: " + authz.ErrUnauthorized.Error(),
 		},
 		{

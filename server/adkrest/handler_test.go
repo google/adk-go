@@ -100,7 +100,7 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 // Server): a caller authenticated as "alice" who asks for another user's
 // sessions is permitted when no authorizer is supplied — NewServer substitutes
 // a permit-all default rather than leaving it nil and panicking — and is
-// refused with 403 when an [authz.Strict] authorizer is supplied.
+// refused with 403 when an [authz.strict] authorizer is supplied.
 func TestNewServerAlwaysSetsAuthorizer(t *testing.T) {
 	const otherUsersSessions = "/apps/" + testAppName + "/users/other-user/sessions"
 
@@ -110,7 +110,7 @@ func TestNewServerAlwaysSetsAuthorizer(t *testing.T) {
 		wantCode   int
 	}{
 		{name: "nil defaults to a permit-all authorizer", authorizer: nil, wantCode: http.StatusOK},
-		{name: "provided authorizer is enforced", authorizer: &authz.Strict{}, wantCode: http.StatusForbidden},
+		{name: "provided authorizer is enforced", authorizer: authz.NewStrict(), wantCode: http.StatusForbidden},
 	}
 
 	for _, tt := range tests {

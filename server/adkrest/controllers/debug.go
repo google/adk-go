@@ -44,7 +44,7 @@ func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loa
 		sessionService: sessionService,
 		agentloader:    agentLoader,
 		debugTelemetry: spansExporter,
-		authorizer:     &authz.Noop{},
+		authorizer:     authz.NewNoop(),
 	}
 }
 

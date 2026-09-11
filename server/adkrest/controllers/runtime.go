@@ -115,7 +115,7 @@ func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
 func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
 	authorizer := cfg.Authorizer
 	if authorizer == nil {
-		authorizer = &authz.Noop{}
+		authorizer = authz.NewNoop()
 	}
 
 	return &RuntimeAPIController{

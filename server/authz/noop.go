@@ -18,12 +18,17 @@ import (
 	"context"
 )
 
-// Noop is an [Authorizer] which allows any identity to act as any userID
-type Noop struct{}
+// noop is an [Authorizer] which allows any identity to act as any userID
+type noop struct{}
+
+// NewNoop creates a new Noop [Authorizer] - allows any identity to act as any userID.
+func NewNoop() Authorizer {
+	return &noop{}
+}
 
 // CanActAsUser implements [Authorizer].
-func (p *Noop) CanActAsUser(_ context.Context, userID string) error {
+func (p *noop) CanActAsUser(_ context.Context, userID string) error {
 	return nil
 }
 
-var _ Authorizer = &Noop{}
+var _ Authorizer = &noop{}

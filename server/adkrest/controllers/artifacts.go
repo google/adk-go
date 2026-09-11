@@ -37,7 +37,7 @@ type ArtifactsAPIController struct {
 func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
 	ac := &ArtifactsAPIController{
 		artifactService: artifactService,
-		authorizer:      &authz.Noop{},
+		authorizer:      authz.NewNoop(),
 	}
 	return ac
 }
