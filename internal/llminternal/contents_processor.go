@@ -214,11 +214,11 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	}
 	filtered = processedEvents
 
-	filtered = dropOrphanedFunctionResponses(filtered, allEvents)
+	filtered, orphanRemnants := dropOrphanedFunctionResponses(filtered, allEvents)
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
-	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered)
+	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered, orphanRemnants)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,9 @@ func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
-func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*session.Event {
+// dropOrphanedFunctionResponses also identifies surviving events whose orphaned
+// responses were removed, so later rearrangement preserves their remaining content.
+func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*session.Event, map[*session.Event]bool) {
 	callIDs := make(map[string]struct{})
 	for _, event := range allEvents {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
@@ -286,6 +288,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*sessio
 
 	var orphanedIDs []string
 	result := make([]*session.Event, 0, len(events))
+	orphanRemnants := make(map[*session.Event]bool)
 	for _, event := range events {
 		content := utils.Content(event)
 		if content == nil {
@@ -315,22 +318,21 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*sessio
 		cloned.LLMResponse.Content.Parts = parts
 		if len(cloned.LLMResponse.Content.Parts) > 0 {
 			result = append(result, cloned)
+			orphanRemnants[cloned] = true
 		}
 	}
 
 	if len(orphanedIDs) > 0 {
 		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
 	}
-	return result
+	return result, orphanRemnants
 }
 
-// rearrangeEventsForLatestFunctionResponse
-// This function only acts if the very last event is a function response.
-// It searches backward for the matching call, deletes all intervening events,
-// and appends a single (merged) response.
-// If the latest function_response is for an async function_call, all events
-// between the initial function_call and the latest function_response will be removed.
-func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*session.Event, error) {
+// rearrangeEventsForLatestFunctionResponse merges responses to the latest event's
+// matching call, dropping intervening non-tool events except orphanRemnants.
+// Unrelated tool events and the content left after pruning their orphaned
+// responses survive; pruning must not change whether that content is retained.
+func rearrangeEventsForLatestFunctionResponse(events []*session.Event, orphanRemnants map[*session.Event]bool) ([]*session.Event, error) {
 	if len(events) < 2 {
 		return events, nil
 	}
@@ -424,6 +426,11 @@ SearchLoop: // A label to allow breaking out of the nested loop
 
 		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
+			// Unlike Python's blanket intermediate-event removal, retain content
+			// deliberately preserved when pruning unrelated orphaned responses.
+			if orphanRemnants[event] {
+				resultEvents = append(resultEvents, event)
+			}
 			continue
 		}
 
