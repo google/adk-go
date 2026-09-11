@@ -64,6 +64,11 @@ type SaveRequest struct {
 
 	// Below are optional fields.
 
+	// CustomMetadata contains caller-defined metadata persisted with the artifact.
+	// Each value is converted to its string representation when saved and returned
+	// as a string by every Service implementation.
+	CustomMetadata map[string]any
+
 	// If set, the artifact will be saved with this version.
 	// If unset, a new version will be created.
 	Version int64
@@ -267,6 +272,9 @@ type VersionsResponse struct {
 }
 
 // ArtifactVersion contains metadata describing a specific version of an artifact.
+// Every Service implementation populates all five fields. CustomMetadata is
+// non-nil, contains string values, and is empty when no custom metadata was
+// saved. MimeType is the media type recorded when the version was saved.
 type ArtifactVersion struct {
 	Version        int64
 	CanonicalURI   string
