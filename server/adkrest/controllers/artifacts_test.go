@@ -113,7 +113,7 @@ func TestLoadArtifactHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			apiController := controllers.NewArtifactsAPIController(artifactServiceWithFile(t))
 			req := httptest.NewRequest(http.MethodGet, "/artifacts/"+tt.artifactName+tt.query, nil)
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: testArtifactUser}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: testArtifactUser}))
 			req = mux.SetURLVars(req, artifactVars(tt.artifactName, ""))
 
 			rr := httptest.NewRecorder()
@@ -164,7 +164,7 @@ func TestLoadArtifactVersionHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			apiController := controllers.NewArtifactsAPIController(artifactServiceWithFile(t))
 			req := httptest.NewRequest(http.MethodGet, "/artifacts/"+tt.artifactName+"/versions/"+tt.version, nil)
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: testArtifactUser}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: testArtifactUser}))
 			req = mux.SetURLVars(req, artifactVars(tt.artifactName, tt.version))
 			rr := httptest.NewRecorder()
 
@@ -201,7 +201,7 @@ func TestDeleteArtifactHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			apiController := controllers.NewArtifactsAPIController(tt.service)
 			req := httptest.NewRequest(http.MethodDelete, "/artifacts/"+testArtifactName, nil)
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: testArtifactUser}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: testArtifactUser}))
 			req = mux.SetURLVars(req, artifactVars(testArtifactName, ""))
 			rr := httptest.NewRecorder()
 

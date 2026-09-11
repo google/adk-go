@@ -105,7 +105,7 @@ func TestIdentityAwareProxyStripsPrefix(t *testing.T) {
 				t.Fatalf("Authenticate() error = %v, want nil", err)
 			}
 			if got := id.UserID; got != tt.wantUser {
-				t.Errorf("Identity.UserID = %q, want %q", got, tt.wantUser)
+				t.Errorf("Caller.UserID = %q, want %q", got, tt.wantUser)
 			}
 			if got := id.Claims["email"]; got != tt.wantEmail {
 				t.Errorf("Claims[email] = %v, want %q", got, tt.wantEmail)

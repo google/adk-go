@@ -218,7 +218,7 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 			reqBytes, _ := json.Marshal(reqObj)
 			req := httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: reqObj.UserId}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: reqObj.UserId}))
 
 			// Record response
 			rr := httptest.NewRecorder()

@@ -129,7 +129,7 @@ func TestGetSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: "testUser"}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestCreateSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: "testUser"}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
@@ -317,7 +317,7 @@ func TestDeleteSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: "testUser"}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
@@ -421,7 +421,7 @@ func TestListSessions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
-			req = req.WithContext(authn.WithIdentity(t.Context(), &authn.Identity{UserID: "testUser"}))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, map[string]string{
 				"app_name": "testApp",
@@ -494,7 +494,7 @@ func TestListSessionsWithoutSessionsEncodesEmptyArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req = req.WithContext(authn.WithIdentity(req.Context(), &authn.Identity{UserID: "testUser"}))
+	req = req.WithContext(authn.WithCaller(req.Context(), &authn.Caller{UserID: "testUser"}))
 	req = mux.SetURLVars(req, map[string]string{"app_name": "testApp", "user_id": "testUser"})
 	rr := httptest.NewRecorder()
 
@@ -718,7 +718,7 @@ func newSessionRequest(t *testing.T, method string, id fakes.SessionKey, body io
 	}
 
 	if authenticatedUserID != "" {
-		req = req.WithContext(authn.WithIdentity(req.Context(), &authn.Identity{UserID: authenticatedUserID}))
+		req = req.WithContext(authn.WithCaller(req.Context(), &authn.Caller{UserID: authenticatedUserID}))
 	}
 
 	return mux.SetURLVars(req, sessionVars(id))
@@ -778,7 +778,7 @@ func TestUpdateSessionRejectsScopedStateKeys(t *testing.T) {
 				t.Fatalf("Marshal() failed: %v", err)
 			}
 			ctx := t.Context()
-			ctx = authn.WithIdentity(ctx, &authn.Identity{UserID: "user"})
+			ctx = authn.WithCaller(ctx, &authn.Caller{UserID: "user"})
 			request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 			request = mux.SetURLVars(request, map[string]string{
 				"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),
@@ -877,7 +877,7 @@ func TestUpdateSessionAcceptsEchoedScopedStateKeys(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal() failed: %v", err)
 			}
-			ctx := authn.WithIdentity(t.Context(), &authn.Identity{UserID: "user"})
+			ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
 			request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 			request = mux.SetURLVars(request, map[string]string{
 				"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),
@@ -947,7 +947,7 @@ func TestUpdateSessionRenameAppliesWithScopedStateInPlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() failed: %v", err)
 	}
-	ctx := authn.WithIdentity(t.Context(), &authn.Identity{UserID: "user"})
+	ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
 	request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 	request = mux.SetURLVars(request, map[string]string{
 		"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),

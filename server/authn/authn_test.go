@@ -24,14 +24,14 @@ import (
 )
 
 func TestContextRoundTrip(t *testing.T) {
-	ctx := WithIdentity(context.Background(), &Identity{UserID: "alice"})
+	ctx := WithCaller(context.Background(), &Caller{UserID: "alice"})
 
-	id, ok := IdentityFromContext(ctx)
+	id, ok := CallerFromContext(ctx)
 	if !ok {
-		t.Fatalf("IdentityFromContext() ok = false, want true")
+		t.Fatalf("CallerFromContext() ok = false, want true")
 	}
 	if got, want := id.UserID, "alice"; got != want {
-		t.Errorf("Identity.UserID = %q, want %q", got, want)
+		t.Errorf("Caller.UserID = %q, want %q", got, want)
 	}
 	if got, want := userIDFromContext(ctx), "alice"; got != want {
 		t.Errorf("UserIDFromContext() = %q, want %q", got, want)
@@ -39,8 +39,8 @@ func TestContextRoundTrip(t *testing.T) {
 }
 
 func TestContextAbsent(t *testing.T) {
-	if _, ok := IdentityFromContext(context.Background()); ok {
-		t.Errorf("IdentityFromContext(empty) ok = true, want false")
+	if _, ok := CallerFromContext(context.Background()); ok {
+		t.Errorf("CallerFromContext(empty) ok = true, want false")
 	}
 	if got := userIDFromContext(context.Background()); got != "" {
 		t.Errorf("UserIDFromContext(empty) = %q, want empty", got)
@@ -51,10 +51,10 @@ func TestContextAbsent(t *testing.T) {
 	}
 }
 
-func TestWithIdentityNilIsNoOp(t *testing.T) {
-	ctx := WithIdentity(context.Background(), nil)
-	if _, ok := IdentityFromContext(ctx); ok {
-		t.Errorf("IdentityFromContext() ok = true after WithIdentity(nil), want false")
+func TestWithCallerNilIsNoOp(t *testing.T) {
+	ctx := WithCaller(context.Background(), nil)
+	if _, ok := CallerFromContext(ctx); ok {
+		t.Errorf("CallerFromContext() ok = true after WithIdentity(nil), want false")
 	}
 }
 
@@ -82,7 +82,7 @@ func TestMiddlewareRejectsMissingCredentials(t *testing.T) {
 }
 
 func TestMiddlewareInternalErrorIs500(t *testing.T) {
-	auth := NewCustom(func(r *http.Request) (*Identity, error) {
+	auth := NewCustom(func(r *http.Request) (*Caller, error) {
 		return nil, errors.New("issuer unreachable")
 	})
 
@@ -111,11 +111,11 @@ func TestMiddlewareNilIsPassThrough(t *testing.T) {
 	}
 }
 
-// TestMiddlewareIdentityNilNoErrorIsRejected covers a misbehaving authenticator
-// that returns neither an identity nor an error: the request must be rejected,
+// TestMiddlewareCallerNilNoErrorIsRejected covers a misbehaving authenticator
+// that returns neither an caller's identity nor an error: the request must be rejected,
 // not let through unauthenticated.
-func TestMiddlewareIdentityNilNoErrorIsRejected(t *testing.T) {
-	auth := NewCustom(func(r *http.Request) (*Identity, error) {
+func TestMiddlewareCallerNilNoErrorIsRejected(t *testing.T) {
+	auth := NewCustom(func(r *http.Request) (*Caller, error) {
 		return nil, nil
 	})
 	called := false
@@ -136,7 +136,7 @@ func TestMiddlewareIdentityNilNoErrorIsRejected(t *testing.T) {
 // userIDFromContext returns the authenticated user ID carried by ctx, or the
 // empty string when the request was not authenticated.
 func userIDFromContext(ctx context.Context) string {
-	if id, ok := IdentityFromContext(ctx); ok {
+	if id, ok := CallerFromContext(ctx); ok {
 		return id.UserID
 	}
 	return ""

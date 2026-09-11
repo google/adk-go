@@ -35,10 +35,10 @@ import (
 // failure and answered 500.
 var ErrUnauthenticated = errors.New("authn: unauthenticated")
 
-// Identity is the authenticated principal resolved from a request.
-type Identity struct {
+// Caller is the authenticated principal resolved from a request.
+type Caller struct {
 	// UserID is the stable identifier of the caller. Middleware puts it on the
-	// request context, where it can be read with [IdentityFromContext].
+	// request context, where it can be read with [CallerFromContext].
 	UserID string
 	// Claims carries optional provider-specific attributes (email, roles, token
 	// scopes, ...). It may be nil.
@@ -51,28 +51,28 @@ type Authenticator interface {
 	// Authenticate verifies the request's credentials and returns the
 	// authenticated identity. It returns an error wrapping [ErrUnauthenticated]
 	// when the request has no valid credentials for this provider.
-	Authenticate(r *http.Request) (*Identity, error)
+	Authenticate(r *http.Request) (*Caller, error)
 }
 
-// identityKey is the context key under which an [Identity] is stored.
-type identityKey struct{}
+// callerKey is the context key under which an [Caller] is stored.
+type callerKey struct{}
 
-// WithIdentity returns a copy of ctx carrying id. A nil id is ignored and ctx
+// WithCaller returns a copy of ctx carrying id. A nil id is ignored and ctx
 // is returned unchanged.
-func WithIdentity(ctx context.Context, id *Identity) context.Context {
+func WithCaller(ctx context.Context, id *Caller) context.Context {
 	if id == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, identityKey{}, id)
+	return context.WithValue(ctx, callerKey{}, id)
 }
 
-// IdentityFromContext returns the [Identity] carried by ctx, reporting false
+// CallerFromContext returns the [Caller] carried by ctx, reporting false
 // when the request was not authenticated.
-func IdentityFromContext(ctx context.Context) (*Identity, bool) {
+func CallerFromContext(ctx context.Context) (*Caller, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	id, ok := ctx.Value(identityKey{}).(*Identity)
+	id, ok := ctx.Value(callerKey{}).(*Caller)
 	return id, ok && id != nil
 }
 
@@ -80,7 +80,7 @@ func IdentityFromContext(ctx context.Context) (*Identity, bool) {
 // before passing it to the next handler, and answers 401 (or 500 on an internal
 // provider failure) when authentication fails. On success it stores the
 // resolved identity on the request context, where downstream handlers read it
-// with [IdentityFromContext].
+// with [CallerFromContext].
 //
 // A nil a yields pass-through middleware, so a caller can wire Middleware
 // unconditionally.
@@ -96,13 +96,13 @@ func Middleware(a Authenticator) func(http.Handler) http.Handler {
 				return
 			}
 			if id == nil {
-				// A provider that reports neither identity nor error is
+				// A provider that reports neither caller's identity nor error is
 				// treated as a decline rather than silently letting the
 				// request through unauthenticated.
 				writeAuthError(w, ErrUnauthenticated)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
+			next.ServeHTTP(w, r.WithContext(WithCaller(r.Context(), id)))
 		})
 	}
 }

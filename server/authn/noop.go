@@ -18,17 +18,17 @@ import (
 	"net/http"
 )
 
-// noop is a simple Authenticator which always returns an empty Identity
+// noop is a simple Authenticator which always returns an empty [Caller]
 type noop struct{}
 
-// NewNoop returns a noop [Authenticator] (always returns an empty [Identity])
+// NewNoop returns a noop [Authenticator] (always returns an empty [Caller])
 func NewNoop() Authenticator {
 	return &noop{}
 }
 
 // Authenticate implements [Authenticator].
-func (n *noop) Authenticate(r *http.Request) (*Identity, error) {
-	return &Identity{}, nil
+func (n *noop) Authenticate(r *http.Request) (*Caller, error) {
+	return &Caller{}, nil
 }
 
 var _ Authenticator = &noop{}

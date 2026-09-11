@@ -37,7 +37,7 @@ func NewHeader(name string) Authenticator {
 // Authenticate implements [Authenticator]. It returns the single non-empty value of the
 // configured header, or an error when the header is absent or has multiple
 // values.
-func (h *header) Authenticate(r *http.Request) (*Identity, error) {
+func (h *header) Authenticate(r *http.Request) (*Caller, error) {
 	vals := r.Header.Values(h.name)
 	switch {
 	case len(vals) == 0:
@@ -49,7 +49,7 @@ func (h *header) Authenticate(r *http.Request) (*Identity, error) {
 		if userID == "" {
 			return nil, fmt.Errorf("%w: header found with empty value", ErrUnauthenticated)
 		}
-		return &Identity{
+		return &Caller{
 			UserID: userID,
 		}, nil
 	}

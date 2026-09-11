@@ -25,10 +25,10 @@ import (
 // a failure in authorization.
 var ErrUnauthorized = errors.New("authz: unauthorized")
 
-// Authorizer provides information whether the Identity can act as a userID
+// Authorizer provides information whether the [Caller] can act as a userID
 // It is used in ADK REST API (adkrest), which has the userID in paths.
 type Authorizer interface {
-	// CanActAsUser returns nil iff the Identity from the ctx can act as a userID. Otherwise returns an error
+	// CanActAsUser returns nil iff the [Caller]] from the ctx can act as a userID. Otherwise returns an error
 	// WARNING: avoid returning PII data in the error, it will be send back to the client.
 	CanActAsUser(ctx context.Context, userID string) error
 }

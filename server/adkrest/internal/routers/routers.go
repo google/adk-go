@@ -62,7 +62,7 @@ type Router interface {
 // When authenticator is non-nil, every route that is not marked
 // [Route.Public] is wrapped with [authn.Middleware], so it answers 401 unless
 // the request carries valid credentials and otherwise carries the resolved
-// identity on the request context. A nil authenticator leaves every route
+// caller's identity on the request context. A nil authenticator leaves every route
 // unauthenticated, preserving the behavior of a server with no authenticator
 // configured.
 //

@@ -29,7 +29,7 @@ import (
 // ctxWithUser returns a context carrying an authenticated identity for userID,
 // the way authn.Middleware populates it before a handler runs.
 func ctxWithUser(userID string) context.Context {
-	return authn.WithIdentity(context.Background(), &authn.Identity{UserID: userID})
+	return authn.WithCaller(context.Background(), &authn.Caller{UserID: userID})
 }
 
 // TestStrictCanActAsUser is the core authorization check: Strict permits a
@@ -102,11 +102,11 @@ func TestStrictCanActAsUser(t *testing.T) {
 	}
 }
 
-// TestStrictDeniesWithoutIdentity checks Strict fails closed when the context
+// TestStrictDeniesWithoutCallerIdentity checks Strict fails closed when the context
 // carries no authenticated identity at all: a request that reached authorization
 // with no identity (for example Strict wired without an authenticator) must be
 // denied, not allowed, and must not panic on a nil context.
-func TestStrictDeniesWithoutIdentity(t *testing.T) {
+func TestStrictDeniesWithoutCallerIdentity(t *testing.T) {
 	s := authz.NewStrict()
 
 	tests := []struct {
@@ -140,9 +140,9 @@ func TestNoopAllowsEverything(t *testing.T) {
 		ctx        context.Context
 		pathUserID string
 	}{
-		{name: "matching identity", ctx: ctxWithUser("alice"), pathUserID: "alice"},
-		{name: "mismatched identity is still allowed", ctx: ctxWithUser("alice"), pathUserID: "bob"},
-		{name: "no identity is still allowed", ctx: context.Background(), pathUserID: "alice"},
+		{name: "matching caller's identity", ctx: ctxWithUser("alice"), pathUserID: "alice"},
+		{name: "mismatched caller's identity is still allowed", ctx: ctxWithUser("alice"), pathUserID: "bob"},
+		{name: "no caller's identity is still allowed", ctx: context.Background(), pathUserID: "alice"},
 		{name: "empty user is allowed", ctx: context.Background(), pathUserID: ""},
 	}
 

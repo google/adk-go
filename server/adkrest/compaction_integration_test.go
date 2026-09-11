@@ -146,7 +146,7 @@ func newCompactionServer(t *testing.T, m model.LLM, sessionService session.Servi
 		SessionService: sessionService,
 		AgentLoader:    agent.NewSingleLoader(root),
 		Compaction:     cfg,
-		Authenticator:  authn.NewCustom(func(r *http.Request) (*authn.Identity, error) { return &authn.Identity{UserID: "u"}, nil }),
+		Authenticator:  authn.NewCustom(func(r *http.Request) (*authn.Caller, error) { return &authn.Caller{UserID: "u"}, nil }),
 	})
 	if err != nil {
 		t.Fatalf("adkrest.NewServer() error = %v", err)

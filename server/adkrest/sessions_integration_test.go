@@ -172,8 +172,8 @@ func newChunkedSessionServer(t *testing.T, authenticatedUserID string) *httptest
 
 	server, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService: session.InMemoryService(),
-		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Identity, error) {
-			return &authn.Identity{UserID: authenticatedUserID}, nil
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
 		}),
 	})
 	if err != nil {

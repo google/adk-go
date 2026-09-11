@@ -211,8 +211,8 @@ func newHITLServer(t *testing.T, authenticatedUserID string) *adkrest.Server {
 	srv, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService: session.InMemoryService(),
 		AgentLoader:    agent.NewSingleLoader(a),
-		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Identity, error) {
-			return &authn.Identity{UserID: authenticatedUserID}, nil
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
 		}),
 	})
 	if err != nil {

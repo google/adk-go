@@ -123,8 +123,8 @@ func TestNewServerAlwaysSetsAuthorizer(t *testing.T) {
 				SessionService: session.InMemoryService(),
 				AgentLoader:    agent.NewSingleLoader(rootAgent),
 				Authenticator: authn.NewCustom(
-					func(*http.Request) (*authn.Identity, error) {
-						return &authn.Identity{UserID: "alice"}, nil
+					func(*http.Request) (*authn.Caller, error) {
+						return &authn.Caller{UserID: "alice"}, nil
 					}),
 				Authorizer: tt.authorizer,
 			})
@@ -170,8 +170,8 @@ func newAssembledServer(t *testing.T, authenticatedUserID string) *httptest.Serv
 		DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: true},
 	}
 	if authenticatedUserID != "" {
-		cfg.Authenticator = authn.NewCustom(func(r *http.Request) (*authn.Identity, error) {
-			return &authn.Identity{UserID: authenticatedUserID}, nil
+		cfg.Authenticator = authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
 		})
 	}
 	server, err := NewServer(cfg)

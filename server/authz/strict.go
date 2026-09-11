@@ -33,14 +33,14 @@ func NewStrict() Authorizer {
 
 // CanActAsUser implements [Authorizer].
 func (p *strict) CanActAsUser(ctx context.Context, userID string) error {
-	identity, ok := authn.IdentityFromContext(ctx)
+	caller, ok := authn.CallerFromContext(ctx)
 	if !ok {
-		return fmt.Errorf("%w: no identity found in context", ErrUnauthorized)
+		return fmt.Errorf("%w: no caller found in context", ErrUnauthorized)
 	}
-	if identity.UserID == userID {
+	if caller.UserID == userID {
 		return nil
 	}
-	return fmt.Errorf("%w: identity doesn't match the provided userID", ErrUnauthorized)
+	return fmt.Errorf("%w: caller doesn't match the provided userID", ErrUnauthorized)
 }
 
 var _ Authorizer = &strict{}

@@ -27,7 +27,7 @@ import (
 )
 
 // newAuthenticatedServer builds an assembled server gated by Custom
-// authenticator that returns an identity with authenticatedUserID.
+// authenticator that returns an caller's identity with authenticatedUserID.
 func newAuthenticatedServer(t *testing.T, authenticatedUserID string) *Server {
 	t.Helper()
 
@@ -40,8 +40,8 @@ func newAuthenticatedServer(t *testing.T, authenticatedUserID string) *Server {
 		ArtifactService: artifact.InMemoryService(),
 		AgentLoader:     agent.NewSingleLoader(rootAgent),
 		Authenticator: authn.NewCustom(
-			func(r *http.Request) (*authn.Identity, error) {
-				return &authn.Identity{
+			func(r *http.Request) (*authn.Caller, error) {
+				return &authn.Caller{
 					UserID: authenticatedUserID,
 				}, nil
 			}),
@@ -155,8 +155,8 @@ func TestDebugEventGraphCrossUserForbidden(t *testing.T) {
 	srv, err := NewServer(ServerConfig{
 		SessionService: session.InMemoryService(),
 		AgentLoader:    agent.NewSingleLoader(rootAgent),
-		Authenticator: authn.NewCustom(func(*http.Request) (*authn.Identity, error) {
-			return &authn.Identity{UserID: "alice"}, nil
+		Authenticator: authn.NewCustom(func(*http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: "alice"}, nil
 		}),
 		Authorizer:     authz.NewStrict(),
 		DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: true},

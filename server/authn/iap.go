@@ -42,7 +42,7 @@ func NewIdentityAwareProxy() Authenticator {
 }
 
 // Authenticate implements [Authenticator].
-func (iap *identityAwareProxy) Authenticate(r *http.Request) (*Identity, error) {
+func (iap *identityAwareProxy) Authenticate(r *http.Request) (*Caller, error) {
 	email := r.Header.Get(UserEMailHeader)
 	userID := r.Header.Get(UserIDHeader)
 
@@ -60,7 +60,7 @@ func (iap *identityAwareProxy) Authenticate(r *http.Request) (*Identity, error) 
 		return nil, fmt.Errorf("%w: user id header is missing the expected prefix", ErrUnauthenticated)
 	}
 
-	return &Identity{
+	return &Caller{
 		UserID: userID,
 		Claims: map[string]any{
 			"email": email,

@@ -19,7 +19,7 @@ import (
 )
 
 // AuthenticatorFunc is the function which can be used by [NewCustom] to create a custom [Authenticator]
-type AuthenticatorFunc func(r *http.Request) (*Identity, error)
+type AuthenticatorFunc func(r *http.Request) (*Caller, error)
 
 // custom is an Authenticator which allows you to implement your own logic for authentication
 type custom struct {
@@ -34,7 +34,7 @@ func NewCustom(authFunc AuthenticatorFunc) Authenticator {
 }
 
 // Authenticate implements [Authenticator].
-func (c *custom) Authenticate(r *http.Request) (*Identity, error) {
+func (c *custom) Authenticate(r *http.Request) (*Caller, error) {
 	if c.AuthenticatorFunc == nil {
 		return nil, ErrUnauthenticated
 	}

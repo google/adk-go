@@ -151,20 +151,20 @@ type ServerConfig struct {
 	// providers.
 	//
 	// When nil it defaults to [authn.Noop], which authenticates every request as
-	// an empty identity — leaving every endpoint reachable without credentials.
+	// an empty caller's identity — leaving every endpoint reachable without credentials.
 	// Setting an Authenticator without also setting an Authorizer authenticates
 	// callers but lets any authenticated caller act as any user; pair it with an
 	// Authorizer to restrict that.
 	Authenticator authn.Authenticator
 
-	// Authorizer decides whether the authenticated identity may act as the user
+	// Authorizer decides whether the authenticated caller's identity may act as the user
 	// named in a request path (the {user_id} segment of the sessions, artifacts,
 	// runtime and debug routes); a failure is answered 403.
 	//
 	// When nil it defaults to [authz.Noop], which permits any identity to act as
 	// any user. Use [authz.Strict] to require the authenticated UserID to match
 	// the path — but only alongside an Authenticator that sets a non-empty
-	// UserID, since [authn.Noop]'s empty identity would then be denied for every
+	// UserID, since [authn.Noop]'s empty caller's identity would then be denied for every
 	// user.
 	Authorizer authz.Authorizer
 

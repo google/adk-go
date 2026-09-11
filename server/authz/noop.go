@@ -18,10 +18,10 @@ import (
 	"context"
 )
 
-// noop is an [Authorizer] which allows any identity to act as any userID
+// noop is an [Authorizer] which allows any [authn.Caller] to act as any userID
 type noop struct{}
 
-// NewNoop creates a new Noop [Authorizer] - allows any identity to act as any userID.
+// NewNoop creates a new Noop [Authorizer] - allows any [authn.Caller] to act as any userID.
 func NewNoop() Authorizer {
 	return &noop{}
 }
