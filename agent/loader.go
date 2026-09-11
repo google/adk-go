@@ -20,7 +20,8 @@ import (
 
 // Loader allows to load a particular agent by name and get the root agent.
 //
-// TODO: move Loader/NewSingleLoader/NewMultiLoader to a separate, experimental package.
+// TODO(hyangah): move Loader/NewSingleLoader/NewMultiLoader to a separate,
+// experimental package.
 type Loader interface {
 	// ListAgents returns a list of names of all agents
 	ListAgents() []string
@@ -30,8 +31,10 @@ type Loader interface {
 	RootAgent() Agent
 }
 
-var _ Loader = (*multiLoader)(nil)
-var _ Loader = (*singleLoader)(nil)
+var (
+	_ Loader = (*multiLoader)(nil)
+	_ Loader = (*singleLoader)(nil)
+)
 
 // multiLoader should be used when you have multiple agents
 type multiLoader struct {
@@ -49,12 +52,13 @@ func NewSingleLoader(a Agent) Loader {
 	return &singleLoader{root: a}
 }
 
-// singleLoader implements Loader. Returns root agent's name
+// ListAgents returns the root agent's name.
 func (s *singleLoader) ListAgents() []string {
 	return []string{s.root.Name()}
 }
 
-// singleLoader implements Loader. Returns root for empty name and for root.Name(), error otherwise.
+// LoadAgent returns the root agent for an empty name or for the root's own
+// name, and an error otherwise.
 func (s *singleLoader) LoadAgent(name string) (Agent, error) {
 	if name == "" {
 		return s.root, nil
@@ -65,7 +69,7 @@ func (s *singleLoader) LoadAgent(name string) (Agent, error) {
 	return nil, fmt.Errorf("cannot load agent '%s' - provide an empty string or use '%s'", name, s.root.Name())
 }
 
-// singleLoader implements Loader. Returns the root agent.
+// RootAgent returns the root agent.
 func (s *singleLoader) RootAgent() Agent {
 	return s.root
 }
