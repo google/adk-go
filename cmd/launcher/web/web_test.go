@@ -192,232 +192,8 @@ func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
 	}
 }
 
-func TestApplyServiceDefaultsFillsEmptyConfig(t *testing.T) {
-	config := &launcher.Config{}
-
-	applyServiceDefaults(config)
-
-	if config.SessionService == nil {
-		t.Error("SessionService is nil after applyServiceDefaults, want a default in-memory service")
-	}
-	if config.ArtifactService == nil {
-		t.Error("ArtifactService is nil after applyServiceDefaults, want a default in-memory service")
-	}
-	if config.MemoryService == nil {
-		t.Error("MemoryService is nil after applyServiceDefaults, want a default in-memory service")
-	}
-}
-
-// TestApplyServiceDefaultsKeepsSuppliedServices covers the partial cases too:
-// defaulting one service must not clobber the two the caller did supply, and
-// supplying one must not stop the other two from being defaulted.
-func TestApplyServiceDefaultsKeepsSuppliedServices(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		supplySession  bool
-		supplyArtifact bool
-		supplyMemory   bool
-	}{
-		{
-			name:           "all supplied",
-			supplySession:  true,
-			supplyArtifact: true,
-			supplyMemory:   true,
-		},
-		{
-			name:          "only session supplied",
-			supplySession: true,
-		},
-		{
-			name:           "only artifact supplied",
-			supplyArtifact: true,
-		},
-		{
-			name:         "only memory supplied",
-			supplyMemory: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			config := &launcher.Config{}
-			var (
-				wantSession  session.Service
-				wantArtifact artifact.Service
-				wantMemory   memory.Service
-			)
-			if tc.supplySession {
-				wantSession = session.InMemoryService()
-				config.SessionService = wantSession
-			}
-			if tc.supplyArtifact {
-				wantArtifact = artifact.InMemoryService()
-				config.ArtifactService = wantArtifact
-			}
-			if tc.supplyMemory {
-				wantMemory = memory.InMemoryService()
-				config.MemoryService = wantMemory
-			}
-
-			applyServiceDefaults(config)
-
-			assertService(t, "SessionService", config.SessionService, wantSession)
-			assertService(t, "ArtifactService", config.ArtifactService, wantArtifact)
-			assertService(t, "MemoryService", config.MemoryService, wantMemory)
-		})
-	}
-}
-
-// TestApplyServiceDefaultsLogsWhatItDefaulted covers the diagnostic rather than
-// the wiring. cmd/launcher/prod runs through the same Run path, so a deployment
-// that meant to configure a durable artifact or memory service and did not gets
-// a server that looks healthy and loses everything on restart. The log line is
-// the only thing that says so.
-func TestApplyServiceDefaultsLogsWhatItDefaulted(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		config  *launcher.Config
-		want    []string
-		notWant []string
-	}{
-		{
-			name:   "nothing supplied",
-			config: &launcher.Config{},
-			want:   []string{"session", "artifact", "memory"},
-		},
-		{
-			name:    "only session supplied",
-			config:  &launcher.Config{SessionService: session.InMemoryService()},
-			want:    []string{"artifact", "memory"},
-			notWant: []string{"session"},
-		},
-		{
-			name: "all supplied",
-			config: &launcher.Config{
-				SessionService:  session.InMemoryService(),
-				ArtifactService: artifact.InMemoryService(),
-				MemoryService:   memory.InMemoryService(),
-			},
-			notWant: []string{"session", "artifact", "memory"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			flags := log.Flags()
-			log.SetOutput(&buf)
-			log.SetFlags(0)
-			t.Cleanup(func() {
-				log.SetOutput(os.Stderr)
-				log.SetFlags(flags)
-			})
-
-			applyServiceDefaults(tc.config)
-
-			got := buf.String()
-			if len(tc.want) == 0 && got != "" {
-				t.Fatalf("applyServiceDefaults logged %q, want nothing: every service was supplied", got)
-			}
-			for _, name := range tc.want {
-				if line := "No " + name + " service configured"; !strings.Contains(got, line) {
-					t.Errorf("applyServiceDefaults logged %q, want a line starting %q", got, line)
-				}
-			}
-			for _, name := range tc.notWant {
-				if line := "No " + name + " service configured"; strings.Contains(got, line) {
-					t.Errorf("applyServiceDefaults logged %q, want no %q line: the caller supplied it", got, line)
-				}
-			}
-		})
-	}
-}
-
-// assertService checks that applyServiceDefaults left a service set. When the
-// caller supplied one, want is that value and the check is pointer identity:
-// the default must not replace it.
-func assertService(t *testing.T, name string, got, want any) {
-	t.Helper()
-
-	if got == nil {
-		t.Errorf("%s is nil after applyServiceDefaults, want a default in-memory service", name)
-		return
-	}
-	if want != nil && got != want {
-		t.Errorf("%s = %p, want the caller-supplied service %p", name, got, want)
-	}
-}
-
-// TestApplyServiceDefaultsServesRESTRoutes pins the reason the defaults exist.
-// Before them, an artifact route reached a nil service and panicked, which
-// dropped the TCP connection without sending any HTTP response at all.
-//
-// The assertion is 200, not merely "some status": the artifact controller has
-// since grown its own nil guard that answers 503, so accepting any status would
-// let the defaults disappear unnoticed. The session controller has no such
-// guard, so its route still panics outright without them.
-func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
-	config := &launcher.Config{}
-	applyServiceDefaults(config)
-
-	server, err := adkrest.NewServer(adkrest.ServerConfig{
-		SessionService:  config.SessionService,
-		ArtifactService: config.ArtifactService,
-		MemoryService:   config.MemoryService,
-		AgentLoader:     config.AgentLoader,
-	})
-	if err != nil {
-		t.Fatalf("adkrest.NewServer() failed: %v", err)
-	}
-
-	for _, tc := range []struct {
-		name string
-		path string
-	}{
-		{
-			name: "list artifacts",
-			path: "/apps/a/users/u/sessions/s/artifacts",
-		},
-		{
-			name: "list sessions",
-			path: "/apps/a/users/u/sessions",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := serveWithoutPanic(t, server, httptest.NewRequest(http.MethodGet, tc.path, nil))
-			if rec.Code != http.StatusOK {
-				t.Errorf("GET %s status = %d (%s), want %d", tc.path, rec.Code, rec.Body.String(), http.StatusOK)
-			}
-		})
-	}
-}
-
-// TestApplyServiceDefaultsMemoryServiceIsCallable exercises the defaulted
-// memory service. No REST route reaches it — it is handed to the runner and
-// used by the load_memory tool mid-run — so the consequence is checked at the
-// call site: a nil service panics there instead of returning an empty result.
-func TestApplyServiceDefaultsMemoryServiceIsCallable(t *testing.T) {
-	config := &launcher.Config{}
-	applyServiceDefaults(config)
-
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("SearchMemory on the defaulted memory service panicked: %v", r)
-		}
-	}()
-
-	resp, err := config.MemoryService.SearchMemory(t.Context(), &memory.SearchRequest{
-		AppName: "a",
-		UserID:  "u",
-		Query:   "anything",
-	})
-	if err != nil {
-		t.Fatalf("SearchMemory() failed: %v", err)
-	}
-	if resp == nil {
-		t.Error("SearchMemory() response is nil, want an empty result")
-	}
-}
-
-// serveWithoutPanic serves one request and turns a handler panic into a named
-// test failure, so a regression reports the route it broke instead of taking
-// the whole test binary down with it.
+// serveWithoutPanic serves one request and fails the test if the handler
+// panics, rather than letting the panic take the package down.
 func serveWithoutPanic(t *testing.T, handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -432,9 +208,112 @@ func serveWithoutPanic(t *testing.T, handler http.Handler, req *http.Request) *h
 	return rec
 }
 
-func TestRegisterHealthRoute(t *testing.T) {
-	router := BuildBaseRouter()
-	registerHealthRoute(router)
+// TestApplyServiceDefaultsFillsOnlySession pins the contract: the launcher
+// supplies a session service and nothing else.
+//
+// Artifact and memory are the caller's to configure. Filling them in is what
+// let a misconfigured deployment come up looking healthy and lose everything it
+// had stored on the next restart.
+func TestApplyServiceDefaultsFillsOnlySession(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	if config.SessionService == nil {
+		t.Error("SessionService is nil, want an in-memory one")
+	}
+	if config.ArtifactService != nil {
+		t.Error("ArtifactService was filled in, want it left to the caller")
+	}
+	if config.MemoryService != nil {
+		t.Error("MemoryService was filled in, want it left to the caller")
+	}
+}
+
+func TestApplyServiceDefaultsKeepsSuppliedServices(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	supplied := session.InMemoryService()
+	config := &launcher.Config{
+		SessionService:  supplied,
+		ArtifactService: artifact.InMemoryService(),
+		MemoryService:   memory.InMemoryService(),
+	}
+	applyServiceDefaults(config)
+
+	if config.SessionService != supplied {
+		t.Error("SessionService was replaced, want the supplied one kept")
+	}
+	if config.ArtifactService == nil || config.MemoryService == nil {
+		t.Error("a supplied service was cleared")
+	}
+}
+
+// TestUnconfiguredArtifactServiceAnswers503 is why leaving it nil is safe.
+//
+// Before the guard in the artifact handlers, a nil service was dereferenced,
+// which panicked and dropped the connection with no HTTP response at all. That
+// crash is what defaulting the service was working around. With the guard, the
+// unconfigured case reports itself.
+func TestUnconfiguredArtifactServiceAnswers503(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+
+	rec := serveWithoutPanic(t, server,
+		httptest.NewRequest(http.MethodGet, "/apps/a/users/u/sessions/s/artifacts", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET artifacts status = %d (%s), want %d",
+			rec.Code, rec.Body.String(), http.StatusServiceUnavailable)
+	}
+}
+
+// TestUnconfiguredServicesStillServeSessions checks the rest of the API is
+// unaffected by leaving artifact and memory unset.
+func TestUnconfiguredServicesStillServeSessions(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+
+	rec := serveWithoutPanic(t, server,
+		httptest.NewRequest(http.MethodGet, "/apps/a/users/u/sessions", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET sessions status = %d (%s), want %d",
+			rec.Code, rec.Body.String(), http.StatusOK)
+	}
+}
+
+func TestHealthFallbackAnswers(t *testing.T) {
+	router := withHealthFallback(BuildBaseRouter())
 
 	t.Run("GET", func(t *testing.T) {
 		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -464,10 +343,10 @@ func TestRegisterHealthRoute(t *testing.T) {
 	})
 }
 
-// TestBuildBaseRouterLeavesHealthToTheCaller guards the reason the route lives
-// in registerHealthRoute: mux serves the first matching route, so registering
-// /health inside the exported constructor would silently shadow an embedder's
-// own handler for that path.
+// TestBuildBaseRouterLeavesHealthToTheCaller guards the reason the fallback
+// lives in withHealthFallback: mux serves the first matching route, so
+// registering /health inside the exported constructor would silently shadow an
+// embedder's own handler for that path.
 func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	router := BuildBaseRouter()
 	router.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -477,5 +356,251 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
+	}
+}
+
+// healthSublauncher registers its own root /health, the way a deployment with a
+// real readiness check does.
+type healthSublauncher struct{}
+
+func (healthSublauncher) Keyword() string                                   { return "ownhealth" }
+func (healthSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (healthSublauncher) CommandLineSyntax() string                         { return "" }
+func (healthSublauncher) SimpleDescription() string                         { return "" }
+func (healthSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (healthSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+	}).Methods(http.MethodGet)
+	return nil
+}
+
+// TestSublauncherHealthRouteWins pins the registration order in buildRouter.
+//
+// mux serves the first matching route, so registering the built-in /health
+// before the sublaunchers would shadow a deployment's own readiness check and
+// report ok for an instance that was reporting itself unhealthy. A load
+// balancer would then keep sending it traffic.
+func TestSublauncherHealthRouteWins(t *testing.T) {
+	l := NewLauncher(healthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"ownhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	router, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if got, want := rec.Code, http.StatusServiceUnavailable; got != want {
+		t.Errorf("GET /health status = %d, want %d from the sublauncher's own handler", got, want)
+	}
+	if got := rec.Body.String(); got != "draining" {
+		t.Errorf("GET /health body = %q, want %q; the built-in health route shadowed the sublauncher's", got, "draining")
+	}
+}
+
+// TestBuiltInHealthRouteIsAFallback is the other half: when no sublauncher
+// claims /health, the built-in one must still answer, because probes are
+// configured with a fixed path.
+func TestBuiltInHealthRouteIsAFallback(t *testing.T) {
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	router, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if got, want := rec.Code, http.StatusOK; got != want {
+		t.Errorf("GET /health status = %d, want %d", got, want)
+	}
+	if got, want := strings.TrimSpace(rec.Body.String()), `{"status":"ok"}`; got != want {
+		t.Errorf("GET /health body = %q, want %q", got, want)
+	}
+}
+
+// catchAllSublauncher mounts a route that matches every path, the way an API
+// sublauncher does when its path prefix is empty.
+type catchAllSublauncher struct{}
+
+func (catchAllSublauncher) Keyword() string                                   { return "catchall" }
+func (catchAllSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (catchAllSublauncher) CommandLineSyntax() string                         { return "" }
+func (catchAllSublauncher) SimpleDescription() string                         { return "" }
+func (catchAllSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (catchAllSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.NewRoute().HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("catch-all"))
+	})
+	return nil
+}
+
+// TestHealthFallbackBeatsACatchAll covers a sublauncher that matches every
+// path without meaning to own the probe path.
+//
+// Registering the health route after the sublaunchers puts it behind such a
+// route, so the probe path 404s. Deciding outside the router avoids that,
+// because a catch-all declares no path template and so does not claim /health.
+func TestHealthFallbackBeatsACatchAll(t *testing.T) {
+	l := NewLauncher(catchAllSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"catchall"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(method, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s /health status = %d, want %d; a catch-all is hiding the probe path",
+				method, rec.Code, http.StatusOK)
+		}
+	}
+
+	// Everything else still reaches the catch-all.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/anything", nil))
+	if body := rec.Body.String(); body != "catch-all" {
+		t.Errorf("GET /anything body = %q, want the catch-all to still serve it", body)
+	}
+}
+
+// TestSublauncherHealthOwnsEveryMethod covers the verb half of the shadowing
+// bug.
+//
+// A sublauncher that declares /health for GET alone owns the path outright. If
+// the fallback answered HEAD, a draining instance would report ok on the verb
+// HAProxy and nginx probe with by default, which is the failure this is meant
+// to prevent, surviving on one method.
+func TestSublauncherHealthOwnsEveryMethod(t *testing.T) {
+	l := NewLauncher(healthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"ownhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/health", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("HEAD /health status = 200, want the sublauncher's own answer; "+
+			"the fallback is reporting ok for an instance that declared itself unhealthy (body %q)",
+			rec.Body.String())
+	}
+}
+
+// TestHealthFallbackKeepsRouterBehaviour covers what answering in front of the
+// router used to lose.
+//
+// The fallback is a route on an outer router, not a check before the inner one,
+// so it still runs the logger middleware and still gets StrictSlash handling. A
+// probe that stopped appearing in the request log, or a probe configured with a
+// trailing slash, are both silent failures.
+func TestHealthFallbackKeepsRouterBehaviour(t *testing.T) {
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+
+	inner := BuildBaseRouter()
+	// A real route, because mux middleware runs only on a matched route. An
+	// empty router matches nothing, so the logger would never run either way.
+	inner.HandleFunc("/other", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := withHealthFallback(inner)
+
+	t.Run("logger runs", func(t *testing.T) {
+		buf.Reset()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d", healthPath, rec.Code, http.StatusOK)
+		}
+		if !strings.Contains(buf.String(), healthPath) {
+			t.Errorf("request log %q does not mention %s; the probe is invisible", buf.String(), healthPath)
+		}
+	})
+
+	t.Run("trailing slash redirects", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath+"/", nil))
+		if rec.Code != http.StatusMovedPermanently {
+			t.Errorf("GET %s/ status = %d, want %d", healthPath, rec.Code, http.StatusMovedPermanently)
+		}
+		if got := rec.Header().Get("Location"); got != healthPath {
+			t.Errorf("Location = %q, want %q", got, healthPath)
+		}
+	})
+
+	t.Run("logger is not doubled", func(t *testing.T) {
+		buf.Reset()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/other", nil))
+		if n := strings.Count(buf.String(), "/other"); n != 1 {
+			t.Errorf("request logged %d times, want 1; log was %q", n, buf.String())
+		}
+	})
+}
+
+// scopedHealthSublauncher registers healthPath behind a host matcher, so it
+// answers some requests for the path and rejects others.
+type scopedHealthSublauncher struct{}
+
+func (scopedHealthSublauncher) Keyword() string { return "scopedhealth" }
+
+func (scopedHealthSublauncher) Parse(args []string) ([]string, error)             { return args, nil }
+func (scopedHealthSublauncher) CommandLineSyntax() string                         { return "" }
+func (scopedHealthSublauncher) SimpleDescription() string                         { return "" }
+func (scopedHealthSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (scopedHealthSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.HandleFunc(healthPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}).Host("internal.example.com")
+	return nil
+}
+
+// TestScopedHealthRouteDoesNotDisableTheFallback covers a route that claims the
+// path only for some requests.
+//
+// Treating it as owning the path switches the fallback off for every request,
+// including the ones its own matcher rejects, so an ordinary probe 404s.
+func TestScopedHealthRouteDoesNotDisableTheFallback(t *testing.T) {
+	l := NewLauncher(scopedHealthSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"scopedhealth"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	handler, err := l.buildRouter(&launcher.Config{})
+	if err != nil {
+		t.Fatalf("buildRouter() failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET %s status = %d, want %d; a host-scoped route switched off the fallback "+
+			"for requests it does not match", healthPath, rec.Code, http.StatusOK)
 	}
 }

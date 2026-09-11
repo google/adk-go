@@ -27,12 +27,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
-	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -153,41 +151,37 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// applyServiceDefaults fills in in-memory services the caller left unset.
+// applyServiceDefaults fills in the one service the launcher can safely assume.
 //
-// Neither adkrest.NewServer nor runner.New defaults them; only
-// runner.NewInMemory does, and the web launcher does not use it. A nil session
-// or memory service reaches the request path and panics, which drops the
-// connection without sending any HTTP response. The artifact handlers answer
-// 503 instead, so defaulting that one replaces a clear diagnostic with a server
-// that works until it restarts and then has lost everything. It is logged for
-// that reason: cmd/launcher/prod runs through this same path, so a deployment
-// that forgot to configure a service still says so on startup.
+// Only the session service. Every request path needs one, and it is what the
+// launcher defaulted before the artifact and memory services were added
+// alongside it.
+//
+// Those two are deliberately left as the caller set them, which for an
+// unconfigured caller means nil. Nothing crashes on that any more. The artifact
+// handlers answer 503 naming the missing service, and the runner only builds
+// the memory wrapper when a service exists, so SearchMemory reports "memory
+// service is not set" rather than dereferencing nothing.
+//
+// Filling them in instead is what made a misconfigured deployment look healthy:
+// it came up, served requests, and lost everything it had stored on the next
+// restart. A 503 that names the missing service is the more useful answer, and
+// it is the caller's decision to make. examples/web/main.go shows the intended
+// pattern.
 func applyServiceDefaults(config *launcher.Config) {
-	var defaulted []string
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
-		defaulted = append(defaulted, "session")
-	}
-	if config.ArtifactService == nil {
-		config.ArtifactService = artifact.InMemoryService()
-		defaulted = append(defaulted, "artifact")
-	}
-	if config.MemoryService == nil {
-		config.MemoryService = memory.InMemoryService()
-		defaulted = append(defaulted, "memory")
-	}
-	for _, name := range defaulted {
-		log.Printf("No %s service configured. Using an in-memory one, so whatever it holds is lost when the process exits.", name)
+		log.Print("No session service configured. Using an in-memory one, so whatever it holds is lost when the process exits.")
 	}
 }
 
-// Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
-	applyServiceDefaults(config)
-
+// buildRouter assembles the handler Run serves: the base router, every active
+// sublauncher's routes, and a health fallback around the outside.
+//
+// Separated from Run so a test can exercise exactly what is served without
+// binding a port.
+func (w *webLauncher) buildRouter(config *launcher.Config) (http.Handler, error) {
 	router := BuildBaseRouter()
-	registerHealthRoute(router)
 
 	// check if there are any active sublaunchers
 	if len(w.activeSublaunchers) == 0 {
@@ -195,16 +189,28 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		for i, l := range w.sublaunchers {
 			availableSublaunchers[i] = l.Keyword()
 		}
-		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
+		return nil, fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
 			if err := l.SetupSubrouters(router, config); err != nil {
-				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+				return nil, fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
 			}
 		}
+	}
+
+	return withHealthFallback(router), nil
+}
+
+// Run implements launcher.SubLauncher.
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	applyServiceDefaults(config)
+
+	router, err := w.buildRouter(config)
+	if err != nil {
+		return err
 	}
 
 	log.Printf("Starting the web server: %+v", w.config)
@@ -323,14 +329,74 @@ func BuildBaseRouter() *mux.Router {
 	return router
 }
 
-// registerHealthRoute serves health at the root as well as under the API
+// healthPath is the probe path served at the root as well as under the API
 // prefix. Load balancers and container probes are configured with a fixed path
 // and cannot be expected to know which sublaunchers happen to be enabled.
+const healthPath = "/health"
+
+// withHealthFallback answers healthPath when nothing else declares it.
 //
-// Run calls this rather than BuildBaseRouter doing it, so that an embedder
-// building its own server keeps /health for itself.
-func registerHealthRoute(router *mux.Router) {
-	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
+// The fallback is a route on an outer router rather than a check in front of
+// the inner one. Answering before the inner router runs skips its middleware
+// and its StrictSlash handling, so probes stopped appearing in the request log
+// and /health/ 404ed instead of redirecting.
+//
+// Registering on the inner router does not work in either position. First
+// shadows a /health a sublauncher serves itself, so a draining instance keeps
+// reporting ok. Last puts it behind any catch-all a sublauncher mounted, so the
+// probe path 404s. An outer router with the inner one as its final route avoids
+// both.
+//
+// A sublauncher that declares healthPath owns it completely, on every method.
+// Answering HEAD here while it answers GET is the same shadowing bug on one
+// verb, and HEAD is what HAProxy and nginx probe with by default. The
+// consequence is worth stating plainly: a sublauncher that registers healthPath
+// for GET alone makes HEAD a 405, where it used to be 200, so a HEAD probe
+// marks the instance down. That is what ownership means here, not an oversight.
+//
+// Run calls this rather than BuildBaseRouter doing it, so an embedder building
+// its own server keeps /health for itself.
+func withHealthFallback(router *mux.Router) http.Handler {
+	if declaresHealthRoute(router) {
+		return router
+	}
+	// mux.NewRouter rather than BuildBaseRouter: the latter installs logger,
+	// which would then run twice on every request the inner router serves.
+	outer := mux.NewRouter().StrictSlash(true)
+	outer.Handle(healthPath, logger(http.HandlerFunc(healthHandler))).
+		Methods(http.MethodGet, http.MethodHead)
+	outer.NewRoute().Handler(router)
+	return outer
+}
+
+// declaresHealthRoute reports whether a route claims healthPath unconditionally.
+//
+// It reads the path template rather than serving a probe request, because a
+// catch-all would answer such a probe without meaning to own the path, and a
+// catch-all is exactly what the fallback has to beat.
+//
+// A route that also carries a host or query matcher does not count. It answers
+// some requests for the path and not others, so switching the fallback off for
+// all of them would 404 the ones its own matcher rejects. Header matchers are
+// not reachable through the mux API, so a route scoped only by a header still
+// counts as owning the path.
+func declaresHealthRoute(router *mux.Router) bool {
+	declared := false
+	_ = router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		tmpl, err := route.GetPathTemplate()
+		if err != nil || tmpl != healthPath {
+			return nil
+		}
+		if _, err := route.GetHostTemplate(); err == nil {
+			return nil
+		}
+		if q, err := route.GetQueriesTemplates(); err == nil && len(q) > 0 {
+			return nil
+		}
+		declared = true
+		return nil
+	})
+	return declared
 }
 
 // healthHandler reports that the web server is up. It says nothing about the
