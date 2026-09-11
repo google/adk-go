@@ -335,7 +335,7 @@ func emitSpanWithoutLogs(sessionID, eventID, opName string, tp *sdktrace.TracerP
 // Go nil slice marshals to JSON null, which fails those schemas, so the UI discards
 // the whole response and the Traces panel renders nothing even though the request
 // returned 200. Decoding the body into Go values hides the difference between null
-// and [], so these assertions read the serialised bytes directly.
+// and [], so these assertions read the serialized bytes directly.
 func TestSessionSpansHandlerEmptyContainersSerializeAsJSONContainers(t *testing.T) {
 	tc := []struct {
 		name         string
@@ -393,7 +393,7 @@ func TestSessionSpansHandlerEmptyContainersSerializeAsJSONContainers(t *testing.
 	}
 }
 
-// TestEventSpanHandlerEmptyLogsSerializeAsJSONArray checks the other serialisation
+// TestEventSpanHandlerEmptyLogsSerializeAsJSONArray checks the other serialization
 // path: the flattened per-event span, built by convertEventSpan.
 func TestEventSpanHandlerEmptyLogsSerializeAsJSONArray(t *testing.T) {
 	const (

@@ -59,7 +59,7 @@ func newAgentNode(a agent.Agent) workflow.Node {
 // returning the agent's final text as the node output.
 //
 // For an LlmAgent, the body delegates to llmagent.RunLLMAgentAsNode
-// to pick up mode-aware behaviour (chat-mode task delegation loop, task-mode
+// to pick up mode-aware behavior (chat-mode task delegation loop, task-mode
 // finish_task sniffing, single_turn seeding + output post-processing).
 // For any other agent kind, events are forwarded verbatim and HITL rides
 // on LongRunningToolIDs.

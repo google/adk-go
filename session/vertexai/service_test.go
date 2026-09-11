@@ -156,7 +156,7 @@ func emptyService(t *testing.T, name string, offline bool) (session.Service, map
 			// and are recorded now. Recording them answered two open questions
 			// about this backend: a compaction record does survive the round
 			// trip, and a hole still names its event afterwards, so the
-			// microsecond normalisation holds here.
+			// microsecond normalization holds here.
 			if errors.Is(err, os.ErrNotExist) {
 				t.Skipf("no replay recording at testdata/%s. Regenerate with: UPDATE_REPLAYS=true go test ./session/vertexai/...", replayFile)
 			}

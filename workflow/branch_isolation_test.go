@@ -59,7 +59,7 @@ func TestRunNode_SequentialFanOut_BranchesFromOptions(t *testing.T) {
 			},
 		},
 		{
-			// Default behaviour: without the opt-in, children
+			// Default behavior: without the opt-in, children
 			// inherit the orchestrator's branch verbatim
 			// (backward-compat contract for callers relying on
 			// inherited branches).

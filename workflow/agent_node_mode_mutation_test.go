@@ -405,7 +405,7 @@ func TestLlmAgent_TransferTargets_AreConstructionOrderIndependent(t *testing.T) 
 // state.IncludeContents = "none" onto the shared agent when it ran a
 // single_turn placement, which is why a second placement of the same instance
 // then hid history everywhere. A guarded reintroduction of that write —
-// only when the field is still empty — changes no behaviour the history tests
+// only when the field is still empty — changes no behavior the history tests
 // observe, because they set IncludeContents explicitly, so nothing but this
 // assertion or the race detector would catch it.
 func TestAgentNode_Run_DoesNotMutateTheAgentsIncludeContents(t *testing.T) {

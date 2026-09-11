@@ -172,7 +172,7 @@ func requestVacationDays(ctx agent.Context, args RequestVacationArgs) (*RequestV
 	if confirmation.Confirmed {
 		jsonBytes, err := json.Marshal(confirmation.Payload)
 		if err != nil {
-			return nil, fmt.Errorf("error marshalling payload %s: %w", confirmation.Payload, err)
+			return nil, fmt.Errorf("error marshaling payload %s: %w", confirmation.Payload, err)
 		}
 		var payload ConfirmationPayload
 		if err := json.Unmarshal(jsonBytes, &payload); err != nil {
@@ -342,7 +342,7 @@ func processApproval(ctx context.Context, r *runner.Runner, sessionID, requestID
 		daysInput, _ := reader.ReadString('\n')
 		days, err := strconv.Atoi(strings.TrimSpace(daysInput))
 		if err != nil || days < 0 || days > req.Days {
-			fmt.Println("Invalid number of days. Approval cancelled.")
+			fmt.Println("Invalid number of days. Approval canceled.")
 			return
 		}
 		daysApproved = days

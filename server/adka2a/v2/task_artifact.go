@@ -121,7 +121,7 @@ func newLegacyArtifactUpdate(task a2a.TaskInfoProvider, id a2a.ArtifactID, parts
 	} else {
 		result = a2a.NewArtifactUpdateEvent(task, id, parts...)
 	}
-	// Explicitely mark and Artifact update as non-partial ADK event so that consumer side
+	// Explicitly mark and Artifact update as non-partial ADK event so that consumer side
 	// does not run its own aggregation logic.
 	result.Metadata = map[string]any{metadataPartialKey: false}
 	return result

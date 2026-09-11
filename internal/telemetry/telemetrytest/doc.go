@@ -18,7 +18,7 @@
 // Helpers in this package:
 //
 //   - [SpanDigest] / [BuildDigests] / [PRESENT] — capture and
-//     normalise the emitted OTel span tree so tests can compare
+//     normalize the emitted OTel span tree so tests can compare
 //     against a literal expected shape. Log records nest inside
 //     the SpanDigest of the span they were emitted under via
 //     [SpanDigest.Logs], yielding a single causal tree.
