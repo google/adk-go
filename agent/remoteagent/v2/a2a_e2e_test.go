@@ -466,136 +466,200 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 }
 
 func TestA2ACleanupPropagation(t *testing.T) {
-	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
-	// Artifact text the mock subagent streams; the cancel step keys off it.
-	const remoteArtifactText = "remote-subagent-working"
-	// Remote A2A server publishes a submitted task and start generating artifact updates
-	// until it detects a context cancelation
-	serverB := startA2AServer(&mockA2AExecutor{
-		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
-			return func(yield func(a2a.Event, error) bool) {
-				yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+	tests := []struct {
+		name                         string
+		cancelBeforeFirstRemoteEvent bool
+	}{
+		{name: "before first remote event", cancelBeforeFirstRemoteEvent: true},
+		{name: "after remote artifact"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteTaskIDChan := make(chan a2a.TaskID, 1)
+			remoteCancelTaskIDChan := make(chan a2a.TaskID, 1)
+			remoteCleanupCalledChan := make(chan struct{}, 2)
+			releaseRemoteFirstEvent := make(chan struct{})
+			var releaseRemoteFirstEventOnce sync.Once
+			releaseFirstEvent := func() {
+				releaseRemoteFirstEventOnce.Do(func() {
+					close(releaseRemoteFirstEvent)
+				})
 			}
-		},
-		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
-			return func(yield func(a2a.Event, error) bool) {
-				remoteTaskIDChan <- reqCtx.TaskID
-				if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
-					return
-				}
-				for ctx.Err() == nil {
-					if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewTextPart(remoteArtifactText)), nil) {
+
+			// Artifact text the mock subagent streams; the second scenario keys off it.
+			const remoteArtifactText = "remote-subagent-working"
+			// Remote A2A server creates its task, waits until the test releases its first
+			// event, then streams artifact updates until it detects cancellation.
+			serverB := startA2AServer(&mockA2AExecutor{
+				cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						remoteCancelTaskIDChan <- reqCtx.TaskID
+						yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+					}
+				},
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						remoteTaskIDChan <- reqCtx.TaskID
+						<-releaseRemoteFirstEvent
+						if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+							return
+						}
+						for ctx.Err() == nil {
+							if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewTextPart(remoteArtifactText)), nil) {
+								return
+							}
+							time.Sleep(1 * time.Millisecond)
+						}
+						yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil), nil)
+					}
+				},
+				cleanupFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, result a2a.SendMessageResult, cause error) {
+					remoteCleanupCalledChan <- struct{}{}
+				},
+			})
+			t.Cleanup(serverB.Close)
+
+			// Root server connects to server B through the remote subagent. Record
+			// cancellation of the remote agent's actual invocation context.
+			remoteInvocationCanceled := make(chan struct{})
+			var remoteInvocationCanceledOnce sync.Once
+			card := &a2a.AgentCard{
+				SupportedInterfaces: []*a2a.AgentInterface{
+					a2a.NewAgentInterface(serverB.URL, a2a.TransportProtocolJSONRPC),
+				},
+				Capabilities: a2a.AgentCapabilities{Streaming: true},
+			}
+			remoteAgentB := utils.Must(NewA2A(A2AConfig{
+				Name:      "remote-agent-b",
+				AgentCard: card,
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(ctx agent.Context) (*genai.Content, error) {
+						context.AfterFunc(ctx, func() {
+							remoteInvocationCanceledOnce.Do(func() {
+								close(remoteInvocationCanceled)
+							})
+						})
+						return nil, nil
+					},
+				},
+			}))
+			rootA := newRootAgent("agent-b", remoteAgentB)
+			executorCleanupCalledChan := make(chan struct{}, 2)
+			executorA := adka2a.NewExecutor(adka2a.ExecutorConfig{
+				OutputMode: adka2a.OutputArtifactPerRun,
+				RunnerConfig: runner.Config{
+					AppName:        rootA.Name(),
+					SessionService: session.InMemoryService(),
+					Agent:          rootA,
+				},
+				A2AExecutionCleanupCallback: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error) {
+					executorCleanupCalledChan <- struct{}{}
+				},
+			})
+			serverA := startA2AServer(executorA)
+			t.Cleanup(serverA.Close)
+
+			client := newA2AClient(t, serverA)
+
+			// Join the detached streaming/cancel goroutines before teardown; a late
+			// t.Errorf from an in-flight RPC on a finished test would panic.
+			var wg sync.WaitGroup
+			t.Cleanup(func() {
+				releaseFirstEvent()
+				wg.Wait()
+			})
+
+			// remoteStreamingChan closes when the subagent's own output first reaches the client.
+			statusUpdateEventChan := make(chan a2a.Event, 10)
+			remoteStreamingChan := make(chan struct{})
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer close(statusUpdateEventChan)
+				remoteStreaming := false
+				msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
+				for event, err := range client.SendStreamingMessage(t.Context(), &a2a.SendMessageRequest{Message: msg}) {
+					if err != nil {
+						t.Errorf("client.SendStreamingMessage() error = %v", err)
 						return
 					}
-					time.Sleep(1 * time.Millisecond)
+					if tau, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+						if !remoteStreaming && artifactContainsText(tau, remoteArtifactText) {
+							remoteStreaming = true
+							close(remoteStreamingChan)
+						}
+						continue
+					}
+					statusUpdateEventChan <- event
 				}
-				yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil), nil)
+			}()
+
+			firstUpdate := testutil.AwaitValue(t, statusUpdateEventChan, "first status update")
+			parentTaskID := firstUpdate.TaskInfo().TaskID
+			// Server B has created the child task but has not yielded its ID to the
+			// remote agent yet.
+			remoteTaskID := testutil.AwaitValue(t, remoteTaskIDChan, "server B remote task ID")
+			if !tc.cancelBeforeFirstRemoteEvent {
+				releaseFirstEvent()
+				testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 			}
-		},
-		cleanupFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, result a2a.SendMessageResult, cause error) {
-			remoteCleanupCalledChan <- struct{}{}
-		},
-	})
-	defer serverB.Close()
 
-	// Root server connects to server B through remote subagent
-	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB)
-	rootA := newRootAgent("agent-b", remoteAgentB)
-	executorCleanupCalledChan := make(chan struct{}, 2)
-	executorA := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		OutputMode: adka2a.OutputArtifactPerRun,
-		RunnerConfig: runner.Config{
-			AppName:        rootA.Name(),
-			SessionService: session.InMemoryService(),
-			Agent:          rootA,
-		},
-		A2AExecutionCleanupCallback: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error) {
-			executorCleanupCalledChan <- struct{}{}
-		},
-	})
-	serverA := startA2AServer(executorA)
-	defer serverA.Close()
+			cancelResultChan := make(chan *a2a.Task, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer close(cancelResultChan)
+				task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: parentTaskID})
+				if err != nil {
+					t.Errorf("client.CancelTask() error = %v", err)
+					return
+				}
+				cancelResultChan <- task
+			}()
 
-	client := newA2AClient(t, serverA)
+			testutil.AwaitN(t, remoteInvocationCanceled, 1, "remote agent invocation cancellation")
+			if tc.cancelBeforeFirstRemoteEvent {
+				// Only release Server B's first task-bearing event after cancellation
+				// has reached the remote agent invocation.
+				releaseFirstEvent()
+			}
 
-	// Join the detached streaming/cancel goroutines before teardown; a late
-	// t.Errorf from an in-flight RPC on a finished test would panic.
-	var wg sync.WaitGroup
-	t.Cleanup(wg.Wait)
+			// Check the streaming message sender got a canceled state task in its response.
+			var lastStreamingUpdate a2a.Event
+			for event := range statusUpdateEventChan {
+				lastStreamingUpdate = event
+			}
+			if tu, ok := lastStreamingUpdate.(*a2a.TaskStatusUpdateEvent); ok {
+				if tu.Status.State != a2a.TaskStateCanceled {
+					t.Errorf("lastStreamingUpdate.Status.State = %q, want %q", tu.Status.State, a2a.TaskStateCanceled)
+				}
+			} else {
+				t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
+			}
 
-	// remoteStreamingChan closes when the subagent's own output first reaches the client.
-	statusUpdateEventChan := make(chan a2a.Event, 10)
-	remoteStreamingChan := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(statusUpdateEventChan)
-		remoteStreaming := false
-		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
-		for event, err := range client.SendStreamingMessage(t.Context(), &a2a.SendMessageRequest{Message: msg}) {
+			// Subagent cleanup fires twice: once for cancellation, once for execution.
+			// A generous deadline avoids flaking under CPU contention.
+			remoteCancelTaskID := testutil.AwaitValue(t, remoteCancelTaskIDChan, "server B cancel task ID")
+			if remoteCancelTaskID != remoteTaskID {
+				t.Errorf("server B CancelTask ID = %q, want %q", remoteCancelTaskID, remoteTaskID)
+			}
+			testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
+			testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
+
+			remoteClient := newA2AClient(t, serverB)
+			remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
 			if err != nil {
-				t.Errorf("client.SendStreamingMessage() error = %v", err)
-				return
+				t.Fatalf("remoteClient.GetTask() error = %v", err)
 			}
-			if tau, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
-				if !remoteStreaming && artifactContainsText(tau, remoteArtifactText) {
-					remoteStreaming = true
-					close(remoteStreamingChan)
-				}
-				continue
+			if remoteTask.Status.State != a2a.TaskStateCanceled {
+				t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
 			}
-			statusUpdateEventChan <- event
-		}
-	}()
 
-	// Cancel only after the subagent's output reaches the client: before that the
-	// parent doesn't know the subagent task ID, so cancellation can't propagate.
-	firstUpdate := testutil.AwaitValue(t, statusUpdateEventChan, "first status update")
-	taskID := firstUpdate.TaskInfo().TaskID
-	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
-	cancelResultChan := make(chan *a2a.Task, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(cancelResultChan)
-		task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
-		if err != nil {
-			t.Errorf("client.CancelTask() error = %v", err)
-			return
-		}
-		cancelResultChan <- task
-	}()
-
-	// Check the streaming message sender got a cancelled state task in their response
-	var lastStreamingUpdate a2a.Event
-	for event := range statusUpdateEventChan {
-		lastStreamingUpdate = event
+			// Join the cancel RPC so it can't log on t after the test returns.
+			testutil.AwaitN(t, cancelResultChan, 1, "cancel task")
+		})
 	}
-	if tu, ok := lastStreamingUpdate.(*a2a.TaskStatusUpdateEvent); ok {
-		if tu.Status.State != a2a.TaskStateCanceled {
-			t.Errorf("lastStreamingUpdate.Status.State = %q, want %q", tu.Status.State, a2a.TaskStateCanceled)
-		}
-	} else {
-		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
-	}
-
-	// Subagent cleanup fires twice: once for cancelation, once for execution.
-	// A generous deadline avoids flaking under CPU contention.
-	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
-	remoteTaskID := testutil.AwaitValue(t, remoteTaskIDChan, "server B remote task ID")
-	testutil.AwaitN(t, executorCleanupCalledChan, 2, "executor cleanup")
-
-	remoteClient := newA2AClient(t, serverB)
-	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
-	if err != nil {
-		t.Fatalf("remoteClient.GetTask() error = %v", err)
-	}
-	if remoteTask.Status.State != a2a.TaskStateCanceled {
-		t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
-	}
-
-	// Join the cancel RPC so it can't log on t after the test returns.
-	testutil.AwaitN(t, cancelResultChan, 1, "cancel task")
 }
 
 func artifactContainsText(tau *a2a.TaskArtifactUpdateEvent, substr string) bool {

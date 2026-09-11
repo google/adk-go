@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -1476,6 +1477,1079 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 			if task.Status.State != a2a.TaskStateCanceled {
 				t.Fatalf("task.Status.State = %q, want %q", task.Status.State, a2a.TaskStateCanceled)
 			}
+		})
+	}
+}
+
+type delayedFirstEventClient struct {
+	streamStarted chan struct{}
+	releaseEvent  chan struct{}
+	canceledTask  chan a2a.TaskID
+}
+
+type scriptedA2AClient struct {
+	sendMessage          func(context.Context, *a2a.SendMessageRequest) (a2a.SendMessageResult, error)
+	sendStreamingMessage func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error]
+	cancelTask           func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error)
+}
+
+type contextDeadline struct {
+	time time.Time
+	ok   bool
+}
+
+func TestRemoteTaskCleanupTargetFromEvent(t *testing.T) {
+	task := &a2a.Task{
+		ID:        "remote-task",
+		ContextID: "remote-context",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	tests := []struct {
+		name      string
+		event     a2a.Event
+		wantInfo  a2a.TaskInfo
+		wantState a2a.TaskState
+		wantOK    bool
+	}{
+		{
+			name:      "task",
+			event:     task,
+			wantInfo:  task.TaskInfo(),
+			wantState: a2a.TaskStateWorking,
+			wantOK:    true,
+		},
+		{
+			name:      "status update",
+			event:     a2a.NewStatusUpdateEvent(task, a2a.TaskStateCompleted, nil),
+			wantInfo:  task.TaskInfo(),
+			wantState: a2a.TaskStateCompleted,
+			wantOK:    true,
+		},
+		{
+			name:  "task without ID",
+			event: &a2a.Task{Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
+		},
+		{
+			name:  "task-scoped message",
+			event: a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("working")),
+		},
+		{
+			name:  "artifact update",
+			event: a2a.NewArtifactEvent(task, a2a.NewTextPart("working")),
+		},
+		{
+			name:  "nil task",
+			event: (*a2a.Task)(nil),
+		},
+		{
+			name:  "nil status update",
+			event: (*a2a.TaskStatusUpdateEvent)(nil),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotOK := remoteTaskCleanupTargetFromEvent(tc.event)
+			if gotOK != tc.wantOK {
+				t.Fatalf("remoteTaskCleanupTargetFromEvent() ok = %v, want %v", gotOK, tc.wantOK)
+			}
+			if got.taskInfo != tc.wantInfo {
+				t.Errorf("remoteTaskCleanupTargetFromEvent() info = %+v, want %+v", got.taskInfo, tc.wantInfo)
+			}
+			if got.state != tc.wantState {
+				t.Errorf("remoteTaskCleanupTargetFromEvent() state = %q, want %q", got.state, tc.wantState)
+			}
+		})
+	}
+}
+
+func (c *scriptedA2AClient) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	if c.sendMessage == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+	return c.sendMessage(ctx, req)
+}
+
+func (c *scriptedA2AClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return c.sendStreamingMessage(ctx, req)
+}
+
+func (c *scriptedA2AClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	if c.cancelTask == nil {
+		return nil, fmt.Errorf("unexpected CancelTask call")
+	}
+	return c.cancelTask(ctx, req)
+}
+
+func (c *scriptedA2AClient) Destroy() error { return nil }
+
+func newRemoteAgentWithClient(t *testing.T, client A2AClient) agent.Agent {
+	t.Helper()
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("http://example.invalid", a2a.TransportProtocolJSONRPC)},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+	}
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) {
+			return client, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	return remoteAgent
+}
+
+func TestRemoteAgent_NonStreamingTaskCleanup(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       a2a.TaskState
+		wantCancels int
+	}{
+		{name: "working", state: a2a.TaskStateWorking, wantCancels: 1},
+		{name: "completed", state: a2a.TaskStateCompleted},
+		{name: "input required", state: a2a.TaskStateInputRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sendCalls, cancelCalls := 0, 0
+			client := &scriptedA2AClient{
+				sendMessage: func(context.Context, *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+					sendCalls++
+					return &a2a.Task{
+						ID:        "remote-task",
+						ContextID: "remote-context",
+						Status:    a2a.TaskStatus{State: tt.state},
+					}, nil
+				},
+				sendStreamingMessage: func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+					t.Fatal("unexpected streaming request")
+					return nil
+				},
+				cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+					cancelCalls++
+					if req.ID != "remote-task" {
+						t.Errorf("CancelTask ID = %q, want remote-task", req.ID)
+					}
+					if err := ctx.Err(); err != nil {
+						t.Errorf("CancelTask context error = %v, want nil", err)
+					}
+					return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+				},
+			}
+			remoteAgent := newRemoteAgentWithClient(t, client)
+			sess := prepareSession(t, t.Context(), []*session.Event{newUserHello()})
+			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Session:   sess,
+				RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+			})
+			for _, err := range remoteAgent.Run(ictx) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+			}
+			if sendCalls != 1 {
+				t.Errorf("SendMessage calls = %d, want 1", sendCalls)
+			}
+			if cancelCalls != tt.wantCancels {
+				t.Errorf("CancelTask calls = %d, want %d", cancelCalls, tt.wantCancels)
+			}
+		})
+	}
+}
+
+func newStreamingInvocationContext(t *testing.T, ctx context.Context) agent.InvocationContext {
+	t.Helper()
+	sess := prepareSession(t, ctx, []*session.Event{newUserHello()})
+	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:   sess,
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+}
+
+func (c *delayedFirstEventClient) SendMessage(context.Context, *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (c *delayedFirstEventClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		close(c.streamStarted)
+		<-c.releaseEvent
+		if ctx.Err() != nil {
+			return
+		}
+		task := &a2a.Task{
+			ID:        "remote-task",
+			ContextID: "remote-context",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+		}
+		// Add content so processing this task would invoke callbacks and emit an event.
+		task.Status.Message = a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("submitted"))
+		yield(task, nil)
+	}
+}
+
+func (c *delayedFirstEventClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	c.canceledTask <- req.ID
+	return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+}
+
+func (c *delayedFirstEventClient) Destroy() error { return nil }
+
+func TestRemoteAgent_CancelsRemoteTaskWhenContextCanceledBeforeFirstEvent(t *testing.T) {
+	client := &delayedFirstEventClient{
+		streamStarted: make(chan struct{}),
+		releaseEvent:  make(chan struct{}),
+		canceledTask:  make(chan a2a.TaskID, 1),
+	}
+	card := &a2a.AgentCard{
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface("http://example.invalid", a2a.TransportProtocolJSONRPC)},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+	}
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) {
+			return client, nil
+		},
+		AfterRequestCallbacks: []AfterA2ARequestCallback{
+			func(agent.Context, *a2a.SendMessageRequest, *session.Event, error) (*session.Event, error) {
+				t.Error("AfterA2ARequestCallback called after invocation cancellation")
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	sess := prepareSession(t, ctx, []*session.Event{newUserHello()})
+	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:   sess,
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+	runDone := make(chan struct{})
+	emitted := make(chan *session.Event, 1)
+	go func() {
+		defer close(runDone)
+		for event := range remoteAgent.Run(ictx) {
+			emitted <- event
+		}
+	}()
+
+	<-client.streamStarted
+	cancel()
+	close(client.releaseEvent)
+
+	select {
+	case taskID := <-client.canceledTask:
+		if taskID != "remote-task" {
+			t.Fatalf("CancelTask() task ID = %q, want %q", taskID, "remote-task")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for remote task cancellation")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent run to finish")
+	}
+	select {
+	case event := <-emitted:
+		t.Fatalf("agent emitted event after invocation cancellation: %v", event)
+	default:
+	}
+}
+
+func TestRemoteAgent_DoesNotStartStreamWhenContextAlreadyCanceled(t *testing.T) {
+	streamStarted := false
+	client := &scriptedA2AClient{
+		sendStreamingMessage: func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+			streamStarted = true
+			return func(func(a2a.Event, error) bool) {}
+		},
+	}
+	remoteAgent := newRemoteAgentWithClient(t, client)
+
+	sess := prepareSession(t, t.Context(), []*session.Event{newUserHello()})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:   sess,
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+
+	for event, err := range remoteAgent.Run(ictx) {
+		t.Fatalf("Run() yielded (%v, %v), want no result", event, err)
+	}
+	if streamStarted {
+		t.Error("SendStreamingMessage() called with an already-canceled invocation context")
+	}
+}
+
+func TestRemoteTaskStreamContext_BoundsCleanupWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 5 * time.Second
+		parent, cancelParent := context.WithCancel(t.Context())
+		streamCtx := newRemoteTaskStreamContext(parent, timeout)
+		defer func() {
+			streamCtx.close()
+			streamCtx.cleanupBudget.close()
+		}()
+
+		cancelParent()
+		synctest.Wait()
+		select {
+		case <-streamCtx.Done():
+			t.Fatal("stream context canceled before the cleanup wait elapsed")
+		default:
+		}
+
+		time.Sleep(timeout - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-streamCtx.Done():
+			t.Fatal("stream context canceled before the cleanup wait elapsed")
+		default:
+		}
+
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if err := streamCtx.Err(); err != context.Canceled {
+			t.Fatalf("streamCtx.Err() = %v, want context.Canceled", err)
+		}
+	})
+}
+
+func TestRemoteAgent_StreamContextPreservesInvocationDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		streamDeadline := make(chan contextDeadline, 1)
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(func(a2a.Event, error) bool) {
+					deadline, ok := ctx.Deadline()
+					streamDeadline <- contextDeadline{time: deadline, ok: ok}
+					<-ctx.Done()
+				}
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		const timeout = 300 * time.Millisecond
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		wantDeadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("invocation context has no deadline")
+		}
+		ictx := newStreamingInvocationContext(t, ctx)
+		start := time.Now()
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		gotDeadline := <-streamDeadline
+		if !gotDeadline.ok {
+			t.Fatal("stream context has no deadline")
+		}
+		if !gotDeadline.time.Equal(wantDeadline) {
+			t.Fatalf("stream deadline = %v, want %v", gotDeadline.time, wantDeadline)
+		}
+		<-runDone
+		if elapsed := time.Since(start); elapsed != timeout {
+			t.Fatalf("Run() duration = %v, want %v", elapsed, timeout)
+		}
+	})
+}
+
+func TestRemoteAgent_SharesEarlyCancellationCleanupBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		streamStarted := make(chan struct{})
+		releaseTask := make(chan struct{})
+		cancelDeadline := make(chan contextDeadline, 1)
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					close(streamStarted)
+					<-releaseTask
+					yield(&a2a.Task{
+						ID:        "remote-task",
+						ContextID: "remote-context",
+						Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+					}, nil)
+				}
+			},
+			cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				deadline, ok := ctx.Deadline()
+				cancelDeadline <- contextDeadline{time: deadline, ok: ok}
+				<-ctx.Done()
+				return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-streamStarted
+		start := time.Now()
+		cancel()
+		synctest.Wait()
+		time.Sleep(4 * time.Second)
+		close(releaseTask)
+		<-runDone
+
+		wantDeadline := start.Add(5 * time.Second)
+		gotDeadline := <-cancelDeadline
+		if !gotDeadline.ok {
+			t.Fatal("CancelTask context has no deadline")
+		}
+		if !gotDeadline.time.Equal(wantDeadline) {
+			t.Fatalf("CancelTask deadline = %v, want %v", gotDeadline.time, wantDeadline)
+		}
+		if elapsed := time.Since(start); elapsed != 5*time.Second {
+			t.Fatalf("Run() duration = %v, want %v", elapsed, 5*time.Second)
+		}
+	})
+}
+
+func TestRemoteAgent_DefaultCleanupHonorsInvocationDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cancelDeadline := make(chan contextDeadline, 1)
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					yield(&a2a.Task{
+						ID:        "remote-task",
+						ContextID: "remote-context",
+						Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+					}, nil)
+				}
+			},
+			cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				deadline, ok := ctx.Deadline()
+				cancelDeadline <- contextDeadline{time: deadline, ok: ok}
+				<-ctx.Done()
+				return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		const timeout = 300 * time.Millisecond
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		wantDeadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("invocation context has no deadline")
+		}
+		ictx := newStreamingInvocationContext(t, ctx)
+		start := time.Now()
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		gotDeadline := <-cancelDeadline
+		if !gotDeadline.ok {
+			t.Fatal("CancelTask context has no deadline")
+		}
+		if !gotDeadline.time.Equal(wantDeadline) {
+			t.Fatalf("CancelTask deadline = %v, want %v", gotDeadline.time, wantDeadline)
+		}
+		<-runDone
+		if elapsed := time.Since(start); elapsed != timeout {
+			t.Fatalf("Run() duration = %v, want %v", elapsed, timeout)
+		}
+	})
+}
+
+// cleanupDeadlineContext models a deadline before its cancellation has propagated.
+type cleanupDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c cleanupDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestContextHasUsableTime(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{name: "nil context"},
+		{name: "no deadline", ctx: t.Context(), want: true},
+		{name: "canceled context", ctx: canceled},
+		{
+			name: "past deadline with nil error",
+			ctx:  cleanupDeadlineContext{Context: t.Context(), deadline: time.Now().Add(-time.Second)},
+		},
+		{
+			name: "insufficient remaining time",
+			ctx:  cleanupDeadlineContext{Context: t.Context(), deadline: time.Now().Add(time.Millisecond)},
+		},
+		{
+			name: "ample remaining time",
+			ctx:  cleanupDeadlineContext{Context: t.Context(), deadline: time.Now().Add(time.Hour)},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contextHasUsableTime(tt.ctx); got != tt.want {
+				t.Errorf("contextHasUsableTime() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoteAgent_CleanupBudgetNearInvocationDeadline(t *testing.T) {
+	tests := []struct {
+		name       string
+		remaining  time.Duration
+		wantBudget time.Duration
+	}{
+		{name: "one millisecond", remaining: time.Millisecond, wantBudget: 5 * time.Second},
+		{name: "below minimum", remaining: 99 * time.Millisecond, wantBudget: 5 * time.Second},
+		{name: "at minimum", remaining: 100 * time.Millisecond, wantBudget: 100 * time.Millisecond},
+		{name: "above minimum", remaining: 101 * time.Millisecond, wantBudget: 101 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				taskReceived := make(chan struct{})
+				cancelCalls := 0
+				client := &scriptedA2AClient{
+					sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+						return func(yield func(a2a.Event, error) bool) {
+							yield(&a2a.Task{
+								ID:     "remote-task",
+								Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+							}, nil)
+							close(taskReceived)
+							<-ctx.Done()
+						}
+					},
+					cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+						cancelCalls++
+						if req.ID != "remote-task" {
+							t.Errorf("CancelTask ID = %q, want remote-task", req.ID)
+						}
+						deadline, ok := ctx.Deadline()
+						if !ok || time.Until(deadline) != tt.wantBudget {
+							t.Errorf("CancelTask budget = %v (has deadline: %v), want %v", time.Until(deadline), ok, tt.wantBudget)
+						}
+						// Model an RPC that cannot finish within the original one-millisecond remainder.
+						time.Sleep(50 * time.Millisecond)
+						if ctx.Err() != nil {
+							t.Errorf("CancelTask context expired during RPC: %v", ctx.Err())
+						}
+						return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+					},
+				}
+				remoteAgent := newRemoteAgentWithClient(t, client)
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				ictx := newStreamingInvocationContext(t, ctx)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for range remoteAgent.Run(ictx) {
+					}
+				}()
+				<-taskReceived
+				time.Sleep(time.Second - tt.remaining)
+				cancel()
+				<-done
+				if cancelCalls != 1 {
+					t.Errorf("CancelTask calls = %d, want 1", cancelCalls)
+				}
+			})
+		})
+	}
+}
+
+func TestRemoteAgent_CancelsRemoteTaskWhenInvocationDeadlineExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type cancelTaskCall struct {
+			taskID            a2a.TaskID
+			contextErr        error
+			deadlineRemaining time.Duration
+			hasDeadline       bool
+		}
+		cancelTaskCalls := make(chan cancelTaskCall, 1)
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					yield(&a2a.Task{
+						ID:        "remote-task",
+						ContextID: "remote-context",
+						Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+					}, nil)
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				deadline, hasDeadline := ctx.Deadline()
+				cancelTaskCalls <- cancelTaskCall{
+					taskID:            req.ID,
+					contextErr:        ctx.Err(),
+					deadlineRemaining: time.Until(deadline),
+					hasDeadline:       hasDeadline,
+				}
+				return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+		<-runDone
+
+		select {
+		case got := <-cancelTaskCalls:
+			if got.taskID != "remote-task" {
+				t.Fatalf("CancelTask() task ID = %q, want %q", got.taskID, "remote-task")
+			}
+			if got.contextErr != nil {
+				t.Fatalf("CancelTask() context error = %v, want nil", got.contextErr)
+			}
+			if !got.hasDeadline {
+				t.Fatal("CancelTask() context has no deadline")
+			}
+			if got.deadlineRemaining != 5*time.Second {
+				t.Fatalf("CancelTask() context deadline remaining = %v, want %v", got.deadlineRemaining, 5*time.Second)
+			}
+		default:
+			t.Fatal("CancelTask() was not sent for a known non-terminal remote task")
+		}
+	})
+}
+
+func TestRemoteAgent_DeadlineDoesNotDrainWithoutTaskInfo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const invocationTimeout = 100 * time.Millisecond
+		cancelTaskCalled := false
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					select {
+					case <-time.After(3 * invocationTimeout):
+						yield(&a2a.Task{
+							ID:        "remote-task",
+							ContextID: "remote-context",
+							Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+						}, nil)
+					case <-ctx.Done():
+					}
+				}
+			},
+			cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				cancelTaskCalled = true
+				return nil, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithTimeout(t.Context(), invocationTimeout)
+		defer cancel()
+		ictx := newStreamingInvocationContext(t, ctx)
+		start := time.Now()
+		for range remoteAgent.Run(ictx) {
+		}
+
+		if elapsed := time.Since(start); elapsed != invocationTimeout {
+			t.Fatalf("Run() duration = %v, want %v", elapsed, invocationTimeout)
+		}
+		if cancelTaskCalled {
+			t.Error("CancelTask() called without remote task information")
+		}
+	})
+}
+
+func TestRemoteAgent_TaskScopedMessageStopsCancellationWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const messageDelay = 200 * time.Millisecond
+		streamStarted := make(chan struct{})
+		releaseMessage := make(chan struct{})
+		cancelTaskCalled := false
+		task := &a2a.Task{
+			ID:        "remote-task",
+			ContextID: "remote-context",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		}
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					close(streamStarted)
+					<-releaseMessage
+					msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("working"))
+					if !yield(msg, nil) {
+						return
+					}
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				cancelTaskCalled = true
+				return nil, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-streamStarted
+		start := time.Now()
+		cancel()
+		synctest.Wait()
+		time.Sleep(messageDelay)
+		close(releaseMessage)
+		<-runDone
+
+		if elapsed := time.Since(start); elapsed != messageDelay {
+			t.Fatalf("Run() cancellation delay = %v, want %v", elapsed, messageDelay)
+		}
+		if cancelTaskCalled {
+			t.Error("CancelTask() called after a final message response")
+		}
+	})
+}
+
+func TestRemoteAgent_FinalMessageClearsCleanupTarget(t *testing.T) {
+	cancelTaskCalled := false
+	task := &a2a.Task{
+		ID:        "remote-task",
+		ContextID: "remote-context",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	client := &scriptedA2AClient{
+		sendStreamingMessage: func(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				if !yield(task, nil) {
+					return
+				}
+				yield(a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("done")), nil)
+			}
+		},
+		cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+			cancelTaskCalled = true
+			return nil, nil
+		},
+	}
+	remoteAgent := newRemoteAgentWithClient(t, client)
+	ictx := newStreamingInvocationContext(t, t.Context())
+
+	for range remoteAgent.Run(ictx) {
+	}
+
+	if cancelTaskCalled {
+		t.Error("CancelTask() called after a final message response")
+	}
+}
+
+func TestRemoteAgent_CancelsRemoteTaskFromArtifactFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		artifactProcessed := make(chan struct{})
+		canceledTask := make(chan a2a.TaskID, 1)
+		task := &a2a.Task{ID: "remote-task", ContextID: "remote-context"}
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					if !yield(a2a.NewArtifactEvent(task, a2a.NewTextPart("working")), nil) {
+						return
+					}
+					close(artifactProcessed)
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(_ context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				canceledTask <- req.ID
+				return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-artifactProcessed
+		start := time.Now()
+		cancel()
+		<-runDone
+
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("Run() cancellation delay = %v, want 0", elapsed)
+		}
+		select {
+		case got := <-canceledTask:
+			if got != task.ID {
+				t.Fatalf("CancelTask() task ID = %q, want %q", got, task.ID)
+			}
+		default:
+			t.Fatal("CancelTask() was not called for the artifact task")
+		}
+	})
+}
+
+func TestRemoteAgent_CancelsRemoteTaskFromArtifactFallbackDuringDrain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const artifactDelay = 200 * time.Millisecond
+		streamStarted := make(chan struct{})
+		releaseArtifact := make(chan struct{})
+		canceledTask := make(chan a2a.TaskID, 1)
+		cancelDeadline := make(chan contextDeadline, 1)
+		task := &a2a.Task{ID: "remote-task", ContextID: "remote-context"}
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					close(streamStarted)
+					<-releaseArtifact
+					if !yield(a2a.NewArtifactEvent(task, a2a.NewTextPart("working")), nil) {
+						return
+					}
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				deadline, ok := ctx.Deadline()
+				cancelDeadline <- contextDeadline{time: deadline, ok: ok}
+				canceledTask <- req.ID
+				return &a2a.Task{ID: req.ID, Status: a2a.TaskStatus{State: a2a.TaskStateCanceled}}, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-streamStarted
+		start := time.Now()
+		cancel()
+		synctest.Wait()
+		time.Sleep(artifactDelay)
+		close(releaseArtifact)
+		<-runDone
+
+		if elapsed := time.Since(start); elapsed != artifactDelay {
+			t.Fatalf("Run() cancellation delay = %v, want %v", elapsed, artifactDelay)
+		}
+		select {
+		case got := <-canceledTask:
+			if got != task.ID {
+				t.Fatalf("CancelTask() task ID = %q, want %q", got, task.ID)
+			}
+		default:
+			t.Fatal("CancelTask() was not called for the artifact task")
+		}
+		gotDeadline := <-cancelDeadline
+		if !gotDeadline.ok {
+			t.Fatal("CancelTask context has no deadline")
+		}
+		wantDeadline := start.Add(5 * time.Second)
+		if !gotDeadline.time.Equal(wantDeadline) {
+			t.Fatalf("CancelTask deadline = %v, want %v", gotDeadline.time, wantDeadline)
+		}
+	})
+}
+
+func TestRemoteAgent_ArtifactFallbackDoesNotOverwriteTerminalStatus(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		eventsProcessed := make(chan struct{})
+		cancelTaskCalled := false
+		task := &a2a.Task{ID: "remote-task", ContextID: "remote-context"}
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					if !yield(a2a.NewStatusUpdateEvent(task, a2a.TaskStateCompleted, nil), nil) {
+						return
+					}
+					if !yield(a2a.NewArtifactEvent(task, a2a.NewTextPart("done")), nil) {
+						return
+					}
+					close(eventsProcessed)
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				cancelTaskCalled = true
+				return nil, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-eventsProcessed
+		cancel()
+		<-runDone
+
+		if cancelTaskCalled {
+			t.Error("CancelTask() called after a terminal status update")
+		}
+	})
+}
+
+func TestRemoteAgent_TerminalStatusReplacesArtifactFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		eventsProcessed := make(chan struct{})
+		cancelTaskCalled := false
+		task := &a2a.Task{
+			ID:        "remote-task",
+			ContextID: "remote-context",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		}
+		client := &scriptedA2AClient{
+			sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					if !yield(a2a.NewArtifactEvent(task, a2a.NewTextPart("done")), nil) {
+						return
+					}
+					if !yield(a2a.NewStatusUpdateEvent(task, a2a.TaskStateCompleted, nil), nil) {
+						return
+					}
+					close(eventsProcessed)
+					<-ctx.Done()
+				}
+			},
+			cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+				cancelTaskCalled = true
+				return nil, nil
+			},
+		}
+		remoteAgent := newRemoteAgentWithClient(t, client)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		ictx := newStreamingInvocationContext(t, ctx)
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			for range remoteAgent.Run(ictx) {
+			}
+		}()
+
+		<-eventsProcessed
+		cancel()
+		<-runDone
+
+		if cancelTaskCalled {
+			t.Error("CancelTask() called after a terminal status update")
+		}
+	})
+}
+
+func TestRemoteAgent_CancellationAroundDirectResponseDoesNotWait(t *testing.T) {
+	for _, cancelBeforeResponse := range []bool{false, true} {
+		name := "after response"
+		if cancelBeforeResponse {
+			name = "before response"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				streamStarted := make(chan struct{})
+				releaseResponse := make(chan struct{})
+				responseProcessed := make(chan struct{})
+				cancelTaskCalled := false
+				client := &scriptedA2AClient{
+					sendStreamingMessage: func(ctx context.Context, _ *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+						return func(yield func(a2a.Event, error) bool) {
+							close(streamStarted)
+							<-releaseResponse
+							msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("done"))
+							if !yield(msg, nil) {
+								return
+							}
+							close(responseProcessed)
+							<-ctx.Done()
+						}
+					},
+					cancelTask: func(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+						cancelTaskCalled = true
+						return nil, nil
+					},
+				}
+				remoteAgent := newRemoteAgentWithClient(t, client)
+
+				ctx, cancel := context.WithCancel(t.Context())
+				ictx := newStreamingInvocationContext(t, ctx)
+				emitted := make(chan *session.Event, 1)
+				runDone := make(chan struct{})
+				go func() {
+					defer close(runDone)
+					for event := range remoteAgent.Run(ictx) {
+						emitted <- event
+					}
+				}()
+
+				<-streamStarted
+				if cancelBeforeResponse {
+					cancel()
+					synctest.Wait()
+					close(releaseResponse)
+				} else {
+					close(releaseResponse)
+					<-emitted
+					<-responseProcessed
+					cancel()
+				}
+				start := time.Now()
+				<-runDone
+				if elapsed := time.Since(start); elapsed != 0 {
+					t.Fatalf("Run() cancellation delay = %v, want 0", elapsed)
+				}
+				if cancelTaskCalled {
+					t.Error("CancelTask() called for a direct response")
+				}
+			})
 		})
 	}
 }
