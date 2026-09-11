@@ -55,6 +55,11 @@ type A2AServerConfig struct {
 	AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
 	// ClientProvider is used to create an [A2AClient] implementation.
 	ClientProvider A2AClientProvider
+	// OwnsAuthScope reports that this SDK installed the a2a auth interceptor on
+	// ClientProvider, so it also owns the credential scope on every outgoing
+	// call. When false the caller wired their own interceptor and their scope
+	// is left alone. See [AttachAuthScope].
+	OwnsAuthScope bool
 }
 
 func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {

@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -32,6 +33,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	"google.golang.org/adk/v2/server/adka2a/v2"
@@ -309,7 +311,70 @@ type A2AConfig struct {
 	GenAIPartConverter adka2a.GenAIPartConverter
 
 	// ClientProvider can be used to provide a custom implementation of A2A message sending.
+	//
+	// The context it receives, and the one its client receives per call, carry
+	// the credential scope (a2aclient.SessionIDFrom) and remain an
+	// agent.InvocationContext. They are a wrapper, though, so an assertion to a
+	// type outside that interface no longer succeeds.
 	ClientProvider A2AClientProvider
+
+	// Auth, when set, resolves an end-user credential per request and attaches
+	// it to the outgoing A2A calls this agent makes whose agent card declares a
+	// matching security requirement: the message send, and the CancelTask the
+	// run loop issues when it exits before a terminal event. It does not cover
+	// the agent card fetch itself, which AgentCardProvider performs before any
+	// credential is resolved. It cannot be combined with a custom
+	// ClientProvider; set one or the other.
+	//
+	// Enable Auth only for remote agents whose card comes from a trusted
+	// source. The card decides where the request goes and where the credential
+	// is written, so an attacker-influenced card can exfiltrate the credential
+	// to an endpoint it controls, and a card naming an http:// interface sends
+	// it in cleartext. Redirects that leave the card's scheme and host are
+	// refused for the same reason.
+	//
+	// Because the card dictates placement, this is narrower than the field of
+	// the same name on mcptoolset.Config, which applies the credential itself:
+	//   - Only auth.APIKeyCredential, auth.BearerCredential and
+	//     auth.OAuth2Credential can be sent. An auth.BasicCredential or an
+	//     auth.WithHeaders value is rejected, since neither survives the
+	//     protocol's single-secret handoff.
+	//   - APIKeyCredential.Name is ignored: the header name comes from the
+	//     card. An OAuth2 token whose type is not bearer is rejected rather
+	//     than sent mislabeled, because a2a always writes "Bearer".
+	//   - A card scheme a2a cannot place is skipped rather than approximated:
+	//     an API key the card wants in a query parameter or a cookie, an HTTP
+	//     scheme other than bearer, mutual TLS, and OpenID Connect.
+	//   - The OAuth2 scopes a card declares are not honoured, because the a2a
+	//     credentials interface never receives them. Scope the provider to
+	//     least privilege yourself.
+	//
+	// Resolution is fail-open: the a2a interceptor logs a resolution error and
+	// sends the request unauthenticated — which the remote will likely reject —
+	// rather than failing the call. Two consequences follow. An interactive
+	// credential cannot work here, because a *auth.ConsentRequiredError is
+	// swallowed instead of driving a consent round-trip, so use static tokens,
+	// API keys, or 2-legged / service-account sources. And a resolution failure
+	// during cleanup sends CancelTask unauthenticated, which a secured remote
+	// rejects, leaving the remote task running.
+	//
+	// The provider is called on every outgoing request, concurrently across
+	// concurrent invocations of the same agent, and more than once per request
+	// when the card names several security schemes. Its scope identifies both
+	// the caller and the callee, so a provider that caches per scope neither
+	// crosses users nor sends one remote agent's token to another:
+	// a2aclient.SessionIDFrom(ctx) yields the app name, user id, session id and
+	// this agent's Name, each percent-encoded and joined with "/".
+	//
+	// Prefer that scope to the ADK context. On calls this agent makes, ctx is
+	// also still the agent.InvocationContext and a provider may type-assert it.
+	// A remote agent reached as a subagent of an adka2a-hosted app gets one
+	// more call — the cancel that server issues for an abandoned child task —
+	// and there the scope is present but the ADK context is not, so a provider
+	// that insists on the type assertion fails there and, fail-open, the cancel
+	// goes out unauthenticated.
+	Auth auth.CredentialProvider
+
 	// MessageSendConfig is attached to a2a.SendMessageRequest sent on every agent invocation.
 	MessageSendConfig *a2a.SendMessageConfig
 
@@ -326,8 +391,25 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
 		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")
 	}
+	if isTypedNil(cfg.Auth) {
+		return nil, fmt.Errorf("A2AConfig.Auth holds a nil %T; leave the field unset instead", cfg.Auth)
+	}
+	if cfg.Auth != nil && cfg.ClientProvider != nil {
+		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead. Its client sees the ADK invocation context on every call, so it can key on remoteagent.CredentialScope(ctx.Session(), name) and attach that with a2aclient.AttachSessionID before delegating")
+	}
 	if cfg.ClientProvider == nil {
-		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory())
+		var opts []a2aclient.FactoryOption
+		if cfg.Auth != nil {
+			httpClient := authHTTPClient()
+			opts = append(opts,
+				a2aclient.WithJSONRPCTransport(httpClient),
+				a2aclient.WithRESTTransport(httpClient),
+				a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{
+					Service: credentialsService{provider: cfg.Auth, warnMismatch: &sync.Once{}},
+				}),
+			)
+		}
+		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(opts...))
 	}
 
 	remoteAgent := &a2aAgent{
@@ -335,6 +417,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			AgentCard:         cfg.AgentCard,
 			AgentCardProvider: cfg.AgentCardProvider,
 			ClientProvider:    cfg.ClientProvider,
+			OwnsAuthScope:     cfg.Auth != nil,
 		},
 	}
 	agent, err := agent.New(agent.Config{
@@ -363,6 +446,9 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 
 type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
+	// warnNoRequirement bounds the "Auth set, card wants none" warning to one
+	// per agent rather than one per invocation.
+	warnNoRequirement sync.Once
 }
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
@@ -373,7 +459,23 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		sender, err := cfg.ClientProvider(ctx, card)
+		// Scope every outgoing call of this invocation to the ADK session so
+		// the a2a auth interceptor can resolve a credential for it: the message
+		// send below, and the cleanup CancelTask the deferred cleanup issues.
+		sendCtx := authSendContext(ctx, cfg, card)
+		if cfg.Auth != nil && (len(card.SecurityRequirements) == 0 || len(card.SecuritySchemes) == 0) {
+			// The interceptor does not even ask for a credential in this case,
+			// so the request goes out unauthenticated and nothing else says so:
+			// a card that forgot its requirement looks exactly like one that
+			// needs no auth. Once per agent — the card is usually static, and
+			// the operator needs the fact, not a copy of it per request.
+			a.warnNoRequirement.Do(func() {
+				log.Warn(ctx, "a2a auth: A2AConfig.Auth is set but the agent card declares no security requirement and scheme pair, so no credential will be attached",
+					"agent", cfg.Name)
+			})
+		}
+
+		sender, err := cfg.ClientProvider(sendCtx, card)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
 			return
@@ -420,7 +522,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			if err == nil && ctx.Err() != nil {
 				err = context.Cause(ctx)
 			}
-			cleanupRemoteTask(ctx, cfg, card, sender, lastEvent, err)
+			cleanupRemoteTask(sendCtx, cfg, card, sender, lastEvent, err)
 		}()
 
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
@@ -482,18 +584,21 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 
 		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
-			a2aEvent, a2aErr := sender.SendMessage(ctx, req)
+			a2aEvent, a2aErr := sender.SendMessage(sendCtx, req)
 			processEvent(a2aEvent, a2aErr)
 			return
 		}
 
-		for a2aEvent, a2aErr := range sender.SendStreamingMessage(ctx, req) {
+		for a2aEvent, a2aErr := range sender.SendStreamingMessage(sendCtx, req) {
 			if !processEvent(a2aEvent, a2aErr) {
 				return
 			}
 		}
 	}
 }
+
+// cleanupTimeout bounds the cleanup CancelTask, credential resolution included.
+const cleanupTimeout = 5 * time.Second
 
 func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client A2AClient, lastEvent a2a.Event, cause error) {
 	if lastEvent == nil {
@@ -517,7 +622,10 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 		return
 	}
 
-	ctx = context.WithoutCancel(ctx)
+	// WithoutCancel returns its own type, which is no longer an
+	// agent.InvocationContext; re-wrap so a credential provider can still
+	// recover the ADK context here, exactly as it can on the send path.
+	ctx = reattachInvocation(ctx, context.WithoutCancel(ctx))
 
 	if cfg.RemoteTaskCleanupCallback != nil {
 		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
@@ -527,9 +635,9 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	if state == a2a.TaskStateInputRequired && cause == nil {
 		return
 	}
-	cancelCtx, cancelTimeout := context.WithTimeout(ctx, 5*time.Second)
+	cancelCtx, cancelTimeout := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancelTimeout()
-	_, err := client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: taskID})
+	_, err := client.CancelTask(reattachInvocation(ctx, cancelCtx), &a2a.CancelTaskRequest{ID: taskID})
 	if err != nil {
 		log.Warn(ctx, "failed to cancel task", "task_id", taskID, "error", err)
 	}
