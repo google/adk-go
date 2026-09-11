@@ -18,4 +18,4 @@ package version
 //
 // The trailing annotation marks this line for Release Please, which rewrites
 // the value in the release PR. Do not edit it by hand.
-const Version = "2.3.0" // x-release-please-version
+const Version = "2.4.0" // x-release-please-version
