@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -365,6 +366,201 @@ func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 	_, err := userMsgCb(mCtx, &genai.Content{Parts: []*genai.Part{{Text: "hello"}}})
 	if err != nil {
 		t.Fatalf("OnUserMessageCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+
+	createCalled := false
+	var requestBody string
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			// Table metadata request: returns 404 Not Found to trigger creation
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			// Table creation request
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createCalled = true
+				bodyBytes, _ := io.ReadAll(r.Body)
+				requestBody = string(bodyBytes)
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	_, err = NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Plugin initialization error: %v", err)
+	}
+
+	if !createCalled {
+		t.Error("Expected table creation to be called")
+	}
+
+	if !strings.Contains(requestBody, "timePartitioning") {
+		t.Errorf("Expected request body to contain 'timePartitioning', got: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "DAY") {
+		t.Errorf("Expected partitioning type to be 'DAY', got request body: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "timestamp") {
+		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
+	}
+}
+
+func TestOnEventCallback_StateDelta(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"key1": "value1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestOnEventCallback_HITL(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							Name: "adk_request_credential",
+							Args: map[string]any{"prompt": "need password"},
+						},
+					},
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							Name:     "adk_request_credential",
+							Response: map[string]any{"password": "123"},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestOnEventCallback_A2A(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		LLMResponse: model.LLMResponse{
+			CustomMetadata: map[string]any{
+				"a2a:task_id":    "task-123",
+				"a2a:context_id": "ctx-456",
+				"a2a:response":   `{"result": "success"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
 	}
 
 	p.AfterRunCallback()(mCtx)
