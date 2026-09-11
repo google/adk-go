@@ -39,6 +39,12 @@ import (
 // Done, Err and Value): those read from the supplied Ctx rather than panicking,
 // so the mock carries a usable context payload. If Ctx is nil they panic like
 // everything else.
+//
+// Value reading from Ctx has a consequence worth knowing when Ctx is a real ADK
+// invocation rather than context.Background(): the mock then reports THAT
+// invocation's identity, not the one its own Session field describes, because it
+// cannot override a key it cannot name. [IdentityFromContext] states the rule and
+// what a decorator must do about it.
 type StrictContextMock struct {
 	// Ctx supplies the values returned by Deadline, Done, Err and Value.
 	Ctx context.Context

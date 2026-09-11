@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -33,6 +34,41 @@ func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
 type ReadonlyContext struct {
 	context.Context
 	InvocationContext agent.InvocationContext
+}
+
+// Value implements context.Context. It answers the ADK identity key for the
+// invocation this context speaks for. Every other key delegates to the embedded
+// context, preserving existing behavior.
+//
+// This type answers the key without carrying [adkcontext.Marker], unlike every
+// other type that does. That is safe only because it is not an
+// [agent.InvocationContext], so it can never sit in the field the identity
+// procedure READS rather than asks — give it those methods and it would need the
+// marker too.
+//
+// The identity key has to be answered here rather than left to the embedded
+// context, even though the two are the same invocation. Forwarding asks that
+// invocation directly, and one implemented outside the agent package cannot
+// override a key it cannot name, so its embedded parent replies — with the
+// enclosing invocation's user, whose credential would then be minted for a call
+// they never made. agent.Promote applies the one identity procedure instead,
+// which reads the invocation's own session and falls back only to a context type
+// agent itself owns. It returns the argument unchanged when it is already one of
+// those, so the copy is made only where it is needed.
+func (c *ReadonlyContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	if key == adkcontext.IdentityKey {
+		if c.InvocationContext == nil {
+			return nil
+		}
+		return agent.Promote(c.InvocationContext).Value(key)
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
 }
 
 // AppName implements agent.ReadonlyContext.
