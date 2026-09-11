@@ -76,6 +76,51 @@ func TestCanonicalSchemaJSON_PropertyOrder(t *testing.T) {
 	}
 }
 
+func TestCanonicalSchemaJSON_RequiredOrder(t *testing.T) {
+	// Two schemas that differ only in the order of their "required" list.
+	// "required" is a set, so they must canonicalize identically.
+	mk := func(required []string) *jsonschema.Schema {
+		return &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"foo": {Type: "string"},
+				"bar": {Type: "integer"},
+			},
+			Required: required,
+		}
+	}
+
+	out1, err := CanonicalSchemaJSON(mk([]string{"foo", "bar"}))
+	if err != nil {
+		t.Fatalf("failed to canonicalize schema1: %v", err)
+	}
+	out2, err := CanonicalSchemaJSON(mk([]string{"bar", "foo"}))
+	if err != nil {
+		t.Fatalf("failed to canonicalize schema2: %v", err)
+	}
+
+	if diff := cmp.Diff(string(out1), string(out2)); diff != "" {
+		t.Errorf("canonicalSchemaJSON mismatch for reordered required (-want +got):\n%s", diff)
+	}
+}
+
+func TestCanonicalSchemaJSON_TypeUnionOrder(t *testing.T) {
+	// A "type" union is a set, so ["string","null"] and ["null","string"]
+	// must canonicalize identically.
+	out1, err := CanonicalSchemaJSON(&jsonschema.Schema{Types: []string{"string", "null"}})
+	if err != nil {
+		t.Fatalf("failed to canonicalize schema1: %v", err)
+	}
+	out2, err := CanonicalSchemaJSON(&jsonschema.Schema{Types: []string{"null", "string"}})
+	if err != nil {
+		t.Fatalf("failed to canonicalize schema2: %v", err)
+	}
+
+	if diff := cmp.Diff(string(out1), string(out2)); diff != "" {
+		t.Errorf("canonicalSchemaJSON mismatch for reordered type union (-want +got):\n%s", diff)
+	}
+}
+
 func TestCanonicalize_DeeplyNested(t *testing.T) {
 	// Deeply nested object with keys unsorted (>=3 levels)
 	input := map[string]any{

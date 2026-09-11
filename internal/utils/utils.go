@@ -156,3 +156,49 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	}
 	r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
 }
+
+// IsProsePart reports whether p is plain text meant to be read, and nothing
+// else.
+//
+// Exactly one field of a [genai.Part] is meant to be set, so a part carrying
+// any of the actionable payloads is not prose whatever else is on it. Callers
+// that filter on this drop such a part rather than reducing it to its text:
+// the text is not what makes it dangerous, and dropping is the conservative
+// half of the choice.
+//
+// A thought is not prose either. It is the model's private reasoning rather
+// than anything it chose to say, and it should not be stored or replayed as
+// though the model had said it.
+func IsProsePart(p *genai.Part) bool {
+	if p == nil || p.Text == "" || p.Thought {
+		return false
+	}
+	return p.FunctionCall == nil &&
+		p.FunctionResponse == nil &&
+		p.ExecutableCode == nil &&
+		p.CodeExecutionResult == nil &&
+		p.FileData == nil &&
+		p.InlineData == nil &&
+		p.ToolCall == nil &&
+		p.ToolResponse == nil
+}
+
+// EventBelongsToBranch reports whether an event on eventBranch is visible to an
+// invocation running on invocationBranch.
+//
+// An event belongs to its own branch and to every descendant of it, so a child
+// agent sees what its parent said and not the other way round. Branch nodes are
+// delimited with a dot, and the prefix match requires that dot so that
+// "agent_0" does not match "agent_00".
+//
+// The single definition, because prompt assembly and anything reasoning about
+// what a prompt contains have to agree on it.
+func EventBelongsToBranch(invocationBranch, eventBranch string) bool {
+	if invocationBranch == "" || eventBranch == "" {
+		return true
+	}
+	if eventBranch == invocationBranch {
+		return true
+	}
+	return strings.HasPrefix(invocationBranch, eventBranch+".")
+}

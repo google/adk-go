@@ -1,0 +1,116 @@
+# Opens the v1 backport PR for merged `main` pull requests labelled `v1-needed`.
+#
+# `v1-needed` is the only label with behaviour attached to it: it says a change
+# on main still owes a 1.x equivalent. `v1` and `v2` are informational, recording
+# which branch a PR targets. This workflow acts on `v1-needed`, and is the
+# automation around scripts/backport.sh.
+#
+# The script replays each merged PR's squash commit onto its own branch cut from
+# `v1`, rewriting the module path (google.golang.org/adk/v2 ->
+# google.golang.org/adk) so the patch matches the 1.x import blocks, and opens
+# one pull request per backport. Conflicts are not guessed at: that PR is left
+# alone and the script comments on the original asking for a manual backport.
+# One conflict costs one backport, not the run.
+#
+# Triggering on push rather than pull_request_target is deliberate. This job
+# holds a token that can push and open pull requests, and pull_request_target
+# grants that to a workflow running in the context of a pull request; push only
+# ever fires for something already merged. The work is driven off the label
+# queue rather than the event payload, so nothing here depends on which event
+# woke it up.
+#
+# The built-in GITHUB_TOKEN is enough. Since June 2026 a pull request opened by
+# github-actions[bot] does trigger its `pull_request` workflows, in an
+# approval-required state: the runs are created but held until someone with
+# write access clicks "Approve workflows to run" on the backport PR.
+# https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/
+# That is one extra click on a pull request a human has to review and merge
+# anyway, and it costs the repository no long-lived credential: this token is
+# scoped to this repository, expires with the job, and belongs to no account.
+#
+# It does need "Allow GitHub Actions to create and approve pull requests"
+# (Settings -> Actions -> General, inherited from the organization). That is not
+# readable from a workflow, so it is not checked up front; the script recognises
+# the failure and says so.
+name: Backport to v1
+
+on:
+  push:
+    branches: [main]
+
+  # Catches a PR labelled after it merged, which no push will follow.
+  schedule:
+    - cron: '0 3 * * *'
+
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: 'PR numbers to backport, space separated, or "all" to drain the queue'
+        required: true
+        default: all
+
+# contents: to push the backport branches. pull-requests: to open them, label
+# them, and comment on an original whose replay conflicted.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize: two pushes in quick succession must not race on the same v1 base.
+concurrency:
+  group: backport-v1
+  cancel-in-progress: false
+
+jobs:
+  backport:
+    # Only the upstream repository has a v1 branch and the labels this reads.
+    # A fork that enables Actions would otherwise go red on every push to its
+    # own main, on a job that cannot do anything useful there.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    # The concurrency group above is serialized, so a wedged run holds up every
+    # later backport, and six hours of that is the default. Not tighter than
+    # this, though: the job is killed mid-drain if it overruns, and a kill
+    # between the push and `gh pr create` leaves a branch with no pull request
+    # behind it, which in_flight then reads as a backport already under way. A
+    # full-history checkout plus a backlog of replays has to fit comfortably.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # The full history: the replay needs the merge base of main and v1.
+          fetch-depth: 0
+          # Kept, rather than the usual false, because the script pushes the
+          # backport branches. No untrusted code is checked out here.
+          persist-credentials: true
+
+      # The bot, not the merging human: it is the bot that pushes these branches
+      # and opens the pull requests, and each replayed commit keeps its original
+      # author regardless.
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Backport
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through the environment rather than interpolated into the
+          # script body, so the value stays data instead of becoming shell.
+          PRS: ${{ inputs.prs }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${PRS:-}" ] && [ "${PRS}" != "all" ]; then
+            # Validated rather than trusted: the split below turns whatever this
+            # holds into separate arguments, and an option or a glob among them
+            # would be read as one. Matched with [[ =~ ]] rather than grep,
+            # which is line-oriented -- $'1301\n*' satisfies a grep anchored to
+            # ^...$ and then globs against the repository root.
+            if [[ ! "${PRS}" =~ ^[0-9]+([[:blank:]]+[0-9]+)*$ ]]; then
+              echo "::error::prs must be PR numbers separated by spaces, or 'all'"
+              exit 1
+            fi
+            # shellcheck disable=SC2206  # Deliberate split into separate args.
+            args=(${PRS})
+          fi
+          scripts/backport.sh "${args[@]}" --pr
