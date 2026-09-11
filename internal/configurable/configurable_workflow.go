@@ -67,6 +67,16 @@ type joinNodeYAMLConfig struct {
 	Name string `yaml:"name"`
 }
 
+// agentNodeYAMLConfig represents the node-level knobs an agent's own config
+// file may carry when that agent is wrapped as a workflow node. It is read
+// from the agent's file rather than from the graph because nodes are cached
+// per config path (see resolveNodeLike): two workflows referencing one agent
+// file share a single node, so the setting could not vary by graph position
+// anyway.
+type agentNodeYAMLConfig struct {
+	RerunOnResume *bool `yaml:"rerun_on_resume,omitempty"`
+}
+
 // toolNodeYAMLConfig represents the YAML schema for a ToolNode.
 type toolNodeYAMLConfig struct {
 	Name           string         `yaml:"name"`
@@ -331,8 +341,13 @@ func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (
 		*collector = append(*collector, ag)
 	}
 
+	var nodeCfg agentNodeYAMLConfig
+	if err := yaml.Unmarshal(data, &nodeCfg); err != nil {
+		return nil, fmt.Errorf("failed to parse agent node config %q: %w", absPath, err)
+	}
+
 	// Wrap standard agent in workflow Node
-	return workflow.NewAgentNode(ag, workflow.NodeConfig{})
+	return workflow.NewAgentNode(ag, workflow.NodeConfig{RerunOnResume: nodeCfg.RerunOnResume})
 }
 
 // castNodeFunction normalizes function signatures to a standard non-generic workflow function.
