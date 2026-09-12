@@ -231,6 +231,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	// Store trimmed StateDelta so temp: keys are not in the canonical record.
+	trimmed := trimTempDeltaState(event)
+
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -239,7 +242,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		Branch:         event.Branch,
 		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
-			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			StateDelta:                 maps.Clone(trimmed.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
 			TransferToAgent:            event.Actions.TransferToAgent,

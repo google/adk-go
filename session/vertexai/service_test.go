@@ -76,6 +76,11 @@ var casesWithoutReplay = map[string]string{
 	// Pinned offline against the in-process fake backend, by
 	// TestAppendEvent_missingSession_wrapsErrNotFound in notfound_test.go.
 	"Test_vertexaiService_AppendEvent_when_session_deleted_returns_ErrNotFound": "notfound_test.go",
+	// Trimming temp: keys before AppendEvent changes the outbound RPC body, so
+	// the recorded Agent Engine replay no longer matches. Pinned offline by
+	// TestAppendEvent_stripsTempKeysBeforePersist until a maintainer re-records
+	// with UPDATE_REPLAYS=true.
+	"Test_vertexaiService_StateManagement_temp_state_is_not_persisted": "append_event_temp_state_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {
