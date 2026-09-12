@@ -44,7 +44,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	router := mux.NewRouter().StrictSlash(true)
-	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 	setupRouter(router,
@@ -53,6 +53,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
+		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
+		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	)
 	return &Server{
