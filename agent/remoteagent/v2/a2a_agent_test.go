@@ -1499,7 +1499,7 @@ func TestRemoteAgent_PartConverter(t *testing.T) {
 
 	ictx := newTestInvocationContext(t, "test-agent", newUserHello())
 
-	parts, err := convertParts(ictx, cfg, event)
+	parts, err := convertParts(ictx, cfg, event, map[string]struct{}{})
 	if err != nil {
 		t.Fatalf("convertParts() error = %v", err)
 	}
