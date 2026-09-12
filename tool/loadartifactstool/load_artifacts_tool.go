@@ -21,8 +21,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/encoding/ianaindex"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -232,8 +236,141 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			resp.Part,
+			safePartForLLM(resp.Part, artifactName),
 		},
 		Role: genai.RoleUser,
 	}, nil
+}
+
+// stripMIMEControlChars removes control characters, which never appear in a
+// legitimate label but would otherwise dodge the exact-match lists below while
+// still hitting the prefix matches. The call site strips the whole label once
+// so that routing and charset parsing cannot disagree about the same input.
+func stripMIMEControlChars(mimeType string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, mimeType)
+}
+
+// normalizeMIMEType drops any parameters and lowercases the type, which is
+// case-insensitive per RFC 2045. The argument must already have had control
+// characters stripped; the call site does so.
+func normalizeMIMEType(mimeType string) string {
+	mimeType, _, _ = strings.Cut(mimeType, ";")
+	return strings.ToLower(strings.TrimSpace(mimeType))
+}
+
+// isInlineMIMETypeSupported reports whether the model accepts this type inline.
+// The argument must already be normalized; the call site does so. The media
+// match is prefix-based on purpose: enumerating subtypes would rot.
+func isInlineMIMETypeSupported(mimeType string) bool {
+	// Gemini rejects SVG source as inline image data whatever subtype it is
+	// labelled with (the rejection is on the bytes, not the label), so this
+	// list catches the conventional labels for such artifacts rather than
+	// mirroring a backend rule. The set matches adk-python's
+	// _GEMINI_UNSUPPORTED_INLINE_SUBTYPES.
+	switch mimeType {
+	case "image/svg", "image/svg+xml", "image/xml":
+		return false
+	}
+	return strings.HasPrefix(mimeType, "image/") ||
+		strings.HasPrefix(mimeType, "audio/") ||
+		strings.HasPrefix(mimeType, "video/") ||
+		mimeType == "application/pdf"
+}
+
+// isTextLikeMIMEType reports whether data of this type can be inlined as text.
+// The argument must already be normalized; the call site does so.
+func isTextLikeMIMEType(mimeType string) bool {
+	switch mimeType {
+	case "application/csv",
+		"application/json",
+		"application/svg+xml",
+		"application/xml",
+		"image/svg",
+		"image/svg+xml",
+		"image/xml":
+		return true
+	}
+	return strings.HasPrefix(mimeType, "text/")
+}
+
+// decodeArtifactText converts artifact bytes to UTF-8 text. A charset
+// parameter on the original MIME type is honoured when it names a known
+// encoding, so "text/csv; charset=windows-1252" round-trips instead of
+// degrading; otherwise invalid sequences are replaced rather than the
+// artifact discarded.
+//
+// Which names resolve is ianaindex's call and is narrower than the aliases seen
+// in the wild: it resolves windows-1252, iso-8859-1, latin1, us-ascii,
+// windows-1251, shift_jis, ibm437 and iso-2022-jp, and rejects cp1252, ascii,
+// utf8 and sjis. An unresolved alias is not an error here, it falls back to the
+// lossy path below, which is what this code did before charsets were honoured
+// at all. Reaching for a second table to widen the coverage would cost binary
+// size for aliases the fallback already handles acceptably.
+//
+// The argument must already have had control characters stripped; the call site
+// does so. mime.ParseMediaType rejects a label containing one, which would drop
+// a declared charset that normalization had accepted for routing.
+func decodeArtifactText(data []byte, rawMIMEType string) string {
+	if _, params, err := mime.ParseMediaType(rawMIMEType); err == nil {
+		if cs := params["charset"]; cs != "" && !strings.EqualFold(cs, "utf-8") {
+			// ianaindex returns (nil, nil) for a charset it knows but does not
+			// implement, such as gb2312 and utf-7, so enc must be checked
+			// separately from err.
+			if enc, err := ianaindex.IANA.Encoding(cs); err == nil && enc != nil {
+				if decoded, err := enc.NewDecoder().Bytes(data); err == nil {
+					// Decoders are expected to replace ill-formed input, but the
+					// fallback below guarantees valid UTF-8 and this branch
+					// should not be the weaker of the two. On well-formed input
+					// this returns the string unmodified and unallocated.
+					return strings.ToValidUTF8(string(decoded), "\uFFFD")
+				}
+			}
+		}
+	}
+	return strings.ToValidUTF8(string(data), "\uFFFD")
+}
+
+// safePartForLLM returns a part the model will accept, converting or describing
+// inline data it would reject. The result is never nil.
+func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
+	if part == nil {
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %q. No content was returned.]", artifactName))
+	}
+	if part.InlineData == nil {
+		return part
+	}
+
+	// Strip once, here, so routing and charset parsing see the same label: a
+	// control character removed for routing but left in the string handed to
+	// mime.ParseMediaType would silently discard a declared charset.
+	rawMIMEType := stripMIMEControlChars(part.InlineData.MIMEType)
+	mimeType := normalizeMIMEType(rawMIMEType)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	data := part.InlineData.Data
+	// An empty blob is degenerate whatever its declared type.
+	if len(data) == 0 {
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %q, type: %q. No inline data was provided.]", artifactName, mimeType))
+	}
+	if isInlineMIMETypeSupported(mimeType) {
+		return part
+	}
+	// Text in a legacy encoding still carries readable content, so decode it
+	// rather than discarding the artifact.
+	if isTextLikeMIMEType(mimeType) {
+		return genai.NewPartFromText(decodeArtifactText(data, rawMIMEType))
+	}
+
+	return genai.NewPartFromText(fmt.Sprintf(
+		"[Binary artifact: %q, type: %q, size: %d bytes. Content cannot be displayed inline.]",
+		artifactName,
+		mimeType,
+		len(data),
+	))
 }

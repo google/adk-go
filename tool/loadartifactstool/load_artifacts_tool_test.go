@@ -497,6 +497,280 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_MIMEConversion(t *testing.T) {
+	tests := []struct {
+		name         string
+		artifactName string
+		part         *genai.Part
+		wantInline   bool
+		wantMIMEType string
+		wantData     []byte
+		wantText     string
+	}{
+		{
+			name:         "text-like type is inlined as text",
+			artifactName: "data.csv",
+			part:         genai.NewPartFromBytes([]byte("col1,col2\n1,2\n"), "application/csv; charset=utf-8"),
+			wantText:     "col1,col2\n1,2\n",
+		},
+		{
+			name:         "media type keeps its inline data",
+			artifactName: "photo.png",
+			part:         genai.NewPartFromBytes([]byte{0x89, 'P', 'N', 'G'}, "image/png"),
+			wantInline:   true,
+			wantMIMEType: "image/png",
+			wantData:     []byte{0x89, 'P', 'N', 'G'},
+		},
+		{
+			name:         "document type keeps its inline data",
+			artifactName: "file.pdf",
+			part:         genai.NewPartFromBytes([]byte("%PDF-1.4"), "application/pdf"),
+			wantInline:   true,
+			wantMIMEType: "application/pdf",
+			wantData:     []byte("%PDF-1.4"),
+		},
+		{
+			name:         "type casing is ignored",
+			artifactName: "notes.txt",
+			part:         genai.NewPartFromBytes([]byte("line one\n"), "TEXT/PLAIN"),
+			wantText:     "line one\n",
+		},
+		{
+			name:         "unsupported binary type becomes a placeholder",
+			artifactName: "slides.pptx",
+			part:         genai.NewPartFromBytes([]byte{1, 2, 3}, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+			wantText:     `[Binary artifact: "slides.pptx", type: "application/vnd.openxmlformats-officedocument.presentationml.presentation", size: 3 bytes. Content cannot be displayed inline.]`,
+		},
+		{
+			name:         "text type holding invalid UTF-8 is decoded with replacement characters",
+			artifactName: "broken.txt",
+			part:         genai.NewPartFromBytes([]byte{0xff, 0xfe, 0xfd}, "text/plain"),
+			wantText:     "\uFFFD",
+		},
+		{
+			name:         "json type is inlined as text",
+			artifactName: "config.json",
+			part:         genai.NewPartFromBytes([]byte(`{"a":1}`), "application/json"),
+			wantText:     `{"a":1}`,
+		},
+		{
+			name:         "xml type is inlined as text",
+			artifactName: "feed.xml",
+			part:         genai.NewPartFromBytes([]byte("<a/>"), "application/xml"),
+			wantText:     "<a/>",
+		},
+		{
+			name:         "audio type keeps its inline data",
+			artifactName: "clip.mp3",
+			part:         genai.NewPartFromBytes([]byte{0x49, 0x44, 0x33}, "audio/mpeg"),
+			wantInline:   true,
+			wantMIMEType: "audio/mpeg",
+			wantData:     []byte{0x49, 0x44, 0x33},
+		},
+		{
+			name:         "video type keeps its inline data",
+			artifactName: "clip.mp4",
+			part:         genai.NewPartFromBytes([]byte{0x00, 0x00, 0x00, 0x18}, "video/mp4"),
+			wantInline:   true,
+			wantMIMEType: "video/mp4",
+			wantData:     []byte{0x00, 0x00, 0x00, 0x18},
+		},
+		{
+			name:         "supported-type check strips casing and parameters",
+			artifactName: "photo2.png",
+			part:         genai.NewPartFromBytes([]byte{0x89, 'P', 'N', 'G'}, "IMAGE/PNG; foo=bar"),
+			wantInline:   true,
+			wantMIMEType: "IMAGE/PNG; foo=bar",
+			wantData:     []byte{0x89, 'P', 'N', 'G'},
+		},
+		{
+			name:         "text in a legacy encoding is decoded lossily",
+			artifactName: "sales.csv",
+			part:         genai.NewPartFromBytes([]byte("caf\xe9, 12\n"), "application/csv"),
+			wantText:     "caf\uFFFD, 12\n",
+		},
+		{
+			name:         "svg image is delivered as text",
+			artifactName: "diagram.svg",
+			part:         genai.NewPartFromBytes([]byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), "image/svg+xml"),
+			wantText:     `<svg xmlns="http://www.w3.org/2000/svg"/>`,
+		},
+		{
+			name:         "legacy svg subtype is delivered as text",
+			artifactName: "old.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg/>"), "image/svg"),
+			wantText:     "<svg/>",
+		},
+		{
+			name:         "xml image subtype is delivered as text",
+			artifactName: "vector.xml",
+			part:         genai.NewPartFromBytes([]byte("<v/>"), "image/xml"),
+			wantText:     "<v/>",
+		},
+		{
+			name:         "svg application subtype is delivered as text",
+			artifactName: "chart.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg id=\"c\"/>"), "application/svg+xml"),
+			wantText:     "<svg id=\"c\"/>",
+		},
+		{
+			// 0x93 and 0x94 are quotation marks under windows-1252 and C1 controls
+			// under ISO-8859-1, so this row fails if the name resolves to a
+			// neighbouring encoding. A byte such as 0xE9 would not discriminate:
+			// it is é under windows-1252, ISO-8859-1 and latin1 alike.
+			name:         "declared charset is honoured when decoding",
+			artifactName: "sales2.csv",
+			part:         genai.NewPartFromBytes([]byte("\x93caf\xe9\x94,12\n"), "text/csv; charset=windows-1252"),
+			wantText:     "“café”,12\n",
+		},
+		{
+			name:         "unknown charset falls back to lossy decoding",
+			artifactName: "odd.txt",
+			part:         genai.NewPartFromBytes([]byte{0xff}, "text/plain; charset=no-such-charset"),
+			wantText:     "\uFFFD",
+		},
+		{
+			// ianaindex returns (nil, nil) rather than an error for a charset it
+			// knows but does not implement, so err == nil alone does not make the
+			// decoder safe to call. Without the enc != nil guard this row panics.
+			// The unknown-charset row above cannot catch that: an unrecognised name
+			// returns an error and short-circuits before the guard is reached.
+			name:         "known but unimplemented charset falls back instead of panicking",
+			artifactName: "legacy.txt",
+			part:         genai.NewPartFromBytes([]byte("ok\xff"), "text/plain; charset=gb2312"),
+			wantText:     "ok\uFFFD",
+		},
+		{
+			// A declared utf-8 short-circuits to the lossy path instead of running
+			// the bytes through a decoder. The two differ on malformed input:
+			// ToValidUTF8 collapses a run of bad bytes into one U+FFFD where the
+			// x/text decoder emits one per byte. Drop the short-circuit and this
+			// row wants "a\uFFFD\uFFFD\uFFFDb" instead.
+			name:         "declared utf-8 takes the lossy path rather than a decoder",
+			artifactName: "notes.txt",
+			part:         genai.NewPartFromBytes([]byte("a\xff\xfe\xfdb"), "text/plain; charset=utf-8"),
+			wantText:     "a\uFFFDb",
+		},
+		{
+			name:         "control characters in the label do not dodge the text path",
+			artifactName: "config2.json",
+			part:         genai.NewPartFromBytes([]byte(`{"b":2}`), "application/json\x00"),
+			wantText:     `{"b":2}`,
+		},
+		{
+			name:         "control characters in the label do not reopen the inline path",
+			artifactName: "diagram2.svg",
+			part:         genai.NewPartFromBytes([]byte("<svg/>"), "image/svg+xml\x00"),
+			wantText:     "<svg/>",
+		},
+		{
+			// Stripping happens once, before both routing and charset parsing, so
+			// the two cannot disagree about the same label. Previously normalization
+			// removed the NUL while mime.ParseMediaType rejected the raw string over
+			// that same NUL, so this artifact silently lost its declared charset and
+			// came back as "caf\uFFFD,12".
+			name:         "control characters in the label do not drop the charset",
+			artifactName: "sales3.csv",
+			part:         genai.NewPartFromBytes([]byte("caf\xe9,12\n"), "text/csv\x00; charset=windows-1252"),
+			wantText:     "café,12\n",
+		},
+		{
+			name:         "missing type defaults to octet-stream",
+			artifactName: "unknown.bin",
+			part:         genai.NewPartFromBytes([]byte{1, 2, 3, 4}, ""),
+			wantText:     `[Binary artifact: "unknown.bin", type: "application/octet-stream", size: 4 bytes. Content cannot be displayed inline.]`,
+		},
+		{
+			name:         "empty data becomes a placeholder",
+			artifactName: "empty.bin",
+			part:         &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream"}},
+			wantText:     `[Artifact: "empty.bin", type: "application/octet-stream". No inline data was provided.]`,
+		},
+		{
+			name:         "empty data is reported even for a supported type",
+			artifactName: "empty.png",
+			part:         &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantText:     `[Artifact: "empty.png", type: "image/png". No inline data was provided.]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := processLoadArtifactRequest(t, tt.artifactName, tt.part)
+
+			if !tt.wantInline {
+				if got.InlineData != nil {
+					t.Fatalf("InlineData: got %v, want nil", got.InlineData)
+				}
+				if got.Text != tt.wantText {
+					t.Errorf("Text: got %q, want %q", got.Text, tt.wantText)
+				}
+				return
+			}
+
+			if got.InlineData == nil {
+				t.Fatal("InlineData: got nil, want inline data preserved")
+			}
+			if got.InlineData.MIMEType != tt.wantMIMEType {
+				t.Errorf("InlineData.MIMEType: got %q, want %q", got.InlineData.MIMEType, tt.wantMIMEType)
+			}
+			if diff := cmp.Diff(tt.wantData, got.InlineData.Data); diff != "" {
+				t.Errorf("InlineData.Data diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func processLoadArtifactRequest(t *testing.T, artifactName string, part *genai.Part) *genai.Part {
+	t.Helper()
+
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContext(t)
+	if _, err := tc.Artifacts().Save(t.Context(), artifactName, part); err != nil {
+		t.Fatalf("Failed to save artifact %s: %v", artifactName, err)
+	}
+
+	llmRequest := loadArtifactsRequest(artifactName)
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+	if len(llmRequest.Contents) != 2 {
+		t.Fatalf("Expected 2 contents, got %d", len(llmRequest.Contents))
+	}
+
+	appendedContent := llmRequest.Contents[1]
+	if appendedContent.Role != genai.RoleUser {
+		t.Errorf("Appended Content Role: got %v, want %v", appendedContent.Role, genai.RoleUser)
+	}
+	if len(appendedContent.Parts) != 2 {
+		t.Fatalf("Expected 2 parts in appended content, got %d", len(appendedContent.Parts))
+	}
+	if got, want := appendedContent.Parts[0].Text, "Artifact "+artifactName+" is:"; got != want {
+		t.Errorf("First part of appended content: got %q, want %q", got, want)
+	}
+	return appendedContent.Parts[1]
+}
+
+func loadArtifactsRequest(artifactName string) *model.LLMRequest {
+	return &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{artifactName},
+					}),
+				},
+			},
+		},
+	}
+}
+
 func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
 
