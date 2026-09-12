@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -43,7 +44,7 @@ import (
 // ID passed the console flow but silently broke the Web UI, so the
 // distinct-ID assertion below is the regression this test exists for.
 func TestRESTHITL_TwoFullCycles_SameSession(t *testing.T) {
-	srv := httptest.NewServer(newHITLServer(t))
+	srv := httptest.NewServer(newHITLServer(t, "u"))
 	defer srv.Close()
 
 	sid := createSession(t, srv.URL)
@@ -176,7 +177,7 @@ const (
 // newHITLServer builds the REST handler around a workflow agent shaped
 // like examples/workflow/hitl_simple: ask_name pauses on a unique
 // interrupt ID per request, greet returns the greeting for the reply.
-func newHITLServer(t *testing.T) *adkrest.Server {
+func newHITLServer(t *testing.T, authenticatedUserID string) *adkrest.Server {
 	t.Helper()
 	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
 		func(ic agent.Context, _ any, emit func(*session.Event) error) (any, error) {
@@ -210,6 +211,9 @@ func newHITLServer(t *testing.T) *adkrest.Server {
 	srv, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService: session.InMemoryService(),
 		AgentLoader:    agent.NewSingleLoader(a),
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
+		}),
 	})
 	if err != nil {
 		t.Fatalf("adkrest.NewServer() error = %v", err)
