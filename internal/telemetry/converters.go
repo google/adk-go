@@ -17,10 +17,10 @@ package telemetry
 import (
 	"fmt"
 
-	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 )
 
-// toLogValue converts a JSON value to a log.Value.
+// toLogValue converts a JSON value to an attribute.Value.
 // From [encoding/json.Unmarshal] documentation:
 // To unmarshal JSON into an interface value,
 // Unmarshal stores one of these in the interface value:
@@ -31,70 +31,78 @@ import (
 //   - []any, for JSON arrays
 //   - map[string]any, for JSON objects
 //   - nil for JSON null
-func toLogValue(v any) log.Value {
+func toLogValue(v any) attribute.Value {
 	switch val := v.(type) {
 	case nil:
-		return log.Value{}
+		return attribute.Value{}
 	case string:
-		return log.StringValue(val)
+		return attribute.StringValue(val)
 	case bool:
-		return log.BoolValue(val)
+		return attribute.BoolValue(val)
 	case float64:
-		return log.Float64Value(val)
+		return attribute.Float64Value(val)
 	case int:
-		return log.IntValue(val)
+		return attribute.IntValue(val)
 	case []any:
-		values := make([]log.Value, 0, len(val))
+		values := make([]attribute.Value, 0, len(val))
 		for _, item := range val {
 			values = append(values, toLogValue(item))
 		}
-		return log.SliceValue(values...)
+		return attribute.SliceValue(values...)
 	case map[string]any:
-		kvs := make([]log.KeyValue, 0, len(val))
+		kvs := make([]attribute.KeyValue, 0, len(val))
 		for k, v := range val {
-			kvs = append(kvs, log.KeyValue{Key: k, Value: toLogValue(v)})
+			kvs = append(kvs, attribute.KeyValue{Key: attribute.Key(k), Value: toLogValue(v)})
 		}
-		return log.MapValue(kvs...)
+		return attribute.MapValue(kvs...)
 	default:
 		// Fallback for other types
-		return log.StringValue(fmt.Sprintf("%v", val))
+		return attribute.StringValue(fmt.Sprintf("%v", val))
 	}
 }
 
-// FromLogValue converts a log.Value to golang type. See [toLogValue] for more details.
-func FromLogValue(v log.Value) any {
-	switch v.Kind() {
-	case log.KindString:
+// FromLogValue converts an attribute.Value to golang type. See [toLogValue] for more details.
+func FromLogValue(v attribute.Value) any {
+	switch v.Type() {
+	case attribute.STRING:
 		return v.AsString()
-	case log.KindInt64:
+	case attribute.STRINGSLICE:
+		return v.AsStringSlice()
+	case attribute.INT64:
 		return v.AsInt64()
-	case log.KindFloat64:
+	case attribute.INT64SLICE:
+		return v.AsInt64Slice()
+	case attribute.FLOAT64:
 		return v.AsFloat64()
-	case log.KindBool:
+	case attribute.FLOAT64SLICE:
+		return v.AsFloat64Slice()
+	case attribute.BOOL:
 		return v.AsBool()
-	case log.KindBytes:
-		return v.AsBytes()
-	case log.KindMap:
+	case attribute.BOOLSLICE:
+		return v.AsBoolSlice()
+	case attribute.BYTESLICE:
+		return v.AsByteSlice()
+	case attribute.MAP:
 		m := make(map[string]any)
 		for _, kv := range v.AsMap() {
-			m[kv.Key] = FromLogValue(kv.Value)
+			m[string(kv.Key)] = FromLogValue(kv.Value)
 		}
 		return m
-	case log.KindSlice:
+	case attribute.SLICE:
 		s := make([]any, 0)
 		for _, v := range v.AsSlice() {
 			s = append(s, FromLogValue(v))
 		}
 		return s
-	case log.KindEmpty:
+	case attribute.EMPTY:
 		return nil
 	default:
 		// Try to handle this as gracefully as possible.
 		//
 		// Don't panic here. The goal here is to have developers find this
-		// first if a slog.Kind is is not handled. It is
+		// first if an attribute.Type is not handled. It is
 		// preferable to have user's open issue asking why their attributes
 		// have a "unhandled: " prefix than say that their code is panicking.
-		return fmt.Sprintf("<unhandled log.Kind: %s>", v.Kind())
+		return fmt.Sprintf("<unhandled attribute.Type: %s>", v.Type())
 	}
 }
