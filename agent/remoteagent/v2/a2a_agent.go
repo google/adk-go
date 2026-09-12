@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -96,6 +97,113 @@ func classifyCardSource(source string) (isFile bool, err error) {
 	return false, fmt.Errorf("%w %q: scheme %q is not supported, use http(s):// or a file path", ErrUnsupportedCardSource, source, u.Scheme)
 }
 
+// ErrUntrustedCardInterface is returned when a fetched agent card declares an
+// interface URL that does not share the origin it was fetched from.
+var ErrUntrustedCardInterface = errors.New("untrusted agent card interface")
+
+// validateCardInterfaceOrigins constrains where a card fetched over the
+// network may aim RPC traffic.
+//
+// A card served from a trusted, configured source URL is not itself trusted
+// content: the response is JSON from whatever answered that request, which
+// could be a compromised or misconfigured server, a MITM on the fetch, or a
+// domain that has since changed hands. agentcard.DefaultResolver.Resolve
+// performs no check that a resolved card's declared interfaces have anything
+// to do with where the card was fetched from -- confirmed directly against
+// the resolver's own source (v2.4.0, the version this package depends on):
+// it fetches, parses, and returns the card with no validation of its
+// contents at all. Without this check, every one of the card's declared
+// interface URLs is followed with no verification, meaning every subsequent
+// A2A request for this agent -- including whatever credential material the
+// request path carries -- would go to wherever the card says, not wherever
+// it was actually fetched from.
+//
+// Every interface the card declares is checked, not only whichever one a
+// given transport negotiation would select, since any of them could end up
+// being used. Each must be https, or http on a loopback host (the shape
+// local-development tooling emits, and a host an attacker who does not
+// already control this machine cannot redirect a fetch to), and must share
+// the origin of the configured agent card source -- not necessarily the
+// origin the fetch actually landed on, if the resolver followed a redirect.
+// Pinning to the configured source rather than the final URL is
+// intentional: pinning to wherever a fetch actually lands would let an open
+// redirect move the trust anchor.
+//
+// Only called for a card fetched over http(s); a card read from a local
+// file did not come off the network here, and its target is left to the
+// caller.
+func validateCardInterfaceOrigins(card *a2a.AgentCard, source string) error {
+	sourceURL, err := url.Parse(source)
+	if err != nil {
+		return fmt.Errorf("%w: invalid agent card source URL %q: %w", ErrUntrustedCardInterface, source, err)
+	}
+	sourceScheme, sourceHost, sourcePort := urlOrigin(sourceURL)
+
+	for _, iface := range card.SupportedInterfaces {
+		if iface == nil {
+			continue
+		}
+		ifaceURL, err := url.Parse(iface.URL)
+		if err != nil {
+			return fmt.Errorf("%w: invalid interface URL %q in agent card: %w", ErrUntrustedCardInterface, iface.URL, err)
+		}
+		if ifaceURL.Scheme != "https" && !isLoopbackHost(ifaceURL.Hostname()) {
+			return fmt.Errorf("%w: interface URL %q must use https, or http on a loopback host", ErrUntrustedCardInterface, iface.URL)
+		}
+		ifaceScheme, ifaceHost, ifacePort := urlOrigin(ifaceURL)
+		if ifaceScheme != sourceScheme || ifaceHost != sourceHost || ifacePort != sourcePort {
+			return fmt.Errorf("%w: interface URL %q does not share the origin of the configured agent card source (%q)", ErrUntrustedCardInterface, iface.URL, source)
+		}
+	}
+	return nil
+}
+
+// defaultPorts maps a scheme to the port a URL omitting one implies.
+var defaultPorts = map[string]string{"http": "80", "https": "443"}
+
+// urlOrigin returns the (scheme, host, port) triple identifying u's origin.
+// The hostname is case-folded and the port is normalized to the scheme's
+// default when u omits one, mirroring the comparison adk-python's
+// _url_origin performs (with its _DEFAULT_PORTS table). Comparing
+// url.URL.Host directly, as an earlier version of this check did, treats
+// "https://Agent.Example.com" as a different origin from
+// "https://agent.example.com", and "https://agent.example.com:443" as
+// different from "https://agent.example.com" -- rejecting same-origin
+// cards that spell the port explicitly or the host in a different case,
+// even though DNS hostnames are case-insensitive and both name the same
+// origin.
+func urlOrigin(u *url.URL) (scheme, host, port string) {
+	scheme = u.Scheme
+	host = strings.ToLower(u.Hostname())
+	port = u.Port()
+	if port == "" {
+		port = defaultPorts[scheme]
+	}
+	return scheme, host, port
+}
+
+// isLoopbackHost reports whether hostname names this machine itself
+// (loopback), not a remote host.
+//
+// A hostname is loopback only if it parses as a loopback IP address, or is
+// "localhost" or a subdomain of it (RFC 6761 reserves the whole
+// *.localhost space to loopback resolution, and "app.localhost" is a
+// common local-development shape). A plain prefix or substring test on the
+// hostname string is not equivalent to either check: "127.evil.com" is an
+// ordinary registrable DNS name an attacker controls, not the loopback
+// address its text merely starts with, and net.ParseIP correctly rejects
+// it as not an IP at all.
+func isLoopbackHost(hostname string) bool {
+	h := strings.ToLower(hostname)
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 // NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
 // The source can be an http(s) URL or a local file path. A source carrying any
 // other scheme, such as "file://", is rejected rather than read as a path.
@@ -109,6 +217,9 @@ func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentC
 			card, err := agentcard.DefaultResolver.Resolve(ctx, source, opts...)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
+			}
+			if err := validateCardInterfaceOrigins(card, source); err != nil {
+				return nil, err
 			}
 			return card, nil
 		}
