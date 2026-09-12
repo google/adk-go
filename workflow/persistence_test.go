@@ -260,3 +260,44 @@ func nodeState(t *testing.T, state *RunState, name string) *NodeState {
 	}
 	return ns
 }
+
+// A completed sibling must retain its output and branch for a join after
+// another node pauses. Historical runs and unfinished siblings must not
+// become completed predecessors of the current invocation.
+func TestReconstructRunState_CompletedJoinPredecessors(t *testing.T) {
+	ask, done, old, streaming := newDummyNode("ask"), newDummyNode("done"), newDummyNode("old"), newDummyNode("streaming")
+	join := NewJoinNode("join")
+	wf, err := New("root", []Edge{{From: Start, To: ask}, {From: Start, To: done}, {From: Start, To: old}, {From: Start, To: streaming}, {From: ask, To: join}, {From: done, To: join}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, messageOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit_output", true: "message_output"}[messageOutput], func(t *testing.T) {
+			completed := modelEvent("done", "saved", messageOutput)
+			completed.InvocationID, completed.Branch = "current", "outer@1.done@1"
+			if !messageOutput {
+				completed.Output = "saved"
+			}
+			pending := &session.Event{Author: "ask", InvocationID: "current", Output: "intermediate", LongRunningToolIDs: []string{"approval"}}
+			previous := &session.Event{Author: "old", InvocationID: "previous", Output: "obsolete"}
+			unfinished := modelEvent("streaming", "partial", false)
+			unfinished.InvocationID = "current"
+			state, err := wf.ReconstructRunState(fakeSession{events: sliceEvents{previous, completed, unfinished, pending}}, "current")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "done")
+			if ns.Status != NodeCompleted || ns.Output != "saved" || ns.Branch != completed.Branch {
+				t.Fatalf("completed sibling = %+v", ns)
+			}
+			if nodeState(t, state, "ask").Status != NodeWaiting {
+				t.Fatal("interrupted node was marked completed")
+			}
+			for _, name := range []string{"old", "streaming"} {
+				if _, exists := state.Nodes[name]; exists {
+					t.Fatalf("%s incorrectly restored as completed", name)
+				}
+			}
+		})
+	}
+}
