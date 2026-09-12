@@ -101,6 +101,22 @@ func TestExampleTool_ProcessRequest(t *testing.T) {
 			wantInstruct: "",
 		},
 		{
+			name:         "NilUserContent",
+			examples:     []*Example{{Input: genai.NewContentFromText("hi", "user"), Output: []*genai.Content{genai.NewContentFromText("hello", "model")}}},
+			userContent:  nil,
+			model:        "gemini-1.5-pro",
+			wantInstruct: "",
+		},
+		{
+			name:     "NilFirstPart",
+			examples: []*Example{{Input: genai.NewContentFromText("hi", "user"), Output: []*genai.Content{genai.NewContentFromText("hello", "model")}}},
+			userContent: &genai.Content{
+				Parts: []*genai.Part{nil},
+			},
+			model:        "gemini-1.5-pro",
+			wantInstruct: "",
+		},
+		{
 			name:     "EmptyUserContentString",
 			examples: []*Example{{Input: genai.NewContentFromText("hi", "user"), Output: []*genai.Content{genai.NewContentFromText("hello", "model")}}},
 			userContent: &genai.Content{
