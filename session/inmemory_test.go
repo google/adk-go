@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -286,4 +287,85 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	if txt := stored.CompactedContent.Parts[0].Text; txt != "summary" {
 		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
 	}
+}
+
+func TestArtifactDeltaRace(t *testing.T) {
+	svc := session.InMemoryService()
+	cr, _ := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	live := cr.Session
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			evs := live.Events()
+			if n := evs.Len(); n > 0 {
+				if e := evs.At(n - 1); e != nil && e.Actions.ArtifactDelta != nil {
+					e.Actions.ArtifactDelta["injected"] = 1
+				}
+			}
+		}
+	}()
+	for i := range 20000 {
+		ev := &session.Event{
+			ID:        fmt.Sprintf("e%d", i),
+			Timestamp: time.Now(),
+			Actions: session.EventActions{
+				StateDelta:    map[string]any{"temp:t": i, "k": i},
+				ArtifactDelta: map[string]int64{"a": int64(i)},
+			},
+		}
+		if err := svc.AppendEvent(t.Context(), live, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+}
+
+// When No temporary state delta key exist, trimTempDeltaState return exact event
+// So, events published into sess.events shares actions maps with concurrent Session.Event() readers,
+// which may be read or cloned by AppendEvent casuing race condition.
+func TestArtifactDeltaRaceNoTemp(t *testing.T) {
+	svc := session.InMemoryService()
+	cr, _ := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	live := cr.Session
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			evs := live.Events()
+			if n := evs.Len(); n > 0 {
+				if e := evs.At(n - 1); e != nil && e.Actions.ArtifactDelta != nil {
+					e.Actions.ArtifactDelta["injected"] = 1
+				}
+			}
+		}
+	}()
+	for i := range 20000 {
+		ev := &session.Event{
+			ID:        fmt.Sprintf("e%d", i),
+			Timestamp: time.Now(),
+			Actions: session.EventActions{
+				StateDelta:    map[string]any{"k": i},
+				ArtifactDelta: map[string]int64{"a": int64(i)},
+			},
+		}
+		if err := svc.AppendEvent(t.Context(), live, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
 }
