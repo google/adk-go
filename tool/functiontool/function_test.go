@@ -19,9 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -344,6 +346,238 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 				t.Errorf("weatherReportTool.Run returned unexpected result (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestFunctionTool_ResultNotRepresentable(t *testing.T) {
+	type Args struct{}
+	for _, tc := range []struct {
+		name       string
+		createTool func() (tool.Tool, error)
+		wantErrMsg string
+	}{
+		{
+			name: "map_holding_nan",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "nan_map_tool",
+					Description: "a tool whose result map holds NaN",
+				}, func(ctx agent.Context, _ Args) (map[string]any, error) {
+					return map[string]any{"score": math.NaN()}, nil
+				})
+			},
+			wantErrMsg: "json: unsupported value: NaN",
+		},
+		{
+			name: "float_infinity",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "inf_float_tool",
+					Description: "a tool returning positive infinity",
+				}, func(ctx agent.Context, _ Args) (float64, error) {
+					return math.Inf(1), nil
+				})
+			},
+			wantErrMsg: "json: unsupported value: +Inf",
+		},
+		{
+			name: "map_holding_channel",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "channel_map_tool",
+					Description: "a tool whose result map holds a channel",
+				}, func(ctx agent.Context, _ Args) (map[string]any, error) {
+					return map[string]any{"ch": make(chan int)}, nil
+				})
+			},
+			wantErrMsg: "json: unsupported type: chan int",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tl, err := tc.createTool()
+			if err != nil {
+				t.Fatalf("functiontool.New failed: %v", err)
+			}
+			funcTool, ok := tl.(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("%T does not implement toolinternal.FunctionTool", tl)
+			}
+			got, err := funcTool.Run(createToolContext(t), map[string]any{})
+			if got != nil {
+				t.Errorf("Run returned result %v, want nil", got)
+			}
+			if err == nil {
+				t.Fatalf("Run returned no error, want %q", tc.wantErrMsg)
+			}
+			if err.Error() != tc.wantErrMsg {
+				t.Errorf("Run returned error %q, want %q", err, tc.wantErrMsg)
+			}
+		})
+	}
+}
+
+// objectMarshaler marshals to an object whose key its inferred schema does not
+// describe, so the two disagree even though the value itself is fine.
+type objectMarshaler struct{ N int }
+
+func (objectMarshaler) MarshalJSON() ([]byte, error) { return []byte(`{"other":1}`), nil }
+
+func TestFunctionTool_WrapsNonMapResult(t *testing.T) {
+	type Args struct{}
+	type player struct {
+		Name  string  `json:"name"`
+		Score float64 `json:"score"`
+	}
+	for _, tc := range []struct {
+		name       string
+		createTool func() (tool.Tool, error)
+		want       any
+	}{
+		{
+			name: "slice_of_structs",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "roster_tool",
+					Description: "a tool returning a slice of structs",
+				}, func(ctx agent.Context, _ Args) ([]player, error) {
+					return []player{{Name: "THY", Score: 5.4186}}, nil
+				})
+			},
+			want: []player{{Name: "THY", Score: 5.4186}},
+		},
+		{
+			name: "slice_of_struct_pointers",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "roster_ptr_tool",
+					Description: "a tool returning a slice of struct pointers",
+				}, func(ctx agent.Context, _ Args) ([]*player, error) {
+					return []*player{{Name: "THY", Score: 5.4186}}, nil
+				})
+			},
+			want: []*player{{Name: "THY", Score: 5.4186}},
+		},
+		{
+			name: "struct_marshaling_to_a_string",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "clock_tool",
+					Description: "a tool returning a time",
+				}, func(ctx agent.Context, _ Args) (time.Time, error) {
+					return time.Unix(0, 0).UTC(), nil
+				})
+			},
+			want: time.Unix(0, 0).UTC(),
+		},
+		{
+			name: "struct_marshaling_to_other_keys",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "object_marshaler_tool",
+					Description: "a tool returning a value with its own MarshalJSON",
+				}, func(ctx agent.Context, _ Args) (objectMarshaler, error) {
+					return objectMarshaler{N: 1}, nil
+				})
+			},
+			want: objectMarshaler{N: 1},
+		},
+		{
+			name: "struct_with_configured_output_schema",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:         "configured_clock_tool",
+					Description:  "a tool returning a time, validated against the configured schema",
+					OutputSchema: &jsonschema.Schema{Type: "string"},
+				}, func(ctx agent.Context, _ Args) (time.Time, error) {
+					return time.Unix(0, 0).UTC(), nil
+				})
+			},
+			want: time.Unix(0, 0).UTC(),
+		},
+		{
+			name: "byte_slice",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "bytes_tool",
+					Description: "a tool returning bytes, which marshal to a base64 string",
+				}, func(ctx agent.Context, _ Args) ([]byte, error) {
+					return []byte("ab"), nil
+				})
+			},
+			want: []byte("ab"),
+		},
+		{
+			name: "raw_message",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "raw_tool",
+					Description: "a tool returning pre-encoded JSON",
+				}, func(ctx agent.Context, _ Args) (json.RawMessage, error) {
+					return json.RawMessage(`{"a":1}`), nil
+				})
+			},
+			want: json.RawMessage(`{"a":1}`),
+		},
+		{
+			name: "nil_struct_pointer",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "absent_tool",
+					Description: "a tool returning no value",
+				}, func(ctx agent.Context, _ Args) (*player, error) {
+					return nil, nil
+				})
+			},
+			want: (*player)(nil),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tl, err := tc.createTool()
+			if err != nil {
+				t.Fatalf("functiontool.New failed: %v", err)
+			}
+			funcTool, ok := tl.(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("%T does not implement toolinternal.FunctionTool", tl)
+			}
+			got, err := funcTool.Run(createToolContext(t), map[string]any{})
+			if err != nil {
+				t.Fatalf("Run returned error %v, want nil", err)
+			}
+			if diff := cmp.Diff(tc.want, got["result"]); diff != "" {
+				t.Errorf("Run returned unexpected result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFunctionTool_OutputSchemaMismatch(t *testing.T) {
+	type Args struct{}
+	maxLen := 3
+	tl, err := functiontool.New(functiontool.Config{
+		Name:         "short_text_tool",
+		Description:  "a tool whose result must be at most three characters",
+		OutputSchema: &jsonschema.Schema{Type: "string", MaxLength: &maxLen},
+	}, func(ctx agent.Context, _ Args) (string, error) {
+		return "abcdefgh", nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New failed: %v", err)
+	}
+	funcTool, ok := tl.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("%T does not implement toolinternal.FunctionTool", tl)
+	}
+	got, err := funcTool.Run(createToolContext(t), map[string]any{})
+	if got != nil {
+		t.Errorf("Run returned result %v, want nil", got)
+	}
+	wantErrMsg := `validating root: maxLength: "abcdefgh" contains 8 Unicode code points, more than 3`
+	if err == nil {
+		t.Fatalf("Run returned no error, want %q", wantErrMsg)
+	}
+	if err.Error() != wantErrMsg {
+		t.Errorf("Run returned error %q, want %q", err, wantErrMsg)
 	}
 }
 
