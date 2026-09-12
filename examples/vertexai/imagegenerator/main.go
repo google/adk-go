@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
+	"google.golang.org/adk/examples/internal/imagegen"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -105,12 +106,23 @@ func generateImage(ctx agent.ToolContext, input generateImageInput) (generateIma
 		ctx,
 		"imagen-3.0-generate-002",
 		input.Prompt,
-		&genai.GenerateImagesConfig{NumberOfImages: 1})
+		&genai.GenerateImagesConfig{
+			NumberOfImages:   1,
+			IncludeRAIReason: true,
+		})
 	if err != nil {
 		return generateImageResult{}, err
 	}
 
-	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	imageBytes, mimeType, err := imagegen.ImageBytes(response)
+	if err != nil {
+		return generateImageResult{}, err
+	}
+	if mimeType == "" {
+		mimeType = "image/png" // Imagen emits PNG by default; fall back when the response omits the MIME type.
+	}
+
+	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(imageBytes, mimeType))
 	if err != nil {
 		return generateImageResult{}, err
 	}
