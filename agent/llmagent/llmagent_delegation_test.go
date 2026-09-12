@@ -840,8 +840,8 @@ always contains everything needed for both steps.`,
 // TestDelegation_03_ChatToSingleTurn covers the SingleTurnTool path:
 // the coordinator emits an FC for the sub-agent, the standard tool-
 // execution pipeline runs it through an AgentNode in a sub-branch,
-// the sub-agent runs exactly ONE LLM round with IncludeContents="none"
-// (so it doesn't see the coordinator's conversation), and its
+// the sub-agent runs exactly ONE LLM round with its history scoped to
+// that turn (so it doesn't see the coordinator's conversation), and its
 // structured reply is returned to the coordinator as a regular FR.
 //
 // Unlike task mode, single_turn does NOT install a finish_task tool;
@@ -935,7 +935,7 @@ the sub-agent more than once. Do NOT ask the user follow-up questions.`,
 	// Verifies single_turn sub-agents are re-invocable across user
 	// turns: the coordinator re-dispatches `translator` for a new
 	// language. The previous translation should NOT leak into the
-	// new sub-branch (single_turn agents see IncludeContents="none"),
+	// new sub-branch (a single_turn placement scopes history to the turn),
 	// but the coordinator's own history still includes both
 	// translator FRs across turns.
 	events2 := dr.turn("Now translate the same word to French.")
