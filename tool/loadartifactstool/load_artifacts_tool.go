@@ -242,18 +242,24 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	}, nil
 }
 
-// normalizeMIMEType drops any parameters and control characters and lowercases
-// the type, which is case-insensitive per RFC 2045. Control characters never
-// appear in a legitimate label but would otherwise dodge the exact-match lists
-// below while still hitting the prefix matches.
-func normalizeMIMEType(mimeType string) string {
-	mimeType, _, _ = strings.Cut(mimeType, ";")
-	mimeType = strings.Map(func(r rune) rune {
+// stripMIMEControlChars removes control characters, which never appear in a
+// legitimate label but would otherwise dodge the exact-match lists below while
+// still hitting the prefix matches. The call site strips the whole label once
+// so that routing and charset parsing cannot disagree about the same input.
+func stripMIMEControlChars(mimeType string) string {
+	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
 	}, mimeType)
+}
+
+// normalizeMIMEType drops any parameters and lowercases the type, which is
+// case-insensitive per RFC 2045. The argument must already have had control
+// characters stripped; the call site does so.
+func normalizeMIMEType(mimeType string) string {
+	mimeType, _, _ = strings.Cut(mimeType, ";")
 	return strings.ToLower(strings.TrimSpace(mimeType))
 }
 
@@ -297,12 +303,31 @@ func isTextLikeMIMEType(mimeType string) bool {
 // encoding, so "text/csv; charset=windows-1252" round-trips instead of
 // degrading; otherwise invalid sequences are replaced rather than the
 // artifact discarded.
+//
+// Which names resolve is ianaindex's call and is narrower than the aliases seen
+// in the wild: it resolves windows-1252, iso-8859-1, latin1, us-ascii,
+// windows-1251, shift_jis, ibm437 and iso-2022-jp, and rejects cp1252, ascii,
+// utf8 and sjis. An unresolved alias is not an error here, it falls back to the
+// lossy path below, which is what this code did before charsets were honoured
+// at all. Reaching for a second table to widen the coverage would cost binary
+// size for aliases the fallback already handles acceptably.
+//
+// The argument must already have had control characters stripped; the call site
+// does so. mime.ParseMediaType rejects a label containing one, which would drop
+// a declared charset that normalization had accepted for routing.
 func decodeArtifactText(data []byte, rawMIMEType string) string {
 	if _, params, err := mime.ParseMediaType(rawMIMEType); err == nil {
 		if cs := params["charset"]; cs != "" && !strings.EqualFold(cs, "utf-8") {
+			// ianaindex returns (nil, nil) for a charset it knows but does not
+			// implement, such as gb2312 and utf-7, so enc must be checked
+			// separately from err.
 			if enc, err := ianaindex.IANA.Encoding(cs); err == nil && enc != nil {
 				if decoded, err := enc.NewDecoder().Bytes(data); err == nil {
-					return string(decoded)
+					// Decoders are expected to replace ill-formed input, but the
+					// fallback below guarantees valid UTF-8 and this branch
+					// should not be the weaker of the two. On well-formed input
+					// this returns the string unmodified and unallocated.
+					return strings.ToValidUTF8(string(decoded), "\uFFFD")
 				}
 			}
 		}
@@ -320,7 +345,11 @@ func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
 		return part
 	}
 
-	mimeType := normalizeMIMEType(part.InlineData.MIMEType)
+	// Strip once, here, so routing and charset parsing see the same label: a
+	// control character removed for routing but left in the string handed to
+	// mime.ParseMediaType would silently discard a declared charset.
+	rawMIMEType := stripMIMEControlChars(part.InlineData.MIMEType)
+	mimeType := normalizeMIMEType(rawMIMEType)
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
@@ -335,7 +364,7 @@ func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
 	// Text in a legacy encoding still carries readable content, so decode it
 	// rather than discarding the artifact.
 	if isTextLikeMIMEType(mimeType) {
-		return genai.NewPartFromText(decodeArtifactText(data, part.InlineData.MIMEType))
+		return genai.NewPartFromText(decodeArtifactText(data, rawMIMEType))
 	}
 
 	return genai.NewPartFromText(fmt.Sprintf(

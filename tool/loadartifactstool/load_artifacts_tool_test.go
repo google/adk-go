@@ -614,16 +614,42 @@ func TestLoadArtifactsTool_ProcessRequest_MIMEConversion(t *testing.T) {
 			wantText:     "<svg id=\"c\"/>",
 		},
 		{
+			// 0x93 and 0x94 are quotation marks under windows-1252 and C1 controls
+			// under ISO-8859-1, so this row fails if the name resolves to a
+			// neighbouring encoding. A byte such as 0xE9 would not discriminate:
+			// it is é under windows-1252, ISO-8859-1 and latin1 alike.
 			name:         "declared charset is honoured when decoding",
 			artifactName: "sales2.csv",
-			part:         genai.NewPartFromBytes([]byte("caf\xe9,12\n"), "text/csv; charset=windows-1252"),
-			wantText:     "café,12\n",
+			part:         genai.NewPartFromBytes([]byte("\x93caf\xe9\x94,12\n"), "text/csv; charset=windows-1252"),
+			wantText:     "“café”,12\n",
 		},
 		{
 			name:         "unknown charset falls back to lossy decoding",
 			artifactName: "odd.txt",
 			part:         genai.NewPartFromBytes([]byte{0xff}, "text/plain; charset=no-such-charset"),
 			wantText:     "\uFFFD",
+		},
+		{
+			// ianaindex returns (nil, nil) rather than an error for a charset it
+			// knows but does not implement, so err == nil alone does not make the
+			// decoder safe to call. Without the enc != nil guard this row panics.
+			// The unknown-charset row above cannot catch that: an unrecognised name
+			// returns an error and short-circuits before the guard is reached.
+			name:         "known but unimplemented charset falls back instead of panicking",
+			artifactName: "legacy.txt",
+			part:         genai.NewPartFromBytes([]byte("ok\xff"), "text/plain; charset=gb2312"),
+			wantText:     "ok\uFFFD",
+		},
+		{
+			// A declared utf-8 short-circuits to the lossy path instead of running
+			// the bytes through a decoder. The two differ on malformed input:
+			// ToValidUTF8 collapses a run of bad bytes into one U+FFFD where the
+			// x/text decoder emits one per byte. Drop the short-circuit and this
+			// row wants "a\uFFFD\uFFFD\uFFFDb" instead.
+			name:         "declared utf-8 takes the lossy path rather than a decoder",
+			artifactName: "notes.txt",
+			part:         genai.NewPartFromBytes([]byte("a\xff\xfe\xfdb"), "text/plain; charset=utf-8"),
+			wantText:     "a\uFFFDb",
 		},
 		{
 			name:         "control characters in the label do not dodge the text path",
@@ -636,6 +662,17 @@ func TestLoadArtifactsTool_ProcessRequest_MIMEConversion(t *testing.T) {
 			artifactName: "diagram2.svg",
 			part:         genai.NewPartFromBytes([]byte("<svg/>"), "image/svg+xml\x00"),
 			wantText:     "<svg/>",
+		},
+		{
+			// Stripping happens once, before both routing and charset parsing, so
+			// the two cannot disagree about the same label. Previously normalization
+			// removed the NUL while mime.ParseMediaType rejected the raw string over
+			// that same NUL, so this artifact silently lost its declared charset and
+			// came back as "caf\uFFFD,12".
+			name:         "control characters in the label do not drop the charset",
+			artifactName: "sales3.csv",
+			part:         genai.NewPartFromBytes([]byte("caf\xe9,12\n"), "text/csv\x00; charset=windows-1252"),
+			wantText:     "café,12\n",
 		},
 		{
 			name:         "missing type defaults to octet-stream",
