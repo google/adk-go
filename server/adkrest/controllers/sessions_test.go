@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -128,6 +129,7 @@ func TestGetSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
@@ -242,6 +244,8 @@ func TestCreateSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
@@ -313,6 +317,8 @@ func TestDeleteSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
@@ -415,11 +421,13 @@ func TestListSessions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, map[string]string{
 				"app_name": "testApp",
 				"user_id":  "testUser",
 			})
+
 			rr := httptest.NewRecorder()
 
 			apiController.ListSessionsHandler(rr, req)
@@ -448,7 +456,7 @@ func TestGetSessionMissingSessionIsNotFound(t *testing.T) {
 	apiController := controllers.NewSessionsAPIController(session.InMemoryService())
 	rr := httptest.NewRecorder()
 
-	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil))
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil, id.UserID))
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
@@ -462,7 +470,7 @@ func TestGetSessionExistingSessionIsOK(t *testing.T) {
 	apiController := controllers.NewSessionsAPIController(newServiceWithSession(t, id, map[string]any{"foo": "bar"}))
 	rr := httptest.NewRecorder()
 
-	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil))
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil, id.UserID))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
@@ -486,6 +494,7 @@ func TestListSessionsWithoutSessionsEncodesEmptyArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	req = req.WithContext(authn.WithCaller(req.Context(), &authn.Caller{UserID: "testUser"}))
 	req = mux.SetURLVars(req, map[string]string{"app_name": "testApp", "user_id": "testUser"})
 	rr := httptest.NewRecorder()
 
@@ -582,7 +591,7 @@ func TestUpdateSession(t *testing.T) {
 			apiController := controllers.NewSessionsAPIController(sessionService)
 			rr := httptest.NewRecorder()
 
-			apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, tt.sessionID, strings.NewReader(tt.body)))
+			apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, tt.sessionID, strings.NewReader(tt.body), id.UserID))
 
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
@@ -602,7 +611,7 @@ func TestUpdateSession(t *testing.T) {
 			// A follow-up GET must show the same state: the delta has to reach
 			// the store, not just the response body.
 			getRR := httptest.NewRecorder()
-			apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, tt.sessionID, nil))
+			apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, tt.sessionID, nil, id.UserID))
 			if getRR.Code != http.StatusOK {
 				t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", getRR.Code, http.StatusOK, getRR.Body.String())
 			}
@@ -627,7 +636,7 @@ func TestUpdateSessionAppliesDeltaThroughAnEvent(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	body := strings.NewReader(`{"stateDelta":{"foo":"baz"}}`)
-	apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, id, body))
+	apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, id, body, id.UserID))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
@@ -658,7 +667,7 @@ func TestUpdateSessionResponseMatchesGetSession(t *testing.T) {
 
 	patchRR := httptest.NewRecorder()
 	body := strings.NewReader(`{"stateDelta":{"foo":"baz"}}`)
-	apiController.UpdateSessionHandler(patchRR, newSessionRequest(t, http.MethodPatch, id, body))
+	apiController.UpdateSessionHandler(patchRR, newSessionRequest(t, http.MethodPatch, id, body, id.UserID))
 	if patchRR.Code != http.StatusOK {
 		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", patchRR.Code, http.StatusOK, patchRR.Body.String())
 	}
@@ -668,7 +677,7 @@ func TestUpdateSessionResponseMatchesGetSession(t *testing.T) {
 	}
 
 	getRR := httptest.NewRecorder()
-	apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, id, nil))
+	apiController.GetSessionHandler(getRR, newSessionRequest(t, http.MethodGet, id, nil, id.UserID))
 	if getRR.Code != http.StatusOK {
 		t.Fatalf("GetSessionHandler() status = %d, want %d; body: %s", getRR.Code, http.StatusOK, getRR.Body.String())
 	}
@@ -700,13 +709,18 @@ func newServiceWithSession(t *testing.T, id fakes.SessionKey, state map[string]a
 	return service
 }
 
-func newSessionRequest(t *testing.T, method string, id fakes.SessionKey, body io.Reader) *http.Request {
+func newSessionRequest(t *testing.T, method string, id fakes.SessionKey, body io.Reader, authenticatedUserID string) *http.Request {
 	t.Helper()
 	url := fmt.Sprintf("/apps/%s/users/%s/sessions/%s", id.AppName, id.UserID, id.SessionID)
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+
+	if authenticatedUserID != "" {
+		req = req.WithContext(authn.WithCaller(req.Context(), &authn.Caller{UserID: authenticatedUserID}))
+	}
+
 	return mux.SetURLVars(req, sessionVars(id))
 }
 
@@ -763,7 +777,9 @@ func TestUpdateSessionRejectsScopedStateKeys(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal() failed: %v", err)
 			}
-			request := httptest.NewRequestWithContext(t.Context(), http.MethodPatch, "/", bytes.NewReader(body))
+			ctx := t.Context()
+			ctx = authn.WithCaller(ctx, &authn.Caller{UserID: "user"})
+			request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 			request = mux.SetURLVars(request, map[string]string{
 				"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),
 			})
@@ -861,7 +877,8 @@ func TestUpdateSessionAcceptsEchoedScopedStateKeys(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal() failed: %v", err)
 			}
-			request := httptest.NewRequestWithContext(t.Context(), http.MethodPatch, "/", bytes.NewReader(body))
+			ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
+			request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 			request = mux.SetURLVars(request, map[string]string{
 				"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),
 			})
@@ -930,7 +947,8 @@ func TestUpdateSessionRenameAppliesWithScopedStateInPlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() failed: %v", err)
 	}
-	request := httptest.NewRequestWithContext(t.Context(), http.MethodPatch, "/", bytes.NewReader(body))
+	ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
+	request := httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body))
 	request = mux.SetURLVars(request, map[string]string{
 		"app_name": "app", "user_id": "user", "session_id": created.Session.ID(),
 	})
