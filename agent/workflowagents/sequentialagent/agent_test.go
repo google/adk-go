@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,7 +34,16 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
+
+// stubTool is a minimal tool.Tool for tests that only need a named entry
+// in state.Tools.
+type stubTool struct{ name string }
+
+func (s stubTool) Name() string        { return s.name }
+func (s stubTool) Description() string { return s.name }
+func (s stubTool) IsLongRunning() bool { return false }
 
 func TestNewSequentialAgent(t *testing.T) {
 	type args struct {
@@ -289,11 +300,16 @@ func TestNewSequentialAgent(t *testing.T) {
 }
 
 func newCustomAgent(t *testing.T, id int) agent.Agent {
+	return newCustomAgentWithTools(t, id, nil)
+}
+
+func newCustomAgentWithTools(t *testing.T, id int, tools []tool.Tool) agent.Agent {
 	t.Helper()
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:  fmt.Sprintf("custom_agent_%v", id),
 		Model: &FakeLLM{id: id, callCounter: 0},
+		Tools: tools,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +410,8 @@ func (m *mockInvocationContext) Err() error                  { return m.ctx.Err(
 func (m *mockInvocationContext) Value(key any) any           { return m.ctx.Value(key) }
 
 func TestSequentialAgent_RunLive_Injection(t *testing.T) {
-	subAgent1 := newCustomAgent(t, 1)
+	existingTaskCompleted := stubTool{name: "task_completed"}
+	subAgent1 := newCustomAgentWithTools(t, 1, []tool.Tool{existingTaskCompleted})
 	subAgent2 := newCustomAgent(t, 2)
 
 	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
@@ -410,10 +427,8 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	// Before RunLive, sub-agents do not have the task_completed tool
 	if llmAgent1, ok := subAgent1.(llminternal.Agent); ok {
 		state := llminternal.Reveal(llmAgent1)
-		for _, tool := range state.Tools {
-			if tool.Name() == "task_completed" {
-				t.Errorf("sub-agent 1 already has task_completed tool before RunLive")
-			}
+		if len(state.Tools) != 1 || state.Tools[0].Name() != existingTaskCompleted.Name() {
+			t.Fatalf("sub-agent 1 lost its pre-existing task_completed tool before RunLive: %#v", state.Tools)
 		}
 	}
 
@@ -438,16 +453,178 @@ func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	// After RunLive initiation, the sub-agents MUST have the task_completed tool injected!
 	if llmAgent1, ok := subAgent1.(llminternal.Agent); ok {
 		state := llminternal.Reveal(llmAgent1)
-		hasTaskCompleted := false
-		for _, tool := range state.Tools {
-			if tool.Name() == "task_completed" {
-				hasTaskCompleted = true
-				break
+		if len(state.Tools) != 1 || state.Tools[0].Name() != existingTaskCompleted.Name() {
+			t.Errorf("sub-agent 1 pre-existing task_completed tool changed after RunLive: %#v", state.Tools)
+		}
+		if strings.Contains(state.Instruction, taskCompletedInstructionMarker) {
+			t.Errorf("sub-agent 1 instruction unexpectedly received task_completed suffix")
+		}
+	}
+}
+
+// taskCompletedInstructionMarker is a stable fragment of the instruction
+// suffix RunLive appends alongside the task_completed tool. The test
+// counts it instead of hardcoding the whole sentence.
+const taskCompletedInstructionMarker = "call the task_completed function to exit so the next agents can take over"
+
+// TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree is the
+// regression test for the data race in RunLive's task_completed
+// injection: llminternal.Reveal(llmAgent) returns the sub-agent's shared,
+// persistent state, and the unguarded read-then-append/read-then-concat
+// used to race under any two concurrent RunLive calls dispatched onto the
+// same sub-agent (e.g. two simultaneous live/streaming sessions sharing
+// an agent tree built once at startup) -- confirmed with `go test -race`
+// before the fix. It also raced itself into double-injecting the tool
+// whenever both goroutines observed hasTaskCompleted == false before
+// either had written it back.
+//
+// Beyond "injected exactly once", the test pins the ordering guarantee
+// the LiveModeInjection latch is there for: each goroutine reads state.Tools
+// right after its own RunLive returns and must observe the completed
+// injection (exactly one task_completed tool, never zero). A plain
+// "already done" marker would pass the final count assertion but let a
+// losing caller return before the winner's write is visible -- that read
+// is what fails under -race without the barrier.
+//
+// The pipeline has three sub-agents so RunLive's injection loop runs more
+// than one iteration, and each sub-agent carries its own State with its own
+// LiveModeInjection latch: the guard has to hold independently for every one.
+func TestSequentialAgent_RunLive_ConcurrentInjectionIsRaceFree(t *testing.T) {
+	subAgents := []agent.Agent{
+		newCustomAgent(t, 1), newCustomAgent(t, 2), newCustomAgent(t, 3),
+	}
+
+	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_agent",
+			SubAgents: subAgents,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create sequential agent: %v", err)
+	}
+
+	liveAgent, ok := sequentialAgent.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	states := make([]*llminternal.State, len(subAgents))
+	for i, sub := range subAgents {
+		llmAgent, ok := sub.(llminternal.Agent)
+		if !ok {
+			t.Fatalf("sub-agent %d does not implement llminternal.Agent", i)
+		}
+		states[i] = llminternal.Reveal(llmAgent)
+	}
+
+	countTaskCompleted := func(s *llminternal.State) int {
+		n := 0
+		for _, tl := range s.Tools {
+			if tl != nil && tl.Name() == "task_completed" {
+				n++
 			}
 		}
-		if !hasTaskCompleted {
-			t.Errorf("sub-agent 1 does not have task_completed tool injected after RunLive")
+		return n
+	}
+
+	const concurrent = 20
+	// seenByCaller[i][j]: what caller i saw in sub-agent j's Tools.
+	seenByCaller := make([][]int, concurrent)
+	var wg sync.WaitGroup
+	wg.Add(concurrent)
+	for i := range concurrent {
+		go func() {
+			defer wg.Done()
+			invCtx := &mockInvocationContext{agent: sequentialAgent, invocationID: "test_id", ctx: t.Context()}
+			_, _, _ = liveAgent.RunLive(invCtx)
+			// RunLive has returned, so every sub-agent's Once has completed:
+			// these reads are ordered after the winners' writes.
+			seen := make([]int, len(states))
+			for j, s := range states {
+				seen[j] = countTaskCompleted(s)
+			}
+			seenByCaller[i] = seen
+		}()
+	}
+	wg.Wait()
+
+	for i, seen := range seenByCaller {
+		for j, n := range seen {
+			if n != 1 {
+				t.Errorf("caller %d saw task_completed %d times in sub-agent %d's Tools after RunLive returned, want exactly 1", i, n, j)
+			}
 		}
+	}
+
+	for j, s := range states {
+		if n := countTaskCompleted(s); n != 1 {
+			t.Errorf("sub-agent %d: task_completed injected %d times across %d concurrent RunLive calls, want exactly 1", j, n, concurrent)
+		}
+		// The tool is useless without the instruction telling the model to
+		// call it; two goroutines can both append the suffix and still leave
+		// one tool in the slice, so the suffix count is a distinct check.
+		if n := strings.Count(s.Instruction, taskCompletedInstructionMarker); n != 1 {
+			t.Errorf("sub-agent %d: task_completed instruction suffix appears %d times, want exactly 1", j, n)
+		}
+	}
+}
+
+// TestSequentialAgent_RunLive_PreexistingToolAndNilSkip pins the two
+// branches of RunLive's injection loop that no other test reaches: the
+// idempotence check that leaves a sub-agent's own task_completed tool (and
+// the instruction) alone, and the untyped-nil skip in the same loop.
+// Deleting the "does it already have task_completed" scan and injecting
+// unconditionally otherwise keeps the whole package green, because the
+// LiveInjection guard fires exactly once either way.
+func TestSequentialAgent_RunLive_PreexistingToolAndNilSkip(t *testing.T) {
+	subAgent, err := llmagent.New(llmagent.Config{
+		Name:  "sub_with_task_completed",
+		Model: &FakeLLM{id: 1},
+		Tools: []tool.Tool{nil, stubTool{name: "task_completed"}}, // nil exercises the skip
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq_agent", SubAgents: []agent.Agent{subAgent}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	liveAgent, ok := seq.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	state := llminternal.Reveal(subAgent.(llminternal.Agent))
+	toolsBefore := len(state.Tools)
+	instrBefore := state.Instruction
+
+	_, _, _ = liveAgent.RunLive(&mockInvocationContext{agent: seq, invocationID: "test_id", ctx: t.Context()})
+
+	if len(state.Tools) != toolsBefore {
+		t.Errorf("Tools grew from %d to %d; a pre-existing task_completed must suppress the append", toolsBefore, len(state.Tools))
+	}
+	got := 0
+	for _, tl := range state.Tools {
+		if tl != nil && tl.Name() == "task_completed" {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Errorf("task_completed tool count = %d, want 1 (the sub-agent's own, untouched)", got)
+	}
+	if state.Instruction != instrBefore {
+		t.Errorf("Instruction changed; the hand-off suffix must not be appended when task_completed already exists")
+	}
+	if n := strings.Count(state.Instruction, taskCompletedInstructionMarker); n != 0 {
+		t.Errorf("instruction suffix appears %d times, want 0", n)
 	}
 }
 
