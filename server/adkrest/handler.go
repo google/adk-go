@@ -33,6 +33,8 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/routers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -76,8 +78,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+
+	sessionsController := controllers.NewSessionsAPIController(cfg.SessionService)
+	sessionsController.WithAuthorizer(authorizer)
+
+	artifactsController := controllers.NewArtifactsAPIController(cfg.ArtifactService)
+	artifactsController.WithAuthorizer(authorizer)
+
 	subrouters := []routers.Router{
-		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
+		routers.NewSessionsAPIRouter(sessionsController),
 		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithConfig(controllers.RuntimeAPIControllerConfig{
 			SessionService:  cfg.SessionService,
 			MemoryService:   cfg.MemoryService,
@@ -86,23 +99,33 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			SSETimeout:      cfg.SSEWriteTimeout,
 			PluginConfig:    cfg.PluginConfig,
 			Compaction:      cfg.Compaction,
+			Authorizer:      authorizer,
 		})),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
-		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
+		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
 		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
 		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	}
 	if cfg.DebugAPIConfig.IncludeDebugAPI {
-		subrouters = append(subrouters, routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)))
+		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
+		debugController.WithAuthorizer(authorizer)
+		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
 	}
 
-	setupRouter(router, subrouters...)
-	return &Server{
+	authenticator := cfg.Authenticator
+	if authenticator == nil {
+		authenticator = authn.NewNoop()
+	}
+
+	setupRouter(router, authenticator, subrouters...)
+	srv := &Server{
 		router:         router,
 		telemetryStore: debugTelemetry,
-	}, nil
+	}
+
+	return srv, nil
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -120,6 +143,30 @@ type ServerConfig struct {
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
 	DebugAPIConfig  DebugAPIConfig
+
+	// Authenticator authenticates inbound requests to every endpoint except the
+	// public ones (/health and /version): a request without valid credentials
+	// is answered 401, and an authenticated request carries the caller's
+	// identity on its context. See the [authn] package for the built-in
+	// providers.
+	//
+	// When nil it defaults to [authn.Noop], which authenticates every request as
+	// an empty caller's identity — leaving every endpoint reachable without credentials.
+	// Setting an Authenticator without also setting an Authorizer authenticates
+	// callers but lets any authenticated caller act as any user; pair it with an
+	// Authorizer to restrict that.
+	Authenticator authn.Authenticator
+
+	// Authorizer decides whether the authenticated caller's identity may act as the user
+	// named in a request path (the {user_id} segment of the sessions, artifacts,
+	// runtime and debug routes); a failure is answered 403.
+	//
+	// When nil it defaults to [authz.Noop], which permits any identity to act as
+	// any user. Use [authz.Strict] to require the authenticated UserID to match
+	// the path — but only alongside an Authenticator that sets a non-empty
+	// UserID, since [authn.Noop]'s empty caller's identity would then be denied for every
+	// user.
+	Authorizer authz.Authorizer
 
 	// Compaction enables context compaction for the sessions the
 	// runners created here drive, replacing older events with summaries. Nil,
@@ -142,6 +189,7 @@ type ServerConfig struct {
 // DebugAPIConfig contains parameters for the debug API.
 type DebugAPIConfig struct {
 	// Controls if [routers.NewDebugAPIRouter] is included
+	// WARNING: do not use debug api on PROD environment
 	IncludeDebugAPI bool
 }
 
@@ -175,7 +223,7 @@ func (s *Server) LogProcessor() sdklog.Processor {
 	return s.telemetryStore.LogProcessor()
 }
 
-func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
-	routers.SetupSubRouters(router, subrouters...)
+func setupRouter(router *mux.Router, authenticator authn.Authenticator, subrouters ...routers.Router) *mux.Router {
+	routers.SetupSubRouters(router, authenticator, subrouters...)
 	return router
 }

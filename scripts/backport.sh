@@ -218,7 +218,7 @@ comment_conflict() {
   [[ "${me}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || me=''
   existing="$(gh pr view "${pr}" --repo "${REPO}" --json comments \
     --jq '[.comments[]
-      | select(.author.login == "github-actions[bot]" or .author.login == "'"${me}"'")
+      | select(.author.login == "github-actions" or .author.login == "github-actions[bot]" or .author.login == "'"${me}"'")
       | select(.body | contains("'"${COMMENT_MARKER}"'"))] | length')" ||
     {
       warn "could not read comments on PR #${pr}; not commenting"
