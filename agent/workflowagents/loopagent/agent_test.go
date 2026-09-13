@@ -376,3 +376,81 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 		}
 	}
 }
+
+func TestLoopAgent_SubAgentEndInvocationPropagated(t *testing.T) {
+	subAgent1Called := false
+	subAgent2Called := false
+
+	subAgent1, err := agent.New(agent.Config{
+		Name: "sub_agent_1",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				subAgent1Called = true
+				ctx.EndInvocation()
+				yield(&session.Event{Author: "sub_agent_1"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subAgent2, err := agent.New(agent.Config{
+		Name: "sub_agent_2",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				subAgent2Called = true
+				yield(&session.Event{Author: "sub_agent_2"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loopAgent, err := loopagent.New(loopagent.Config{
+		MaxIterations: 2,
+		AgentConfig: agent.Config{
+			Name:      "loop_agent",
+			SubAgents: []agent.Agent{subAgent1, subAgent2},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessionService := session.InMemoryService()
+	ctx := t.Context()
+	_, err = sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user_id",
+		SessionID: "session_id",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          loopAgent,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if !subAgent1Called {
+		t.Error("expected sub_agent_1 to be called")
+	}
+	// Demonstrates that calling EndInvocation() in sub_agent_1
+	// ends the invocation across the shared *atomic.Bool context state, preventing sub_agent_2 from running.
+	if subAgent2Called {
+		t.Error("expected sub_agent_2 NOT to be called because sub_agent_1 ended the invocation")
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -79,26 +80,38 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
+	var parentEndInv *atomic.Bool
+	if carrier, ok := ctx.(interface{ EndInvocationPtr() *atomic.Bool }); ok {
+		parentEndInv = carrier.EndInvocationPtr()
+	}
+	var anySiblingEnded atomic.Bool
+
 	for _, sa := range ctx.Agent().SubAgents() {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
+		siblingEndInv := new(atomic.Bool)
 		subAgent := sa
 		errGroup.Go(func() error {
 			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
-				Artifacts:    ctx.Artifacts(),
-				Memory:       ctx.Memory(),
-				Session:      ctx.Session(),
-				Branch:       branch,
-				Agent:        subAgent,
-				UserContent:  ctx.UserContent(),
-				RunConfig:    ctx.RunConfig(),
-				InvocationID: ctx.InvocationID(),
+				Artifacts:     ctx.Artifacts(),
+				Memory:        ctx.Memory(),
+				Session:       ctx.Session(),
+				Branch:        branch,
+				Agent:         subAgent,
+				UserContent:   ctx.UserContent(),
+				RunConfig:     ctx.RunConfig(),
+				EndInvocation: siblingEndInv,
+				InvocationID:  ctx.InvocationID(),
 			})
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+			}
+
+			if siblingEndInv.Load() {
+				anySiblingEnded.Store(true)
 			}
 
 			return nil
@@ -111,6 +124,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			case resultsChan <- result{err: err}:
 			case <-doneChan:
 			}
+		}
+		if anySiblingEnded.Load() && parentEndInv != nil {
+			parentEndInv.Store(true)
 		}
 		close(resultsChan)
 	}()

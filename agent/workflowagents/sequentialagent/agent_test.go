@@ -374,6 +374,7 @@ type mockInvocationContext struct {
 	agent        agent.Agent
 	invocationID string
 	ctx          context.Context
+	ended        bool
 }
 
 func (m *mockInvocationContext) Agent() agent.Agent {
@@ -382,6 +383,10 @@ func (m *mockInvocationContext) Agent() agent.Agent {
 
 func (m *mockInvocationContext) InvocationID() string {
 	return m.invocationID
+}
+
+func (m *mockInvocationContext) Ended() bool {
+	return m.ended
 }
 
 func (m *mockInvocationContext) Context() context.Context {
@@ -569,5 +574,164 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 	// Verify subSess2 is closed
 	if !subSess2.closed {
 		t.Errorf("expected sub_agent_2 session to be closed at the end")
+	}
+}
+
+func TestSequentialAgent_SubAgentEndInvocationPropagated(t *testing.T) {
+	subAgent1Called := false
+	subAgent2Called := false
+
+	subAgent1, err := llmagent.New(llmagent.Config{
+		Name:  "sub_agent_1",
+		Model: &FakeLLM{id: 1},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				subAgent1Called = true
+				return genai.NewContentFromText("sub agent 1 ended", genai.RoleModel), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subAgent2, err := llmagent.New(llmagent.Config{
+		Name:  "sub_agent_2",
+		Model: &FakeLLM{id: 2},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				subAgent2Called = true
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seqAgent := newSequentialAgent(t, []agent.Agent{subAgent1, subAgent2}, "seq_agent")
+
+	sessionService := session.InMemoryService()
+	ctx := context.Background()
+	_, err = sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user_id",
+		SessionID: "session_id",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          seqAgent,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if !subAgent1Called {
+		t.Error("expected sub_agent_1 callback to be called")
+	}
+
+	// Demonstrates that calling EndInvocation() in sub_agent_1 callback (via non-nil BeforeAgentCallback return)
+	// ends the invocation across the shared *atomic.Bool context state, preventing sub_agent_2 from running.
+	if subAgent2Called {
+		t.Error("expected sub_agent_2 callback NOT to be called because sub_agent_1 ended the invocation")
+	}
+}
+
+func TestSequentialAgent_RunLive_Ended(t *testing.T) {
+	ctx := t.Context()
+
+	subAgent1Called := false
+	subAgent2Called := false
+
+	agent1 := mustAgent(agent.New(agent.Config{Name: "sub_agent_1"}))
+	liveAgent1 := &mockLiveAgent{
+		Agent: agent1,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			subAgent1Called = true
+			iterFn := func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "sub_agent_1"
+				yield(ev, nil)
+			}
+			return &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}, iterFn, nil
+		},
+	}
+
+	agent2 := mustAgent(agent.New(agent.Config{Name: "sub_agent_2"}))
+	liveAgent2 := &mockLiveAgent{
+		Agent: agent2,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			subAgent2Called = true
+			iterFn := func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "sub_agent_2"
+				yield(ev, nil)
+			}
+			return &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}, iterFn, nil
+		},
+	}
+
+	seqAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_agent",
+			SubAgents: []agent.Agent{liveAgent1, liveAgent2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create sequential agent: %v", err)
+	}
+
+	invCtx := &mockInvocationContext{
+		agent:        seqAgent,
+		invocationID: "test_inv_id",
+		ctx:          ctx,
+	}
+
+	liveAgent, ok := seqAgent.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatalf("sequential agent does not implement RunLive")
+	}
+
+	_, seqIter, err := liveAgent.RunLive(invCtx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	next, stop := iter.Pull2(seqIter)
+	defer stop()
+
+	// Consume first sub-agent event
+	ev1, err1, ok := next()
+	if !ok || err1 != nil {
+		t.Fatalf("expected first event, got ok=%v, err=%v", ok, err1)
+	}
+	if ev1.Author != "sub_agent_1" {
+		t.Errorf("expected event from sub_agent_1, got %s", ev1.Author)
+	}
+	if !subAgent1Called {
+		t.Errorf("expected sub_agent_1 to be called")
+	}
+
+	invCtx.ended = true
+
+	_, _, ok = next()
+	if ok {
+		t.Errorf("expected iterator to end when ctx.Ended() is true")
+	}
+	if subAgent2Called {
+		t.Errorf("expected sub_agent_2 not to be called after ctx.Ended() became true")
 	}
 }

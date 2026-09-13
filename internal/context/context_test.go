@@ -17,6 +17,7 @@ package context
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -62,7 +63,13 @@ func TestWithContext(t *testing.T) {
 	if got.Value(key) != val {
 		t.Errorf("WithContext() did not update context")
 	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(InvocationContext{}), cmpopts.IgnoreFields(InvocationContext{}, "Context")); diff != "" {
+	atomicBoolComparer := cmp.Comparer(func(a, b *atomic.Bool) bool {
+		if a == nil || b == nil {
+			return a == b
+		}
+		return a.Load() == b.Load()
+	})
+	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(InvocationContext{}), cmpopts.IgnoreFields(InvocationContext{}, "Context"), atomicBoolComparer); diff != "" {
 		t.Errorf("WithContext() mismatch (-want +got):\n%s", diff)
 	}
 }
