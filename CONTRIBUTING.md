@@ -319,6 +319,9 @@ This repo ships skills for AI coding agents (Antigravity, Gemini CLI, Claude
 Code, and others) in `.agents/skills/`. Compatible tools load them on their own;
 otherwise read the relevant `SKILL.md` before starting that kind of work.
 
+-   **`adk-go-self-review`** — reviewing a change before opening a PR, or
+    before any later push that changes code: the fresh-context pass, the five
+    lenses, and the mutation check that proves your tests pin the change.
 -   **`adk-sample-creator`** — authoring or reworking a runnable example under
     `examples/`: directory layout, `main.go` anatomy, the README template with
     its diagram and transcript, and the checks to run before opening the PR.
