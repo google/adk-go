@@ -18,6 +18,7 @@ We'd love to accept your patches and contributions to this project.
     -   [Testing Requirements](#testing-requirements)
     -   [Unit Tests](#unit-tests)
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
+    -   [Stale pull requests](#stale-pull-requests)
 -   [AI-assisted development](#ai-assisted-development)
 -   [ADK Web](#adk-web)
     -   [Refreshing the embedded web bundle](#refreshing-the-embedded-web-bundle)
@@ -312,6 +313,20 @@ Depending on your change:
         runner setup.
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
+
+### Stale pull requests
+
+If your pull request is waiting on you, you have two weeks to respond. After
+that, a maintainer may take the change over and finish it. Waiting on you means
+review comments unanswered, CI red, or a question left hanging.
+
+The two weeks run from the last thing that needed an answer from you. Any reply
+stops the clock, and a comment saying you need another week counts. Come back
+after a takeover has started and the pull request goes back to you, unless a
+replacement has already merged.
+
+Your commits keep your name on them either way. The point is to get the change
+to users, not to take the work off you.
 
 ## AI-assisted development
 
