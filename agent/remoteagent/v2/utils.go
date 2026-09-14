@@ -39,7 +39,9 @@ type userFunctionCall struct {
 // with user-provided data. The struct contains both call and response events.
 // agentName is the remote peer's name; when non-empty, only function calls authored by that peer match
 // (aligned with adk-python's event.author == self.name check).
-func getUserFunctionCallAt(events session.Events, index int, agentName string) *userFunctionCall {
+// scope is the invocation IsolationScope so a sibling-scope function call cannot
+// leak its TaskID or contextID into this invocation.
+func getUserFunctionCallAt(events session.Events, index int, agentName, scope string) *userFunctionCall {
 	if index < 0 || index >= events.Len() {
 		return nil
 	}
@@ -53,7 +55,7 @@ func getUserFunctionCallAt(events session.Events, index int, agentName string) *
 	}
 	for i := index - 1; i >= 0; i-- {
 		request := events.At(i)
-		if !isFunctionCallEvent(request, fnCallID, agentName) {
+		if request.IsolationScope != scope || !isFunctionCallEvent(request, fnCallID, agentName) {
 			continue
 		}
 		result := &userFunctionCall{response: candidate}
@@ -153,6 +155,14 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	lastRemoteResponseIndex := -1
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
+		// Isolation scopes require an exact match, so an unscoped invocation replays
+		// only unscoped events, per session.Event.IsolationScope. adk-python's remote
+		// agent gates this on task mode instead
+		// (remote_a2a_agent.py::_construct_message_parts_from_session); we follow the
+		// Go contract, which its own prompt-history filter already uses.
+		if event.IsolationScope != ctx.IsolationScope() {
+			continue
+		}
 		if event.Author == ctx.Agent().Name() {
 			lastRemoteResponseIndex = i
 			_, contextID = adka2a.GetA2ATaskInfo(event)
@@ -167,6 +177,10 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	result := make([]*a2a.Part, 0, partCount)
 	for i := lastRemoteResponseIndex + 1; i < events.Len(); i++ {
 		event := events.At(i)
+		// Same exact-match rule as above.
+		if event.IsolationScope != ctx.IsolationScope() {
+			continue
+		}
 		// Only wrap foreign agent events as user messages when the current agent has an explicit name.
 		// If Agent().Name() is empty (e.g., in anonymous wrappers or conformance harnesses), event.Author != ""
 		// would falsely match and attribute events as foreign turns.
@@ -184,6 +198,23 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		result = append(result, parts...)
 	}
 	return result, contextID
+}
+
+// hasIsolationScopeHistory reports whether the session already holds at
+// least one event in the given scope. A scoped node dispatch seeds its first
+// turn from UserContent because AgentNode.Run seeds it without appending an
+// event, so the shared session has nothing in scope yet on that first
+// dispatch. Once the scope has any history, further seeding is wrong even if
+// every in-scope event has already been sent to the remote agent -- that
+// case should produce an empty message so run() short-circuits, not a resend
+// of the original input.
+func hasIsolationScopeHistory(events session.Events, scope string) bool {
+	for i := range events.Len() {
+		if events.At(i).IsolationScope == scope {
+			return true
+		}
+	}
+	return false
 }
 
 func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event) *session.Event {
