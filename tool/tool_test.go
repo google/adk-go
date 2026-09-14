@@ -615,3 +615,120 @@ func TestWithConfirmation_ToolWithBothRunAndRunStream(t *testing.T) {
 		t.Errorf("requestConfirmationCalled = false, want true")
 	}
 }
+
+// bareStreamingTool is a streaming tool with no ProcessRequest of its own, so
+// the confirmation wrapper has to pack itself.
+type bareStreamingTool struct {
+	name      string
+	streamRan *bool
+}
+
+func (b *bareStreamingTool) Name() string        { return b.name }
+func (b *bareStreamingTool) Description() string { return "" }
+func (b *bareStreamingTool) IsLongRunning() bool { return false }
+func (b *bareStreamingTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: b.name}
+}
+
+func (b *bareStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		*b.streamRan = true
+		yield("did the thing", nil)
+	}
+}
+
+// selfPackingStreamingTool packs itself into the request from its own
+// ProcessRequest, as functiontool's streaming tool and MCP tools do. The
+// confirmation wrapper has to swap that entry for itself, or the flow looks the
+// tool up by name and finds an ungated RunStream.
+type selfPackingStreamingTool struct {
+	*bareStreamingTool
+	processRequestCalled *bool
+}
+
+func (s *selfPackingStreamingTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	*s.processRequestCalled = true
+	return toolutils.PackTool(req, s)
+}
+
+func TestWithConfirmation_StreamingProcessRequest_Packing(t *testing.T) {
+	const toolName = "streamPackingTool"
+
+	tests := []struct {
+		name string
+		// build makes the tool the toolset hands out. The two cases cover the two
+		// ways the wrapper's ProcessRequest can populate req.Tools: swapping an
+		// entry the inner tool packed itself, and packing the wrapper when the
+		// inner tool has no ProcessRequest.
+		build                    func(base *bareStreamingTool, processRequestCalled *bool) tool.Tool
+		wantProcessRequestCalled bool
+	}{
+		{
+			name: "inner tool packs itself",
+			build: func(base *bareStreamingTool, processRequestCalled *bool) tool.Tool {
+				return &selfPackingStreamingTool{bareStreamingTool: base, processRequestCalled: processRequestCalled}
+			},
+			wantProcessRequestCalled: true,
+		},
+		{
+			name:  "inner tool has no ProcessRequest",
+			build: func(base *bareStreamingTool, _ *bool) tool.Tool { return base },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streamRan := false
+			processRequestCalled := false
+			base := &bareStreamingTool{name: toolName, streamRan: &streamRan}
+
+			ts := &testToolset{tools: []tool.Tool{tt.build(base, &processRequestCalled)}}
+			tools, err := tool.WithConfirmation(ts, true, nil).Tools(nil)
+			if err != nil {
+				t.Fatalf("Tools() failed: %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+			}
+
+			processor, ok := tools[0].(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatalf("wrapped tool does not implement RequestProcessor, so the flow would reject it")
+			}
+
+			req := &model.LLMRequest{}
+			if err := processor.ProcessRequest(nil, req); err != nil {
+				t.Fatalf("ProcessRequest() failed: %v", err)
+			}
+			if processRequestCalled != tt.wantProcessRequestCalled {
+				t.Errorf("inner ProcessRequest called = %v, want %v", processRequestCalled, tt.wantProcessRequestCalled)
+			}
+
+			// The flow executes whatever req.Tools holds under this name, so an
+			// inner tool left there is an ungated tool.
+			if req.Tools[toolName] != tools[0] {
+				t.Fatalf("req.Tools[%q] = %T, want the confirmation wrapper %T", toolName, req.Tools[toolName], tools[0])
+			}
+			packed, ok := req.Tools[toolName].(toolinternal.StreamingFunctionTool)
+			if !ok {
+				t.Fatalf("packed tool is %T, not a StreamingFunctionTool, so the flow could not execute it", req.Tools[toolName])
+			}
+			if _, ok := req.Tools[toolName].(toolinternal.FunctionTool); ok {
+				t.Errorf("packed tool also satisfies FunctionTool, so an unguarded Run is reachable")
+			}
+
+			ctx := &testContext{Context: t.Context()}
+			for _, err := range packed.RunStream(ctx, map[string]any{}) {
+				if !errors.Is(err, tool.ErrConfirmationRequired) {
+					t.Errorf("RunStream() error = %v, want ErrConfirmationRequired", err)
+				}
+			}
+			if streamRan {
+				t.Errorf("packed tool ran without confirmation")
+			}
+			if !ctx.requestConfirmationCalled {
+				t.Errorf("requestConfirmationCalled = false, want true")
+			}
+		})
+	}
+}
