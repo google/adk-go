@@ -16,8 +16,10 @@ package services_test
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -139,8 +141,11 @@ func TestGetAppInfo(t *testing.T) {
 				if len(got.Tools) != 0 {
 					t.Errorf("len(Tools) = %d, want 0", len(got.Tools))
 				}
-				if got.SubAgents != nil {
-					t.Errorf("SubAgents = %v, want nil", got.SubAgents)
+				if got.SubAgents == nil {
+					t.Error("SubAgents = nil, want an empty slice (a nil slice marshals to null)")
+				}
+				if len(got.SubAgents) != 0 {
+					t.Errorf("len(SubAgents) = %d, want 0", len(got.SubAgents))
 				}
 			},
 		},
@@ -409,6 +414,35 @@ func TestGetAppInfo(t *testing.T) {
 	}
 }
 
+// TestGetAppInfoAgentsAlwaysPresent covers an app with no LLM agent anywhere.
+// The contract requires the agents key on every /app-info response, because
+// evaluation reads it, so an empty map has to marshal to {} and not vanish.
+func TestGetAppInfoAgentsAlwaysPresent(t *testing.T) {
+	root, err := agent.New(agent.Config{
+		Name:        "custom_root",
+		Description: "A custom agent with no LLM agent below it.",
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	info := services.GetAppInfo(context.Background(), "test_app", root)
+	if info.Agents == nil {
+		t.Error("Agents = nil, want an empty map (a nil map marshals to null)")
+	}
+	if len(info.Agents) != 0 {
+		t.Errorf("len(Agents) = %d, want 0", len(info.Agents))
+	}
+
+	body, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(body), `"agents":{}`) {
+		t.Errorf("response has no agents key; body: %s", body)
+	}
+}
+
 // TestGetAppInfoNonLLMRootIsNamedButNotDescribed pins the one place the
 // agents map and RootAgentName disagree: the root is always named, and it is
 // only described when it is an LLM agent.
@@ -475,8 +509,8 @@ func TestGetAppInfoCyclicNonLLMAgents(t *testing.T) {
 	if diff := cmp.Diff([]string{"root"}, gotNames); diff != "" {
 		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
 	}
-	if got := info.Agents["root"].SubAgents; got != nil {
-		t.Errorf("root SubAgents = %v, want nil; the loop reaches no LLM agent", got)
+	if got := info.Agents["root"].SubAgents; len(got) != 0 {
+		t.Errorf("root SubAgents = %v, want empty; the loop reaches no LLM agent", got)
 	}
 }
 

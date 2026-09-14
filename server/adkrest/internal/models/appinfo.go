@@ -26,12 +26,16 @@ const LanguageGo = "go"
 // Agents is flat: nesting is recovered by following [AgentInfo.SubAgents] from
 // RootAgentName. It holds only LLM agents, so RootAgentName is not one of its
 // keys when the app's root agent is of another kind.
+//
+// Agents carries no omitempty: the contract requires the key on every
+// /app-info response, because evaluation reads it, and an app with no LLM
+// agents at all must report an empty object rather than nothing.
 type AppInfo struct {
 	Name          string                `json:"name"`
 	RootAgentName string                `json:"rootAgentName"`
 	Description   string                `json:"description"`
 	Language      string                `json:"language"`
-	Agents        map[string]*AgentInfo `json:"agents,omitempty"`
+	Agents        map[string]*AgentInfo `json:"agents"`
 }
 
 // AgentInfo describes a single LLM agent within an app.
@@ -39,10 +43,14 @@ type AppInfo struct {
 // SubAgents names the nearest LLM agents below this one: an agent of another
 // kind in between is stepped over, and the LLM agents it holds are listed here
 // in its place.
+//
+// Neither Tools nor SubAgents carries omitempty. adk-python emits both on
+// every agent, the empty list included, and a client that reads a field by
+// index rather than by lookup fails on a key that is simply absent.
 type AgentInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
 	Instruction string        `json:"instruction"`
 	Tools       []*genai.Tool `json:"tools"`
-	SubAgents   []string      `json:"subAgents,omitempty"`
+	SubAgents   []string      `json:"subAgents"`
 }

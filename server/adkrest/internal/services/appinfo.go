@@ -120,7 +120,9 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		// links to this agent rather than to nothing.
 		resolved[name] = []string{name}
 
-		var subAgents []string
+		// Starts non-nil: an agent with no LLM agent below it must report []
+		// and not null, which the contract forbids.
+		subAgents := []string{}
 		for _, sub := range a.SubAgents() {
 			subAgents = append(subAgents, nearestLLMAgents(sub)...)
 		}

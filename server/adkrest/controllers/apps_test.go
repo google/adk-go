@@ -143,10 +143,14 @@ func TestAppInfoHandler(t *testing.T) {
 	}
 }
 
-func TestAppInfoHandlerEmptyToolsIsNotNull(t *testing.T) {
+// TestAppInfoHandlerEmptyCollectionsAreNotNull pins the wire shape a client
+// parses. The contract requires every field below on every response and
+// forbids nulls, and adk-python emits each of them the same way, so a client
+// written against Python reads an ADK Go response with no field missing.
+func TestAppInfoHandlerEmptyCollectionsAreNotNull(t *testing.T) {
 	rootAgent, err := llmagent.New(llmagent.Config{
 		Name:        "plain",
-		Description: "No tools at all.",
+		Description: "No tools and no sub-agents at all.",
 		Instruction: "Answer briefly.",
 	})
 	if err != nil {
@@ -157,9 +161,35 @@ func TestAppInfoHandlerEmptyToolsIsNotNull(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-	// The contract requires tools to be present, and forbids null fields.
-	if body := rr.Body.String(); !strings.Contains(body, `"tools":[]`) {
-		t.Errorf("response does not contain an empty tools array; body: %s", body)
+
+	body := rr.Body.String()
+	for _, want := range []string{`"tools":[]`, `"subAgents":[]`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("response does not contain %s; body: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "null") {
+		t.Errorf("response contains a null; body: %s", body)
+	}
+
+	// Every key the contract marks required, at both levels.
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	for _, key := range []string{"name", "rootAgentName", "description", "language", "agents"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response is missing %q; body: %s", key, body)
+		}
+	}
+	plain, ok := got["agents"].(map[string]any)["plain"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents[plain] is missing; body: %s", body)
+	}
+	for _, key := range []string{"name", "description", "instruction", "tools", "subAgents"} {
+		if _, ok := plain[key]; !ok {
+			t.Errorf("agents[plain] is missing %q; body: %s", key, body)
+		}
 	}
 }
 
