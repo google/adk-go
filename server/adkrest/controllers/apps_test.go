@@ -164,7 +164,8 @@ func TestAppInfoHandlerEmptyToolsIsNotNull(t *testing.T) {
 }
 
 // TestAppInfoHandlerWorkflowRoot covers an app whose root agent is not an LLM
-// agent. adk-python answers 400 here; this server describes the app instead.
+// agent. adk-python answers 400 "Root agent is not an LlmAgent" here; this
+// server answers 200 and reports the LLM agents below it.
 func TestAppInfoHandlerWorkflowRoot(t *testing.T) {
 	writer, err := llmagent.New(llmagent.Config{
 		Name:        "writer",
@@ -202,11 +203,11 @@ func TestAppInfoHandlerWorkflowRoot(t *testing.T) {
 	if !ok {
 		t.Fatalf("agents is %T, want an object", got["agents"])
 	}
-	if _, ok := agents["writing_pipeline"]; !ok {
-		t.Error("agents is missing the workflow root itself")
+	if _, ok := agents["writing_pipeline"]; ok {
+		t.Error("agents contains the workflow root; only LLM agents are reported")
 	}
 	if _, ok := agents["writer"]; !ok {
-		t.Error("agents is missing writer; the sub-tree below a non-LLM agent must still be walked")
+		t.Error("agents is missing writer; the subtree below a non-LLM agent must still be walked")
 	}
 }
 

@@ -20,11 +20,12 @@ import "google.golang.org/genai"
 // [AppInfo.Language].
 const LanguageGo = "go"
 
-// AppInfo describes an ADK app and the agents it contains. It is the response
-// body of GET /apps/{app_name}/app-info.
+// AppInfo describes an ADK app and the LLM agents it contains. It is the
+// response body of GET /apps/{app_name}/app-info.
 //
 // Agents is flat: nesting is recovered by following [AgentInfo.SubAgents] from
-// RootAgentName.
+// RootAgentName. It holds only LLM agents, so RootAgentName is not one of its
+// keys when the app's root agent is of another kind.
 type AppInfo struct {
 	Name          string                `json:"name"`
 	RootAgentName string                `json:"rootAgentName"`
@@ -33,10 +34,11 @@ type AppInfo struct {
 	Agents        map[string]*AgentInfo `json:"agents,omitempty"`
 }
 
-// AgentInfo describes a single agent within an app.
+// AgentInfo describes a single LLM agent within an app.
 //
-// Agents that are not LLM agents report an empty Instruction and no Tools,
-// because they have neither.
+// SubAgents names the nearest LLM agents below this one: an agent of another
+// kind in between is stepped over, and the LLM agents it holds are listed here
+// in its place.
 type AgentInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`

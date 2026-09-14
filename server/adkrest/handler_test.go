@@ -94,6 +94,42 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 	}
 }
 
+func TestNewServerAppInfoAPIGate(t *testing.T) {
+	const appInfoRoute = "/apps/" + testAppName + "/app-info"
+
+	for _, tc := range []struct {
+		name       string
+		include    bool
+		wantRouted bool
+	}{
+		{name: "omitted by default", include: false, wantRouted: false},
+		{name: "included when opted in", include: true, wantRouted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rootAgent, err := agent.New(agent.Config{Name: testAppName, Description: "root agent"})
+			if err != nil {
+				t.Fatalf("agent.New() failed: %v", err)
+			}
+			srv, err := NewServer(ServerConfig{
+				SessionService:   session.InMemoryService(),
+				AgentLoader:      agent.NewSingleLoader(rootAgent),
+				AppInfoAPIConfig: AppInfoAPIConfig{IncludeAppInfoAPI: tc.include},
+			})
+			if err != nil {
+				t.Fatalf("NewServer() error = %v", err)
+			}
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, appInfoRoute, nil))
+			routed := rr.Body.String() != muxNotFound
+			if routed != tc.wantRouted {
+				t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
+					appInfoRoute, routed, tc.wantRouted, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 // TestNewServerAlwaysSetsAuthorizer verifies NewServer always leaves the
 // request path with a usable authorizer. It checks behavior rather than the
 // Server struct (the authorizer is injected into the controllers, not stored on

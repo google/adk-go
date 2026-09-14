@@ -41,7 +41,10 @@ type declarer interface {
 }
 
 // GetAppInfo describes an app without running it: its root agent, and every
-// agent reachable from that root with its instruction, tools and children.
+// LLM agent reachable from that root with its instruction, tools and children.
+//
+// RootAgentName names the app's entry agent whatever its kind, so it is absent
+// from Agents when the root is not an LLM agent.
 func GetAppInfo(ctx context.Context, appName string, root agent.Agent) *models.AppInfo {
 	if root == nil {
 		return nil
@@ -56,47 +59,97 @@ func GetAppInfo(ctx context.Context, appName string, root agent.Agent) *models.A
 }
 
 // collectAgents walks the agent tree rooted at root, returning one
-// [models.AgentInfo] per agent, keyed by agent name.
+// [models.AgentInfo] per LLM agent, keyed by agent name.
+//
+// Only LLM agents are reported, per the wire contract, but the walk does not
+// stop at an agent that is not one: a SequentialAgent between two LLM agents is
+// stepped over rather than cutting off everything below it. So the names in
+// [models.AgentInfo.SubAgents] are the nearest LLM agents below that parent,
+// and every one of them is a key of the returned map.
 func collectAgents(ctx context.Context, appName string, root agent.Agent) map[string]*models.AgentInfo {
 	agents := make(map[string]*models.AgentInfo)
+	// resolved caches what each agent contributes to its parent's sub-agent
+	// list, so an agent reachable from two parents is described once and still
+	// linked from both.
+	resolved := make(map[string][]string)
+	// inProgress holds the agents on the current path, so a tree that is not
+	// one -- an agent that is its own ancestor -- terminates.
+	inProgress := make(map[string]bool)
 
-	var walk func(a agent.Agent)
-	walk = func(a agent.Agent) {
+	// nearestLLMAgents describes the nearest LLM agents at or below a, adding
+	// each to agents, and returns their names.
+	var nearestLLMAgents func(a agent.Agent) []string
+	nearestLLMAgents = func(a agent.Agent) []string {
 		if a == nil {
-			return
+			return nil
 		}
-		if _, seen := agents[a.Name()]; seen {
-			return
+		name := a.Name()
+		if names, done := resolved[name]; done {
+			return names
+		}
+		if inProgress[name] {
+			return nil
+		}
+		inProgress[name] = true
+		defer delete(inProgress, name)
+
+		llmAgent, isLLM := a.(llminternal.Agent)
+		if !isLLM {
+			// Not reported itself. The LLM agents below it stand in for it, so
+			// its parent links to them directly.
+			var nested []string
+			for _, sub := range a.SubAgents() {
+				nested = append(nested, nearestLLMAgents(sub)...)
+			}
+			resolved[name] = dedupe(nested)
+			return resolved[name]
 		}
 
+		state := llminternal.Reveal(llmAgent)
 		info := &models.AgentInfo{
-			Name:        a.Name(),
+			Name:        name,
 			Description: a.Description(),
-			// Contract requires Tools field to be present.
-			Tools: []*genai.Tool{},
-		}
-		agents[a.Name()] = info
-
-		if llmAgent, ok := a.(llminternal.Agent); ok {
-			state := llminternal.Reveal(llmAgent)
 			// An agent whose instruction comes from an InstructionProvider
 			// reports an empty instruction: resolving it needs session state
 			// that does not exist outside of an invocation.
-			info.Instruction = state.Instruction
-			info.Tools = agentTools(ctx, appName, a.Name(), state)
+			Instruction: state.Instruction,
+			Tools:       agentTools(ctx, appName, name, state),
 		}
+		agents[name] = info
+		// Recorded before recursing, so a descendant that reaches back here
+		// links to this agent rather than to nothing.
+		resolved[name] = []string{name}
 
+		var subAgents []string
 		for _, sub := range a.SubAgents() {
-			if sub == nil {
-				continue
-			}
-			info.SubAgents = append(info.SubAgents, sub.Name())
-			walk(sub)
+			subAgents = append(subAgents, nearestLLMAgents(sub)...)
 		}
+		info.SubAgents = dedupe(subAgents)
+
+		return resolved[name]
 	}
-	walk(root)
+	nearestLLMAgents(root)
 
 	return agents
+}
+
+// dedupe removes repeated names, keeping the first of each and the order they
+// arrived in. Two children can lead to the same LLM agent, and a parent should
+// list it once.
+func dedupe(names []string) []string {
+	if len(names) < 2 {
+		return names
+	}
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
 }
 
 // agentTools describes the tools an LLM agent exposes to the model, as function
