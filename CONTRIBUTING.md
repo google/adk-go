@@ -203,10 +203,11 @@ information on using pull requests.
 ### Requirement for PRs
 
 -   Code must follow [Google Go Style Guide](https://google.github.io/styleguide/go/index).
--   All PRs, other than small documentation or typo fixes, should have an Issue
-    associated. If a relevant issue doesn't exist, please create one first or
-    you may instead describe the bug or feature directly within the PR
-    description, following the structure of our issue templates.
+-   All PRs, other than small documentation or typo fixes, must have an Issue
+    associated. If a relevant issue doesn't exist, please create one first, then
+    reference it from the PR description with `Closes: #<number>` or
+    `Related: #<number>`. Describe the problem and the solution in the PR
+    description as well, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
 -   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
     `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
