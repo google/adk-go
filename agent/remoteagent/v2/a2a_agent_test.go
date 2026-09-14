@@ -1032,8 +1032,8 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 					Role: a2a.MessageRoleUser,
 					Parts: a2a.ContentParts{
 						a2a.NewTextPart("hello"),
-						a2a.NewTextPart("For context:"),
-						a2a.NewTextPart(fmt.Sprintf("[%s] said: hi", notRemoteAgentName)),
+						otherAgentPreambleA2APart(),
+						otherAgentA2APart("["+notRemoteAgentName+"] said:", "hi"),
 						a2a.NewTextPart("how are you?"),
 					},
 				},
@@ -1062,8 +1062,8 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 					ContextID: "ctx-123",
 					Parts: a2a.ContentParts{
 						a2a.NewTextPart("msg3"),
-						a2a.NewTextPart("For context:"),
-						a2a.NewTextPart(fmt.Sprintf("[%s] said: resp3", notRemoteAgentName)),
+						otherAgentPreambleA2APart(),
+						otherAgentA2APart("["+notRemoteAgentName+"] said:", "resp3"),
 					},
 				},
 			},
