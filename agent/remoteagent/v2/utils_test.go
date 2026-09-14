@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -380,8 +381,8 @@ func TestProbe_UnmatchedFunctionResponseSentRaw(t *testing.T) {
 		b, _ := json.Marshal(msg.Parts[0])
 		t.Fatalf("part[0] = %s, want text starting with %q", b, wantPrefix)
 	}
-	if !strings.Contains(got0, `"v": 1`) {
-		t.Fatalf("part[0] text = %q, want JSON with Python-style separators", got0)
+	if !strings.Contains(got0, `"v":1`) {
+		t.Fatalf("part[0] text = %q, want compact JSON payload", got0)
 	}
 	if meta := msg.Parts[0].Metadata; meta != nil {
 		if typ, ok := meta[adka2a.ToA2AMetaKey("type")]; ok && typ == "function_response" {
@@ -517,8 +518,8 @@ func TestToMissingRemoteSessionParts_MixedFunctionResponseAndSiblingParts(t *tes
 	if !strings.HasPrefix(got1, "Tool local_tool returned:") {
 		t.Fatalf("part[1].Text() = %q, want rewritten tool text", got1)
 	}
-	if !strings.Contains(got1, `"x": "y"`) {
-		t.Fatalf("part[1].Text() = %q, want JSON payload with separators", got1)
+	if !strings.Contains(got1, `"x":"y"`) {
+		t.Fatalf("part[1].Text() = %q, want compact JSON payload", got1)
 	}
 	if got := gotParts[2].Text(); got != "after" {
 		t.Fatalf("part[2].Text() = %q, want %q", got, "after")
@@ -552,12 +553,12 @@ func TestConvertParts_RewrittenSkipsGenAIPartConverter(t *testing.T) {
 	if !strings.HasPrefix(got, "Tool local_tool returned:") {
 		t.Fatalf("text = %q, want rewritten tool text", got)
 	}
-	// HTML must not be escaped; Python-style separators preferred.
+	// HTML must not be escaped.
 	if strings.Contains(got, `\u0026`) || !strings.Contains(got, "&") {
 		t.Fatalf("text = %q, want unescaped & from SetEscapeHTML(false)", got)
 	}
-	if !strings.Contains(got, `"url": "https://x/?a=1&b=2"`) {
-		t.Fatalf("text = %q, want Python-style JSON", got)
+	if !strings.Contains(got, `"url":"https://x/?a=1&b=2"`) {
+		t.Fatalf("text = %q, want compact JSON with unescaped &", got)
 	}
 }
 
@@ -566,8 +567,126 @@ func TestMarshalFunctionResponseJSON(t *testing.T) {
 	if strings.Contains(got, `\u0026`) || strings.Contains(got, `\u003c`) {
 		t.Fatalf("HTML-escaped unexpectedly: %q", got)
 	}
-	if !strings.Contains(got, ": ") || !strings.Contains(got, ", ") {
-		t.Fatalf("missing Python-style separators: %q", got)
+	if !strings.Contains(got, `"url":"a&b<c>"`) {
+		t.Fatalf("got %q, want compact JSON with unescaped HTML chars", got)
 	}
 }
 
+func TestMarshalFunctionResponseJSON_Unserializable(t *testing.T) {
+	t.Run("NaN", func(t *testing.T) {
+		got := marshalFunctionResponseJSON(map[string]any{"score": math.NaN()})
+		if got != "<unserializable>" {
+			t.Fatalf("got %q, want <unserializable>", got)
+		}
+		if strings.Contains(got, "map[") || strings.Contains(got, "NaN") {
+			t.Fatalf("payload leaked into fallback: %q", got)
+		}
+	})
+	t.Run("cycle", func(t *testing.T) {
+		type node struct {
+			Self *node `json:"self"`
+		}
+		n := &node{}
+		n.Self = n
+		got := marshalFunctionResponseJSON(n)
+		if got != "<unserializable>" {
+			t.Fatalf("got %q, want <unserializable>", got)
+		}
+	})
+}
+
+func TestUnmatchedFunctionResponseText_EmptyName(t *testing.T) {
+	got := unmatchedFunctionResponseText(&genai.FunctionResponse{
+		Name: "", Response: map[string]any{"ok": true},
+	})
+	if strings.Contains(got, "Tool  returned:") {
+		t.Fatalf("double space in %q", got)
+	}
+	if !strings.HasPrefix(got, "Tool <unnamed> returned:") {
+		t.Fatalf("got %q, want Tool <unnamed> returned: ...", got)
+	}
+}
+
+func TestNewMessage_ResumeKeepsMixedFunctionResponsesAsData(t *testing.T) {
+	// Parallel tool merge can put a peer FR and a local-tool FR in one user event.
+	// Resume must keep both as data — never flatten the local one to text alongside.
+	remoteName := "remote-agent"
+	events := []*session.Event{
+		newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-remote", Name: "peer_tool"}}),
+		newEventFromParts("user",
+			&genai.Part{FunctionResponse: &genai.FunctionResponse{
+				ID: "fc-remote", Name: "peer_tool", Response: map[string]any{"ok": true},
+			}},
+			&genai.Part{FunctionResponse: &genai.FunctionResponse{
+				ID: "fc-local", Name: "local_tool", Response: map[string]any{"secret": "s"},
+			}},
+		),
+	}
+	ictx := newTestInvocationContext(t, remoteName, events...)
+	msg, err := newMessage(ictx, A2AConfig{})
+	if err != nil {
+		t.Fatalf("newMessage() error = %v", err)
+	}
+	if len(msg.Parts) != 2 {
+		t.Fatalf("len(msg.Parts) = %d, want 2", len(msg.Parts))
+	}
+	for i, p := range msg.Parts {
+		if p.Text() != "" {
+			t.Fatalf("part[%d] was rewritten to text %q; resume must keep all FRs as data", i, p.Text())
+		}
+		meta := p.Metadata
+		if meta == nil || meta[adka2a.ToA2AMetaKey("type")] != "function_response" {
+			b, _ := json.Marshal(p)
+			t.Fatalf("part[%d] = %s, want function_response data", i, b)
+		}
+	}
+}
+
+func TestCollectRemoteFunctionCallIDs_EmptyNameCollectsAnyAuthor(t *testing.T) {
+	// Anonymous agent: author gate skipped — coordinator-authored call IDs are collected
+	// so matched responses are not incorrectly flattened on the history path.
+	events := []*session.Event{
+		newEventFromParts("coordinator", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-coord", Name: "tool"}}),
+		newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "fc-coord", Name: "tool", Response: map[string]any{"ok": true},
+		}}),
+		newEventFromParts("user", genai.NewPartFromText("continue")),
+	}
+	ictx := newTestInvocationContext(t, "", events...)
+	ids := collectRemoteFunctionCallIDs(ictx.Session().Events(), "")
+	if _, ok := ids["fc-coord"]; !ok {
+		t.Fatalf("empty agentName did not collect coordinator call ID; ids=%v", ids)
+	}
+	gotParts, _ := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
+	var fr *a2a.Part
+	for _, p := range gotParts {
+		if p.Metadata != nil && p.Metadata[adka2a.ToA2AMetaKey("type")] == "function_response" {
+			fr = p
+			break
+		}
+	}
+	if fr == nil {
+		b, _ := json.Marshal(gotParts)
+		t.Fatalf("coordinator-matched response flattened with empty agent name: %s", b)
+	}
+}
+
+func TestConvertParts_NilPartSkipped(t *testing.T) {
+	event := newEventFromParts("user",
+		nil,
+		&genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "fc-foreign", Name: "local_tool", Response: map[string]any{"ok": true},
+		}},
+	)
+	ictx := newTestInvocationContext(t, "remote-agent")
+	parts, err := convertParts(ictx, A2AConfig{}, event, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("convertParts() error = %v", err)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1", len(parts))
+	}
+	if !strings.HasPrefix(parts[0].Text(), "Tool local_tool returned:") {
+		t.Fatalf("part text = %q, want rewritten tool text", parts[0].Text())
+	}
+}

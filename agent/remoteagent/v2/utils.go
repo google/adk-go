@@ -74,23 +74,30 @@ func isFunctionCallEvent(event *session.Event, callID, agentName string) bool {
 		return false
 	}
 	return slices.ContainsFunc(event.Content.Parts, func(part *genai.Part) bool {
-		return part.FunctionCall != nil && part.FunctionCall.ID == callID
+		return part != nil && part.FunctionCall != nil && part.FunctionCall.ID == callID
 	})
 }
 
 // collectRemoteFunctionCallIDs returns call IDs this remote peer itself emitted.
 // Function responses whose IDs are not in this set must not be forwarded as A2A
 // function responses — the peer has no invocation to resume for a call it never made.
-// When agentName is empty, events authored with an empty name are collected (same
-// author-gate semantics as isFunctionCallEvent).
+// When agentName is empty, the author gate is skipped (same as isFunctionCallEvent),
+// so calls from any author — including coordinators — are collected.
 func collectRemoteFunctionCallIDs(events session.Events, agentName string) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for i := 0; i < events.Len(); i++ {
 		event := events.At(i)
-		if event.Author != agentName || event.Content == nil {
+		if event == nil || event.Content == nil {
+			continue
+		}
+		// Empty agentName skips the author gate (anonymous wrappers / harnesses).
+		if agentName != "" && event.Author != agentName {
 			continue
 		}
 		for _, part := range event.Content.Parts {
+			if part == nil {
+				continue
+			}
 			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
 				ids[part.FunctionCall.ID] = struct{}{}
 			}
@@ -100,51 +107,24 @@ func collectRemoteFunctionCallIDs(events session.Events, agentName string) map[s
 }
 
 // marshalFunctionResponseJSON encodes a function-response payload without HTML
-// escaping, matching Python json.dumps separators (", ", ": ") when possible.
+// escaping. On encode failure it returns a fixed placeholder that does not
+// embed the payload (cyclic or non-JSON values such as NaN).
 func marshalFunctionResponseJSON(v any) string {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return fmt.Sprintf("%v", v)
+		return "<unserializable>"
 	}
-	compact := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
-	return string(insertJSONSeparators(compact))
-}
-
-// insertJSONSeparators adds a space after ':' and ',' outside of JSON strings,
-// matching Python json.dumps default separators.
-func insertJSONSeparators(b []byte) []byte {
-	out := make([]byte, 0, len(b)+len(b)/4)
-	inString := false
-	escape := false
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		if escape {
-			out = append(out, c)
-			escape = false
-			continue
-		}
-		if inString && c == '\\' {
-			out = append(out, c)
-			escape = true
-			continue
-		}
-		if c == '"' {
-			inString = !inString
-			out = append(out, c)
-			continue
-		}
-		out = append(out, c)
-		if !inString && (c == ':' || c == ',') {
-			out = append(out, ' ')
-		}
-	}
-	return out
+	return string(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
 }
 
 func unmatchedFunctionResponseText(fr *genai.FunctionResponse) string {
-	return fmt.Sprintf("Tool %s returned: %s", fr.Name, marshalFunctionResponseJSON(fr.Response))
+	name := fr.Name
+	if name == "" {
+		name = "<unnamed>"
+	}
+	return fmt.Sprintf("Tool %s returned: %s", name, marshalFunctionResponseJSON(fr.Response))
 }
 
 // getFunctionResponseCallID finds the first part with non-nil FunctionResponse and returns the call ID.
@@ -153,7 +133,7 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 		return "", false
 	}
 	responsePartIndex := slices.IndexFunc(event.Content.Parts, func(part *genai.Part) bool {
-		return part.FunctionResponse != nil
+		return part != nil && part.FunctionResponse != nil
 	})
 	if responsePartIndex < 0 {
 		return "", false
@@ -217,6 +197,9 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 	parts := make([]*genai.Part, 0, len(agentEvent.Content.Parts)+1)
 	parts = append(parts, &genai.Part{Text: "For context:"})
 	for _, part := range agentEvent.Content.Parts {
+		if part == nil {
+			continue
+		}
 		if part.Thought {
 			continue
 		}
@@ -241,10 +224,17 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 	return event
 }
 
+// convertParts converts genai parts to A2A parts. When remoteFCIDs is non-nil
+// (history path), function responses whose IDs are not in the set are rewritten
+// as text. A nil remoteFCIDs skips rewrite entirely (resume path), matching
+// Python's preserve_as_resume rule that forbids mixing data FR with flattened text.
 func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event, remoteFCIDs map[string]struct{}) ([]*a2a.Part, error) {
 	parts := make([]*a2a.Part, 0, len(event.Content.Parts))
 	for _, part := range event.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part == nil {
+			continue
+		}
+		if remoteFCIDs != nil && part.FunctionResponse != nil {
 			if _, ok := remoteFCIDs[part.FunctionResponse.ID]; !ok {
 				text := unmatchedFunctionResponseText(part.FunctionResponse)
 				log.Warn(ctx, "rewrote unmatched function response as text for remote peer",
@@ -263,11 +253,11 @@ func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Eve
 			}
 			continue
 		}
-		converted, err := adka2a.ToA2AParts([]*genai.Part{part}, event.LongRunningToolIDs)
+		converted, err := adka2a.ToA2APart(part, event.LongRunningToolIDs)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
-		parts = append(parts, converted...)
+		parts = append(parts, converted)
 	}
 	return parts, nil
 }
