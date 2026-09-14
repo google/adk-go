@@ -653,7 +653,7 @@ func TestCollectRemoteFunctionCallIDs_EmptyNameCollectsAnyAuthor(t *testing.T) {
 		newEventFromParts("user", genai.NewPartFromText("continue")),
 	}
 	ictx := newTestInvocationContext(t, "", events...)
-	ids := collectRemoteFunctionCallIDs(ictx.Session().Events(), "")
+	ids := collectRemoteFunctionCallIDs(ictx.Session().Events(), "", "")
 	if _, ok := ids["fc-coord"]; !ok {
 		t.Fatalf("empty agentName did not collect coordinator call ID; ids=%v", ids)
 	}

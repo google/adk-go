@@ -80,16 +80,22 @@ func isFunctionCallEvent(event *session.Event, callID, agentName string) bool {
 	})
 }
 
-// collectRemoteFunctionCallIDs returns call IDs this remote peer itself emitted.
-// Function responses whose IDs are not in this set must not be forwarded as A2A
-// function responses — the peer has no invocation to resume for a call it never made.
+// collectRemoteFunctionCallIDs returns call IDs this remote peer itself emitted
+// within the given IsolationScope. Function responses whose IDs are not in this
+// set must not be forwarded as A2A function responses — the peer has no
+// invocation to resume for a call it never made in this scope.
 // When agentName is empty, the author gate is skipped (same as isFunctionCallEvent),
 // so calls from any author — including coordinators — are collected.
-func collectRemoteFunctionCallIDs(events session.Events, agentName string) map[string]struct{} {
+// Events whose IsolationScope differs from scope are skipped (aligned with
+// toMissingRemoteSessionParts and adk-python's task_scope filter).
+func collectRemoteFunctionCallIDs(events session.Events, agentName, scope string) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for i := 0; i < events.Len(); i++ {
 		event := events.At(i)
 		if event == nil || event.Content == nil {
+			continue
+		}
+		if event.IsolationScope != scope {
 			continue
 		}
 		// Empty agentName skips the author gate (anonymous wrappers / harnesses).
@@ -173,7 +179,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		}
 	}
 
-	remoteFCIDs := collectRemoteFunctionCallIDs(events, ctx.Agent().Name())
+	remoteFCIDs := collectRemoteFunctionCallIDs(events, ctx.Agent().Name(), ctx.IsolationScope())
 	result := make([]*a2a.Part, 0, partCount)
 	for i := lastRemoteResponseIndex + 1; i < events.Len(); i++ {
 		event := events.At(i)
