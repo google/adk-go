@@ -279,7 +279,11 @@ func TestMCPPolicyStartsOnlyApprovedCommandLazily(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			command, approved := executable, executable
 			if tt.configAlias {
-				command = filepath.Join(t.TempDir(), "approved-launcher")
+				name := "approved-launcher"
+				if runtime.GOOS == "windows" {
+					name += ".exe"
+				}
+				command = filepath.Join(t.TempDir(), name)
 				if err := os.Symlink(executable, command); err != nil {
 					t.Skipf("symlinks unavailable: %v", err)
 				}
