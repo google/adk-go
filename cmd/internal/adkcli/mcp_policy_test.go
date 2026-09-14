@@ -19,10 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/internal/configurable"
 )
@@ -76,8 +78,7 @@ func TestLoadMCPPolicy(t *testing.T) {
 			if err != nil || !slices.Equal(remaining, tt.remaining) {
 				t.Fatalf("loadMCPPolicy() remaining = %v, err = %v; want %v", remaining, err, tt.remaining)
 			}
-			// Verify the CLI passes actual authorization into the factory, not
-			// merely that it accepts and removes the flag.
+			// The parser must return a context that authorizes the factory.
 			args := map[string]any{
 				"stdio_connection_params": map[string]any{
 					"server_params": map[string]any{"command": executable, "args": []any{"approved"}},
@@ -91,6 +92,95 @@ func TestLoadMCPPolicy(t *testing.T) {
 				}
 			} else if err == nil || set != nil {
 				t.Fatal("CLI without a policy authorized a subprocess")
+			}
+		})
+	}
+}
+
+// Run main in a child process to isolate its flags, globals, and os.Exit calls.
+func TestMCPPolicyCLIProcess(t *testing.T) {
+	if os.Getenv("ADK_TEST_MCP_POLICY_CLI") != "1" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 {
+		t.Fatal("missing CLI argument separator")
+	}
+	os.Args = append(os.Args[:1], os.Args[separator+1:]...)
+	main()
+}
+
+func TestMCPPolicyCLIStartup(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_API_KEY", "unused-test-key")
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+	configDir := t.TempDir()
+	config, err := json.Marshal(map[string]any{
+		"agent_class": "LlmAgent", "name": "policy_agent", "model": "gemini-2.5-flash",
+		"tools": []any{map[string]any{
+			"name": "McpToolset",
+			"args": map[string]any{
+				"stdio_connection_params": map[string]any{
+					"server_params": map[string]any{"command": executable, "args": []string{}},
+				},
+				"tool_filter": []string{},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "root_agent.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name       string
+		withPolicy bool
+		args       []string
+		wantError  string
+	}{
+		{name: "approved", withPolicy: true, args: []string{}},
+		{name: "no policy", wantError: "denied by default"},
+		{name: "arguments not approved", withPolicy: true, args: []string{"different"}, wantError: "not approved"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cliArgs := []string{"-test.run=^TestMCPPolicyCLIProcess$", "--"}
+			if tt.withPolicy {
+				policy, err := json.Marshal(map[string]any{"allowed_servers": []any{
+					map[string]any{"command": executable, "args": tt.args},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				policyPath := filepath.Join(t.TempDir(), "policy.json")
+				if err := os.WriteFile(policyPath, policy, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cliArgs = append(cliArgs, "--mcp-policy", policyPath)
+			}
+			cliArgs = append(cliArgs, "console")
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, cliArgs...)
+			cmd.Dir = configDir
+			cmd.Env = append(os.Environ(), "ADK_TEST_MCP_POLICY_CLI=1")
+			// Nil stdin supplies EOF, so the console exits without a model or MCP call.
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatal("CLI startup timed out")
+			}
+			loaded := strings.Contains(string(output), "Agent loaded successfully: policy_agent")
+			if tt.wantError != "" {
+				if err == nil || loaded || !strings.Contains(string(output), tt.wantError) {
+					t.Fatal("CLI did not reject the unapproved agent during config loading")
+				}
+				return
+			}
+			if err != nil || !loaded || !strings.Contains(string(output), "EOF detected, exiting...") {
+				t.Fatal("CLI did not load the approved agent and finish the console session")
 			}
 		})
 	}
