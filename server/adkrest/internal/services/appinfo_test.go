@@ -31,13 +31,16 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
 	"google.golang.org/adk/v2/tool/mcptoolset"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type weatherArgs struct {
@@ -69,6 +72,37 @@ func newLLMAgent(t *testing.T, cfg llmagent.Config) agent.Agent {
 		t.Fatalf("llmagent.New(%q) failed: %v", cfg.Name, err)
 	}
 	return a
+}
+
+// computeInstruction is a named InstructionProvider, so a test can assert on
+// the name app-info reports for it.
+func computeInstruction(ctx agent.ReadonlyContext) (string, error) {
+	return "resolved at run time", nil
+}
+
+// newWorkflowAgent builds a workflow agent whose graph runs the given agents in
+// a chain. Their agents live in the workflow's edges, not in its SubAgents.
+func newWorkflowAgent(t *testing.T, name, description string, agents ...agent.Agent) agent.Agent {
+	t.Helper()
+	var edges []workflow.Edge
+	from := workflow.Start
+	for _, a := range agents {
+		node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(%q) failed: %v", a.Name(), err)
+		}
+		edges = append(edges, workflow.Edge{From: from, To: node})
+		from = node
+	}
+	wa, err := workflowagent.New(workflowagent.Config{
+		Name:        name,
+		Description: description,
+		Edges:       edges,
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(%q) failed: %v", name, err)
+	}
+	return wa
 }
 
 // newSequentialAgent builds an agent that is not an LLM agent, to sit between
@@ -395,20 +429,135 @@ func TestGetAppInfo(t *testing.T) {
 			},
 		},
 		{
-			name: "an instruction provider cannot be resolved statically",
+			// An instruction provider is named rather than resolved, matching
+			// adk-python. Reporting it empty would read as an agent with no
+			// instruction at all.
+			name: "an instruction provider is named, not resolved",
 			root: func(t *testing.T) agent.Agent {
 				return newLLMAgent(t, llmagent.Config{
-					Name:        "dynamic",
-					Description: "Builds its instruction at run time.",
-					InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
-						return "resolved at run time", nil
-					},
+					Name:                "dynamic",
+					Description:         "Builds its instruction at run time.",
+					InstructionProvider: computeInstruction,
 				})
 			},
 			wantAgents: []string{"dynamic"},
 			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if got := agents["dynamic"].Instruction; got != "" {
-					t.Errorf("Instruction = %q, want empty", got)
+				want := "<InstructionProvider: services_test.computeInstruction>"
+				if got := agents["dynamic"].Instruction; got != want {
+					t.Errorf("Instruction = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			// A workflow agent keeps the agents of its graph in its edges, not
+			// in SubAgents, so following SubAgents alone finds none of them.
+			name: "agents in a workflow graph are reported",
+			root: func(t *testing.T) agent.Agent {
+				return newWorkflowAgent(t, "graph_root", "Runs a graph.",
+					newLLMAgent(t, llmagent.Config{
+						Name:        "researcher",
+						Description: "Researches.",
+						Instruction: "Research.",
+						Tools:       []tool.Tool{newWeatherTool(t, "lookup")},
+					}),
+					newLLMAgent(t, llmagent.Config{
+						Name:        "summarizer",
+						Description: "Summarizes.",
+						Instruction: "Summarize.",
+					}),
+				)
+			},
+			wantAgents: []string{"researcher", "summarizer"},
+			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+				if diff := cmp.Diff([]string{"lookup"}, toolNames(agents["researcher"].Tools)); diff != "" {
+					t.Errorf("researcher tool names mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		{
+			// A graph node can itself be a graph, so the walk has to descend
+			// into a sub-workflow rather than stopping at the node holding it.
+			name: "agents in a nested sub-workflow are reported",
+			root: func(t *testing.T) agent.Agent {
+				buried := newLLMAgent(t, llmagent.Config{
+					Name:        "buried",
+					Description: "Runs inside a nested graph.",
+					Instruction: "Work.",
+				})
+				buriedNode, err := workflow.NewAgentNode(buried, workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode failed: %v", err)
+				}
+				inner, err := workflow.NewWorkflowNode("inner_graph",
+					[]workflow.Edge{{From: workflow.Start, To: buriedNode}})
+				if err != nil {
+					t.Fatalf("workflow.NewWorkflowNode failed: %v", err)
+				}
+				root, err := workflowagent.New(workflowagent.Config{
+					Name:        "outer_graph",
+					Description: "Runs a graph that contains a graph.",
+					Edges:       []workflow.Edge{{From: workflow.Start, To: inner}},
+				})
+				if err != nil {
+					t.Fatalf("workflowagent.New failed: %v", err)
+				}
+				return root
+			},
+			wantAgents: []string{"buried"},
+		},
+		{
+			name: "an LLM agent above a workflow agent links through to its graph",
+			root: func(t *testing.T) agent.Agent {
+				graph := newWorkflowAgent(t, "graph", "Runs a graph.",
+					newLLMAgent(t, llmagent.Config{
+						Name:        "worker",
+						Description: "Works.",
+						Instruction: "Work.",
+					}),
+				)
+				return newLLMAgent(t, llmagent.Config{
+					Name:        "root",
+					Description: "Root agent.",
+					Instruction: "Delegate.",
+					SubAgents:   []agent.Agent{graph},
+				})
+			},
+			wantAgents: []string{"root", "worker"},
+			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+				if diff := cmp.Diff([]string{"worker"}, agents["root"].SubAgents); diff != "" {
+					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		{
+			// An agent tool runs its agent under its own runner and session, so
+			// none of that agent's events reach the stream and none is ever
+			// attributed to it. Evaluation keys an agent by the author of the
+			// events it produced, so reporting one that authors none would put
+			// an entry in the map that no event can ever match. It is still
+			// reported as a tool on its caller.
+			name: "an agent used as a tool is reported as a tool, not as an agent",
+			root: func(t *testing.T) agent.Agent {
+				wrapped := newLLMAgent(t, llmagent.Config{
+					Name:        "translator",
+					Description: "Translates text.",
+					Instruction: "Translate.",
+					Tools:       []tool.Tool{newWeatherTool(t, "lookup_phrase")},
+				})
+				return newLLMAgent(t, llmagent.Config{
+					Name:        "root",
+					Description: "Root agent.",
+					Instruction: "Call the translator.",
+					Tools:       []tool.Tool{agenttool.New(wrapped, nil)},
+				})
+			},
+			wantAgents: []string{"root"},
+			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+				if got := agents["root"].SubAgents; len(got) != 0 {
+					t.Errorf("root SubAgents = %v, want empty; an agent tool is not a sub-agent", got)
+				}
+				if diff := cmp.Diff([]string{"translator"}, toolNames(agents["root"].Tools)); diff != "" {
+					t.Errorf("root tool names mismatch (-want +got):\n%s", diff)
 				}
 			},
 		},

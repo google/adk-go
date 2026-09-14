@@ -16,18 +16,25 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log"
+	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/workflowagent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // toolsetResolveBudget bounds the time one request spends resolving toolsets,
@@ -77,6 +84,17 @@ func GetAppInfo(ctx context.Context, appName string, root agent.Agent) *models.A
 // stepped over rather than cutting off everything below it. So the names in
 // [models.AgentInfo.SubAgents] are the nearest LLM agents below that parent,
 // and every one of them is a key of the returned map.
+//
+// An agent's children are its sub-agents plus the agents its workflow graph
+// runs, since a workflow agent holds those in its edges rather than in
+// SubAgents.
+//
+// An agent reachable only as an agent tool is deliberately left out. Such an
+// agent runs under its own runner and session inside the tool call, so none of
+// its events reach the stream and no event is ever attributed to it. Evaluation
+// keys an agent by the author of the events it produced, so an agent that
+// authors none has nothing to match. It is still reported as a function
+// declaration in its caller's Tools.
 func collectAgents(ctx context.Context, appName string, root agent.Agent) map[string]*models.AgentInfo {
 	agents := make(map[string]*models.AgentInfo)
 	// resolved caches what each agent contributes to its parent's sub-agent
@@ -114,7 +132,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 			// its parent links to them directly.
 			before := truncations
 			var nested []string
-			for _, sub := range a.SubAgents() {
+			for _, sub := range children(a) {
 				nested = append(nested, nearestLLMAgents(sub)...)
 			}
 			out := dedupe(nested)
@@ -130,14 +148,12 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		}
 
 		state := llminternal.Reveal(llmAgent)
+		tools := resolveTools(ctx, appName, name, state)
 		info := &models.AgentInfo{
 			Name:        name,
 			Description: a.Description(),
-			// An agent whose instruction comes from an InstructionProvider
-			// reports an empty instruction: resolving it needs session state
-			// that does not exist outside of an invocation.
-			Instruction: state.Instruction,
-			Tools:       agentTools(ctx, appName, name, state),
+			Instruction: instruction(state),
+			Tools:       toolDeclarations(tools),
 		}
 		agents[name] = info
 		// Recorded before recursing, so a descendant that reaches back here
@@ -147,7 +163,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		// Starts non-nil: an agent with no LLM agent below it must report []
 		// and not null, which the contract forbids.
 		subAgents := []string{}
-		for _, sub := range a.SubAgents() {
+		for _, sub := range children(a) {
 			subAgents = append(subAgents, nearestLLMAgents(sub)...)
 		}
 		info.SubAgents = dedupe(subAgents)
@@ -178,13 +194,86 @@ func dedupe(names []string) []string {
 	return out
 }
 
-// agentTools describes the tools an LLM agent exposes to the model, as function
-// declarations.
+// children returns the agents a walk should descend into from a: its
+// sub-agents, followed by the agents its workflow graph runs.
 //
-// Tools without a declaration are omitted.
-func agentTools(ctx context.Context, appName, agentName string, state *llminternal.State) []*genai.Tool {
-	tools := resolveTools(ctx, appName, agentName, state)
+// A workflow agent keeps the agents of its graph in its edges, not in
+// SubAgents, so following SubAgents alone reports nothing for a graph-rooted
+// app.
+func children(a agent.Agent) []agent.Agent {
+	subAgents := a.SubAgents()
+	edges := workflowEdges(a)
+	if len(edges) == 0 {
+		return subAgents
+	}
 
+	out := slices.Clone(subAgents)
+	seen := make(map[workflow.Node]bool)
+	var walkEdges func(edges []workflow.Edge)
+	walkEdges = func(edges []workflow.Edge) {
+		for _, e := range edges {
+			for _, n := range []workflow.Node{e.From, e.To} {
+				if n == nil || seen[n] {
+					continue
+				}
+				seen[n] = true
+				switch node := n.(type) {
+				case *workflow.AgentNode:
+					out = append(out, node.Agent())
+				case *workflow.WorkflowNode:
+					walkEdges(node.Workflow().Edges())
+				}
+			}
+		}
+	}
+	walkEdges(edges)
+	return out
+}
+
+// workflowEdges returns the edges of a's workflow graph, or nil when a is not
+// a workflow agent.
+func workflowEdges(a agent.Agent) []workflow.Edge {
+	internalAgent, ok := a.(agentinternal.Agent)
+	if !ok {
+		return nil
+	}
+	cfg, ok := agentinternal.Reveal(internalAgent).Config.(workflowagent.Config)
+	if !ok {
+		return nil
+	}
+	return cfg.Edges
+}
+
+// instruction is the agent's system instruction as app-info reports it.
+//
+// An instruction that comes from a provider is named rather than resolved:
+// resolving it needs session state that does not exist outside an invocation.
+// Reporting it empty would read as an agent with no instruction at all.
+// adk-python reports the same placeholder.
+func instruction(state *llminternal.State) string {
+	if state.Instruction != "" || state.InstructionProvider == nil {
+		return state.Instruction
+	}
+	return fmt.Sprintf("<InstructionProvider: %s>", providerName(state.InstructionProvider))
+}
+
+// providerName is the declared name of an instruction provider, trimmed of its
+// package path.
+func providerName(p llminternal.InstructionProvider) string {
+	fn := runtime.FuncForPC(reflect.ValueOf(p).Pointer())
+	if fn == nil {
+		return "unknown"
+	}
+	name := fn.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// toolDeclarations describes the tools an LLM agent exposes to the model, as
+// function declarations. Tools without a declaration are omitted.
+func toolDeclarations(tools []tool.Tool) []*genai.Tool {
 	infos := make([]*genai.Tool, 0, len(tools))
 	for _, t := range tools {
 		d, ok := t.(declarer)

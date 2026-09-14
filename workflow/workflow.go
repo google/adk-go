@@ -274,6 +274,22 @@ func (w *Workflow) Name() string {
 	return w.name
 }
 
+// Edges returns the workflow's edges, in no particular order, so a caller can
+// walk its graph without running it. See [AgentNode.Agent].
+//
+// The graph indexes each edge once under its source node, so every edge appears
+// exactly once here.
+func (w *Workflow) Edges() []Edge {
+	if w == nil || w.graph == nil {
+		return nil
+	}
+	var edges []Edge
+	for _, es := range w.graph.successors {
+		edges = append(edges, es...)
+	}
+	return edges
+}
+
 // Run drives the workflow to completion or to a graceful pause
 // when any node enters NodeWaiting. It returns an iter.Seq2 that
 // yields events from per-node goroutines in arrival order; the
