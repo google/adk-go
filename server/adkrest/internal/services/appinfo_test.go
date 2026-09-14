@@ -17,10 +17,13 @@ package services_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -96,6 +99,29 @@ func toolNames(tools []*genai.Tool) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// deadlineToolset records the context deadline each agent's toolset is
+// resolved under, so a test can tell a budget shared by the whole walk from one
+// handed out afresh per agent.
+type deadlineToolset struct {
+	name string
+
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (d *deadlineToolset) Name() string { return d.name }
+
+func (d *deadlineToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil, errors.New("toolset resolved with no deadline")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.deadlines = append(d.deadlines, deadline)
+	return nil, nil
 }
 
 // fakeToolset returns a fixed set of tools without touching the network.
@@ -411,6 +437,100 @@ func TestGetAppInfo(t *testing.T) {
 				tc.check(t, agents)
 			}
 		})
+	}
+}
+
+// TestGetAppInfoToolsetBudgetIsPerRequest pins that the toolset timeout is one
+// budget for the whole walk. Handing each agent its own would multiply it by
+// the number of agents holding a toolset, so a request could outlive the
+// server's write timeout many times over while the client already saw a broken
+// response.
+func TestGetAppInfoToolsetBudgetIsPerRequest(t *testing.T) {
+	first := &deadlineToolset{name: "first"}
+	second := &deadlineToolset{name: "second"}
+
+	child := newLLMAgent(t, llmagent.Config{
+		Name:        "child",
+		Description: "Holds the second toolset.",
+		Instruction: "Help.",
+		Toolsets:    []tool.Toolset{second},
+	})
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "root",
+		Description: "Holds the first toolset.",
+		Instruction: "Delegate.",
+		Toolsets:    []tool.Toolset{first},
+		SubAgents:   []agent.Agent{child},
+	})
+
+	services.GetAppInfo(context.Background(), "test_app", root)
+
+	if len(first.deadlines) != 1 || len(second.deadlines) != 1 {
+		t.Fatalf("toolsets resolved %d and %d times, want 1 each",
+			len(first.deadlines), len(second.deadlines))
+	}
+	// One context reaches both agents, so the deadline is the same instant and
+	// not merely a close one: a second WithTimeout lands nanoseconds later.
+	if !second.deadlines[0].Equal(first.deadlines[0]) {
+		t.Errorf("deadlines differ by %v; each agent got its own budget, want one shared across the walk",
+			second.deadlines[0].Sub(first.deadlines[0]))
+	}
+}
+
+// TestGetAppInfoLoopDoesNotPoisonASiblingBranch covers the second thing a loop
+// breaks, after non-termination. Turning back at an agent already on the path
+// gives that agent an answer true only for the path the walk came in on, so
+// caching it hands the truncated answer to a later parent that could have seen
+// the whole subtree.
+//
+//	root  -> [outer(Seq), sibling(LLM)]
+//	outer -> [inner(Seq), leaf(LLM)]
+//	inner -> outer                       (the loop)
+//	sibling -> inner
+//
+// inner is walked first from inside outer, where the loop cuts it short and it
+// reaches nothing. sibling reaches leaf through inner -> outer -> leaf, so
+// sibling must still report leaf.
+func TestGetAppInfoLoopDoesNotPoisonASiblingBranch(t *testing.T) {
+	leaf := newLLMAgent(t, llmagent.Config{
+		Name:        "leaf",
+		Description: "Does the work.",
+		Instruction: "Work.",
+	})
+	placeholder := newLLMAgent(t, llmagent.Config{
+		Name:        "placeholder",
+		Description: "Replaced below to close the loop.",
+		Instruction: "Unused.",
+	})
+	inner := newSequentialAgent(t, "inner", "Inner pipeline.", placeholder)
+	outer := newSequentialAgent(t, "outer", "Outer pipeline.", inner, leaf)
+	sibling := newLLMAgent(t, llmagent.Config{
+		Name:        "sibling",
+		Description: "Reaches inner from outside the loop.",
+		Instruction: "Delegate.",
+		SubAgents:   []agent.Agent{inner},
+	})
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "root",
+		Description: "Root agent.",
+		Instruction: "Delegate.",
+		SubAgents:   []agent.Agent{outer, sibling},
+	})
+
+	subAgents := inner.SubAgents()
+	if len(subAgents) != 1 {
+		t.Fatalf("len(inner.SubAgents()) = %d, want 1", len(subAgents))
+	}
+	subAgents[0] = outer
+
+	info := services.GetAppInfo(context.Background(), "test_app", root)
+
+	if diff := cmp.Diff([]string{"leaf"}, info.Agents["sibling"].SubAgents); diff != "" {
+		t.Errorf("sibling sub-agents mismatch (-want +got):\n%s", diff)
+	}
+	gotNames := slices.Sorted(maps.Keys(info.Agents))
+	if diff := cmp.Diff([]string{"leaf", "root", "sibling"}, gotNames); diff != "" {
+		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
 	}
 }
 

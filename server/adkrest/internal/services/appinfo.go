@@ -30,10 +30,17 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// toolsetResolveTimeout bounds the time spent resolving an agent's toolsets.
-// Toolsets may reach out over the network (an MCP server, for example), and
-// describing an app must not hang on one.
-const toolsetResolveTimeout = 10 * time.Second
+// toolsetResolveBudget bounds the time one request spends resolving toolsets,
+// across every agent in the app rather than per agent. Toolsets may reach out
+// over the network (an MCP server, for example), and describing an app must not
+// hang on one.
+//
+// A budget per agent would multiply by the number of agents holding a toolset,
+// which outlives the server's own write timeout: the client would see a broken
+// response while the handler kept opening outbound connections. Once this is
+// spent, the remaining Tools calls return the context error at once and are
+// logged and skipped like any other failing toolset.
+const toolsetResolveBudget = 10 * time.Second
 
 // declarer is implemented by tools the model calls as functions.
 type declarer interface {
@@ -49,6 +56,10 @@ func GetAppInfo(ctx context.Context, appName string, root agent.Agent) *models.A
 	if root == nil {
 		return nil
 	}
+	// One budget for the whole walk, not one per agent.
+	ctx, cancel := context.WithTimeout(ctx, toolsetResolveBudget)
+	defer cancel()
+
 	return &models.AppInfo{
 		Name:          appName,
 		RootAgentName: root.Name(),
@@ -75,6 +86,9 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 	// inProgress holds the agents on the current path, so a tree that is not
 	// one -- an agent that is its own ancestor -- terminates.
 	inProgress := make(map[string]bool)
+	// truncations counts how often the walk turned back at an agent already on
+	// the path. It only ever moves in a graph that loops.
+	truncations := 0
 
 	// nearestLLMAgents describes the nearest LLM agents at or below a, adding
 	// each to agents, and returns their names.
@@ -88,6 +102,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 			return names
 		}
 		if inProgress[name] {
+			truncations++
 			return nil
 		}
 		inProgress[name] = true
@@ -97,12 +112,21 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		if !isLLM {
 			// Not reported itself. The LLM agents below it stand in for it, so
 			// its parent links to them directly.
+			before := truncations
 			var nested []string
 			for _, sub := range a.SubAgents() {
 				nested = append(nested, nearestLLMAgents(sub)...)
 			}
-			resolved[name] = dedupe(nested)
-			return resolved[name]
+			out := dedupe(nested)
+			// Cache only a result the walk reached the bottom of. A loop makes
+			// this agent's answer depend on where the walk entered it, and
+			// caching the truncated one would hand it to a later parent that
+			// could have seen the whole subtree. An LLM agent is immune: it
+			// contributes its own name whatever the path.
+			if truncations == before {
+				resolved[name] = out
+			}
+			return out
 		}
 
 		state := llminternal.Reveal(llmAgent)
@@ -179,14 +203,15 @@ func agentTools(ctx context.Context, appName, agentName string, state *llmintern
 // resolveTools returns an agent's static tools followed by the tools of each of
 // its toolsets. A toolset that fails to resolve is logged and skipped: a
 // description of the rest of the app is more useful than no description at all.
+//
+// ctx already carries the request's toolset budget, shared with every other
+// agent in the walk.
 func resolveTools(ctx context.Context, appName, agentName string, state *llminternal.State) []tool.Tool {
 	tools := slices.Clone(state.Tools)
 	if len(state.Toolsets) == 0 {
 		return tools
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, toolsetResolveTimeout)
-	defer cancel()
 	toolsetCtx := appInfoContext{Context: ctx, appName: appName, agentName: agentName}
 
 	for _, ts := range state.Toolsets {

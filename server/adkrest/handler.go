@@ -207,6 +207,11 @@ type AppInfoAPIConfig struct {
 	// reports each agent's system instruction and tool declarations, which is
 	// what an evaluation harness needs and more than a deployed server should
 	// hand out. Turn it on for evaluation, leave it off in production.
+	//
+	// The route requires authentication like any other, but [ServerConfig.Authenticator]
+	// defaults to [authn.Noop], which admits every request. Setting this without
+	// also setting an Authenticator serves every agent's instructions and tool
+	// schemas to an anonymous caller.
 	IncludeAppInfoAPI bool
 }
 
