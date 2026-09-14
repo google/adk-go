@@ -16,8 +16,29 @@ package session
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrNotFound reports that the requested session does not exist.
+//
+// Every [Service] implementation wraps it from [Service.Get] and from
+// [Service.AppendEvent] when the session named in the request is absent, so
+// that a caller can tell a missing session from a storage failure:
+//
+//	if errors.Is(err, session.ErrNotFound) { … }
+//
+// No other method reports it, because no other method treats a missing session
+// as a failure: [Service.Delete] is a no-op on one, and [Service.List] returns
+// an empty result. Nor does it cover every error those two methods can return.
+// A request that names a session belonging to another user, one that fails
+// validation, and a backend that is simply unreachable all stay ordinary
+// errors, so errors.Is never reads "not yours", "not valid" or "not working"
+// as "not there".
+//
+// The REST layer relies on this to answer 404 rather than 500. Wrap it first,
+// as fmt.Errorf("%w: …: %w", session.ErrNotFound, err).
+var ErrNotFound = errors.New("session not found")
 
 // Service is a session storage service.
 //

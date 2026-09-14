@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/memory"
@@ -36,6 +37,8 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
+
+var _ toolinternal.SkipSummarizationResultDisplayer = (*agentTool)(nil)
 
 // agentTool implements a tool that allows an agent to call another agent.
 type agentTool struct {
@@ -78,6 +81,14 @@ func (t *agentTool) Description() string {
 // IsLongRunning implements tool.Tool.
 func (t *agentTool) IsLongRunning() bool {
 	return false
+}
+
+// DisplayResultOnSkipSummarization implements
+// toolinternal.SkipSummarizationResultDisplayer. When SkipSummarization is
+// set, the sub-agent's result is the final answer, not an internal
+// acknowledgement, so it should still be shown to the user.
+func (t *agentTool) DisplayResultOnSkipSummarization() bool {
+	return true
 }
 
 // Declaration returns the function declaration for the wrapped agent.

@@ -141,7 +141,7 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := newTestInvocationContext(t, "test-agent", tc.events...)
-			got := getUserFunctionCallAt(ictx.Session().Events(), tc.atIndex)
+			got := getUserFunctionCallAt(ictx.Session().Events(), tc.atIndex, "")
 			if !tc.success && got != nil {
 				t.Errorf("getUserFunctionCallAt() = %v, want nil", got)
 			}

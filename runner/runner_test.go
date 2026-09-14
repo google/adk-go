@@ -21,6 +21,7 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -639,14 +640,16 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 	}
 }
 
-func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
+func TestRunner_NilEventYieldedTerminatesRun(t *testing.T) {
 	nilAgent, err := agent.New(agent.Config{
-		Name: "nil_yielder",
+		Name: "nil_flood",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				yield(nil, nil)
+				for {
+					if !yield(nil, nil) {
+						return
+					}
+				}
 			}
 		},
 	})
@@ -655,28 +658,51 @@ func TestRunner_NilEventYieldedDoesNotPanic(t *testing.T) {
 	}
 
 	sessionService := session.InMemoryService()
+	_, err = sessionService.Create(context.Background(), &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user1",
+		SessionID: "session1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
 	r, err := New(Config{
-		AppName:           "test_app",
-		Agent:             nilAgent,
-		SessionService:    sessionService,
-		AutoCreateSession: true,
+		AppName:        "test_app",
+		Agent:          nilAgent,
+		SessionService: sessionService,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	var count int
-	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
-	for ev, err := range r.Run(t.Context(), "user1", "session1", msg, agent.RunConfig{}) {
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if ev == nil {
-			t.Errorf("unexpected nil event")
-		}
-		count++
+	type result struct {
+		err        error
+		iterations int
 	}
-	if count != 0 {
-		t.Errorf("expected 0 events, got %d", count)
+	done := make(chan result, 1)
+	go func() {
+		got := result{}
+		for _, err := range r.Run(context.Background(), "user1", "session1", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}) {
+			got.err = err
+			got.iterations++
+			break
+		}
+		done <- got
+	}()
+
+	select {
+	case got := <-done:
+		if got.iterations != 1 {
+			t.Fatalf("Run() iterations = %d, want 1", got.iterations)
+		}
+		if got.err == nil {
+			t.Fatal("Run() yielded no error for a nil event")
+		}
+		if !strings.Contains(got.err.Error(), "nil_flood") {
+			t.Fatalf("Run() error = %v, want the agent name", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not terminate after a nil event")
 	}
 }
