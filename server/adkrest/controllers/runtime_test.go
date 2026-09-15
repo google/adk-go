@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -217,6 +218,7 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 			reqBytes, _ := json.Marshal(reqObj)
 			req := httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: reqObj.UserId}))
 
 			// Record response
 			rr := httptest.NewRecorder()

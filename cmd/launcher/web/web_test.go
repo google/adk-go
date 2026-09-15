@@ -380,7 +380,8 @@ func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := serveWithoutPanic(t, server, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := serveWithoutPanic(t, server, req)
 			if rec.Code != http.StatusOK {
 				t.Errorf("GET %s status = %d (%s), want %d", tc.path, rec.Code, rec.Body.String(), http.StatusOK)
 			}

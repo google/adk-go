@@ -151,6 +151,146 @@ func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestInMemoryState_All_ConcurrentSet is a regression guard for the fix in #530
+// (https://github.com/google/adk-go/issues/561): state.All() used to unlock the
+// mutex between each iteration step, so ranging over it while a concurrent
+// AppendEvent call mutated the underlying map could trigger a fatal "concurrent
+// map iteration and map write" panic. The fix snapshots the map under the lock
+// (maps.Clone) before iterating, so this no longer reaches the panic.
+//
+// This does not exercise concurrent Set() calls — state.Set() is never on the
+// hot path here, since AppendEvent applies its StateDelta via maps.Copy and
+// holds the service mutex for its whole body, so the "writers" below serialize
+// against each other and only race against the reader. It also does not pin
+// down the snapshot semantics #530 introduced (see
+// TestInMemoryState_All_IsSnapshot for that). What it does catch: if All() is
+// ever changed back to range the live map without cloning it first — for
+// example by someone "simplifying" away the maps.Clone — this fails fast under
+// -race with a DATA RACE and a "concurrent map iteration and map write" fatal
+// error.
+//
+// Run with: go test -race ./session/...
+func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	resp, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+		State:   map[string]any{"k0": 0},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	sess := resp.Session
+
+	const writers = 8
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	// These calls serialize against each other (AppendEvent holds the service
+	// mutex for its whole body); what races is each of them against the reader
+	// goroutine's All() below.
+	wg.Add(writers)
+	for w := range writers {
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for i := range iterations {
+				ev := &session.Event{
+					Timestamp: time.Now(),
+					Actions: session.EventActions{
+						StateDelta: map[string]any{
+							fmt.Sprintf("w%d_k%d", w, i): i,
+						},
+					},
+				}
+				// The session was just created and is never deleted concurrently,
+				// so AppendEvent has no error path to take here; a failure means
+				// something regressed elsewhere.
+				if err := svc.AppendEvent(ctx, sess, ev); err != nil {
+					t.Errorf("AppendEvent(w%d, i%d) failed: %v", w, i, err)
+				}
+			}
+		}(w)
+	}
+
+	// Concurrent reader: iterate all state entries, checking the seed key
+	// survives every snapshot and the count never goes backwards.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		prevCount := 0
+		for range iterations {
+			count := 0
+			sawSeed := false
+			for k := range sess.State().All() {
+				count++
+				if k == "k0" {
+					sawSeed = true
+				}
+			}
+			if !sawSeed {
+				t.Error("All() did not yield seed key \"k0\"")
+			}
+			if count < prevCount {
+				t.Errorf("All() yielded %d keys, want at least %d (the previous snapshot's count)", count, prevCount)
+			}
+			prevCount = count
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+}
+
+// TestInMemoryState_All_IsSnapshot pins the property #530 actually introduced:
+// All() ranges over a point-in-time snapshot, not a live view of the map. It is
+// deterministic — no goroutines, no -race, no timing — and fails on the
+// pre-#530 behavior ("leaked N keys written after iteration began").
+//
+// Run with: go test -run TestInMemoryState_All_IsSnapshot ./session/
+func TestInMemoryState_All_IsSnapshot(t *testing.T) {
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "user", State: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := resp.Session.State()
+	for i := range 64 {
+		if err := st.Set(fmt.Sprintf("seed_%03d", i), i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got, leaked []string
+	first := true
+	for k := range st.All() {
+		got = append(got, k)
+		if strings.HasPrefix(k, "injected_") {
+			leaked = append(leaked, k)
+		}
+		if first { // mutate hard, once, while iteration is live
+			first = false
+			for i := range 2048 {
+				_ = st.Set(fmt.Sprintf("injected_%05d", i), i)
+			}
+		}
+	}
+
+	if len(leaked) > 0 {
+		t.Errorf("All() yielded %d keys written after iteration began, e.g. %q", len(leaked), leaked[0])
+	}
+	if len(got) != 64 {
+		t.Errorf("All() yielded %d keys, want the 64 present when iteration began", len(got))
+	}
+}
+
 func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 	ctx := t.Context()
 	service := session.InMemoryService()
