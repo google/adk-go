@@ -154,3 +154,10 @@ func (s *vertexAiService) AppendEvent(ctx context.Context, sess session.Session,
 	}
 	return nil
 }
+
+// GetUserState is not supported by the Vertex AI session service: Vertex AI
+// only exposes user-scoped state as merged into individual sessions, not as
+// an independently queryable resource.
+func (s *vertexAiService) GetUserState(ctx context.Context, req *session.GetUserStateRequest) (*session.GetUserStateResponse, error) {
+	return nil, fmt.Errorf("VertexAiSessionService does not support GetUserState")
+}

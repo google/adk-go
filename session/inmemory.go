@@ -194,6 +194,22 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return nil
 }
 
+func (s *inMemoryService) GetUserState(ctx context.Context, req *GetUserStateRequest) (*GetUserStateResponse, error) {
+	appName, userID := req.AppName, req.UserID
+	if appName == "" || userID == "" {
+		return nil, fmt.Errorf("app_name, user_id are required, got app_name: %q, user_id: %q", appName, userID)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	state := make(map[string]any)
+	if innerUsersMap, ok := s.userState[appName]; ok {
+		maps.Copy(state, innerUsersMap[userID])
+	}
+	return &GetUserStateResponse{State: state}, nil
+}
+
 func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, event *Event) error {
 	if curSession == nil {
 		return fmt.Errorf("session is nil")
