@@ -20,14 +20,17 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"google.golang.org/genai"
+	"gopkg.in/yaml.v3"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type mockSession struct{}
@@ -586,4 +589,79 @@ edges:
 	if val, ok := toolOut["result"].(string); !ok || val != "tool_output" {
 		t.Errorf("expected tool output result 'tool_output', got %v", toolOut["result"])
 	}
+}
+
+// routeHandler stands in for a route target; this test only parses the graph.
+func routeHandler(ctx agent.Context, input string) (string, error) { return input, nil }
+
+func init() {
+	for i := 1; i <= 9; i++ {
+		RegisterNodeFunction(fmt.Sprintf("h%d", i), routeHandler)
+	}
+}
+
+func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
+	// Enough routes to push the map past Go's single-bucket layout, where
+	// iteration is only a random rotation and would match sorted order by luck
+	// too often. Declared unsorted so the test can tell the two apart.
+	const config = `
+edges:
+  - - START
+    - upper_fn
+    - ZETA: h1
+      ALPHA: h2
+      MIKE: h3
+      OSCAR: h4
+      BRAVO: h5
+      YANKEE: h6
+      CHARLIE: h7
+      TANGO: h8
+      default: h9
+`
+	var cfg struct {
+		Edges []yaml.Node `yaml:"edges"`
+	}
+	if err := yaml.Unmarshal([]byte(config), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	edges, err := parseEdges(t.Context(), "", cfg.Edges)
+	if err != nil {
+		t.Fatalf("parseEdges() error = %v", err)
+	}
+
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		got[i] = fmt.Sprintf("%s->%s(%s)", e.From.Name(), e.To.Name(), routeLabel(e.Route))
+	}
+	want := []string{
+		"START->upper_fn(none)",
+		"upper_fn->h2(ALPHA)",
+		"upper_fn->h5(BRAVO)",
+		"upper_fn->h7(CHARLIE)",
+		"upper_fn->h3(MIKE)",
+		"upper_fn->h4(OSCAR)",
+		"upper_fn->h8(TANGO)",
+		"upper_fn->h6(YANKEE)",
+		"upper_fn->h1(ZETA)",
+		"upper_fn->h9(<default>)",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseEdges() =\n\t%v\nwant\n\t%v", got, want)
+	}
+}
+
+func routeLabel(r workflow.Route) string {
+	// Checked before the type switch so it cannot be confused with the literal
+	// StringRoute("default").
+	if r == workflow.Default {
+		return "<default>"
+	}
+	switch v := r.(type) {
+	case nil:
+		return "none"
+	case workflow.StringRoute:
+		return string(v)
+	}
+	return fmt.Sprintf("%T", r)
 }
