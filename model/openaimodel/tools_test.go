@@ -293,14 +293,16 @@ func TestConvertFunctionDeclarationMarshalsStrict(t *testing.T) {
 // rules out simply reusing enforceStrictOpenAISchema here: it rewrites required
 // to list every property, which would make optional tool arguments mandatory.
 //
-// Both paths are covered: ParametersJsonSchema is the one functiontool.New
+// All three parameter paths are covered, because the rewrite has to be pinned
+// out of each one separately. ParametersJsonSchema is the path functiontool.New
 // takes, and its schema is already strict-shaped apart from required, so a
 // rewrite there is invisible unless the fixture omits a property from required.
 func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 	tests := []struct {
 		name string
 		decl *genai.FunctionDeclaration
-		// Value the key must still hold after conversion; nil means absent.
+		// Values the keys must still hold after conversion; nil means absent.
+		wantRequired             any
 		wantAdditionalProperties any
 	}{
 		{
@@ -317,6 +319,7 @@ func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 					Required: []string{"city"},
 				},
 			},
+			wantRequired:             []any{"city"},
 			wantAdditionalProperties: nil,
 		},
 		{
@@ -334,7 +337,17 @@ func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 					"additionalProperties": false,
 				},
 			},
+			wantRequired:             []any{"city"},
 			wantAdditionalProperties: false,
+		},
+		{
+			// The default schema for a tool that takes no arguments. Enforcing
+			// strict here would add additionalProperties and an empty required,
+			// which is the same rewrite applied to a declaration that has none.
+			name:                     "no parameters",
+			decl:                     &genai.FunctionDeclaration{Name: "fn"},
+			wantRequired:             nil,
+			wantAdditionalProperties: nil,
 		},
 	}
 
@@ -344,15 +357,11 @@ func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("convertFunctionDeclaration() error = %v", err)
 			}
-			want := []any{"city"}
-			if got := fn.Parameters["required"]; !reflect.DeepEqual(got, want) {
-				t.Errorf("required = %v, want %v", got, want)
+			// An absent key reads as nil, which is what the nil expectations mean.
+			if got := fn.Parameters["required"]; !reflect.DeepEqual(got, tc.wantRequired) {
+				t.Errorf("required = %v, want %v, in %v", got, tc.wantRequired, fn.Parameters)
 			}
-			got, ok := fn.Parameters["additionalProperties"]
-			if !ok {
-				got = nil
-			}
-			if !reflect.DeepEqual(got, tc.wantAdditionalProperties) {
+			if got := fn.Parameters["additionalProperties"]; !reflect.DeepEqual(got, tc.wantAdditionalProperties) {
 				t.Errorf("additionalProperties = %v, want %v, in %v", got, tc.wantAdditionalProperties, fn.Parameters)
 			}
 		})

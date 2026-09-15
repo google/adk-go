@@ -46,11 +46,12 @@
 // Function tools are declared with strict parameter validation disabled, and
 // that is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema: validate them in the tool.
-// Optional arguments stay optional as a result: the API used to rewrite the
-// schema to make every argument required, then enforce that. The cost is that
-// tools whose parameters already qualified for strict mode are no longer
-// enforced — functiontool.New produces those unless the argument struct uses
-// omitempty, omitzero or a map-typed field.
+// Optional arguments stay optional as a result, where leaving the flag unset
+// lets the API rewrite an otherwise strict-eligible schema to make every
+// argument required and then enforce that. The cost is that tools whose
+// parameters already qualified for strict mode are no longer enforced —
+// functiontool.New produces those unless the argument struct uses omitempty,
+// omitzero or a map-typed field.
 //
 // Clients construct a ClientConfig and pass it to NewModel:
 //

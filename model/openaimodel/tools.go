@@ -69,18 +69,21 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // from a generic schema format to a map[string]any that the OpenAI API expects.
 //
 // Strict parameter validation is pinned off so the mode does not depend on the
-// caller's schema. Left unset, the API picks it from the schema shape, reports
-// the choice only on the response tool, which this package discards, and does
-// not merely accept or reject: given additionalProperties:false with only some
-// properties in required, it rewrites required to name them all and runs strict,
-// forcing a value into an argument the caller made optional.
+// caller's schema. Left unset, the API picks it from the schema shape and
+// reports the choice only on the response tool, which this package discards:
+// where the schema is otherwise strict-eligible but leaves a property out of
+// required, it adds that property and enforces it, forcing a value into an
+// argument the caller made optional.
 //
-// Pinning on is the breaking direction. Strict needs every property in
-// required, so an optional one must be nullable ("type": ["string", "null"]):
-// functiontool.New emits that for pointer fields, but omitempty and omitzero
-// fields are left out of required, and genai.Schema emits "nullable": true,
-// which strict rejects. Strict also demands additionalProperties:false on every
-// object; a map-typed field emits a schema there.
+// Pinning on is the breaking direction, because strict needs every property in
+// required and an optional one must therefore be nullable
+// ("type": ["string", "null"]). functiontool.New emits that for pointer fields,
+// but omitempty and omitzero fields are left out of required, and genai.Schema
+// emits "nullable": true, which strict accepts and ignores, forcing the empty
+// value it was meant to avoid.
+//
+// adk-python's Responses backend pins the flag off the same way, so this is
+// parity rather than a judgement call local to Go.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
