@@ -298,7 +298,7 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 	// Check if the blob exists before trying to read it
 	attrs, err := blob.attrs(ctx)
 	if err != nil {
-		if err == storage.ErrObjectNotExist {
+		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
 		}
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
@@ -474,18 +474,17 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 
 	attrs, err := blob.attrs(ctx)
 	if err != nil {
-		if err == storage.ErrObjectNotExist {
+		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
 		}
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
 	}
 
-	var canonicalURI string
-	if attrs.MediaLink != "" {
-		canonicalURI = attrs.MediaLink
-	} else {
-		canonicalURI = fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
-	}
+	// Always the gs:// form, matching adk-python's GCS artifact service. The
+	// object's MediaLink is an authenticated JSON API download URL, which a
+	// consumer handed the URI cannot fetch: a model given it as the file_uri of
+	// a file_data part treats it as a web page and fails to read it.
+	canonicalURI := fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
 
 	customMeta := make(map[string]any)
 	if attrs.Metadata != nil {

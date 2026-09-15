@@ -18,6 +18,13 @@ import (
 	"google.golang.org/adk/v2/internal/telemetry/telemetrytest"
 )
 
+// systemInstructionsJSON is the gen_ai.system_instructions attribute both
+// generate_content spans carry: the agent's own instruction followed by the
+// identity preamble ADK appends.
+const systemInstructionsJSON = `[{"type":"text","content":"you are helpful\n\n` +
+	`You are an agent. Your internal name is \"some_root_agent\". ` +
+	`The description about you is \"A sample root agent.\"."}]`
+
 // AgentWithToolCaptureContentCase is the expected root span for
 // the same scenario as [AgentWithToolCase] but with content capture
 // enabled, via OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var.
@@ -39,6 +46,14 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 				"gen_ai.response.finish_reasons": []string{""},
+				"gen_ai.system_instructions":     systemInstructionsJSON,
+				"gen_ai.input.messages":          `[{"role":"user","parts":[{"type":"text","content":"hello"}]}]`,
+				// The mock model reports no finish reason, so the tool call
+				// in the turn decides it: the schema distinguishes a tool
+				// call from a plain stop.
+				"gen_ai.output.messages": `[{"role":"assistant","parts":[` +
+					`{"type":"tool_call","name":"some_tool","arguments":{"arg1":"val1"}}],` +
+					`"finish_reason":"tool_call"}]`,
 			},
 			Logs: []*telemetrytest.LogDigest{
 				{
@@ -97,6 +112,14 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gcp.vertex.agent.event_id":      telemetrytest.PRESENT,
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 				"gen_ai.response.finish_reasons": []string{""},
+				"gen_ai.system_instructions":     systemInstructionsJSON,
+				// The history now carries all three turns. genai labels the
+				// tool result "user"; the schema calls it "tool".
+				"gen_ai.input.messages": `[{"role":"user","parts":[{"type":"text","content":"hello"}]},` +
+					`{"role":"assistant","parts":[{"type":"tool_call","name":"some_tool","arguments":{"arg1":"val1"}}]},` +
+					`{"role":"tool","parts":[{"type":"tool_call_response","name":"some_tool","response":{"result":"processed val1"}}]}]`,
+				"gen_ai.output.messages": `[{"role":"assistant","parts":[` +
+					`{"type":"text","content":"text response"}],"finish_reason":"stop"}]`,
 			},
 			Logs: []*telemetrytest.LogDigest{
 				{

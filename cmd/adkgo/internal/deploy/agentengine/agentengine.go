@@ -23,6 +23,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -115,27 +117,20 @@ func init() {
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
-			f.source.origEntryPointPath = flags.source.entryPointPath
-			absp, err := filepath.Abs(flags.source.entryPointPath)
+			f.source.origEntryPointPath = f.source.entryPointPath
+			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 
-			if flags.build.tempDir == "" {
-				flags.build.tempDir = os.TempDir()
-			}
-			absp, err = filepath.Abs(flags.build.tempDir)
-			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
-			}
-			f.build.tempDir, err = os.MkdirTemp(absp, "agentEngine_"+time.Now().Format("20060102_150405__")+"*")
-			if err != nil {
-				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
-			}
-			p("Using temp dir:", f.build.tempDir)
-
-			// come up with a executable name based on entry point path
+			// come up with a executable name based on entry point path.
+			// Deriving and checking it happens before the temp dir is created:
+			// everything here can fail, and cleanTemp only runs after a fully
+			// successful deploy, so a rejected value would otherwise leave an
+			// empty agentEngine_<timestamp>_* directory behind. Nothing above
+			// needs the directory; every field that resolves against it
+			// (execPath, dockerfileBuildPath, archivePath) is assigned below.
 			dir, file := path.Split(f.source.entryPointPath)
 			f.source.srcBasePath = dir
 			f.source.entryPointPath = file
@@ -145,7 +140,35 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
-				f.build.execPath = path.Join(f.build.tempDir, exec)
+			}
+
+			// Both values are embedded in a Dockerfile RUN (shell-form)
+			// instruction, so they need the stricter shell-safe allowlist,
+			// not just the quote/newline blocklist used where a value only
+			// reaches a non-shell-form context (COPY path, CMD exec array).
+			if err := util.ValidateShellArgSafe(f.build.execFile,
+				fmt.Sprintf("executable name derived from --entry_point_path %q:", f.source.origEntryPointPath)); err != nil {
+				return err
+			}
+			if err := util.ValidateShellArgSafe(f.source.origEntryPointPath, "--entry_point_path"); err != nil {
+				return err
+			}
+
+			if f.build.tempDir == "" {
+				f.build.tempDir = os.TempDir()
+			}
+			absp, err = filepath.Abs(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
+			}
+			f.build.tempDir, err = os.MkdirTemp(absp, "agentEngine_"+time.Now().Format("20060102_150405__")+"*")
+			if err != nil {
+				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
+			}
+			p("Using temp dir:", f.build.tempDir)
+
+			if f.build.execPath == "" {
+				f.build.execPath = path.Join(f.build.tempDir, f.build.execFile)
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
@@ -175,25 +198,96 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
+// defaultBuilderGoVersion is a last-resort builder image tag, used only when the
+// application's go.mod cannot be read and the running toolchain version cannot
+// be determined. It is a rolling tag rather than a pinned version: since this
+// branch is reached only when the required toolchain is entirely unknown, a
+// pinned default would re-rot exactly like the hardcoded tag this change removes,
+// whereas "latest" can never be too old for the app. GOTOOLCHAIN=auto in the
+// builder stage still downgrades in-image if the module needs an older toolchain.
+const defaultBuilderGoVersion = "latest"
+
+// builderGoVersion returns the Go version tag for the builder image. It prefers
+// the go directive declared in the application's go.mod so the managed build
+// uses a toolchain that satisfies what the app requires, falling back to the
+// version of the toolchain running adkgo, then to defaultBuilderGoVersion.
+func builderGoVersion(sourceDir string) string {
+	dir := sourceDir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if v := goVersionFromModFile(data); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimPrefix(runtime.Version(), "go"); isGoVersion(v) {
+		return v
+	}
+	return defaultBuilderGoVersion
+}
+
+// goVersionFromModFile extracts the value of the top-level `go` directive
+// (e.g. "1.26.5") from go.mod contents, or "" if it is absent or malformed.
+func goVersionFromModFile(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		// Drop a trailing line comment (e.g. `go 1.26.5 // pinned`) so it does
+		// not leak into the FROM instruction and break the Dockerfile.
+		if i := strings.Index(rest, "//"); i >= 0 {
+			rest = rest[:i]
+		}
+		if v := strings.TrimSpace(rest); isGoVersion(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+// goVersionPattern matches a Go version number such as "1", "1.26", "1.26.5",
+// or "1.26rc1". Validating the whole shape (not just the leading digit) guards
+// against matching a module path inside a require block and against carrying a
+// malformed value like "1abc" into a "golang:1abc" tag that does not exist.
+var goVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}([a-z]+[0-9]+)?$`)
+
+// isGoVersion reports whether s looks like a Go version number.
+func isGoVersion(s string) bool {
+	return goVersionPattern.MatchString(s)
+}
+
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 
+			// Every value below is read off the receiver, not off the package
+			// global. computeFlags validates the receiver, so a read of the
+			// global here would let the guard and the line it guards come apart
+			// for any caller that is not the cobra RunE.
 			var b strings.Builder
-			b.WriteString(`
-FROM golang:1.25 as builder
-WORKDIR /app
+			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
+			// GOTOOLCHAIN=auto lets the in-image go command fetch the toolchain
+			// go.mod requires when the base tag is older than the module needs.
+			// The official golang images pin GOTOOLCHAIN=local, so without this a
+			// residual version mismatch (Docker Hub publishing lag, or a transitive
+			// dependency requiring a newer toolchain) is fatal instead of recoverable.
+			b.WriteString("ENV GOTOOLCHAIN=auto\n")
+			b.WriteString(`WORKDIR /app
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
 FROM gcr.io/distroless/static-debian11
 
 COPY --from=builder /app/` + f.build.execFile + `  /app/` + f.build.execFile + `
-EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
+EXPOSE ` + strconv.Itoa(f.agentEngine.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(f.agentEngine.serverPort) + `"`)
 
 			b.WriteString(`, "agentengine"`)
 
