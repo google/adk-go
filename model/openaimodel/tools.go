@@ -68,22 +68,10 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // the function's name, description, and importantly, convert its parameters
 // from a generic schema format to a map[string]any that the OpenAI API expects.
 //
-// Strict parameter validation is pinned off so the mode does not depend on the
-// caller's schema. Left unset, the API picks it from the schema shape and
-// reports the choice only on the response tool, which this package discards:
-// where the schema is otherwise strict-eligible but leaves a property out of
-// required, it adds that property and enforces it, forcing a value into an
-// argument the caller made optional.
-//
-// Pinning on is the breaking direction, because strict needs every property in
-// required and an optional one must therefore be nullable
-// ("type": ["string", "null"]). functiontool.New emits that for pointer fields,
-// but omitempty and omitzero fields are left out of required, and genai.Schema
-// emits "nullable": true, which strict accepts and ignores, forcing the empty
-// value it was meant to avoid.
-//
-// adk-python's Responses backend pins the flag off the same way, so this is
-// parity rather than a judgement call local to Go.
+// Strict is pinned off rather than left unset: an absent flag lets the API pick
+// the mode from the schema shape and add the caller's optional arguments to
+// required. Pinning it on would do that permanently, so off is the only value
+// that keeps an optional argument optional; adk-python's Responses path agrees.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
