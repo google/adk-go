@@ -515,3 +515,55 @@ func eventFields(ev *session.Event) []string {
 	}
 	return fields
 }
+
+// TestRunner_WorkflowHITL_SettledResponseDoesNotHijackTurn guards the
+// permissiveness documented on buildResumeResponses at the workflow-agent
+// front door too: a turn may carry a function response the run has already
+// finished with — the A2A flow sends the human's reply text alongside the
+// approval response in one message — and must still run, not fail the whole
+// turn with ErrNothingToResume and drop the text.
+func TestRunner_WorkflowHITL_SettledResponseDoesNotHijackTurn(t *testing.T) {
+	ctx := t.Context()
+
+	var upstream, handler atomic.Int32
+	counter := workflow.NewFunctionNode("upstream",
+		func(_ agent.Context, in any) (any, error) {
+			upstream.Add(1)
+			return "up", nil
+		}, workflow.NodeConfig{})
+	asker := newHitlAsker("asker", "", false /*rerunOnResume*/)
+	sink := workflow.NewFunctionNode("handler",
+		func(_ agent.Context, in any) (any, error) {
+			handler.Add(1)
+			return "handled", nil
+		}, workflow.NodeConfig{})
+
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, counter, asker, sink))
+
+	turn1 := drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession,
+		userText("go"), agent.RunConfig{}))
+	id, name := findLongRunningInterrupt(turn1)
+	if id == "" {
+		t.Fatal("turn 1 did not pause on a long-running interrupt")
+	}
+	drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession,
+		resumeContent(id, name, "yes"), agent.RunConfig{}))
+	if got := handler.Load(); got != 1 {
+		t.Fatalf("handler runs after the real resume = %d, want 1", got)
+	}
+
+	// The interrupt is settled. A later turn echoes it back under another
+	// name, alongside new user text.
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "now do something new"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: id, Name: "some_client_tool", Response: map[string]any{"ok": true},
+		}},
+	}}
+	drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}))
+
+	if got := upstream.Load(); got != 2 {
+		t.Errorf("upstream runs = %d, want 2: the turn was routed to Resume "+
+			"against a settled interrupt instead of running the workflow", got)
+	}
+}
