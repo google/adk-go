@@ -24,6 +24,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -311,6 +312,40 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
+// isResumable reports whether a live-connection error means the socket is
+// gone and the flow should reconnect, rather than surface the error and stop.
+//
+// Both the reader and the sender goroutine report into the same errChan and
+// the flow acts on whichever arrives first, so the two must classify the same
+// connection loss the same way. They do not produce the same text: the reader
+// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
+// sees the raw socket write failure, whose wording is platform-specific
+// ("write: broken pipe" on Linux, "wsasend: An established connection was
+// aborted by the software in your host machine." on Windows). Matching the
+// transport failure by type rather than by text keeps the verdict the same on
+// every platform.
+func isResumable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	// A failed read or write on the underlying socket of an already-established
+	// connection. The dial lives on a different path, which handles its own
+	// errors, so reaching here means a live connection dropped.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "1008") ||
+		strings.Contains(errStr, "GoAway")
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -355,21 +390,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			SessionResumption:        runCfg.Live.SessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
-		}
-
-		isResumable := func(err error) bool {
-			if err == nil {
-				return false
-			}
-			if err == io.EOF {
-				return true
-			}
-			errStr := err.Error()
-			return strings.Contains(errStr, "broken pipe") ||
-				strings.Contains(errStr, "connection reset") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "1008") ||
-				strings.Contains(errStr, "GoAway")
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
