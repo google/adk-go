@@ -38,6 +38,10 @@ import (
 // records or elides it for privacy.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+// captureToolDefinitionParametersEnvVar controls the explicit input-schema
+// capture opt-in used by the telemetry package.
+const captureToolDefinitionParametersEnvVar = "ADK_INSTRUMENTATION_GENAI_CAPTURE_TOOL_DEFINITION_PARAMETERS"
+
 // TestTelemetrySchema_AgentWithTool runs the canonical
 // "llmagent with one FunctionTool" scenario end-to-end and asserts
 // the emitted span+log tree matches the expected shape exactly.
@@ -52,29 +56,48 @@ const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_
 // adk-python/tests/unittests/telemetry/test_functional.py.
 func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 	tests := []struct {
-		name           string
-		captureContent bool
-		want           *telemetrytest.SpanDigest
+		name              string
+		captureContent    bool
+		captureParameters bool
+		want              *telemetrytest.SpanDigest
 	}{
 		{
-			name:           "elided",
-			captureContent: false,
-			want:           telemetrytestcase.AgentWithToolCase,
+			name:              "elided",
+			captureContent:    false,
+			captureParameters: false,
+			want:              telemetrytestcase.AgentWithToolCase,
 		},
 		{
-			name:           "capture_content",
-			captureContent: true,
-			want:           telemetrytestcase.AgentWithToolCaptureContentCase,
+			name:              "capture_content",
+			captureContent:    true,
+			captureParameters: false,
+			want:              telemetrytestcase.AgentWithToolCaptureContentCase,
+		},
+		{
+			name:              "capture_content_and_tool_parameters",
+			captureContent:    true,
+			captureParameters: true,
+			want:              telemetrytestcase.AgentWithToolCaptureContentAndParametersCase,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Register before t.Setenv so environment restoration runs before
+			// ApplyEnv refreshes the package-level telemetry settings.
+			t.Cleanup(telemetry.ApplyEnv)
 			if tc.captureContent {
 				// Spans have to be named: a truthy value means log records only.
 				t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
 			} else {
 				t.Setenv(captureMessageContentEnvVar, "")
+			}
+			// Keep this end-to-end test independent of a developer's local
+			// tool-schema capture setting.
+			if tc.captureParameters {
+				t.Setenv(captureToolDefinitionParametersEnvVar, "true")
+			} else {
+				t.Setenv(captureToolDefinitionParametersEnvVar, "")
 			}
 			telemetry.ApplyEnv()
 
