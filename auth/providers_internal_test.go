@@ -114,11 +114,11 @@ func TestLazyTokenSourceHonorsCallerCancellation(t *testing.T) {
 		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
 	})
 
-	// A caller with an already-cancelled context must not block on the init.
-	cancelled, cancel := context.WithCancel(context.Background())
+	// A caller with an already-canceled context must not block on the init.
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := p.Credential(cancelled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Credential(cancelled) error = %v, want context.Canceled", err)
+	if _, err := p.Credential(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Credential(canceled) error = %v, want context.Canceled", err)
 	}
 
 	// Let the detached init finish; a fresh caller then reuses the memoized source.

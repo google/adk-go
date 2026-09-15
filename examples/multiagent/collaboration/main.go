@@ -303,7 +303,7 @@ func main() {
 	weatherCheckerInstruction := `You report current weather conditions.
 If no location is given, call ` + "`user_info`" + ` to find the user's home city.
 Always call ` + "`geocode_address`" + ` to convert the location into coordinates, then ` + "`get_weather`" + `.
-Finish with a single sentence summarising the conditions and temperature.
+Finish with a single sentence summarizing the conditions and temperature.
 `
 
 	flightBookerInstruction := `You book exactly one flight for the user.

@@ -44,7 +44,7 @@ var nonDeterministicSpanAttributes = map[string]bool{
 	"gcp.vertex.agent.tool_response":  true, // contains generated event ids
 }
 
-// SpanDigest is a deterministic snapshot of a span: name, normalised
+// SpanDigest is a deterministic snapshot of a span: name, normalized
 // attributes, status, child spans, and the log records emitted while
 // the span was active.
 type SpanDigest struct {

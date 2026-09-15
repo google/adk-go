@@ -53,7 +53,7 @@ func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context 
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
 // Please mind that if you already have commonContext, you should use WithDelta to
-// create child contextes
+// create child contexts
 func NewContext(parent InvocationContext) Context {
 	if p, ok := parent.(*commonContext); ok {
 		return &commonContext{

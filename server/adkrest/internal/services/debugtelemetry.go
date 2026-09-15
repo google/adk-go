@@ -171,7 +171,7 @@ type DebugLog struct {
 //     default — the server records body.content as the string "<elided>",
 //     while the UI requires an object with a "parts" array for user messages
 //     and choices. The elision moves inside the structure instead.
-//   - A body that cannot be marshalled at all, a NaN float for example. The
+//   - A body that cannot be marshaled at all, a NaN float for example. The
 //     handler encodes every span in one call, so one of those truncates the
 //     response.
 func normalizeLogBody(eventName string, body any) any {

@@ -41,7 +41,7 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 // the scheduler observes Event.RequestedInput and transitions the
 // node to NodeWaiting.
 //
-// The event also carries a synthesised FunctionCall part with name
+// The event also carries a synthesized FunctionCall part with name
 // WorkflowInputFunctionCallName and ID equal to req.InterruptID,
 // plus req.InterruptID in LongRunningToolIDs. This shape makes
 // Event.IsFinalResponse() return true so the surrounding agent
@@ -77,7 +77,7 @@ func NewRequestInputEvent(ctx agent.InvocationContext, req session.RequestInput)
 	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.RequestedInput = &req
 
-	// Synthesise the FunctionCall part so generic
+	// Synthesize the FunctionCall part so generic
 	// FunctionResponse-by-ID dispatch can route the human's reply
 	// back to this agent on the follow-up turn. Args mirror the
 	// RequestInput fields so a client that does not parse the

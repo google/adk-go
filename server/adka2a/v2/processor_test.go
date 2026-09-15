@@ -39,7 +39,7 @@ func modelPartialResponseFromParts(parts ...*genai.Part) model.LLMResponse {
 
 func newNonPartialArtifactEvent(task *a2a.Task, parts ...*a2a.Part) *a2a.TaskArtifactUpdateEvent {
 	ev := a2a.NewArtifactEvent(task, parts...)
-	// It is important for events to be explicitely marked as ADK partial or non-partial.
+	// It is important for events to be explicitly marked as ADK partial or non-partial.
 	// This signals to consumers that the remote agent is running its own aggregation logic.
 	ev.Metadata = map[string]any{metadataPartialKey: false}
 	return ev
