@@ -56,16 +56,28 @@ func (f ProviderFunc) Credential(ctx context.Context) (Credential, error) {
 // before a credential can be issued. Consumers detect it with errors.As.
 type ConsentRequiredError struct {
 	// AuthURI is the URL the end user must visit to grant consent.
+	//
+	// Hand it to that user and to nobody else. It is built by the credentials
+	// service, and a 3-legged authorization URI normally carries the acting user
+	// in a login_hint parameter, so it is not redacted the way service text in
+	// other errors is — the identifier in it is what makes the URL work. Do not
+	// log it, do not put it in a span, and do not serialize this error: every
+	// field is exported, so a json.Marshal of it publishes the URI whatever
+	// Error() says.
 	AuthURI string
 	// Nonce is an opaque value echoed back to correlate the consent response.
+	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
 	// Key is the credential-store key to resume the flow under.
 	Key string
 }
 
-// Error implements error.
+// Error implements error. It deliberately omits AuthURI: this error becomes a
+// tool's error, which is fed to the model and persisted in the session, and the
+// consent URI carries the state and nonce that bind the credential. Consumers
+// read it off the field.
 func (e *ConsentRequiredError) Error() string {
-	return fmt.Sprintf("auth: interactive consent required (auth_uri=%q)", e.AuthURI)
+	return "auth: interactive consent required"
 }
 
 // StaticToken returns a provider that always yields the given bearer token.

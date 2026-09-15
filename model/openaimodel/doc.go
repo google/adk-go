@@ -21,6 +21,28 @@
 // providers that expose the OpenAI Responses API surface. This package
 // allows for easy integration of OpenAI's language models into applications.
 //
+// Every top-level field of genai.GenerateContentConfig is either translated to
+// the Responses API or rejected with an error naming it, the pre-existing errors
+// being checked first so existing errors.Is call sites are unaffected. Rejection
+// keys on presence, which is only observable where the zero value cannot itself
+// be a setting, so a plain bool or string carrying its zero — AudioTimestamp
+// false, CachedContent or MediaResolution empty — passes unremarked, as does
+// HTTPOptions.Headers, ignored by design because headers addressed to another
+// backend must not reach OpenAI.
+//
+//	Translated  Temperature, TopP, MaxOutputTokens, SystemInstruction,
+//	            ResponseMIMEType, ResponseSchema, ResponseJsonSchema,
+//	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
+//	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
+//	Rejected    TopK, StopSequences, CandidateCount above one, the penalties,
+//	            Labels, SafetySettings, an unsupported ResponseMIMEType, Seed,
+//	            CachedContent, ResponseModalities, MediaResolution,
+//	            SpeechConfig, AudioTimestamp, ImageConfig, RoutingConfig,
+//	            ModelSelectionConfig, ModelArmorConfig,
+//	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
+//	            HTTPOptions apart from Timeout and Headers
+//	Ignored     HTTPOptions.Headers
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()
