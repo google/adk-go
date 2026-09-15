@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -474,4 +475,41 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 	if cmp.Diff(reversed, first) == "" {
 		t.Errorf("tied events came back in reverse insertion order:\n%v", first)
 	}
+}
+
+// TestDatabaseService_NonJSONStateErrorSurfaces guards against the
+// GormValuer path discarding json.Marshal errors: stateMap.GormValue used to
+// do `data, _ := json.Marshal(sm)` and bind an empty payload, and because
+// GORM dispatches GormValuer before driver.Valuer, the error-returning
+// Value() path was never reached. A NaN state value must fail the write at
+// the boundary instead of silently persisting an empty state (#1537).
+func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user-bad",
+		State:   map[string]any{"bad": math.NaN()},
+	}); err == nil {
+		t.Fatalf("expected an error writing non-JSON state (NaN), got nil")
+	}
+
+	// The session row for the bad write must not exist: the write must fail
+	// at the boundary, not persist an empty payload.
+	var count int64
+	if err := s.db.Model(&storageSession{}).Where("app_name = ? AND user_id = ?", "app", "user-bad").Count(&count).Error; err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no persisted session for the failing write, found %d", count)
+	}
+
 }
