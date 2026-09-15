@@ -17,7 +17,6 @@ package web
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -34,6 +33,11 @@ import (
 	"google.golang.org/adk/v2/internal/cli/util"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+)
+
+const (
+	logStartingWebServer = "Starting the web server: %+v"
+	logWebServerStartsOn = "Web servers starts on %s"
 )
 
 // webConfig contains parameters for launching web server
@@ -182,7 +186,8 @@ func applyServiceDefaults(config *launcher.Config) {
 	}
 }
 
-// Run implements launcher.SubLauncher.
+// Run implements launcher.SubLauncher. It takes ownership of the telemetry
+// providers initialized for execution and shuts them down on exit.
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	applyServiceDefaults(config)
 
@@ -207,19 +212,26 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		}
 	}
 
-	log.Printf("Starting the web server: %+v", w.config)
-	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
-	log.Printf("Web servers starts on %s", webUrl)
-	for _, l := range w.activeSublaunchers {
-		l.UserMessage(webUrl, log.Println)
-	}
-	log.Println()
-
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
 	if err != nil {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
+		defer cancel()
+		if err := telemetryService.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown failed: %v", err)
+		}
+	}()
+
+	log.Printf(logStartingWebServer, w.config)
+	log.Println()
+	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
+	log.Printf(logWebServerStartsOn, webUrl)
+	for _, l := range w.activeSublaunchers {
+		l.UserMessage(webUrl, log.Println)
+	}
+	log.Println()
 
 	srv := w.buildHTTPServer(router)
 
@@ -236,9 +248,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		log.Println("Shutting down the web server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
 		defer cancel()
-		serverErr := srv.Shutdown(shutdownCtx)
-		telemetryErr := telemetryService.Shutdown(shutdownCtx)
-		return errors.Join(serverErr, telemetryErr)
+		return srv.Shutdown(shutdownCtx)
 	case err, ok := <-errChan:
 		if !ok {
 			return nil
