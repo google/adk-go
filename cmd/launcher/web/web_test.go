@@ -565,7 +565,7 @@ func TestHealthFallbackKeepsRouterBehaviour(t *testing.T) {
 }
 
 // scopedHealthSublauncher registers healthPath behind a host matcher, so it
-// answers some requests for the path and rejects others.
+// answers requests for one host and rejects the rest.
 type scopedHealthSublauncher struct{}
 
 func (scopedHealthSublauncher) Keyword() string { return "scopedhealth" }
@@ -581,12 +581,14 @@ func (scopedHealthSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config
 	return nil
 }
 
-// TestScopedHealthRouteDoesNotDisableTheFallback covers a route that claims the
-// path only for some requests.
+// TestNarrowedHealthRouteStillOwnsThePath pins the ownership contract for a
+// route that narrows healthPath with a matcher.
 //
-// Treating it as owning the path switches the fallback off for every request,
-// including the ones its own matcher rejects, so an ordinary probe 404s.
-func TestScopedHealthRouteDoesNotDisableTheFallback(t *testing.T) {
+// It owns the path outright, so the fallback stands down and the requests its
+// own matcher rejects reach nothing. The alternative is for the fallback to
+// answer those, which shadows the route on the host it was written for.
+// Declaring healthPath means answering every request for it.
+func TestNarrowedHealthRouteStillOwnsThePath(t *testing.T) {
 	l := NewLauncher(scopedHealthSublauncher{}).(*webLauncher)
 	if _, err := l.Parse([]string{"scopedhealth"}); err != nil {
 		t.Fatalf("Parse() failed: %v", err)
@@ -596,11 +598,25 @@ func TestScopedHealthRouteDoesNotDisableTheFallback(t *testing.T) {
 		t.Fatalf("buildRouter() failed: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+	t.Run("its own host reaches it", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, healthPath, nil)
+		req.Host = "internal.example.com"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("GET %s status = %d, want %d; a host-scoped route switched off the fallback "+
-			"for requests it does not match", healthPath, rec.Code, http.StatusOK)
-	}
+		if rec.Code != http.StatusTeapot {
+			t.Errorf("GET %s status = %d, want %d; the fallback shadowed the route on its own host",
+				healthPath, rec.Code, http.StatusTeapot)
+		}
+	})
+
+	t.Run("any other host reaches nothing", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthPath, nil))
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want %d; declaring the path has to switch the fallback off",
+				healthPath, rec.Code, http.StatusNotFound)
+		}
+	})
 }

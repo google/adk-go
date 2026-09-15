@@ -151,23 +151,15 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// applyServiceDefaults fills in the one service the launcher can safely assume.
+// applyServiceDefaults sets an in-memory session service when the caller left
+// one unset. Every request path needs a session service, and a nil one panics
+// mid-request, which drops the connection with no HTTP response.
 //
-// Only the session service. Every request path needs one, and it is what the
-// launcher defaulted before the artifact and memory services were added
-// alongside it.
-//
-// Those two are deliberately left as the caller set them, which for an
-// unconfigured caller means nil. Nothing crashes on that any more. The artifact
-// handlers answer 503 naming the missing service, and the runner only builds
-// the memory wrapper when a service exists, so SearchMemory reports "memory
-// service is not set" rather than dereferencing nothing.
-//
-// Filling them in instead is what made a misconfigured deployment look healthy:
-// it came up, served requests, and lost everything it had stored on the next
-// restart. A 503 that names the missing service is the more useful answer, and
-// it is the caller's decision to make. examples/web/main.go shows the intended
-// pattern.
+// Artifact and memory stay as the caller set them. Nil is safe: the artifact
+// handlers answer 503 naming the service, and SearchMemory reports "memory
+// service is not set". Filling them in instead let an unconfigured deployment
+// come up healthy and lose everything on the next restart.
+// examples/web/main.go shows the intended wiring.
 func applyServiceDefaults(config *launcher.Config) {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
@@ -336,23 +328,16 @@ const healthPath = "/health"
 
 // withHealthFallback answers healthPath when nothing else declares it.
 //
-// The fallback is a route on an outer router rather than a check in front of
-// the inner one. Answering before the inner router runs skips its middleware
-// and its StrictSlash handling, so probes stopped appearing in the request log
-// and /health/ 404ed instead of redirecting.
-//
 // Registering on the inner router does not work in either position. First
 // shadows a /health a sublauncher serves itself, so a draining instance keeps
 // reporting ok. Last puts it behind any catch-all a sublauncher mounted, so the
 // probe path 404s. An outer router with the inner one as its final route avoids
-// both.
+// both, and keeps the inner router's middleware and StrictSlash, which a check
+// in front of it would skip.
 //
-// A sublauncher that declares healthPath owns it completely, on every method.
-// Answering HEAD here while it answers GET is the same shadowing bug on one
-// verb, and HEAD is what HAProxy and nginx probe with by default. The
-// consequence is worth stating plainly: a sublauncher that registers healthPath
-// for GET alone makes HEAD a 405, where it used to be 200, so a HEAD probe
-// marks the instance down. That is what ownership means here, not an oversight.
+// A sublauncher that declares healthPath owns it outright: every method, every
+// host, every query. Declaring it for GET alone makes HEAD a 405, and HEAD is
+// what HAProxy and nginx probe with by default, so declare both.
 //
 // Run calls this rather than BuildBaseRouter doing it, so an embedder building
 // its own server keeps /health for itself.
@@ -369,31 +354,21 @@ func withHealthFallback(router *mux.Router) http.Handler {
 	return outer
 }
 
-// declaresHealthRoute reports whether a route claims healthPath unconditionally.
+// declaresHealthRoute reports whether a route declares healthPath.
 //
 // It reads the path template rather than serving a probe request, because a
 // catch-all would answer such a probe without meaning to own the path, and a
 // catch-all is exactly what the fallback has to beat.
 //
-// A route that also carries a host or query matcher does not count. It answers
-// some requests for the path and not others, so switching the fallback off for
-// all of them would 404 the ones its own matcher rejects. Header matchers are
-// not reachable through the mux API, so a route scoped only by a header still
-// counts as owning the path.
+// The template is the whole test. A route that narrows healthPath with a host
+// or query matcher still owns it, and the fallback stands down for every
+// request, so such a route has to answer them all.
 func declaresHealthRoute(router *mux.Router) bool {
 	declared := false
 	_ = router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
-		tmpl, err := route.GetPathTemplate()
-		if err != nil || tmpl != healthPath {
-			return nil
+		if tmpl, err := route.GetPathTemplate(); err == nil && tmpl == healthPath {
+			declared = true
 		}
-		if _, err := route.GetHostTemplate(); err == nil {
-			return nil
-		}
-		if q, err := route.GetQueriesTemplates(); err == nil && len(q) > 0 {
-			return nil
-		}
-		declared = true
 		return nil
 	})
 	return declared
