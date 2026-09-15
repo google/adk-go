@@ -3,8 +3,7 @@ FROM node:iron-trixie AS downloader
 RUN apt-get update && apt-get install -y git
 
 # The upstream revision to build. A SHA rather than a tag, because upstream can
-# move a tag. 33c3568 is upstream tag v1.0.5, dated 2026-08-26. Pass
-# --build-arg ADK_WEB_REF=<sha-or-tag> for a one-off build; see
+# move a tag. Pass --build-arg ADK_WEB_REF=<sha-or-tag> for a one-off build; see
 # scripts/adk-web/README.md for how to move the pin for everyone.
 #
 # Keep it pinned. This used to clone `main` behind a cache-buster, so a refresh
