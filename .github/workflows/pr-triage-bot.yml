@@ -1,0 +1,198 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Assigns a shepherd to every incoming pull request, and optionally asks the
+# author for missing context. It never labels and never re-assigns. See
+# examples/githubbots/pr-triage/README.md.
+#
+# SECURITY: this workflow runs on `pull_request_target`, so it executes with the
+# BASE repository's token and secrets while the pull request comes from a fork.
+# That combination is the most dangerous trigger GitHub Actions offers, and the
+# rules below are what make it safe:
+#
+#   - It uses the DEFAULT checkout, which is the base branch — trusted code. It
+#     never checks out, builds or runs anything from the pull request head.
+#   - Nothing from the pull request reaches a shell. The bot reads the pull
+#     request through the GitHub API and treats its title, description and
+#     changed-file paths as untrusted data.
+#   - The only value that crosses into a `run:` block is the pull request
+#     number, which arrives through `env:` and is rejected unless it is digits.
+#
+# Configuration (repository settings, not this file):
+#   - vars.PR_TRIAGE_OWNER_MAP  required: "component=login,component=login".
+#                               The job is SKIPPED while this is unset, so the
+#                               bot is inert until a maintainer configures it.
+#   - vars.PR_TRIAGE_DRY_RUN    optional kill switch: set to "true" to log
+#                               intended actions without performing any. It can
+#                               force a dry run but never force a live one.
+#   - secrets.GEMINI_API_KEY    required: Gemini API key.
+name: PR Triage Bot
+
+# zizmor rates pull_request_target High on the grounds that it is "almost always
+# used insecurely", and it is right to. It is suppressed here rather than
+# avoided because this bot cannot do its job without it: assigning an owner to a
+# pull request from a FORK requires the base repository's token, which the plain
+# pull_request trigger does not provide. adk-python and adk-java run the same
+# trigger for the same reason.
+#
+# What the rule exists to catch is a workflow that combines that token with the
+# fork's code. This one does not, and the three things that would make it unsafe
+# are each absent by construction and asserted by a test in workflow_test.go:
+#   - it never checks out the pull request head (no `ref:` anywhere, so the
+#     default checkout is the base branch, which is trusted code);
+#   - it never builds, runs or sources anything the fork wrote -- `go run` builds
+#     from the base branch's own go.mod and go.sum;
+#   - the only event-supplied value that reaches a shell is the pull request
+#     number, passed through env: and rejected unless it matches ^[0-9]+$.
+# The pull request's text is read through the API and treated as untrusted data
+# by the bot itself. See examples/githubbots/pr-triage/README.md.
+on: # zizmor: ignore[dangerous-triggers]
+  # Only events that bring in a new pull request are listed. `synchronize` and a
+  # periodic backfill would each re-assign an owner a maintainer had just taken
+  # off, so removing an assignee stays a decision this bot cannot undo.
+  # Drafts are skipped by the bot and picked up here on ready_for_review.
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request to triage (leave empty for a batch over unassigned pull requests)'
+        required: false
+        type: string
+      pr_count:
+        description: 'How many pull requests to process in batch mode'
+        required: false
+        default: '10'
+        type: string
+      dry_run:
+        description: 'Log intended actions without assigning or commenting'
+        required: false
+        default: false
+        type: boolean
+
+# ONE triage run at a time, repository-wide. The group is deliberately constant.
+#
+# A per-pull-request group serializes same-pull-request runs but lets DIFFERENT
+# pull requests run concurrently, and this job is reachable by any stranger:
+# pull_request_target runs from the base branch and is not subject to the
+# "require approval for first-time contributors" gate that holds back the main
+# `pull_request` CI. So N open pull requests meant N concurrent runners, and
+# opening pull requests is free.
+#
+# The trade-off, stated plainly because it is not free: with the default
+# `queue: single`, a run queued while another is pending CANCELS that pending
+# run. Under contention some pull requests are therefore not auto-triaged. That
+# is the right failure mode here -- the bot is advisory, a maintainer can assign
+# by hand, and workflow_dispatch with a pr_number re-runs triage for a specific
+# one. Dropping an advisory action under load beats handing a stranger the
+# organisation's runner pool.
+#
+# (`queue: max` would queue up to 100 instead of dropping, which is strictly
+# better, but actionlint 1.7.12 does not know that key yet and rejects the file.
+# Worth revisiting when the linter catches up.)
+concurrency:
+  group: pr-triage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    # Upstream only, and only once an owner map exists. A missing map skips the
+    # job rather than failing it, so an unconfigured bot never puts a red check
+    # on a contributor's pull request.
+    if: github.repository == 'google/adk-go' && vars.PR_TRIAGE_OWNER_MAP != ''
+    runs-on: ubuntu-latest
+    # Deliberately tight. The event path triages exactly ONE pull request, which
+    # takes about a minute; the old 15 was sized for a batch. Since a stranger
+    # can trigger this job directly, the ceiling is also the per-attack cost.
+    # The process budget below (RUN_BUDGET) is lower, so an overrun is reported
+    # by the bot with a diagnosis instead of the job being killed here.
+    timeout-minutes: 8
+    permissions:
+      # Covers both assignees and comments on a pull request. The bot needs
+      # nothing wider: it does not label, push, or read any other repository.
+      pull-requests: write
+      contents: read
+
+    steps:
+      # Default checkout: the base branch (trusted code), NOT the pull request
+      # head. Do not add `ref:` here.
+      - name: Checkout the base branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: ./.github/actions/setup
+
+      # The pull request number is the only event-supplied value that reaches a
+      # shell. It arrives through env (never interpolated into the script) and is
+      # rejected unless it is digits, so it cannot carry shell metacharacters or
+      # a newline into the step output.
+      - name: Resolve the pull request number
+        id: target
+        env:
+          RAW_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number || '' }}
+          RAW_PR_COUNT: ${{ inputs.pr_count || '10' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${RAW_PR_NUMBER}" && ! "${RAW_PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "pr_number must be digits only; rejecting the run" >&2
+            exit 1
+          fi
+          if [[ ! "${RAW_PR_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "pr_count must be digits only; rejecting the run" >&2
+            exit 1
+          fi
+          echo "pr_number=${RAW_PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "pr_count=${RAW_PR_COUNT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run the PR triage bot
+        working-directory: examples/githubbots/pr-triage
+        env:
+          # The built-in token, scoped by the permissions block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          # The complete set of logins this bot may ever assign.
+          OWNER_MAP: ${{ vars.PR_TRIAGE_OWNER_MAP }}
+          # The identity the bot posts under. GET /user is a user-to-server
+          # endpoint and answers 403 for the installation token above, so the
+          # bot cannot discover this for itself; without it, it cannot recognize
+          # its own past comment and would ask the same author again.
+          BOT_LOGIN: 'github-actions[bot]'
+          # Empty on a batch dispatch, which is how the bot selects batch mode.
+          PULL_REQUEST_NUMBER: ${{ steps.target.outputs.pr_number }}
+          PR_COUNT: ${{ steps.target.outputs.pr_count }}
+          # Either channel can ask for a dry run and neither can veto one. A
+          # plain `vars.X || inputs.dry_run` would go the wrong way: the string
+          # "false" is truthy in an expression, so a variable set to "false"
+          # would override an explicit `dry_run: true` and run live.
+          DRY_RUN: ${{ (vars.PR_TRIAGE_DRY_RUN == 'true' || inputs.dry_run) && 'true' || 'false' }}
+          # Below the job's timeout-minutes, so the bot reports its own overrun.
+          RUN_BUDGET: 5m
+          # One pull request; the default 5m was sized for a batch.
+          PR_TIMEOUT: 3m
+          # Pinned, not floating. adk-python pins LLM_MODEL_NAME too, and a
+          # floating alias silently changes the deployed model. gemini-flash-latest
+          # measured 0/5 on this key path during a shedding window while
+          # gemini-3.6-flash measured 5/5. The Go default is left alone so the
+          # example stays copyable; the deployed model is a reviewable line here.
+          LLM_MODEL_NAME: gemini-3.6-flash
+        run: |
+          set -euo pipefail
+          go run -mod=readonly .
