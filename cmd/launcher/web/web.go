@@ -21,7 +21,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +40,7 @@ import (
 
 // webConfig contains parameters for launching web server
 type webConfig struct {
+	host            string
 	port            int
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
@@ -209,7 +212,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 
 	log.Printf("Starting the web server: %+v", w.config)
 	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
+	webUrl := "http://" + net.JoinHostPort(browsableHost(w.config.host), strconv.Itoa(w.config.port))
 	log.Printf("Web servers starts on %s", webUrl)
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
@@ -247,9 +250,20 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 }
 
+// browsableHost is the host to show the user. A wildcard bind answers on every
+// address the machine has, and localhost is the one that always reaches it
+// from the machine itself.
+func browsableHost(host string) string {
+	switch host {
+	case "", "0.0.0.0", "::":
+		return "localhost"
+	}
+	return host
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		Addr:         net.JoinHostPort(w.config.host, strconv.Itoa(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -281,7 +295,8 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.StringVar(&config.host, "host", "127.0.0.1", "Address to bind the server to. The default accepts connections from this machine only. Pass 0.0.0.0 to accept them from the network - these endpoints are unauthenticated, so only do that on a network you trust.")
+	fs.IntVar(&config.port, "port", 8080, "Port for the server")
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")

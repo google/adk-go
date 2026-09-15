@@ -480,3 +480,85 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
 	}
 }
+
+// TestBindAddress pins that the server binds what -host and -port say, and
+// that the default is loopback. A wildcard bind puts the unauthenticated REST
+// API and the /run_live WebSocket on every interface the machine has.
+func TestBindAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "loopback by default", want: "127.0.0.1:8080"},
+		{name: "explicit port", args: []string{"--port", "9000"}, want: "127.0.0.1:9000"},
+		{name: "opt in to every interface", args: []string{"--host", "0.0.0.0"}, want: "0.0.0.0:8080"},
+		{name: "IPv6 host is bracketed", args: []string{"--host", "::1"}, want: "[::1]:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher().(*webLauncher)
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", tc.args, err)
+			}
+			if got := l.buildHTTPServer(nil).Addr; got != tc.want {
+				t.Errorf("Addr = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultBindIsLoopbackSocket pins the kernel outcome rather than the
+// string. net.Listen(":8080") returns a socket on the unspecified address,
+// which answers on every interface the machine has, and that is the exposure
+// in issue #1154. Port 0 so the test cannot collide with a real server.
+func TestDefaultBindIsLoopbackSocket(t *testing.T) {
+	l := NewLauncher().(*webLauncher)
+	if _, err := l.Parse([]string{"--port", "0"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", l.buildHTTPServer(nil).Addr)
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("listener Close() failed: %v", err)
+		}
+	})
+
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", ln.Addr())
+	}
+	if addr.IP.IsUnspecified() {
+		t.Errorf("bound %v, which answers on every interface", addr)
+	}
+	if !addr.IP.IsLoopback() {
+		t.Errorf("bound %v, want a loopback address", addr)
+	}
+}
+
+// TestBrowsableHost pins the mapping the startup URL relies on. A wildcard
+// bind answers everywhere, so localhost is the spelling that reaches it from
+// this machine; any other host is printed as given, because that is the only
+// address the socket is on.
+func TestBrowsableHost(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want string
+	}{
+		{host: "", want: "localhost"},
+		{host: "0.0.0.0", want: "localhost"},
+		{host: "::", want: "localhost"},
+		{host: "127.0.0.1", want: "127.0.0.1"},
+		{host: "::1", want: "::1"},
+		{host: "192.168.1.5", want: "192.168.1.5"},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := browsableHost(tc.host); got != tc.want {
+				t.Errorf("browsableHost(%q) = %q, want %q", tc.host, got, tc.want)
+			}
+		})
+	}
+}
