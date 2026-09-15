@@ -102,6 +102,10 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 		err = tableRef.Create(ctx, &bq.TableMetadata{
 			Schema: EventsSchema(),
+			TimePartitioning: &bq.TimePartitioning{
+				Field: "timestamp",
+				Type:  bq.DayPartitioningType,
+			},
 			Clustering: &bq.Clustering{
 				Fields: config.ClusteringFields,
 			},
