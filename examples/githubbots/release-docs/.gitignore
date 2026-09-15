@@ -1,0 +1,5 @@
+# Local configuration; never commit real credentials.
+.env
+
+# Built binary.
+release-docs
