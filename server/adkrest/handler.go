@@ -104,20 +104,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
-		&routers.AgentBuilderAPIRouter{},
+		&routers.AgentBuilderAPIRouter{}, // Ungated on purpose; see its doc comment.
 		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	}
-	// These routes are opt-in because they describe the agent rather than serve
-	// it. The trace routes carry tool-call arguments and responses, and the
-	// agent-graph routes disclose the agent tree and, through the DOT source,
-	// the name of every tool the agent can call. adk-python keeps both in
-	// DevServer, a class its production server never instantiates.
-	//
-	// The agent builder routes are deliberately not here. They read no agent
-	// and disclose nothing, and gating the empty 200 that disables the UI's
-	// builder toggle would turn it into the error status that handler exists to
-	// avoid.
+	// Opt-in: traces carry tool-call arguments and responses, and the agent
+	// graph names every tool the agent can call.
 	if cfg.DebugAPIConfig.IncludeDebugAPI {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
@@ -201,16 +193,12 @@ type ServerConfig struct {
 
 // DebugAPIConfig contains parameters for the debug API.
 type DebugAPIConfig struct {
-	// IncludeDebugAPI serves the developer routes that describe an agent
-	// rather than run it: [routers.NewDebugAPIRouter], whose traces carry
-	// tool-call arguments and responses, and [routers.NewAgentGraphAPIRouter],
-	// whose DOT source names every tool the agent can call.
+	// IncludeDebugAPI serves [routers.NewDebugAPIRouter] and
+	// [routers.NewAgentGraphAPIRouter], which expose tool-call arguments,
+	// responses and tool names. The web UI's Traces and agent structure
+	// panels need them.
 	//
 	// WARNING: do not use debug api on PROD environment
-	//
-	// It is off by default, so a server that does not set it answers 404 on
-	// those paths. The web UI calls them, so without this its Traces panel and
-	// agent-structure panel do not render.
 	IncludeDebugAPI bool
 }
 

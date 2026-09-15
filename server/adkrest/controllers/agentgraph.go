@@ -155,9 +155,8 @@ func (c *AgentGraphAPIController) loadAgent(rw http.ResponseWriter, req *http.Re
 		http.Error(rw, err.Error(), http.StatusNotFound)
 		return nil, false
 	}
-	// AgentLoader is an interface a caller implements, so it can hand back a
-	// nil agent with a nil error. Without this the handler dereferences it and
-	// panics, dropping the connection with no HTTP response at all.
+	// A Loader may return a nil agent with a nil error. Dereferencing it
+	// panics, which drops the connection without any HTTP response.
 	if loaded == nil {
 		http.Error(rw, "agent "+appName+" not found", http.StatusNotFound)
 		return nil, false

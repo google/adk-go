@@ -291,11 +291,8 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       api:  you can access API using %s%s", webURL, a.config.pathPrefix))
 	printer(fmt.Sprintf("       api:      for instance: %s%s/list-apps", webURL, a.config.pathPrefix))
 	if !a.config.includeDebugAPI {
-		// Say it here rather than leave it to be inferred from a 404 in the
-		// browser console. These routes are off by default because they expose
-		// tool-call arguments, responses and tool names, so an operator has to
-		// ask for them. Nothing else says which panels that costs.
-		printer("       api:      the web UI's Traces and agent structure panels need -include_debug_api")
+		// Otherwise the only signal is a 404 in the browser console.
+		printer("       api:      debug excluded: for the web UI's Traces and agent structure panels, use -include_debug_api")
 	}
 }
 
@@ -367,7 +364,12 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
-	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "Serve the developer endpoints that describe an agent rather than run it: the debug trace routes, whose payloads carry tool-call arguments and responses, and the agent graph routes, whose output names every tool the agent can call. The web UI needs this for its Traces and agent structure panels. Off by default. !!! WARNING !!! : debug endpoints are not safe to be used in production environment, do not set them to true in production.")
+	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, ""+
+		"Serve the debug trace and agent graph endpoints, which expose tool-call "+
+		"arguments, responses and tool names. The web UI's Traces and agent "+
+		"structure panels need them. "+
+		"!!! WARNING !!! : debug endpoints are not safe to be used in production "+
+		"environment, do not set them to true in production.")
 
 	return &apiLauncher{
 		config: config,

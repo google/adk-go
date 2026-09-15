@@ -21,12 +21,8 @@ import (
 )
 
 // AgentGraphAPIRouter defines the routes behind the web UI's agent-structure
-// panel.
-//
-// These are separate from the builder routes because only these two disclose
-// anything: the tree of agents, and, through the DOT source, the name of every
-// tool the agent can call. That is what puts them behind IncludeDebugAPI, and
-// the builder routes must not be dragged along with them.
+// panel. They return the agent tree, and the DOT source names every tool the
+// agent can call, so they are registered only under IncludeDebugAPI.
 type AgentGraphAPIRouter struct {
 	graphController *controllers.AgentGraphAPIController
 }
@@ -58,11 +54,9 @@ const builderDetail = "ADK Go agents are defined in Go code, so there is no serv
 
 // AgentBuilderAPIRouter defines the web UI's agent builder routes.
 //
-// It is registered unconditionally, unlike the graph routes it used to share a
-// router with. None of these reads an agent or reveals anything about one: the
-// GET answers empty and the writes answer 501. Putting them behind
-// IncludeDebugAPI would turn the deliberate empty 200 into a 404, which is the
-// error status AgentBuilderConfigHandler exists to avoid.
+// These are registered unconditionally. They read no agent and disclose
+// nothing: the GET answers an empty 200, which is how the UI knows to disable
+// its builder toggle, and the writes answer 501.
 type AgentBuilderAPIRouter struct{}
 
 // Routes returns the routes for the agent builder API.
