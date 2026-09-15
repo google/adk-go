@@ -480,3 +480,90 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
 	}
 }
+
+type pingSublauncher struct{}
+
+func (pingSublauncher) Keyword() string                       { return "ping" }
+func (pingSublauncher) Parse(args []string) ([]string, error) { return args, nil }
+func (pingSublauncher) CommandLineSyntax() string              { return "" }
+func (pingSublauncher) SimpleDescription() string              { return "" }
+func (pingSublauncher) UserMessage(webURL string, printer func(v ...any)) {}
+func (pingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	r.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return nil
+}
+
+// TestHTTPMiddleware_AppliedOutermostFirst covers Config.HTTPMiddleware: each
+// entry wraps the handler returned by the previous one, so the first entry in
+// the slice must be the outermost — the first to see an inbound request.
+func TestHTTPMiddleware_AppliedOutermostFirst(t *testing.T) {
+	var order []string
+
+	makeMiddleware := func(name string) func(http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				order = append(order, name)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	l := NewLauncher(pingSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "ping"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	config := &launcher.Config{
+		HTTPMiddleware: []func(http.Handler) http.Handler{
+			makeMiddleware("first"),
+			makeMiddleware("second"),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- l.Run(ctx, config) }()
+
+	addr := fmt.Sprintf("http://127.0.0.1:%d/ping", port)
+	deadline := time.Now().Add(5 * time.Second)
+	var pingErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(addr)
+		pingErr = err
+		if err == nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				t.Fatalf("response body Close() failed: %v", closeErr)
+			}
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pingErr != nil {
+		t.Fatalf("server did not start in time: %v", pingErr)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Run() error = %v, want nil after context cancellation", err)
+	}
+
+	if len(order) < 2 {
+		t.Fatalf("middleware not invoked; got invocation order: %v", order)
+	}
+	if order[0] != "first" || order[1] != "second" {
+		t.Errorf("middleware invocation order = %v, want [first second ...]", order)
+	}
+}

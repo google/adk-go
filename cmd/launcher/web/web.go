@@ -221,7 +221,12 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
 
-	srv := w.buildHTTPServer(router)
+	var handler http.Handler = router
+	for i := len(config.HTTPMiddleware) - 1; i >= 0; i-- {
+		handler = config.HTTPMiddleware[i](handler)
+	}
+
+	srv := w.buildHTTPServer(handler)
 
 	errChan := make(chan error, 1)
 	go func() {
