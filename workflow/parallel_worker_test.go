@@ -30,6 +30,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
+	grpcCodes "google.golang.org/grpc/codes"
+	grpcStatus "google.golang.org/grpc/status"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -425,6 +427,136 @@ func TestParallelWorker_FailFast(t *testing.T) {
 
 	if atomic.LoadInt32(&workerCCancelled) != 1 {
 		t.Error("expected worker c to be cancelled")
+	}
+}
+
+func TestParallelWorker_LowestIndexErrorWins(t *testing.T) {
+	for range 20 {
+		// Both workers return independent errors. Neither error is caused by
+		// fail-fast cancellation. Disable cancellation for this test so both
+		// results reach the aggregation loop; fail-fast cancellation is covered
+		// by the tests below.
+		wrapped := NewFunctionNode("independent_failures", func(ctx agent.Context, input int) (int, error) {
+			return 0, fmt.Errorf("error %d", input)
+		}, defaultNodeConfig)
+
+		pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		exCtx := &nonCancellingAgentContext{Context: agent.NewContext(newMockCtx(t))}
+		var gotErr error
+		for _, err := range pw.Run(exCtx, []any{0, 1}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if gotErr.Error() != "error 0" {
+			t.Fatalf("expected lowest-index error %q, got %q", "error 0", gotErr)
+		}
+	}
+}
+
+// nonCancellingAgentContext isolates result ordering tests from fail-fast
+// cancellation. The cancellation behavior itself is covered separately.
+type nonCancellingAgentContext struct {
+	agent.Context
+}
+
+func (c *nonCancellingAgentContext) WithAgentCancel() (agent.Context, context.CancelFunc) {
+	return c.Context, func() {}
+}
+
+func TestParallelWorker_FailFastGRPCCancellationDoesNotMaskError(t *testing.T) {
+	wrapped := NewFunctionNode("failure_with_cancellation", func(ctx agent.Context, input int) (int, error) {
+		if input == 0 {
+			<-ctx.Done()
+			return 0, grpcStatus.Error(grpcCodes.Canceled, "context canceled")
+		}
+		return 0, errors.New("error 1")
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exCtx := agent.NewContext(newMockCtx(t))
+	var gotErr error
+	for _, err := range pw.Run(exCtx, []any{0, 1}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotErr.Error() != "error 1" {
+		t.Errorf("expected worker error %q, got %q", "error 1", gotErr)
+	}
+}
+
+func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+
+	wrapped := NewFunctionNode("slow_success", func(ctx agent.Context, input int) (int, error) {
+		startOnce.Do(func() { close(started) })
+		// Deliberately ignore cancellation so the test isolates the dispatch
+		// path and verifies that skipped items still fail the run.
+		<-release
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var hasFinalResult bool
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3, 4}) {
+			if err != nil {
+				gotErr = err
+			}
+			if _, ok := extractOutput(ev); ok {
+				hasFinalResult = true
+			}
+		}
+		close(done)
+	}()
+
+	<-started
+	cancel()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during dispatch")
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected context.Canceled, got nil")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", gotErr)
+	}
+	if hasFinalResult {
+		t.Error("expected no final result after cancellation during dispatch")
 	}
 }
 
