@@ -152,6 +152,20 @@ func (telemetryFailSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Confi
 	return nil
 }
 
+// recordingSublauncher captures the URL Run announces to its sublaunchers.
+type recordingSublauncher struct{ webURL string }
+
+func (*recordingSublauncher) Keyword() string                       { return "record" }
+func (*recordingSublauncher) Parse(args []string) ([]string, error) { return args, nil }
+func (*recordingSublauncher) CommandLineSyntax() string             { return "" }
+func (*recordingSublauncher) SimpleDescription() string             { return "" }
+func (s *recordingSublauncher) UserMessage(webURL string, printer func(v ...any)) {
+	s.webURL = webURL
+}
+func (*recordingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	return nil
+}
+
 // TestRunDoesNotLeakListenerWhenTelemetryInitFails covers issue #1350: when
 // telemetry initialization fails, Run must not leave an HTTP listener bound.
 func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
@@ -560,5 +574,31 @@ func TestBrowsableHost(t *testing.T) {
 				t.Errorf("browsableHost(%q) = %q, want %q", tc.host, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRunAnnouncesTheBoundAddress pins the URL Run prints and hands to every
+// sublauncher, which is the link a developer clicks. A server on 192.168.1.5
+// that still says localhost sends them somewhere the socket is not.
+//
+// Telemetry initialization is made to fail so Run returns right after the
+// announcement, which it makes before binding anything.
+func TestRunAnnouncesTheBoundAddress(t *testing.T) {
+	rec := &recordingSublauncher{}
+	l := NewLauncher(rec).(*webLauncher)
+	if _, err := l.Parse([]string{"--host", "::1", "--port", "9000", "record"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+	if err := l.Run(context.Background(), config); err == nil {
+		t.Fatalf("Run() succeeded, want telemetry initialization failure")
+	}
+
+	if want := "http://[::1]:9000"; rec.webURL != want {
+		t.Errorf("sublauncher was given %q, want %q", rec.webURL, want)
 	}
 }
