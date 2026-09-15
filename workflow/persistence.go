@@ -102,6 +102,18 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	if state == nil {
 		return nil, nil
 	}
+	// Restore completed predecessors as well as interrupted nodes. Join
+	// barriers consult Nodes, not the completed set used to skip replayed
+	// successors, and need the predecessors' outputs after a resume.
+	for name, output := range nodeOutputs {
+		if _, exists := state.Nodes[name]; !exists {
+			ns := &NodeState{Status: NodeCompleted, Output: output}
+			if scan := scans[name]; scan != nil {
+				ns.Branch = scan.branch
+			}
+			state.Nodes[name] = ns
+		}
+	}
 
 	// WAITING nodes have not finished, so Resume must not treat them
 	// as already-run; the rest stay in completed to skip their
@@ -172,7 +184,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
-		if ev.Output != nil {
+		if _, ok := childEventOutput(ev); ok {
 			s.branch = ev.Branch
 		}
 		for _, id := range ev.LongRunningToolIDs {
