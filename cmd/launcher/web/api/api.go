@@ -290,6 +290,10 @@ func registerAPIRoutes(router *mux.Router, pathPrefix string, handler http.Handl
 func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       api:  you can access API using %s%s", webURL, a.config.pathPrefix))
 	printer(fmt.Sprintf("       api:      for instance: %s%s/list-apps", webURL, a.config.pathPrefix))
+	if !a.config.includeDebugAPI {
+		// Otherwise the only signal is a 404 in the browser console.
+		printer("       api:      debug excluded: for the web UI's Traces and agent structure panels, use -include_debug_api")
+	}
 }
 
 // SetupSubrouters adds the API router to the parent router.
@@ -360,7 +364,12 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
-	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true. !!! WARNING !!! : debug endpoints are not safe to be used in production environment, do not set them to true in production. ")
+	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, ""+
+		"Serve the debug trace and agent graph endpoints, which expose tool-call "+
+		"arguments, responses and tool names. The web UI's Traces and agent "+
+		"structure panels need them. "+
+		"!!! WARNING !!! : debug endpoints are not safe to be used in production "+
+		"environment, do not set them to true in production.")
 
 	return &apiLauncher{
 		config: config,
