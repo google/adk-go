@@ -288,6 +288,10 @@ func TestReservedToolNameRefused(t *testing.T) {
 		"google_maps_grounding", // in-model built-in; built by the tool factory
 		"set_model_response",    // added by the output-schema path
 		"transfer_to_agent",     // in-model transfer tool
+		"exit_loop",             // loop control
+		"list_skills",           // skill toolset
+		"load_skill",
+		"load_skill_resource",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := toolsWithServerTool(t, name); err == nil {

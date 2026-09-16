@@ -176,6 +176,10 @@ var reservedToolNames = map[string]struct{}{
 	"code_execution":        {},
 	"load_artifacts":        {},
 	"load_memory":           {},
+	"exit_loop":             {},
+	"list_skills":           {},
+	"load_skill":            {},
+	"load_skill_resource":   {},
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
