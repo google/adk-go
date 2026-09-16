@@ -161,22 +161,21 @@ func (*set) IsLongRunning() bool {
 }
 
 // reservedToolNames are tool names the framework itself puts on the wire. In-model
-// built-ins (google_search, google_maps, ...) only append to the request's config
-// tools and never occupy their name in the tool map, so a server advertising one of
-// these would have its tool dispatched in place of the framework's own. Refuse them
-// at registration instead.
+// built-ins (google_search, google_maps_grounding, ...) only append to the request's
+// config tools and never occupy their name in the tool map, so a server advertising
+// one of these would have its tool dispatched in place of the framework's own.
+// Refuse them at registration instead.
 var reservedToolNames = map[string]struct{}{
-	"set_model_response": {},
-	"transfer_to_agent":  {},
-	"finish_task":        {},
-	"task_completed":     {},
-	"google_search":      {},
-	"google_maps":        {},
-	"url_context":        {},
-	"vertex_ai_search":   {},
-	"code_execution":     {},
-	"load_artifacts":     {},
-	"load_memory":        {},
+	"set_model_response":    {},
+	"transfer_to_agent":     {},
+	"finish_task":           {},
+	"task_completed":        {},
+	"google_search":         {},
+	"google_maps_grounding": {},
+	"url_context":           {},
+	"code_execution":        {},
+	"load_artifacts":        {},
+	"load_memory":           {},
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
