@@ -436,7 +436,7 @@ func hasFunctionCalls(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			return true
 		}
 	}
@@ -448,7 +448,7 @@ func hasFunctionResponses(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			return true
 		}
 	}
@@ -461,7 +461,7 @@ func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 		return false
 	}
 	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
-	return lastPart.CodeExecutionResult != nil
+	return lastPart != nil && lastPart.CodeExecutionResult != nil
 }
 
 // Bounds on a decoded numeric event timestamp, in microseconds: years 1 and
