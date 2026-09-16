@@ -19,6 +19,7 @@ import (
 	"iter"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -564,6 +565,101 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 	args := fcPart.FunctionCall.Args
 	if args["document"] != "Once upon a time..." {
 		t.Errorf("expected document 'Once upon a time...', got '%v'", args["document"])
+	}
+}
+
+func TestStreamingFunctionCallArgsWithArrayJSONPath(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// stream_function_call_arguments sends RFC 9535 JSON paths, which address
+	// array elements as "$.items[0]", not "$.items.0".
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "add_items",
+								ID:   "fc_arr",
+								PartialArgs: []*genai.PartialArg{
+									{JsonPath: "$.items[0]", StringValue: "a"},
+									{JsonPath: "$.items[2].name", StringValue: "x"},
+								},
+								WillContinue: ptr(true),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// A second chunk continues a string at an array element and adds a nested
+	// array value, quoted member names (one carrying an escape), an index past
+	// the aggregator's bound, and a path that conflicts with a scalar already
+	// set — the last two leave no value behind.
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								PartialArgs: []*genai.PartialArg{
+									{JsonPath: "$.items[0]", StringValue: "b"},
+									{JsonPath: `$.filter["tag.list"][0]`, StringValue: "y"},
+									{JsonPath: "$['x.y']", StringValue: "n"},
+									{JsonPath: `$["a\nb"]`, BoolValue: ptr(true)},
+									{JsonPath: "$.big[10001]", StringValue: "z"},
+									{JsonPath: "$.items[0].deep", StringValue: "d"},
+								},
+								WillContinue: ptr(false),
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+	fcPart := parts[0]
+	if fcPart.FunctionCall == nil {
+		t.Fatal("expected function call")
+	}
+
+	want := map[string]any{
+		"items":  []any{"ab", nil, map[string]any{"name": "x"}},
+		"filter": map[string]any{"tag.list": []any{"y"}},
+		"x.y":    "n",
+		"a\nb":   true,
+		// The oversized index is rejected, leaving only the list its navigation
+		// created; the conflict with the string at items[0] is dropped.
+		"big": []any{},
+	}
+	if diff := cmp.Diff(want, fcPart.FunctionCall.Args); diff != "" {
+		t.Errorf("aggregated args mismatch (-want +got):\n%s", diff)
 	}
 }
 
