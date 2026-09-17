@@ -953,6 +953,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				if len(bufferedEvents) > 0 {
+					ids := make([]string, 0, len(bufferedEvents))
+					for _, bufferedEvent := range bufferedEvents {
+						ids = append(ids, bufferedEvent.ID)
+					}
+					err = fmt.Errorf("%w; discarded buffered event IDs: %q", err, ids)
+				}
 				log.Printf("%v", err)
 				yield(nil, err)
 				return
@@ -1042,6 +1049,20 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if !yield(event, nil) {
+				return
+			}
+		}
+
+		// Reaching here means innerIter exhausted naturally. Every downstream
+		// stop returns from wrappedIter above, so buffered events are safe to flush.
+		for _, bufferedEvent := range bufferedEvents {
+			if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(bufferedEvent, nil) {
 				return
 			}
 		}
