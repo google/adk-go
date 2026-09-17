@@ -74,6 +74,10 @@ type Service interface {
 	// compaction ran, and the same range is summarized and billed again on
 	// every later turn.
 	AppendEvent(context.Context, Session, *Event) error
+	// GetUserState returns the user-scoped state for the given app and user,
+	// without requiring an active session. Keys are returned without the
+	// "user:" prefix. Returns an empty map if no user state has been stored.
+	GetUserState(context.Context, *GetUserStateRequest) (*GetUserStateResponse, error)
 }
 
 // InMemoryService returns an in-memory implementation of the session service.
@@ -135,4 +139,16 @@ type DeleteRequest struct {
 	AppName   string
 	UserID    string
 	SessionID string
+}
+
+// GetUserStateRequest represents a request to get user-scoped state.
+type GetUserStateRequest struct {
+	AppName string
+	UserID  string
+}
+
+// GetUserStateResponse represents a response from [Service.GetUserState].
+type GetUserStateResponse struct {
+	// State holds the user-scoped key/value pairs, without the "user:" prefix.
+	State map[string]any
 }
