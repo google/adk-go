@@ -15,9 +15,12 @@
 package llminternal
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -30,9 +33,24 @@ import (
 )
 
 type confirmedCall struct {
-	confirmation *toolconfirmation.ToolConfirmation
-	call         genai.FunctionCall
+	confirmation   *toolconfirmation.ToolConfirmation
+	confirmationID string
+	call           genai.FunctionCall
 }
+
+type invocationSessionService interface {
+	SessionService() session.Service
+}
+
+type confirmationClaimLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var confirmationClaimLocks = struct {
+	sync.Mutex
+	values map[string]*confirmationClaimLock
+}{values: make(map[string]*confirmationClaimLock)}
 
 func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -204,8 +222,9 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					resumeOrder = append(resumeOrder, originalFunctionCall.ID)
 				}
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
-					confirmation: &confirmation,
-					call:         *originalFunctionCall,
+					confirmation:   &confirmation,
+					confirmationID: functionCall.ID,
+					call:           *originalFunctionCall,
 				}
 			}
 
@@ -213,21 +232,12 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			// TODO consider forward or backward pass instead of nested loops
-			// Remove the tools that have already been confirmed.
-			for j := len(events) - 1; j > confirmationEventIndex; j-- {
-				event = events[j]
-				responses := utils.FunctionResponses(event.Content)
-				if len(responses) == 0 {
-					continue
-				}
-				for _, resp := range responses {
-					delete(toolsToResumeByFunctionCallID, resp.ID)
-				}
-				if len(toolsToResumeByFunctionCallID) == 0 {
-					break
-				}
+			removeAlreadyCompletedTools(events, k, confirmationEventIndex, agentName, toolsToResumeByFunctionCallID)
+			if len(toolsToResumeByFunctionCallID) == 0 {
+				continue
 			}
+
+			removeAlreadyCompletedTools(events, confirmationEventIndex, len(events), agentName, toolsToResumeByFunctionCallID)
 			if len(toolsToResumeByFunctionCallID) == 0 {
 				continue
 			}
@@ -244,8 +254,27 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					// a call would run its tool a second time within this resume.
 					continue
 				}
+				if cc.confirmation.Confirmed {
+					claimed, claimEvent, err := claimConfirmation(ctx, cc, agentName)
+					if err != nil {
+						if !yield(nil, err) {
+							return
+						}
+						return
+					}
+					if !claimed {
+						delete(toolsToResumeByFunctionCallID, callID)
+						continue
+					}
+					if claimEvent != nil {
+						events = append(events, claimEvent)
+					}
+				}
 				parts = append(parts, &genai.Part{FunctionCall: &cc.call})
 				toolsToResumeConfirmation[callID] = cc.confirmation
+			}
+			if len(parts) == 0 {
+				continue
 			}
 
 			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
@@ -256,4 +285,135 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 		}
 	}
+}
+
+func claimConfirmation(ctx agent.InvocationContext, call *confirmedCall, agentName string) (bool, *session.Event, error) {
+	service := session.Service(nil)
+	if provider, ok := ctx.(invocationSessionService); ok {
+		service = provider.SessionService()
+	}
+	// Direct processor users may provide an invocation context without a
+	// runner-owned service. Preserve that supported testing/embedding path;
+	// runner-created contexts always carry the service.
+	if service == nil || ctx.Session() == nil {
+		return true, nil, nil
+	}
+
+	claim := session.NewEvent(ctx, ctx.InvocationID())
+	claim.ID = confirmationClaimEventID(ctx.Session(), agentName, call.call.ID)
+	claim.Author = agentName
+	claim.Actions.ConfirmationClaim = &session.ConfirmationClaim{
+		ConfirmationID: call.confirmationID,
+		FunctionCallID: call.call.ID,
+	}
+
+	if appender, ok := service.(session.EventAppender); ok {
+		inserted, err := appender.AppendEventIfAbsent(ctx, ctx.Session(), claim)
+		return inserted, claim, err
+	}
+
+	// A custom service may not expose a cross-process atomic primitive. The
+	// keyed lock prevents duplicate claims among runners in this process; the
+	// latest read closes the stale-session window before the append.
+	release := lockConfirmationClaim(ctx.Session(), agentName, call.call.ID)
+	defer release()
+	latest, err := service.Get(ctx, &session.GetRequest{
+		AppName:   ctx.Session().AppName(),
+		UserID:    ctx.Session().UserID(),
+		SessionID: ctx.Session().ID(),
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to verify confirmation claim: %w", err)
+	}
+	if hasConfirmationClaim(latest.Session, agentName, call.call.ID) {
+		return false, nil, nil
+	}
+	if err := service.AppendEvent(ctx, ctx.Session(), claim); err != nil {
+		return false, nil, fmt.Errorf("failed to persist confirmation claim: %w", err)
+	}
+	return true, claim, nil
+}
+
+func confirmationClaimEventID(sess session.Session, agentName, functionCallID string) string {
+	sum := sha256.Sum256([]byte(sess.AppName() + "\x00" + sess.UserID() + "\x00" + sess.ID() + "\x00" + agentName + "\x00" + functionCallID))
+	return fmt.Sprintf("adk-confirmation-claim-%x", sum[:])
+}
+
+func hasConfirmationClaim(sess session.Session, agentName, functionCallID string) bool {
+	if sess == nil {
+		return false
+	}
+	for event := range sess.Events().All() {
+		if event.Author != agentName || event.Actions.ConfirmationClaim == nil {
+			continue
+		}
+		if event.Actions.ConfirmationClaim.FunctionCallID == functionCallID {
+			return true
+		}
+	}
+	return false
+}
+
+func lockConfirmationClaim(sess session.Session, agentName, functionCallID string) func() {
+	key := sess.AppName() + "\x00" + sess.UserID() + "\x00" + sess.ID() + "\x00" + agentName + "\x00" + functionCallID
+	confirmationClaimLocks.Lock()
+	lock := confirmationClaimLocks.values[key]
+	if lock == nil {
+		lock = &confirmationClaimLock{}
+		confirmationClaimLocks.values[key] = lock
+	}
+	lock.refs++
+	confirmationClaimLocks.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		confirmationClaimLocks.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(confirmationClaimLocks.values, key)
+		}
+		confirmationClaimLocks.Unlock()
+	}
+}
+
+// removeAlreadyCompletedTools removes only agent-authored tool responses from
+// the bounded event window. The lower bound is the confirmation request: the
+// earlier request-time error must not suppress the first approval, while later
+// completed responses must suppress replays. A rejection is not a completion;
+// it leaves the confirmation eligible for a later answer.
+func removeAlreadyCompletedTools(events []*session.Event, startIndex, endIndex int, agentName string, toolsToResume map[string]*confirmedCall) {
+	for j := startIndex + 1; j < endIndex; j++ {
+		event := events[j]
+		if event.Author != agentName {
+			continue
+		}
+		if claim := event.Actions.ConfirmationClaim; claim != nil {
+			delete(toolsToResume, claim.FunctionCallID)
+			if len(toolsToResume) == 0 {
+				return
+			}
+		}
+		responses := utils.FunctionResponses(event.Content)
+		if len(responses) == 0 {
+			continue
+		}
+		for _, resp := range responses {
+			if isConfirmationRejection(resp) {
+				continue
+			}
+			delete(toolsToResume, resp.ID)
+		}
+		if len(toolsToResume) == 0 {
+			return
+		}
+	}
+}
+
+func isConfirmationRejection(resp *genai.FunctionResponse) bool {
+	if resp == nil || resp.Response == nil {
+		return false
+	}
+	errText, ok := resp.Response["error"].(string)
+	return ok && strings.HasSuffix(errText, tool.ErrConfirmationRejected.Error())
 }

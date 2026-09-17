@@ -25,9 +25,10 @@ import (
 )
 
 type InvocationContextParams struct {
-	Artifacts agent.Artifacts
-	Memory    agent.Memory
-	Session   session.Session
+	Artifacts      agent.Artifacts
+	Memory         agent.Memory
+	Session        session.Session
+	SessionService session.Service
 
 	Branch         string
 	IsolationScope string
@@ -85,6 +86,11 @@ func (c *InvocationContext) Memory() agent.Memory {
 
 func (c *InvocationContext) Session() session.Session {
 	return c.params.Session
+}
+
+// SessionService returns the service that owns the invocation session.
+func (c *InvocationContext) SessionService() session.Service {
+	return c.params.SessionService
 }
 
 func (c *InvocationContext) UserContent() *genai.Content {
