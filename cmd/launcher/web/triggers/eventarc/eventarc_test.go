@@ -25,14 +25,15 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 )
 
 // TestSetupSubroutersWiresOIDCConfig checks that -trigger_oidc_audience actually
-// reaches the controller, not just the launcher's own config struct. The
-// startup warning reads the flag field, so config that never gets threaded
-// through to TriggerConfig would suppress the warning and look correct while
-// leaving the endpoint open. An unauthenticated request is rejected before any
-// service on launcher.Config is touched, so the empty Config here is fine.
+// reaches the controller, not just the launcher's own config struct, by driving
+// a real router and observing a 401. An unauthenticated request is rejected
+// before any service on launcher.Config is touched, so the empty Config here is
+// fine. The allow-list half cannot be observed this way; that is what
+// TestSetupSubroutersPassesConfigToController covers.
 func TestSetupSubroutersWiresOIDCConfig(t *testing.T) {
 	l := NewLauncher().(*eventarcLauncher)
 	if _, err := l.Parse([]string{"-path_prefix=/api", "-trigger_oidc_audience=https://example-agent.example.com"}); err != nil {
@@ -94,19 +95,16 @@ func TestParseOIDCFlags(t *testing.T) {
 	}
 }
 
-// TestTriggerConfigWiresOIDC pins both halves of the OIDC configuration to the
-// TriggerConfig that SetupSubrouters hands the controller, which is the only
-// place the launcher can get either of them wrong.
-//
-// The end-to-end test above covers the audience half by observing a 401.
-// The allow-list half cannot be reached the same way: proving a 403 needs a
-// token that verifies, and the real idtoken.Validate would have to call
-// Google's certificate endpoint, while the test seam that replaces it is
-// unexported inside the triggers package by design. So this asserts on the
-// config instead, and the warning in UserMessage reads the same function, so
-// a setting that stops reaching the controller also stops being announced as
-// enforced.
-func TestTriggerConfigWiresOIDC(t *testing.T) {
+// TestSetupSubroutersPassesConfigToController pins both halves of the OIDC
+// configuration to the TriggerConfig that SetupSubrouters actually hands the
+// controller, observed at the constructor seam rather than by calling
+// triggerConfig() directly. That distinction is the point: the audience half is
+// already covered end to end by the 401 above, but the allow-list half cannot
+// be reached that way (proving a 403 needs a token that verifies, and the
+// idtoken seam is unexported inside triggers by design). Reading the config the
+// controller is built with, rather than the helper that builds it, is what
+// stops a rewrite of SetupSubrouters that keeps only the audience from passing.
+func TestSetupSubroutersPassesConfigToController(t *testing.T) {
 	tests := []struct {
 		name         string
 		args         []string
@@ -143,15 +141,25 @@ func TestTriggerConfigWiresOIDC(t *testing.T) {
 				t.Fatalf("Parse() failed: %v", err)
 			}
 
-			oidc := l.triggerConfig().OIDC
+			var got triggers.ControllerConfig
+			real := l.newController
+			l.newController = func(cfg triggers.ControllerConfig) (*triggers.EventarcController, error) {
+				got = cfg
+				return real(cfg)
+			}
+			if err := l.SetupSubrouters(mux.NewRouter(), &launcher.Config{}); err != nil {
+				t.Fatalf("SetupSubrouters() failed: %v", err)
+			}
+
+			oidc := got.TriggerConfig.OIDC
 			if tt.wantAudience == "" {
 				if oidc != nil {
-					t.Fatalf("triggerConfig().OIDC = %+v, want nil", oidc)
+					t.Fatalf("controller TriggerConfig.OIDC = %+v, want nil", oidc)
 				}
 				return
 			}
 			if oidc == nil {
-				t.Fatal("triggerConfig().OIDC = nil; the audience is not reaching the controller")
+				t.Fatal("controller TriggerConfig.OIDC = nil; the audience is not reaching the controller")
 			}
 			if oidc.ExpectedAudience != tt.wantAudience {
 				t.Errorf("ExpectedAudience = %q, want %q", oidc.ExpectedAudience, tt.wantAudience)

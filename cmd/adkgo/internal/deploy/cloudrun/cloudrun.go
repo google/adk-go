@@ -140,20 +140,45 @@ func init() {
 }
 
 // computeFlags uses command line arguments to create a full config
+// validateTriggerOIDCFlags rejects the OIDC trigger flag combinations that
+// cannot be emitted safely, before any filesystem work happens. It is a pure
+// function of the parsed flags so it can be exercised on its own.
+//
+// Two properties are enforced. A service-account allow-list without an
+// audience disables verification entirely rather than pinning anything, so it
+// is rejected here instead of surfacing as a crash-looping revision inside the
+// deployed container. And every value lands in the generated Dockerfile CMD as
+// a JSON string, where json.Marshal silently substitutes U+FFFD for invalid
+// UTF-8 rather than failing, so a bad value would deploy an audience the
+// operator never typed; ValidateDockerfileSafe rejects those bytes up front.
+func (f *deployCloudRunFlags) validateTriggerOIDCFlags() error {
+	if f.cloudRun.pubsubTrigger.oidcServiceAccounts != "" && f.cloudRun.pubsubTrigger.oidcAudience == "" {
+		return fmt.Errorf("--pubsub_oidc_service_accounts requires --pubsub_oidc_audience")
+	}
+	if f.cloudRun.eventarcTrigger.oidcServiceAccounts != "" && f.cloudRun.eventarcTrigger.oidcAudience == "" {
+		return fmt.Errorf("--eventarc_oidc_service_accounts requires --eventarc_oidc_audience")
+	}
+	for _, v := range []struct{ val, label string }{
+		{f.cloudRun.pubsubTrigger.oidcAudience, "--pubsub_oidc_audience"},
+		{f.cloudRun.pubsubTrigger.oidcServiceAccounts, "--pubsub_oidc_service_accounts"},
+		{f.cloudRun.eventarcTrigger.oidcAudience, "--eventarc_oidc_audience"},
+		{f.cloudRun.eventarcTrigger.oidcServiceAccounts, "--eventarc_oidc_service_accounts"},
+	} {
+		if err := util.ValidateDockerfileSafe(v.val, v.label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (f *deployCloudRunFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
 			if f.cloudRun.debugAPI && !f.cloudRun.api {
 				return fmt.Errorf("cannot enable Debug API without having enabled API")
 			}
-			// The sublauncher rejects this pair too, but that happens inside
-			// the deployed container, where the operator sees a crash-looping
-			// revision rather than an error.
-			if f.cloudRun.pubsubTrigger.oidcServiceAccounts != "" && f.cloudRun.pubsubTrigger.oidcAudience == "" {
-				return fmt.Errorf("--pubsub_oidc_service_accounts requires --pubsub_oidc_audience")
-			}
-			if f.cloudRun.eventarcTrigger.oidcServiceAccounts != "" && f.cloudRun.eventarcTrigger.oidcAudience == "" {
-				return fmt.Errorf("--eventarc_oidc_service_accounts requires --eventarc_oidc_audience")
+			if err := f.validateTriggerOIDCFlags(); err != nil {
+				return err
 			}
 
 			// Checked before the temp dir is created so a rejected value does
@@ -316,8 +341,12 @@ func writeTriggerArgs(b *strings.Builder, cfg triggerConfigFlags) {
 	}
 }
 
-// jsonString renders v as a JSON string literal. Marshaling a string cannot
-// fail, so the error path is only there to keep the output well-formed.
+// jsonString renders v as a JSON string literal, escaping any quote or
+// backslash so the value cannot break out of the JSON array it sits in.
+// Marshaling a string cannot fail, so the error path only keeps the output
+// well-formed. Note that json.Marshal does not reject invalid UTF-8, it
+// substitutes U+FFFD per bad byte; computeFlags rejects such values up front
+// via ValidateDockerfileSafe so they never reach here.
 func jsonString(v string) string {
 	encoded, err := json.Marshal(v)
 	if err != nil {

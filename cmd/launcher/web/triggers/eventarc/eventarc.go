@@ -43,6 +43,11 @@ type eventarcConfig struct {
 type eventarcLauncher struct {
 	flags  *flag.FlagSet
 	config *eventarcConfig
+	// newController builds the trigger controller. It is a field, defaulted to
+	// the real constructor, so a test can observe the ControllerConfig that
+	// SetupSubrouters actually passes rather than only what triggerConfig()
+	// returns. That is the seam where the OIDC settings reach the controller.
+	newController func(triggers.ControllerConfig) (*triggers.EventarcController, error)
 }
 
 // NewLauncher creates a new eventarc launcher. It extends Web launcher.
@@ -66,8 +71,9 @@ func NewLauncher() web.Sublauncher {
 		"account must be configured to include an email claim in the token.")
 
 	return &eventarcLauncher{
-		config: config,
-		flags:  fs,
+		config:        config,
+		flags:         fs,
+		newController: triggers.NewEventarcControllerWithConfig,
 	}
 }
 
@@ -119,7 +125,7 @@ func (e *eventarcLauncher) SimpleDescription() string {
 
 // SetupSubrouters adds the Eventarc trigger endpoint to the parent router.
 func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
-	controller, err := triggers.NewEventarcControllerWithConfig(triggers.ControllerConfig{
+	controller, err := e.newController(triggers.ControllerConfig{
 		SessionService:  config.SessionService,
 		AgentLoader:     config.AgentLoader,
 		MemoryService:   config.MemoryService,

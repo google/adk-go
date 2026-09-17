@@ -43,6 +43,11 @@ type pubsubConfig struct {
 type pubsubLauncher struct {
 	flags  *flag.FlagSet
 	config *pubsubConfig
+	// newController builds the trigger controller. It is a field, defaulted to
+	// the real constructor, so a test can observe the ControllerConfig that
+	// SetupSubrouters actually passes rather than only what triggerConfig()
+	// returns. That is the seam where the OIDC settings reach the controller.
+	newController func(triggers.ControllerConfig) (*triggers.PubSubController, error)
 }
 
 // NewLauncher creates a new pubsub launcher. It extends Web launcher.
@@ -66,8 +71,9 @@ func NewLauncher() web.Sublauncher {
 		"account must be configured to include an email claim in the token.")
 
 	return &pubsubLauncher{
-		config: config,
-		flags:  fs,
+		config:        config,
+		flags:         fs,
+		newController: triggers.NewPubSubControllerWithConfig,
 	}
 }
 
@@ -119,7 +125,7 @@ func (p *pubsubLauncher) SimpleDescription() string {
 
 // SetupSubrouters adds the PubSub trigger endpoint to the parent router.
 func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
-	controller, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
+	controller, err := p.newController(triggers.ControllerConfig{
 		SessionService:  config.SessionService,
 		AgentLoader:     config.AgentLoader,
 		MemoryService:   config.MemoryService,
