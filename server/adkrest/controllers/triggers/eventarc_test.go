@@ -202,3 +202,46 @@ func TestEventarcTriggerHandler(t *testing.T) {
 		})
 	}
 }
+
+// TestEventarcTriggerHandler_RequiresAuthWhenAudienceConfigured mirrors
+// TestPubSubTriggerHandler_RequiresAuthWhenAudienceConfigured: once an
+// operator opts in to OIDC verification via TriggerConfig.OIDC, a request with
+// no bearer token must be rejected before the agent is invoked.
+func TestEventarcTriggerHandler_RequiresAuthWhenAudienceConfigured(t *testing.T) {
+	mockAgentRunCount := 0
+	testAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				mockAgentRunCount++
+				yield(&session.Event{ID: "success-event"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	agentLoader := agent.NewSingleLoader(testAgent)
+	config := defaultTriggerConfig
+	config.OIDC = &triggers.OIDCConfig{ExpectedAudience: "https://example-agent.example.com"}
+	controller := triggers.NewEventarcController(sessionService, agentLoader, nil, nil, runner.PluginConfig{}, config)
+
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/eventarc", bytes.NewBuffer([]byte(`{}`)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/cloudevents+json")
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+
+	controller.EventarcTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected status %d for a request with no bearer token, got %d. Body: %s", http.StatusUnauthorized, rr.Code, rr.Body.String())
+	}
+	if mockAgentRunCount != 0 {
+		t.Errorf("expected the agent not to run for an unauthenticated request, got %d run attempts", mockAgentRunCount)
+	}
+}
