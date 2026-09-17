@@ -25,6 +25,13 @@ const systemInstructionsJSON = `[{"type":"text","content":"you are helpful\n\n` 
 	`You are an agent. Your internal name is \"some_root_agent\". ` +
 	`The description about you is \"A sample root agent.\"."}]`
 
+const toolDefinitionsJSON = `[{"name":"some_tool","description":"A sample tool.","type":"function"}]`
+
+const toolDefinitionsWithParametersJSON = `[{"name":"some_tool","description":"A sample tool.",` +
+	`"parameters":{"additionalProperties":false,"properties":{"arg1":{"type":"string"}},` +
+	`"required":["arg1"],"type":"object"},` +
+	`"type":"function"}]`
+
 // AgentWithToolCaptureContentCase is the expected root span for
 // the same scenario as [AgentWithToolCase] but with content capture
 // enabled, via OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var.
@@ -47,6 +54,7 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 				"gen_ai.response.finish_reasons": []string{""},
 				"gen_ai.system_instructions":     systemInstructionsJSON,
+				"gen_ai.tool.definitions":        toolDefinitionsJSON,
 				"gen_ai.input.messages":          `[{"role":"user","parts":[{"type":"text","content":"hello"}]}]`,
 				// The mock model reports no finish reason, so the tool call
 				// in the turn decides it: the schema distinguishes a tool
@@ -113,6 +121,7 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 				"gcp.vertex.agent.invocation_id": telemetrytest.PRESENT,
 				"gen_ai.response.finish_reasons": []string{""},
 				"gen_ai.system_instructions":     systemInstructionsJSON,
+				"gen_ai.tool.definitions":        toolDefinitionsJSON,
 				// The history now carries all three turns. genai labels the
 				// tool result "user"; the schema calls it "tool".
 				"gen_ai.input.messages": `[{"role":"user","parts":[{"type":"text","content":"hello"}]},` +
@@ -187,4 +196,37 @@ var AgentWithToolCaptureContentCase = &telemetrytest.SpanDigest{
 			},
 		},
 	},
+}
+
+// AgentWithToolCaptureContentAndParametersCase is the expected root span for
+// the same scenario as [AgentWithToolCaptureContentCase] with tool parameter
+// capture enabled.
+var AgentWithToolCaptureContentAndParametersCase = withToolDefinitions(
+	AgentWithToolCaptureContentCase, toolDefinitionsWithParametersJSON,
+)
+
+// withToolDefinitions makes a shallow copy of the digest tree while replacing
+// the tool-definition attribute on each generate_content span. The nested logs
+// are immutable test data and can be shared safely.
+func withToolDefinitions(base *telemetrytest.SpanDigest, toolDefinitions string) *telemetrytest.SpanDigest {
+	clone := *base
+	clone.Attributes = cloneAttributes(base.Attributes)
+	clone.Children = make([]*telemetrytest.SpanDigest, len(base.Children))
+	for i, child := range base.Children {
+		childClone := *child
+		childClone.Attributes = cloneAttributes(child.Attributes)
+		if childClone.Name == "generate_content mock" {
+			childClone.Attributes["gen_ai.tool.definitions"] = toolDefinitions
+		}
+		clone.Children[i] = &childClone
+	}
+	return &clone
+}
+
+func cloneAttributes(attributes map[string]any) map[string]any {
+	clone := make(map[string]any, len(attributes))
+	for key, value := range attributes {
+		clone[key] = value
+	}
+	return clone
 }
