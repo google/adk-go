@@ -156,10 +156,18 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 	if err != nil {
 		return nil, err
 	}
-	typeName := fmt.Sprintf("%T", t)
+	base := t
+	for {
+		wrapper, ok := base.(tool.Wrapper)
+		if !ok {
+			break
+		}
+		base = wrapper.Unwrap()
+	}
+	typeName := fmt.Sprintf("%T", base)
 	if !strings.HasSuffix(typeName, "agentTool") {
 		// TODO: support replay requests and responses from AgentTool.
-		if ft, ok := t.(toolinternal.FunctionTool); ok {
+		if ft, ok := tool.As[toolinternal.FunctionTool](t); ok {
 			_, err := ft.Run(ctx, args)
 			if err != nil {
 				fmt.Println("Error calling tool:", err)

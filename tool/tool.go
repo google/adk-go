@@ -34,7 +34,10 @@ var ErrConfirmationRequired = errors.New("requires confirmation, please approve 
 // ErrConfirmationRejected indicated that the tool call confirmation rejected.
 var ErrConfirmationRejected = errors.New("call is rejected")
 
-// Tool defines the interface for a callable tool.
+// Tool describes a tool exposed to an agent. Locally callable tools implement
+// [FunctionTool] or [StreamingFunctionTool]; model-native tools implement
+// [RequestProcessor] to configure the model request. Implement [Wrapper] when
+// decorating a tool to preserve its other capabilities.
 type Tool interface {
 	// Name returns the name of the tool.
 	Name() string
