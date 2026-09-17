@@ -67,21 +67,20 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
-	state := req.State
-	if state == nil {
-		state = make(stateMap)
-	}
 	val := &session{
 		id:        key,
-		state:     state,
 		updatedAt: platform.Now(ctx),
 	}
 
 	s.sessions.Set(encodedKey, val)
-	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
+	appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(req.State)
 	appState := s.updateAppState(appDelta, req.AppName)
 	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
-	val.state = sessionutils.MergeStates(appState, userState, state)
+	// The session record takes only the session-scoped delta: app: and user:
+	// keys come back in through the merge, and temp: keys are
+	// invocation-scoped — there is no invocation at Create — so they must
+	// not be persisted.
+	val.state = sessionutils.MergeStates(appState, userState, sessionDelta)
 
 	copiedSession := copySessionWithoutStateAndEvents(val)
 	copiedSession.state = maps.Clone(val.state)
