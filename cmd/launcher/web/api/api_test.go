@@ -15,14 +15,17 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -471,5 +474,149 @@ func TestSetupSubroutersServesRealRESTAPI(t *testing.T) {
 				t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
 			}
 		})
+	}
+}
+
+// TestWebSocketUpgradeThroughMount covers /run_live, which takes over the
+// connection instead of writing a response.
+//
+// The prefixed mount wraps the ResponseWriter to rewrite redirects, and
+// gorilla/websocket type-asserts that writer to http.Hijacker directly rather
+// than following Unwrap. A wrapper missing Hijack therefore turns every
+// upgrade into a 500, on the default /api prefix but not on an empty one.
+// httptest.NewServer is used rather than a recorder because only a real
+// connection can be hijacked.
+func TestWebSocketUpgradeThroughMount(t *testing.T) {
+	for _, prefix := range []string{"/api", ""} {
+		t.Run("prefix="+prefix, func(t *testing.T) {
+			upgrader := websocket.Upgrader{}
+			echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					// Upgrade has already written the error response.
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("live"))
+			})
+
+			router := mux.NewRouter().StrictSlash(true)
+			inner := mux.NewRouter().StrictSlash(true)
+			inner.Path("/run_live").Handler(echo)
+			registerAPIRoutes(router, prefix, inner)
+
+			srv := httptest.NewServer(router)
+			defer srv.Close()
+
+			url := "ws" + strings.TrimPrefix(srv.URL, "http") + prefix + "/run_live"
+			conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				status := "no response"
+				if resp != nil {
+					status = resp.Status
+				}
+				t.Fatalf("Dial(%s) error = %v (%s), want a successful upgrade", url, err, status)
+			}
+			defer func() { _ = conn.Close() }()
+
+			// Without a deadline, an upgrade that succeeds but never sends a
+			// frame hangs until the package timeout, taking every other test in
+			// the package down with it instead of failing this one.
+			if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				t.Fatalf("SetReadDeadline() error = %v", err)
+			}
+
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				t.Fatalf("ReadMessage() error = %v, want the server's frame", err)
+			}
+			if got := string(msg); got != "live" {
+				t.Errorf("ReadMessage() = %q, want %q", got, "live")
+			}
+		})
+	}
+}
+
+// TestHijackReportsNotSupported covers the branch taken when the writer
+// underneath the mount cannot be hijacked.
+//
+// The wrapper has to report that as http.ErrNotSupported rather than a bare
+// error, because http.ResponseController finds this method before it follows
+// Unwrap. A caller asking errors.Is(err, http.ErrNotSupported) would otherwise
+// get a different answer purely because the mount is in the way.
+func TestHijackReportsNotSupported(t *testing.T) {
+	// httptest.ResponseRecorder implements no Hijacker, which is the case.
+	w := &redirectRewriter{ResponseWriter: httptest.NewRecorder(), prefix: "/api"}
+
+	conn, brw, err := w.Hijack()
+
+	if err == nil {
+		t.Fatal("Hijack() error = nil, want a failure on a writer that cannot be hijacked")
+	}
+	if conn != nil || brw != nil {
+		t.Errorf("Hijack() = (%v, %v), want both nil alongside the error", conn, brw)
+	}
+	if !errors.Is(err, http.ErrNotSupported) {
+		t.Errorf("Hijack() error = %v, want it to wrap http.ErrNotSupported", err)
+	}
+}
+
+// TestRunLiveUpgradesThroughTheRealMount drives the actual REST server rather
+// than a stub inner router.
+//
+// The stub version proves the mount can carry an upgrade. This proves the
+// endpoint that was broken can. The session does not exist, so the server
+// accepts the upgrade and then closes; what matters is that the handshake
+// completes at all, which is what returned 500 before Hijack was forwarded.
+func TestRunLiveUpgradesThroughTheRealMount(t *testing.T) {
+	agnt, err := agent.New(agent.Config{
+		Name: "HelloWorldAgent",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	l := NewLauncher()
+	if _, err := l.Parse([]string{"-path_prefix", "/api"}); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := l.SetupSubrouters(router, &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(agnt),
+		SessionService: session.InMemoryService(),
+	}); err != nil {
+		t.Fatalf("SetupSubrouters() error = %v", err)
+	}
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") +
+		"/api/run_live?app_name=HelloWorldAgent&user_id=u&session_id=does-not-exist"
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		status := "no response"
+		if resp != nil {
+			status = resp.Status
+		}
+		t.Fatalf("Dial(%s) error = %v (%s), want the handshake to complete", url, err, status)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("handshake status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
+	}
+
+	// The server closes because the session is missing. Reading that close is
+	// what confirms the connection was live, and the deadline keeps a silent
+	// server from hanging the package.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Log("server sent a frame before closing, which is also fine")
 	}
 }
