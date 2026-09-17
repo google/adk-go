@@ -14,7 +14,11 @@
 
 package workflow
 
-import "github.com/google/jsonschema-go/jsonschema"
+import (
+	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/internal/workflowstate"
+)
 
 // NodeStatus is the lifecycle status of a node in the workflow graph.
 //
@@ -135,6 +139,14 @@ type NodeState struct {
 	// duplicates (idempotency).
 	answeredThisTurn bool
 
+	// reentryConsumed is true when every response this node resumed on
+	// has already been acted on by a later activation of the node —
+	// i.e. the answers are replays, not new. Not persisted; rebuilt
+	// each turn from event history. Only meaningful for re-entry
+	// nodes, whose reschedule is otherwise driven by ResumedInputs,
+	// which history never un-answers.
+	reentryConsumed bool
+
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`
 
@@ -165,6 +177,61 @@ type RunState struct {
 	// and used by Resume to avoid re-triggering a handoff successor
 	// that already ran on a prior turn (idempotency). Not persisted.
 	completed map[string]bool
+}
+
+// actionableInterruptIDs returns the interrupt IDs this run recognises, mapped
+// to whether Resume can still do something with them: those a node is waiting
+// for, those a re-entry node is about to be re-run with, and those a node
+// settled on this very turn are live (true). An answer a re-entry node has
+// already acted on is recognised but spent (false) — Resume will skip that node
+// rather than re-run it, so routing a turn there on its strength alone would
+// fail the turn with ErrNothingToResume. A FunctionResponse absent from the map
+// answers nothing here at all: it replies to an interrupt this run has finished
+// with, or was never aimed at this run.
+//
+// Reachable from the packages that dispatch a turn through
+// internal/workflowstate rather than as public API, since "settled on this very
+// turn" is only observable on a state fresh from ReconstructRunState.
+//
+//nolint:unused // installed into internal/workflowstate by init below.
+func (s *RunState) actionableInterruptIDs() map[string]bool {
+	ids := map[string]bool{}
+	mark := func(id string, live bool) {
+		if id == "" {
+			return
+		}
+		// Two nodes can name one ID; live anywhere wins.
+		ids[id] = ids[id] || live
+	}
+	for _, ns := range s.Nodes {
+		if ns == nil {
+			continue
+		}
+		// A completed node still counts on the turn its answer arrived:
+		// a handoff asker resolves from history and rehydrates completed,
+		// so its genuine first resume looks settled already.
+		if ns.Status != NodeWaiting && ns.Status != NodePending && !ns.answeredThisTurn {
+			continue
+		}
+		for _, id := range ns.Interrupts {
+			// Still open, whatever became of this node's other answers.
+			mark(id, true)
+		}
+		for id := range ns.ResumedInputs {
+			mark(id, !ns.reentryConsumed)
+		}
+	}
+	return ids
+}
+
+func init() {
+	workflowstate.ActionableInterruptIDs = func(runState any) map[string]bool {
+		st, ok := runState.(*RunState)
+		if !ok || st == nil {
+			return nil
+		}
+		return st.actionableInterruptIDs()
+	}
 }
 
 // NewRunState returns an empty state with the Nodes map
