@@ -63,6 +63,9 @@ type Config struct {
 
 	// Retry configuration for appending rows.
 	RetryConfig RetryConfig
+
+	// Automatically add new columns to existing tables when schema evolves.
+	AutoSchemaUpgrade bool
 }
 
 // DefaultConfig returns the default configuration for the agent analytics plugin.
@@ -86,5 +89,6 @@ func DefaultConfig() Config {
 			MaxDelay:     10 * time.Second,
 			Multiplier:   2.0,
 		},
+		AutoSchemaUpgrade: true,
 	}
 }

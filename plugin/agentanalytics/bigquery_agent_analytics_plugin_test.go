@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -376,5 +377,401 @@ func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+
+	createCalled := false
+	var requestBody string
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			// Table metadata request: returns 404 Not Found to trigger creation
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			// Table creation request
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createCalled = true
+				bodyBytes, _ := io.ReadAll(r.Body)
+				requestBody = string(bodyBytes)
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	_, err = NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Plugin initialization error: %v", err)
+	}
+
+	if !createCalled {
+		t.Error("Expected table creation to be called")
+	}
+
+	if !strings.Contains(requestBody, "timePartitioning") {
+		t.Errorf("Expected request body to contain 'timePartitioning', got: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "DAY") {
+		t.Errorf("Expected partitioning type to be 'DAY', got request body: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "timestamp") {
+		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
+	}
+}
+
+func TestSchemaFieldsMatch(t *testing.T) {
+	existing := bq.Schema{
+		{Name: "col1", Type: bq.StringFieldType},
+		{
+			Name: "col_record",
+			Type: bq.RecordFieldType,
+			Schema: bq.Schema{
+				{Name: "sub1", Type: bq.IntegerFieldType},
+			},
+		},
+	}
+
+	desired := bq.Schema{
+		{Name: "col1", Type: bq.StringFieldType},
+		{Name: "col2", Type: bq.BooleanFieldType}, // New top-level col
+		{
+			Name: "col_record",
+			Type: bq.RecordFieldType,
+			Schema: bq.Schema{
+				{Name: "sub1", Type: bq.IntegerFieldType},
+				{Name: "sub2", Type: bq.StringFieldType}, // New sub-field
+			},
+		},
+	}
+
+	newFields, updatedRecords := schemaFieldsMatch(existing, desired)
+
+	if len(newFields) != 1 || newFields[0].Name != "col2" {
+		t.Errorf("Expected 1 new top-level field 'col2', got %v", newFields)
+	}
+
+	if len(updatedRecords) != 1 || updatedRecords[0].Name != "col_record" {
+		t.Fatalf("Expected 1 updated RECORD field 'col_record', got %v", updatedRecords)
+	}
+
+	updatedRecord := updatedRecords[0]
+	if len(updatedRecord.Schema) != 2 {
+		t.Errorf("Expected updated RECORD to have 2 sub-fields, got %d", len(updatedRecord.Schema))
+	}
+	if updatedRecord.Schema[1].Name != "sub2" {
+		t.Errorf("Expected second sub-field of RECORD to be 'sub2', got %s", updatedRecord.Schema[1].Name)
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_TableExists(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+	config.AutoSchemaUpgrade = false
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"tableReference":{"projectId":"test-project","datasetId":"test-dataset","tableId":"test-table"}}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Expected no error when table exists, got: %v", err)
+	}
+	if p == nil {
+		t.Fatal("Expected plugin to be non-nil")
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_TableNotFound_CreateSucceeds(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+	config.AutoSchemaUpgrade = false
+
+	createCalled := false
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createCalled = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Expected no error when table is created successfully, got: %v", err)
+	}
+	if p == nil {
+		t.Fatal("Expected plugin to be non-nil")
+	}
+	if !createCalled {
+		t.Error("Expected table creation to be attempted, but it was not called")
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_TableNotFound_CreateFails(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+	config.AutoSchemaUpgrade = false
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
+				}, nil
+			}
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"Permission denied"}}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err == nil {
+		t.Fatal("Expected error when table creation fails, got nil")
+	}
+	if p != nil {
+		t.Error("Expected plugin to be nil when table creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create BigQuery table") {
+		t.Errorf("Expected error message to contain 'failed to create BigQuery table', got: %v", err)
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPlugin_MetadataError_Non404(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+	config.AutoSchemaUpgrade = false
+
+	createAttempted := false
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"Permission denied"}}`)),
+				}, nil
+			}
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+				createAttempted = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err == nil {
+		t.Fatal("Expected error when metadata retrieval fails with non-404 error, got nil")
+	}
+	if p != nil {
+		t.Error("Expected plugin to be nil when metadata retrieval fails")
+	}
+	if createAttempted {
+		t.Error("Expected table creation NOT to be attempted, but it was called")
+	}
+	if !strings.Contains(err.Error(), "failed to retrieve BigQuery table metadata") {
+		t.Errorf("Expected error message to contain 'failed to retrieve BigQuery table metadata', got: %v", err)
 	}
 }
