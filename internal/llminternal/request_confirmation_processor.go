@@ -248,11 +248,28 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
 
-			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
+			response := &model.LLMResponse{
 				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
-			}, toolsToResumeConfirmation, nil)
-			if !yield(ev, err) {
+			}
+			functionCallEvent := &session.Event{LLMResponse: *response}
+			ev, err := f.handleFunctionCalls(ctx, toolsmap, response, toolsToResumeConfirmation, nil)
+			if err != nil {
+				if !yield(ev, err) {
+					return
+				}
+				continue
+			}
+
+			confirmationEvent := generateRequestConfirmationEvent(ctx, functionCallEvent, ev)
+			if !yield(ev, nil) {
 				return
+			}
+
+			if confirmationEvent != nil {
+				if !yield(confirmationEvent, nil) {
+					return
+				}
+				ctx.EndInvocation()
 			}
 		}
 	}
