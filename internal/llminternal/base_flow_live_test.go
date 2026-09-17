@@ -171,6 +171,65 @@ func liveConfigProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *
 	return func(yield func(*session.Event, error) bool) {}
 }
 
+func TestRunLiveCloneErrors(t *testing.T) {
+	for _, source := range []string{"config", "contents"} {
+		t.Run(source, func(t *testing.T) {
+			cyclic := map[string]any{}
+			cyclic["self"] = cyclic
+			ctx, cancel := newLiveInvocationContext(t)
+			defer cancel()
+			state := &State{}
+			service := session.InMemoryService()
+			created, err := service.Create(ctx, &session.CreateRequest{AppName: "test", UserID: "user"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source == "config" {
+				state.GenerateContentConfig = &genai.GenerateContentConfig{ResponseJsonSchema: cyclic}
+			} else {
+				ev := &session.Event{
+					Author:      ctx.Agent().Name(),
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromFunctionCall("lookup", cyclic, "model")},
+				}
+				if err := service.AppendEvent(ctx, created.Session, ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Agent: &mockLLMAgent{Agent: ctx.Agent(), s: state}, Session: created.Session,
+			})
+			f := &Flow{
+				Model: &fakeLiveModel{},
+				RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{
+					basicRequestProcessor,
+					ContentsRequestProcessor,
+					// Even a regression that swallows the copy error must not open a connection.
+					func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							yield(nil, errors.New("copy error was not propagated"))
+						}
+					},
+				},
+			}
+			live, events, err := f.RunLive(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = live.Close() }()
+			errorsSeen := 0
+			for ev, err := range events {
+				if ev != nil || !errors.Is(err, errCloneDepth) {
+					t.Fatalf("live stream returned (%v, %v), want clone depth error", ev, err)
+				}
+				errorsSeen++
+			}
+			if errorsSeen != 1 {
+				t.Errorf("got %d errors, want 1", errorsSeen)
+			}
+		})
+	}
+}
+
 func TestRunLiveNoGoroutineLeak(t *testing.T) {
 	tests := []struct {
 		name string
