@@ -104,14 +104,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
-		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		&routers.AgentBuilderAPIRouter{}, // Ungated on purpose; see its doc comment.
 		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	}
+	// Opt-in: traces carry tool-call arguments and responses, and the agent
+	// graph names every tool the agent can call.
 	if cfg.DebugAPIConfig.IncludeDebugAPI {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
-		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+		subrouters = append(subrouters,
+			routers.NewDebugAPIRouter(debugController),
+			routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		)
 	}
 
 	authenticator := cfg.Authenticator
@@ -188,7 +193,11 @@ type ServerConfig struct {
 
 // DebugAPIConfig contains parameters for the debug API.
 type DebugAPIConfig struct {
-	// Controls if [routers.NewDebugAPIRouter] is included
+	// IncludeDebugAPI serves [routers.NewDebugAPIRouter] and
+	// [routers.NewAgentGraphAPIRouter], which expose tool-call arguments,
+	// responses and tool names. The web UI's Traces and agent structure
+	// panels need them.
+	//
 	// WARNING: do not use debug api on PROD environment
 	IncludeDebugAPI bool
 }

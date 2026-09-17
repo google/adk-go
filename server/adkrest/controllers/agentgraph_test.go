@@ -384,3 +384,37 @@ func TestGraphHandlersNilAgentLoader(t *testing.T) {
 		})
 	}
 }
+
+// nilAgentLoader returns a nil agent and a nil error, which an AgentLoader
+// implemented outside this repository is free to do.
+type nilAgentLoader struct{}
+
+func (nilAgentLoader) LoadAgent(string) (agent.Agent, error) { return nil, nil }
+func (nilAgentLoader) ListAgents() []string                  { return nil }
+func (nilAgentLoader) RootAgent() agent.Agent                { return nil }
+
+// TestAgentGraphHandlersSurviveANilAgent covers a loader that reports success
+// and hands back nothing. Before the guard the handler dereferenced it and
+// panicked, which drops the connection without sending any response.
+func TestAgentGraphHandlersSurviveANilAgent(t *testing.T) {
+	c := controllers.NewAgentGraphAPIController(nilAgentLoader{})
+
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"build_graph", c.BuildGraphHandler},
+		{"build_graph_image", c.BuildGraphImageHandler},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/", nil), map[string]string{"app_name": "app1"})
+			rr := httptest.NewRecorder()
+
+			tc.handler(rr, req)
+
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
