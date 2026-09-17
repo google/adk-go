@@ -847,6 +847,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
 		}
 
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
+		}
+
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, artifactDelta, err)
