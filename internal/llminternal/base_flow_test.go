@@ -940,6 +940,61 @@ func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LL
 	}
 }
 
+// TestCallLLMStreamingModeFromRunConfig pins how callLLM derives the streaming
+// flag, including the nil case (issue #586).
+//
+// None of these store a runconfig in the Go context, as when agent.Run() is
+// invoked directly and the runner is bypassed, so runconfig.FromContext would
+// return nil; the streaming mode is read from the invocation context instead.
+// The nil RunConfig case is not hypothetical: RunLive builds its invocation
+// context without one, so that branch is reachable in production and has to
+// resolve to false rather than panic.
+func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		runConfig *agent.RunConfig
+		want      bool
+	}{
+		{
+			name:      "SSE streams",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			want:      true,
+		},
+		{
+			name:      "none does not stream",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+			want:      false,
+		},
+		{
+			name:      "nil run config does not stream",
+			runConfig: nil,
+			want:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &recordStreamModel{}
+			f := &Flow{Model: m}
+
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				RunConfig: tc.runConfig,
+			})
+
+			req := &model.LLMRequest{}
+			for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() error = %v, want nil", err)
+				}
+			}
+
+			if m.stream != tc.want {
+				t.Errorf("GenerateContent received stream=%v, want %v", m.stream, tc.want)
+			}
+		})
+  } 
+}
+
 func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
 	m := &alwaysThinkingModel{}
 	f := &Flow{Model: m}
