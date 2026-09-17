@@ -18,6 +18,8 @@ package agentanalytics
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
@@ -102,6 +104,10 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 		err = tableRef.Create(ctx, &bq.TableMetadata{
 			Schema: EventsSchema(),
+			TimePartitioning: &bq.TimePartitioning{
+				Field: "timestamp",
+				Type:  bq.DayPartitioningType,
+			},
 			Clustering: &bq.Clustering{
 				Fields: config.ClusteringFields,
 			},
@@ -271,18 +277,25 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		},
 
 		BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-			attrs := map[string]any{"tool_name": t.Name()}
+			attrs := map[string]any{
+				"tool_name":   t.Name(),
+				"tool_origin": getToolOrigin(t),
+			}
 			logEvent(ctx, "TOOL_START", args, attrs)
 			return nil, nil
 		},
 		AfterToolCallback: func(ctx agent.Context, t tool.Tool, args, res map[string]any, err error) (map[string]any, error) {
-			attrs := map[string]any{"tool_name": t.Name()}
+			attrs := map[string]any{
+				"tool_name":   t.Name(),
+				"tool_origin": getToolOrigin(t),
+			}
 			logEvent(ctx, "TOOL_END", res, attrs)
 			return nil, nil
 		},
 		OnToolErrorCallback: func(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 			attrs := map[string]any{
 				"tool_name":     t.Name(),
+				"tool_origin":   getToolOrigin(t),
 				"error_message": err.Error(),
 			}
 			logEvent(ctx, "TOOL_ERROR", nil, attrs)
@@ -299,4 +312,34 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	}
 
 	return baseplugin.New(cfg)
+}
+
+func getToolOrigin(t tool.Tool) string {
+	tType := reflect.TypeOf(t).String()
+	if strings.Contains(tType, "mcptoolset.mcpTool") {
+		return "MCP"
+	}
+	if strings.Contains(tType, "agenttool.agentTool") {
+		val := reflect.ValueOf(t)
+		if val.Kind() == reflect.Ptr {
+			val = val.Elem()
+		}
+		if val.Kind() == reflect.Struct {
+			agentField := val.FieldByName("agent")
+			if agentField.IsValid() {
+				agentType := agentField.Type().String()
+				if strings.Contains(agentType, "remoteagent.a2aAgent") || strings.Contains(agentType, "remoteagent/v2.a2aAgent") {
+					return "A2A"
+				}
+			}
+		}
+		return "SUB_AGENT"
+	}
+	if strings.Contains(tType, "functiontool.functionTool") {
+		return "LOCAL"
+	}
+	if strings.Contains(tType, "TransferToAgent") {
+		return "TRANSFER_AGENT"
+	}
+	return "UNKNOWN"
 }
