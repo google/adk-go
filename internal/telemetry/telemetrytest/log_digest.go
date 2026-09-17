@@ -46,7 +46,7 @@ func buildLogDigest(r *sdklog.Record) *LogDigest {
 }
 
 // jsonRoundTrip marshals v to JSON and unmarshals the result back
-// into a fresh any. This normalises:
+// into a fresh any. This normalizes:
 //   - numeric types (int64, float64 → float64),
 //   - string-valued bodies (returned as plain Go strings),
 //   - structured bodies (returned as map[string]any / []any).

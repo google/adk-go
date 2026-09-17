@@ -174,7 +174,7 @@ func TestScheduler_JoinNode_UsesCommonPrefix(t *testing.T) {
 }
 
 // TestScheduler_JoinNode_NestedFanOut verifies the common-prefix
-// behaviour when predecessors share a deeper ancestor branch. After
+// behavior when predecessors share a deeper ancestor branch. After
 // fan-out, predecessors that themselves shared an outer branch
 // produce a join on that outer branch (not all the way back to
 // root).

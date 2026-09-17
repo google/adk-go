@@ -364,7 +364,7 @@ func (s *fakeSession) Events() session.Events {
 	return fakeEvents(append([]*session.Event(nil), s.events...))
 }
 
-// appendEvent records an event in history (the test analogue of
+// appendEvent records an event in history (the test analog of
 // session.Service.AppendEvent) and applies any StateDelta.
 func (s *fakeSession) appendEvent(ev *session.Event) {
 	if ev == nil {
@@ -514,7 +514,7 @@ func newMockCtx(sess session.Session, agt agent.Agent, msg *genai.Content) *Mock
 }
 
 // drainAgent consumes the agent's iter.Seq2, collecting events and
-// appending each to sess. The append step is the test analogue of
+// appending each to sess. The append step is the test analog of
 // the runner's AppendEvent: it builds the session history that the
 // next turn's ReconstructRunState reads. Fails the test if the
 // iterator yields a non-nil error the test did not opt into.
