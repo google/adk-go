@@ -20,12 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
 
 	"google.golang.org/genai"
@@ -52,7 +50,7 @@ type ToolsetFactory func(ctx context.Context, args map[string]any) (tool.Toolset
 var (
 	registryMu       sync.RWMutex
 	registry         = make(map[string]AgentFactory)
-	agentRegistry    = make(map[string]agent.Agent)
+	agentRegistry    = make(map[agentCacheKey]agent.Agent)
 	toolRegistry     = make(map[string]any)
 	callbackRegistry = make(map[string]any)
 )
@@ -235,10 +233,13 @@ func init() {
 			toolFilterStr[i] = s
 		}
 
+		transport, err := approvedMCPTransport(ctx, command, serverArgsStr)
+		if err != nil {
+			return nil, err
+		}
+
 		mcpSet, err := mcptoolset.New(mcptoolset.Config{
-			Transport: &mcp.CommandTransport{
-				Command: exec.Command(command, serverArgsStr...),
-			},
+			Transport:  transport,
 			ToolFilter: tool.StringPredicate(toolFilterStr),
 		})
 		if err != nil {
@@ -409,8 +410,11 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 			"path traversal detected: config_path %q resolves outside agent directory", refPath)
 	}
 
+	// An agent constructed under one policy must not bypass another policy's
+	// authorization checks when the same config is loaded again.
+	key := agentCacheKey{path: absPath, policy: mcpPolicyFromContext(ctx)}
 	registryMu.RLock()
-	if a, ok := agentRegistry[absPath]; ok {
+	if a, ok := agentRegistry[key]; ok {
 		registryMu.RUnlock()
 		return a, nil
 	}
@@ -423,10 +427,10 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	if existing, ok := agentRegistry[absPath]; ok {
+	if existing, ok := agentRegistry[key]; ok {
 		return existing, nil
 	}
-	agentRegistry[absPath] = a
+	agentRegistry[key] = a
 	return a, nil
 }
 
