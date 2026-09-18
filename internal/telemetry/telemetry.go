@@ -133,7 +133,11 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	span.SetAttributes(responseContentAttributes(params.Response)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
+			// Tool-use prompt tokens are reported separately from PromptTokenCount and
+			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
+			// matches the semantic-conventions reference implementation for google-genai:
+			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
+			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.

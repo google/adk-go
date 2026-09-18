@@ -576,15 +576,27 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
-			}
-
-			if llmInternalState.Mode != llminternal.ModeChat {
-				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+			// LlmAgent as root agent must have chat mode.
+			rootMode := llminternal.ResolveMode(llmInternalState.Mode, llminternal.ModeChat)
+			if rootMode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), rootMode))
 				return
 			}
+			// Record the root's placement, as every other placement does.
+			// This changes no behavior today: the check above has already
+			// rejected anything but chat, and chat is also what an unbound
+			// agent falls back to, so no reader can tell a chat binding from
+			// an absent one. It is here so the runner is not the one
+			// placement that resolves a mode and then keeps it to itself,
+			// which is how a later reader would come to be right about graph
+			// nodes and wrong about roots.
+			//
+			// Kept in a local rather than assigned back to ctx, this closure's
+			// captured parameter, so ranging the returned iterator twice cannot
+			// accumulate wrappers. The non-LlmAgent path below does assign back,
+			// but this branch returns before reaching it, so on this path the
+			// iterator really is clean for a re-range.
+			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
@@ -614,7 +626,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
+			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, options, yield)
 			return
 		}
 
@@ -719,7 +731,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {
@@ -937,7 +952,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {

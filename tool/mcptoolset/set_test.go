@@ -847,3 +847,69 @@ func TestMCPTool_EmptyTextResponse(t *testing.T) {
 		t.Fatalf("Expected output to be empty string, got: %v", res["output"])
 	}
 }
+
+func TestMCPTool_NonTextContentRoundTrip(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	resourceSize := int64(42)
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "content_tool", Description: "returns non-text content"}, func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "repo://owner/project/main/file.go",
+					MIMEType: "text/plain",
+					Blob:     []byte("package example\n"),
+				}},
+				&mcp.ResourceLink{
+					URI:      "https://example.com/report.pdf",
+					Name:     "report.pdf",
+					MIMEType: "application/pdf",
+					Size:     &resourceSize,
+				},
+				&mcp.ImageContent{MIMEType: "image/png", Data: []byte{1, 2, 3, 4}},
+				&mcp.AudioContent{MIMEType: "audio/wav", Data: []byte{1, 2, 3}},
+			},
+		}, nil, nil
+	})
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	tools, err := ts.Tools(icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+	))
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("Expected 1 tool, got %d", len(tools))
+	}
+
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("Expected tool to implement toolinternal.FunctionTool")
+	}
+	toolCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	got, err := fnTool.Run(agent.NewToolContext(toolCtx, "", nil, nil), map[string]any{})
+	if err != nil {
+		t.Fatalf("Run() failed: %v", err)
+	}
+
+	want := map[string]any{"output": "[MCP embedded resource: " +
+		"uri=\"repo://owner/project/main/file.go\", mimeType=\"text/plain\"]\n" +
+		"package example\n" +
+		"[MCP resource link: uri=\"https://example.com/report.pdf\", mimeType=\"application/pdf\", " +
+		"name=\"report.pdf\", size=42 bytes]\n" +
+		"[MCP image: mimeType=\"image/png\", size=4 bytes]\n" +
+		"[MCP audio: mimeType=\"audio/wav\", size=3 bytes]"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Run() result mismatch (-want +got):\n%s", diff)
+	}
+}

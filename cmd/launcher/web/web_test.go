@@ -15,18 +15,30 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/telemetry"
 )
 
@@ -179,5 +191,476 @@ func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
 			t.Fatalf("port %d still bound after Run() returned an error: listener leaked", port)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestApplyServiceDefaultsFillsEmptyConfig(t *testing.T) {
+	config := &launcher.Config{}
+
+	applyServiceDefaults(config)
+
+	if config.SessionService == nil {
+		t.Error("SessionService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+	if config.ArtifactService == nil {
+		t.Error("ArtifactService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+	if config.MemoryService == nil {
+		t.Error("MemoryService is nil after applyServiceDefaults, want a default in-memory service")
+	}
+}
+
+// TestApplyServiceDefaultsKeepsSuppliedServices covers the partial cases too:
+// defaulting one service must not clobber the two the caller did supply, and
+// supplying one must not stop the other two from being defaulted.
+func TestApplyServiceDefaultsKeepsSuppliedServices(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		supplySession  bool
+		supplyArtifact bool
+		supplyMemory   bool
+	}{
+		{
+			name:           "all supplied",
+			supplySession:  true,
+			supplyArtifact: true,
+			supplyMemory:   true,
+		},
+		{
+			name:          "only session supplied",
+			supplySession: true,
+		},
+		{
+			name:           "only artifact supplied",
+			supplyArtifact: true,
+		},
+		{
+			name:         "only memory supplied",
+			supplyMemory: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &launcher.Config{}
+			var (
+				wantSession  session.Service
+				wantArtifact artifact.Service
+				wantMemory   memory.Service
+			)
+			if tc.supplySession {
+				wantSession = session.InMemoryService()
+				config.SessionService = wantSession
+			}
+			if tc.supplyArtifact {
+				wantArtifact = artifact.InMemoryService()
+				config.ArtifactService = wantArtifact
+			}
+			if tc.supplyMemory {
+				wantMemory = memory.InMemoryService()
+				config.MemoryService = wantMemory
+			}
+
+			applyServiceDefaults(config)
+
+			assertService(t, "SessionService", config.SessionService, wantSession)
+			assertService(t, "ArtifactService", config.ArtifactService, wantArtifact)
+			assertService(t, "MemoryService", config.MemoryService, wantMemory)
+		})
+	}
+}
+
+// TestApplyServiceDefaultsLogsWhatItDefaulted covers the diagnostic rather than
+// the wiring. cmd/launcher/prod runs through the same Run path, so a deployment
+// that meant to configure a durable artifact or memory service and did not gets
+// a server that looks healthy and loses everything on restart. The log line is
+// the only thing that says so.
+func TestApplyServiceDefaultsLogsWhatItDefaulted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		config  *launcher.Config
+		want    []string
+		notWant []string
+	}{
+		{
+			name:   "nothing supplied",
+			config: &launcher.Config{},
+			want:   []string{"session", "artifact", "memory"},
+		},
+		{
+			name:    "only session supplied",
+			config:  &launcher.Config{SessionService: session.InMemoryService()},
+			want:    []string{"artifact", "memory"},
+			notWant: []string{"session"},
+		},
+		{
+			name: "all supplied",
+			config: &launcher.Config{
+				SessionService:  session.InMemoryService(),
+				ArtifactService: artifact.InMemoryService(),
+				MemoryService:   memory.InMemoryService(),
+			},
+			notWant: []string{"session", "artifact", "memory"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			flags := log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			t.Cleanup(func() {
+				log.SetOutput(os.Stderr)
+				log.SetFlags(flags)
+			})
+
+			applyServiceDefaults(tc.config)
+
+			got := buf.String()
+			if len(tc.want) == 0 && got != "" {
+				t.Fatalf("applyServiceDefaults logged %q, want nothing: every service was supplied", got)
+			}
+			for _, name := range tc.want {
+				if line := "No " + name + " service configured"; !strings.Contains(got, line) {
+					t.Errorf("applyServiceDefaults logged %q, want a line starting %q", got, line)
+				}
+			}
+			for _, name := range tc.notWant {
+				if line := "No " + name + " service configured"; strings.Contains(got, line) {
+					t.Errorf("applyServiceDefaults logged %q, want no %q line: the caller supplied it", got, line)
+				}
+			}
+		})
+	}
+}
+
+// assertService checks that applyServiceDefaults left a service set. When the
+// caller supplied one, want is that value and the check is pointer identity:
+// the default must not replace it.
+func assertService(t *testing.T, name string, got, want any) {
+	t.Helper()
+
+	if got == nil {
+		t.Errorf("%s is nil after applyServiceDefaults, want a default in-memory service", name)
+		return
+	}
+	if want != nil && got != want {
+		t.Errorf("%s = %p, want the caller-supplied service %p", name, got, want)
+	}
+}
+
+// TestApplyServiceDefaultsServesRESTRoutes pins the reason the defaults exist.
+// Before them, an artifact route reached a nil service and panicked, which
+// dropped the TCP connection without sending any HTTP response at all.
+//
+// The assertion is 200, not merely "some status": the artifact controller has
+// since grown its own nil guard that answers 503, so accepting any status would
+// let the defaults disappear unnoticed. The session controller has no such
+// guard, so its route still panics outright without them.
+func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{
+			name: "list artifacts",
+			path: "/apps/a/users/u/sessions/s/artifacts",
+		},
+		{
+			name: "list sessions",
+			path: "/apps/a/users/u/sessions",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := serveWithoutPanic(t, server, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d (%s), want %d", tc.path, rec.Code, rec.Body.String(), http.StatusOK)
+			}
+		})
+	}
+}
+
+// TestApplyServiceDefaultsMemoryServiceIsCallable exercises the defaulted
+// memory service. No REST route reaches it — it is handed to the runner and
+// used by the load_memory tool mid-run — so the consequence is checked at the
+// call site: a nil service panics there instead of returning an empty result.
+func TestApplyServiceDefaultsMemoryServiceIsCallable(t *testing.T) {
+	config := &launcher.Config{}
+	applyServiceDefaults(config)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SearchMemory on the defaulted memory service panicked: %v", r)
+		}
+	}()
+
+	resp, err := config.MemoryService.SearchMemory(t.Context(), &memory.SearchRequest{
+		AppName: "a",
+		UserID:  "u",
+		Query:   "anything",
+	})
+	if err != nil {
+		t.Fatalf("SearchMemory() failed: %v", err)
+	}
+	if resp == nil {
+		t.Error("SearchMemory() response is nil, want an empty result")
+	}
+}
+
+// serveWithoutPanic serves one request and turns a handler panic into a named
+// test failure, so a regression reports the route it broke instead of taking
+// the whole test binary down with it.
+func serveWithoutPanic(t *testing.T, handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s %s panicked: %v", req.Method, req.URL.Path, r)
+		}
+	}()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRegisterHealthRoute(t *testing.T) {
+	router := BuildBaseRouter()
+	registerHealthRoute(router)
+
+	t.Run("GET", func(t *testing.T) {
+		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /health status = %d, want %d", rec.Code, http.StatusOK)
+		}
+
+		var got map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("GET /health body %q is not JSON: %v", rec.Body.String(), err)
+		}
+		if got["status"] != "ok" {
+			t.Errorf("GET /health body = %q, want status %q", rec.Body.String(), "ok")
+		}
+		// adkrest serves /api/health with this exact Content-Type. A probe that
+		// checks the header must not care which of the two paths it is given.
+		if got, want := rec.Header().Get("Content-Type"), "application/json"; got != want {
+			t.Errorf("GET /health Content-Type = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodHead, "/health", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("HEAD /health status = %d, want %d", rec.Code, http.StatusOK)
+		}
+	})
+}
+
+// TestBuildBaseRouterLeavesHealthToTheCaller guards the reason the route lives
+// in registerHealthRoute: mux serves the first matching route, so registering
+// /health inside the exported constructor would silently shadow an embedder's
+// own handler for that path.
+func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
+	router := BuildBaseRouter()
+	router.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}).Methods(http.MethodGet)
+
+	rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
+	}
+}
+
+type trackingSpanProcessor struct {
+	shutdownCalled atomic.Bool
+}
+
+func (p *trackingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *trackingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *trackingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *trackingSpanProcessor) Shutdown(context.Context) error {
+	p.shutdownCalled.Store(true)
+	return nil
+}
+
+// TestRunShutsDownTelemetryWhenServerFailsToStart covers issue #1469:
+// when the HTTP server fails to start (e.g. port already bound),
+// Run must shut down the initialized OpenTelemetry providers.
+func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	tracker := &trackingSpanProcessor{}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(tracker)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("telemetry shutdown was not called after server startup failure")
+	}
+}
+
+type failingSpanProcessor struct {
+	shutdownErr error
+}
+
+func (p *failingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *failingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *failingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *failingSpanProcessor) Shutdown(context.Context) error {
+	return p.shutdownErr
+}
+
+// TestRunLogsWhenTelemetryShutdownFails covers the defer error branch:
+// when telemetry shutdown fails, the error is logged to stderr rather than
+// terminating or panicking.
+func TestRunLogsWhenTelemetryShutdownFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	failingProcessor := &failingSpanProcessor{
+		shutdownErr: fmt.Errorf("simulated flush error"),
+	}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(failingProcessor)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if got := buf.String(); !strings.Contains(got, "telemetry shutdown failed: simulated flush error") {
+		t.Errorf("expected log output to contain telemetry shutdown error, got %q", got)
+	}
+}
+
+type trackingSublauncher struct {
+	telemetryFailSublauncher
+	userMessageCalled atomic.Bool
+}
+
+func (s *trackingSublauncher) UserMessage(webURL string, printer func(v ...any)) {
+	s.userMessageCalled.Store(true)
+}
+
+// TestRunDoesNotAnnounceURLWhenTelemetryInitFails covers issue #1469:
+// sublauncher UserMessage and URL announcements must only occur after telemetry
+// initialization succeeds.
+func TestRunDoesNotAnnounceURLWhenTelemetryInitFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	sub := &trackingSublauncher{}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil || !strings.Contains(err.Error(), "telemetry initialization failed") {
+		t.Fatalf("Run() error = %v, want error containing %q", err, "telemetry initialization failed")
+	}
+
+	if sub.userMessageCalled.Load() {
+		t.Errorf("UserMessage was called before telemetry initialization succeeded")
+	}
+	startingPrefix := strings.Split(logStartingWebServer, "%")[0]
+	startsOnPrefix := strings.Split(logWebServerStartsOn, "%")[0]
+	if got := buf.String(); strings.Contains(got, startingPrefix) || strings.Contains(got, startsOnPrefix) {
+		t.Errorf("startup banner was logged before telemetry initialization succeeded: %q", got)
+	}
+}
+
+type optionAppendingSublauncher struct {
+	telemetryFailSublauncher
+	processor *trackingSpanProcessor
+}
+
+func (s *optionAppendingSublauncher) Keyword() string { return "appending" }
+
+func (s *optionAppendingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	c.TelemetryOptions = append(c.TelemetryOptions, telemetry.WithSpanProcessors(s.processor))
+	return nil
+}
+
+// TestRunSetupSubroutersCanAppendTelemetryOptions verifies the invariant that
+// SetupSubrouters runs before telemetry initialization, so that subrouters can
+// append telemetry options (e.g. span processors) that are picked up by Run.
+func TestRunSetupSubroutersCanAppendTelemetryOptions(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	tracker := &trackingSpanProcessor{}
+	sub := &optionAppendingSublauncher{processor: tracker}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "appending"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	config := &launcher.Config{}
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("span processor appended in SetupSubrouters was not initialized/shut down")
 	}
 }
