@@ -485,6 +485,7 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		}
 	}
 
+	canonicalURIs := make(map[int64]string)
 	for _, tc := range []struct {
 		name         string
 		version      int64
@@ -504,7 +505,11 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 				t.Fatalf("GetArtifactVersion(%d) failed: %v", tc.version, err)
 			}
 			assertArtifactVersion(t, resp.ArtifactVersion, tc.wantVersion, tc.wantMimeType, tc.wantMetadata)
+			canonicalURIs[tc.wantVersion] = resp.ArtifactVersion.CanonicalURI
 		})
+	}
+	if canonicalURIs[2] == canonicalURIs[3] {
+		t.Errorf("versions 2 and 3 have the same CanonicalURI %q", canonicalURIs[2])
 	}
 
 	t.Run(fmt.Sprintf("GetArtifactVersion_nonexistent-version_%s", testSuffix), func(t *testing.T) {

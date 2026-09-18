@@ -28,6 +28,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -492,7 +493,15 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 	// object's MediaLink is an authenticated JSON API download URL, which a
 	// consumer handed the URI cannot fetch: a model given it as the file_uri of
 	// a file_data part treats it as a web page and fails to read it.
-	canonicalURI := fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
+	escapedAppName := url.PathEscape(appName)
+	escapedUserID := url.PathEscape(userID)
+	escapedFileName := url.PathEscape(fileName)
+	var canonicalURI string
+	if fileHasUserNamespace(fileName) {
+		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/user/%s/%d", s.bucketName, escapedAppName, escapedUserID, escapedFileName, version)
+	} else {
+		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/%s/%s/%d", s.bucketName, escapedAppName, escapedUserID, url.PathEscape(sessionID), escapedFileName, version)
+	}
 
 	customMeta := make(map[string]any)
 	if attrs.Metadata != nil {

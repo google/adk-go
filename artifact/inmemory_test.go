@@ -15,6 +15,7 @@
 package artifact_test
 
 import (
+	"net/url"
 	"testing"
 	"time"
 
@@ -111,10 +112,19 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				CanonicalURI:   tc.uriPrefix + "1",
 				CustomMetadata: map[string]any{"key": "value", "count": "42", "enabled": "true"},
 				CreateTime:     firstCreateTime,
-				MimeType:       "image/png",
+				MimeType:       "application/changed",
 			}
 			if diff := cmp.Diff(wantFirst, first.ArtifactVersion); diff != "" {
 				t.Errorf("GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+			}
+			loaded, err := srv.Load(readCtx, &artifact.LoadRequest{
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+			})
+			if err != nil {
+				t.Fatalf("Load(v1) failed: %v", err)
+			}
+			if got := loaded.Part.InlineData.MIMEType; got != first.ArtifactVersion.MimeType {
+				t.Errorf("Load(v1).Part.InlineData.MIMEType = %q, GetArtifactVersion(v1).MimeType = %q", got, first.ArtifactVersion.MimeType)
 			}
 
 			first.ArtifactVersion.CustomMetadata["key"] = "changed after read"
@@ -126,6 +136,52 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 			}
 			if diff := cmp.Diff(wantFirst, again.ArtifactVersion); diff != "" {
 				t.Errorf("second GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestInMemoryCanonicalURIEscapesSegments(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fileName string
+		wantURI  string
+	}{
+		{
+			name:     "session scoped",
+			fileName: "report?old#draft",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%3Fold%23draft/versions/1",
+		},
+		{
+			name:     "user scoped",
+			fileName: "user:report?old#draft",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%3Fold%23draft/versions/1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := artifact.InMemoryService()
+			if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+				Part: genai.NewPartFromText("data"),
+			}); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+
+			resp, err := srv.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+			if got := resp.ArtifactVersion.CanonicalURI; got != tc.wantURI {
+				t.Errorf("CanonicalURI = %q, want %q", got, tc.wantURI)
+			}
+			parsed, err := url.Parse(resp.ArtifactVersion.CanonicalURI)
+			if err != nil {
+				t.Fatalf("url.Parse(CanonicalURI) failed: %v", err)
+			}
+			if parsed.RawQuery != "" || parsed.Fragment != "" {
+				t.Errorf("CanonicalURI parsed with query %q and fragment %q, want neither", parsed.RawQuery, parsed.Fragment)
 			}
 		})
 	}

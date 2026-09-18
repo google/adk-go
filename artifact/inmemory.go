@@ -21,6 +21,7 @@ import (
 	"iter"
 	"maps"
 	"math"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -38,7 +39,6 @@ type artifactEntry struct {
 	part           *genai.Part
 	createTime     time.Time
 	customMetadata map[string]any
-	mimeType       string
 }
 
 // inMemoryService is an in-memory implementation of the Service.
@@ -163,10 +163,8 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	for key, value := range req.CustomMetadata {
 		customMetadata[key] = fmt.Sprint(value)
 	}
-	mimeType := "text/plain"
-	if req.Part.InlineData != nil {
-		mimeType = req.Part.InlineData.MIMEType
-	}
+	// Read the caller-provided clock outside the service lock. A provider may
+	// call back into the service, so invoking it while locked could deadlock.
 	createTime := platform.Now(ctx)
 
 	s.mu.Lock()
@@ -180,7 +178,6 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 		part:           req.Part,
 		createTime:     createTime,
 		customMetadata: customMetadata,
-		mimeType:       mimeType,
 	})
 	return &SaveResponse{Version: nextVersion}, nil
 }
@@ -335,9 +332,16 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
 
-	canonicalURI := fmt.Sprintf("memory://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", appName, userID, sessionID, fileName, version)
+	escapedAppName := url.PathEscape(appName)
+	escapedUserID := url.PathEscape(userID)
+	escapedFileName := url.PathEscape(fileName)
+	canonicalURI := fmt.Sprintf("memory://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, url.PathEscape(sessionID), escapedFileName, version)
 	if userScoped {
-		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)
+		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
+	}
+	mimeType := "text/plain"
+	if entry.part.InlineData != nil {
+		mimeType = entry.part.InlineData.MIMEType
 	}
 
 	return &GetArtifactVersionResponse{
@@ -346,7 +350,7 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 			CanonicalURI:   canonicalURI,
 			CustomMetadata: maps.Clone(entry.customMetadata),
 			CreateTime:     entry.createTime,
-			MimeType:       entry.mimeType,
+			MimeType:       mimeType,
 		},
 	}, nil
 }

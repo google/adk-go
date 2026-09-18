@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newGCSServiceForTesting("bucket")
 			fb := svc.bucket.(*fakeBucket)
-			fb.now = func() time.Time { return firstCreateTime }
+			fb.setNow(func() time.Time { return firstCreateTime })
 			metadata := map[string]any{
 				"string":  "value",
 				"number":  42,
@@ -109,7 +110,7 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 			}
 			metadata["string"] = "changed after save"
 
-			fb.now = func() time.Time { return secondCreateTime }
+			fb.setNow(func() time.Time { return secondCreateTime })
 			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromText("text"),
@@ -171,7 +172,7 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Delete() failed: %v", err)
 			}
-			fb.now = func() time.Time { return recreateTime }
+			fb.setNow(func() time.Time { return recreateTime })
 			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromBytes([]byte("new"), "application/octet-stream"),
@@ -444,6 +445,52 @@ func TestGetArtifactVersionCanonicalURI(t *testing.T) {
 	}
 }
 
+func TestGetArtifactVersionCanonicalURIEscapesSegments(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fileName string
+		wantURI  string
+	}{
+		{
+			name:     "session scoped",
+			fileName: "report?old#draft",
+			wantURI:  "gs://demo-bucket/app%2Fone/user%2Ftwo/session%2Fthree/report%3Fold%23draft/1",
+		},
+		{
+			name:     "user scoped",
+			fileName: "user:report?old#draft",
+			wantURI:  "gs://demo-bucket/app%2Fone/user%2Ftwo/user/user:report%3Fold%23draft/1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("demo-bucket")
+			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+				Part: genai.NewPartFromText("data"),
+			}); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+
+			resp, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+			if got := resp.ArtifactVersion.CanonicalURI; got != tc.wantURI {
+				t.Errorf("CanonicalURI = %q, want %q", got, tc.wantURI)
+			}
+			parsed, err := url.Parse(resp.ArtifactVersion.CanonicalURI)
+			if err != nil {
+				t.Fatalf("url.Parse(CanonicalURI) failed: %v", err)
+			}
+			if parsed.RawQuery != "" || parsed.Fragment != "" {
+				t.Errorf("CanonicalURI parsed with query %q and fragment %q, want neither", parsed.RawQuery, parsed.Fragment)
+			}
+		})
+	}
+}
+
 // TestBackoffDelayBounds checks the jittered backoff stays within [0, saveRetryMaxDelay].
 func TestBackoffDelayBounds(t *testing.T) {
 	for attempt := range maxSaveAttempts {
@@ -542,6 +589,12 @@ type fakeBucket struct {
 	// client library's wrapped storage.ErrObjectNotExist (see
 	// TestNotFoundIsWrappedSentinel).
 	attrsErr error
+}
+
+func (f *fakeBucket) setNow(now func() time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now = now
 }
 
 // object returns a handle to the named blob, creating an empty backing store on
