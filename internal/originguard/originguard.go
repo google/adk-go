@@ -25,6 +25,14 @@
 //  2. Is the Origin one we serve? Absent, matching the request's own origin, or
 //     on the configured allowlist.
 //
+// Both rest on the server being reachable from this machine only. A server
+// reachable over a network cannot tell a rebound page from an ordinary remote
+// browser: the Host it names really does resolve here, and the Origin it claims
+// really is its own. Neither check fires there and the page is served. A
+// container with a published port is such a server whatever address the port
+// was published on, because inside the container the connection still arrives
+// on a routable interface. Nothing here closes that; authentication does.
+//
 // Ported from adk-python's cli/api_server.py, which applies the same two checks
 // as _is_dns_rebinding_request and _is_request_origin_allowed.
 package originguard
@@ -53,6 +61,10 @@ type Config struct {
 	// rebinding check when it is a loopback address. Empty means the caller has
 	// not said, and the check stays off.
 	//
+	// A wildcard address ("", ":8080", "0.0.0.0", "[::]") names every
+	// interface, so it says no more about who can reach the server than saying
+	// nothing does, and [Policy.servesOnlyThisMachine] treats it the same way.
+	//
 	// Not inferred from the accepted connection, though that would arm it for
 	// more callers. A connection accepted on loopback does not mean the server
 	// is bound to loopback: a sidecar proxy, an nginx proxy_pass to
@@ -75,11 +87,13 @@ type Policy struct {
 	// origins, which is an operator saying the server is meant to be reachable
 	// from anywhere.
 	allowAll bool
-	// bindDeclared records that the caller said what it binds, and
-	// boundToLoopback that what it named is a loopback address. A declared
+	// bindDeclared records that the caller said what it binds,
+	// boundToLoopback that what it named is a loopback address, and
+	// bindWildcard that it named every interface rather than one. A declared
 	// loopback bind is what arms the rebinding check.
 	bindDeclared    bool
 	boundToLoopback bool
+	bindWildcard    bool
 	// origins holds the allowed origins, canonicalized.
 	origins map[string]bool
 	// hosts holds the host of each allowed origin, lowercased and without a
@@ -94,6 +108,7 @@ func New(cfg Config) *Policy {
 	p := &Policy{
 		bindDeclared:    cfg.BindHost != "",
 		boundToLoopback: cfg.BindHost != "" && isLoopbackAddr(cfg.BindHost),
+		bindWildcard:    cfg.BindHost != "" && isWildcardAddr(cfg.BindHost),
 		origins:         make(map[string]bool),
 		hosts:           make(map[string]bool),
 	}
@@ -215,15 +230,27 @@ func (p *Policy) originAllowed(r *http.Request, rawOrigin string) bool {
 // servesOnlyThisMachine reports whether this server can be reached from the
 // machine it runs on and nowhere else.
 //
-// A declared bind host answers it outright, either way. Naming a routable
-// address is an operator saying the server is exposed, and the rule above must
-// then not fire at all, however the connection happened to arrive.
+// One named address answers it outright, either way. Naming a routable one is
+// an operator saying the server is exposed, and the rule above must then not
+// fire at all, however the connection happened to arrive.
 //
-// Only when nothing was declared does the accepted connection stand in. That is
-// enough here, unlike in [Policy.isDNSRebinding]: this narrows which Origin a
-// browser may present, and a caller sending no Origin is never affected by it.
+// A wildcard bind names every interface, which says neither, so the accepted
+// connection stands in, as it does when nothing was declared at all. Telling
+// the guard what you bind must never leave it with less to go on than telling
+// it nothing.
+//
+// That last part diverges from adk-python, which takes a declared bind at face
+// value here and so lets a wildcard one turn the rule off
+// (_is_request_origin_allowed). Its comment there expects the accepted socket
+// to stand in for a wildcard bind, which is what this does. The deployment it
+// has in mind, a container serving a real hostname, accepts on a routable
+// address and is unaffected.
+//
+// The accepted connection is enough here, unlike in [Policy.isDNSRebinding]:
+// this narrows which Origin a browser may present, and a caller sending no
+// Origin is never affected by it.
 func (p *Policy) servesOnlyThisMachine(r *http.Request) bool {
-	if p.bindDeclared {
+	if p.bindDeclared && !p.bindWildcard {
 		return p.boundToLoopback
 	}
 	return isLoopbackAddr(serverHost(r))
@@ -419,6 +446,17 @@ func isLoopbackAddr(host string) bool {
 	}
 	addr, err := netip.ParseAddr(bare)
 	return err == nil && addr.IsLoopback()
+}
+
+// isWildcardAddr reports whether host, with or without a port, names every
+// interface rather than one: an empty host, "0.0.0.0" or "[::]".
+func isWildcardAddr(host string) bool {
+	bare := bareHost(host)
+	if bare == "" {
+		return true
+	}
+	addr, err := netip.ParseAddr(bare)
+	return err == nil && addr.IsUnspecified()
 }
 
 // bareHost lowercases host and strips its port and root dot, ready for

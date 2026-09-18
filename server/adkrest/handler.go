@@ -192,6 +192,12 @@ type ServerConfig struct {
 	// pointing its own DNS name at us. This is what stops a page reaching the
 	// server, and the WebSocket in particular, by DNS rebinding.
 	//
+	// Only on such a server. Where the request arrives over a network the
+	// reasoning does not hold, so neither this nor BindHost's check refuses a
+	// rebound page. That includes inside a container, where the connection
+	// arrives on a routable interface whatever address the port was published
+	// on. A server in that position needs an Authenticator.
+	//
 	// Listing an origin also vouches for its host, which BindHost's check
 	// consults. That check runs on requests with no Origin too, so on a server
 	// with a loopback BindHost this field decides those as well.
@@ -213,15 +219,18 @@ type ServerConfig struct {
 	// catch a rebound page's same-origin GET, on which a browser sends no
 	// Origin at all.
 	//
-	// Naming any other address says the server is exposed on purpose, and turns
-	// off both that check and the loopback-Origin rule above: a server reachable
-	// over the network is legitimately reachable under whatever name resolves
-	// to it.
+	// Naming one routable address says the server is exposed on purpose, and
+	// turns off both that check and the loopback-Origin rule above: a server
+	// reachable over the network is legitimately reachable under whatever name
+	// resolves to it.
 	//
-	// Left empty, the address the connection was accepted on stands in for the
-	// loopback-Origin rule, and the Host check stays off. Prefer saying: the
-	// accepted address cannot tell a browser on this machine from a sidecar
-	// proxy or an nginx proxy_pass to 127.0.0.1.
+	// A wildcard address ("", ":8080", "0.0.0.0", "[::]") names every
+	// interface, so it says neither. There, and when this is left empty, the
+	// address the connection was accepted on stands in for the loopback-Origin
+	// rule, and the Host check stays off. Naming a loopback address is what
+	// buys anything over saying nothing: the accepted address cannot tell a
+	// browser on this machine from a sidecar proxy or an nginx proxy_pass to
+	// 127.0.0.1.
 	BindHost string
 
 	// Compaction enables context compaction for the sessions the

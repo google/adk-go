@@ -428,10 +428,14 @@ func TestForwardedHeadersCannotDefeatHostGuard(t *testing.T) {
 	}
 }
 
-// TestDeclaredBindOverridesTheConnection pins that a declared bind host settles
-// both checks on its own. An operator who says the server is exposed must not
-// have either re-imposed by whichever interface a connection happened to arrive
-// on, and one who says it is on loopback must not lose them the other way.
+// TestDeclaredBindOverridesTheConnection pins that one declared bind address
+// settles both checks on its own, and that a wildcard one does not. An operator
+// who says the server is exposed must not have either check re-imposed by
+// whichever interface a connection happened to arrive on, and one who says it
+// is on loopback must not lose them the other way. Naming every interface says
+// neither, so it has to leave the server exactly as guarded as saying nothing:
+// the two "wildcard bind" cases and the two "nothing declared" cases below
+// answer alike.
 func TestDeclaredBindOverridesTheConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -443,8 +447,33 @@ func TestDeclaredBindOverridesTheConnection(t *testing.T) {
 			// Declared exposed, connection over loopback: someone on this
 			// machine browsing a server that is open to the network anyway.
 			name:     "routable bind, loopback connection",
+			bindHost: "192.168.1.5",
+			local:    "127.0.0.1",
+		},
+		{
+			// A wildcard bind is every interface, loopback included, so the
+			// connection is the only thing that says where this one came from.
+			name:     "wildcard bind, loopback connection",
 			bindHost: "0.0.0.0",
 			local:    "127.0.0.1",
+			want:     ErrOriginNotAllowed,
+		},
+		{
+			name:     "wildcard bind written as a bare port, loopback connection",
+			bindHost: ":8080",
+			local:    "127.0.0.1",
+			want:     ErrOriginNotAllowed,
+		},
+		{
+			name:     "IPv6 wildcard bind, loopback connection",
+			bindHost: "[::]",
+			local:    "127.0.0.1",
+			want:     ErrOriginNotAllowed,
+		},
+		{
+			name:     "wildcard bind, routable connection",
+			bindHost: "0.0.0.0",
+			local:    "192.168.1.5",
 		},
 		{
 			// Declared loopback, connection reported as routable. Only this
