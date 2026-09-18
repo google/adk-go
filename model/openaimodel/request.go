@@ -705,9 +705,11 @@ func preserveSchemaNumbers(val any) any {
 }
 
 // enforceStrictOpenAISchema recursively walks the schema and enforces the rules
-// required by OpenAI's structured outputs with strict=true. Specifically, it
-// sets additionalProperties=false on all object types, and ensures that all
-// properties are listed in the required array.
+// required by OpenAI's structured outputs with strict=true: every object type
+// carries properties, additionalProperties=false and a required array naming
+// every property, and a $ref keeps no siblings. An object that declares no
+// properties is given all three as empty, because the API rejects the whole
+// request when any object in the schema omits one of them.
 func enforceStrictOpenAISchema(val any) {
 	schema, ok := val.(map[string]any)
 	if !ok {
@@ -725,18 +727,23 @@ func enforceStrictOpenAISchema(val any) {
 
 	t, hasType := schema["type"]
 	isObj := hasType && t == "object"
-	propsVal, hasProps := schema["properties"]
+	propsMap, _ := schema["properties"].(map[string]any)
 
-	if isObj && hasProps {
-		schema["additionalProperties"] = false
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			req := make([]string, 0, len(propsMap))
-			for k := range propsMap {
-				req = append(req, k)
-			}
-			sort.Strings(req)
-			schema["required"] = req
+	if isObj {
+		// A property-less object is still an object, and the API rejects one
+		// that omits any of the three keys, so synthesize an empty set rather
+		// than leaving the schema as the caller wrote it.
+		if propsMap == nil {
+			propsMap = map[string]any{}
+			schema["properties"] = propsMap
 		}
+		schema["additionalProperties"] = false
+		req := make([]string, 0, len(propsMap))
+		for k := range propsMap {
+			req = append(req, k)
+		}
+		sort.Strings(req)
+		schema["required"] = req
 	}
 
 	if defsVal, ok := schema["$defs"]; ok {
@@ -747,12 +754,8 @@ func enforceStrictOpenAISchema(val any) {
 		}
 	}
 
-	if hasProps {
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			for _, prop := range propsMap {
-				enforceStrictOpenAISchema(prop)
-			}
-		}
+	for _, prop := range propsMap {
+		enforceStrictOpenAISchema(prop)
 	}
 
 	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
