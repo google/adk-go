@@ -36,11 +36,12 @@ import (
 
 // apiConfig contains parametres for lauching ADK REST API
 type apiConfig struct {
-	frontendAddress string
-	pathPrefix      string
-	sseWriteTimeout time.Duration
-	traceCapacity   int
-	includeDebugAPI bool
+	frontendAddress   string
+	pathPrefix        string
+	sseWriteTimeout   time.Duration
+	traceCapacity     int
+	includeDebugAPI   bool
+	includeAppInfoAPI bool
 }
 
 // apiLauncher can launch ADK REST API
@@ -311,6 +312,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		DebugAPIConfig: adkrest.DebugAPIConfig{
 			IncludeDebugAPI: a.config.includeDebugAPI,
 		},
+		AppInfoAPIConfig: adkrest.AppInfoAPIConfig{
+			IncludeAppInfoAPI: a.config.includeAppInfoAPI,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create REST server: %w", err)
@@ -361,6 +365,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
 	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true. !!! WARNING !!! : debug endpoints are not safe to be used in production environment, do not set them to true in production. ")
+	fs.BoolVar(&config.includeAppInfoAPI, "include_app_info", false, "Mounts GET /apps/{app_name}/app-info, which reports each LLM agent's instruction and tool declarations. Off by default; turn it on for evaluation tooling, leave it off in production.")
 
 	return &apiLauncher{
 		config: config,

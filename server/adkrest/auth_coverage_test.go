@@ -81,8 +81,9 @@ func TestAllEndpointsRequireAuthentication(t *testing.T) {
 		// credential-less request to a protected route is answered 401 by the
 		// middleware before the handler runs.
 		Authenticator: authn.NewHeader("non-existing"),
-		// Opt into the debug API so its routes are covered too.
-		DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: true},
+		// Opt into the gated APIs so their routes are covered too.
+		DebugAPIConfig:   DebugAPIConfig{IncludeDebugAPI: true},
+		AppInfoAPIConfig: AppInfoAPIConfig{IncludeAppInfoAPI: true},
 	})
 	if err != nil {
 		t.Fatalf("NewServer() failed: %v", err)
