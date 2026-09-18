@@ -57,9 +57,30 @@ func Test_vertexaiService(t *testing.T) {
 	} // VertexAI forbids custom IDs
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		name := strings.ReplaceAll(t.Name(), "/", "_")
+		if _, ok := casesWithoutReplay[name]; ok {
+			t.Skipf("no recorded Agent Engine traffic for %s; see casesWithoutReplay", name)
+		}
 		s, _ := emptyService(t, name, false)
 		return s
 	})
+}
+
+// casesWithoutReplay lists shared-suite cases this package cannot run, keyed by
+// the replay file they would need. Recording one requires a live Agent Engine,
+// so a case added to the suite after the last recording session has no traffic
+// to replay and would fail on the missing file rather than on the behavior.
+//
+// Skipping is not a pass: every entry names where the same behavior is pinned
+// instead, and those tests must stay.
+var casesWithoutReplay = map[string]string{
+	// Pinned offline against the in-process fake backend, by
+	// TestAppendEvent_missingSession_wrapsErrNotFound in notfound_test.go.
+	"Test_vertexaiService_AppendEvent_when_session_deleted_returns_ErrNotFound": "notfound_test.go",
+	// Trimming temp: keys before AppendEvent changes the outbound RPC body, so
+	// the recorded Agent Engine replay no longer matches. Pinned offline by
+	// TestAppendEvent_stripsTempKeysBeforePersist until a maintainer re-records
+	// with UPDATE_REPLAYS=true.
+	"Test_vertexaiService_StateManagement_temp_state_is_not_persisted": "append_event_temp_state_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {

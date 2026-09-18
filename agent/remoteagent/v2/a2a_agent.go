@@ -459,6 +459,20 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 			if event != nil { // an event might be skipped
 				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+					// aggregatePartial may synthesize a brand-new non-partial
+					// event from buffered partial chunks (the reassembled
+					// artifact). That event has not passed through the
+					// after-callbacks, so run them here. The pass-through `event`
+					// already ran callbacks above; skip it (same pointer) to
+					// avoid invoking callbacks on it twice.
+					if toEmit != event {
+						if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, toEmit, nil); cbResp != nil || cbErr != nil {
+							if cbErr != nil {
+								return yieldErr(cbErr)
+							}
+							toEmit = cbResp
+						}
+					}
 					if !yield(toEmit, nil) {
 						return false
 					}
@@ -523,9 +537,13 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
-	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
+	// Resume path: do not rewrite function responses to text. A single user
+	// event can mix peer and local tool answers (parallel tool merge); Python's
+	// preserve_as_resume forbids flattening any FR when any other stays as data.
+	// IsolationScope prevents sibling-scope function calls from leaking TaskID/contextID.
+	if userFnCall := getUserFunctionCallAt(events, events.Len()-1, ctx.Agent().Name(), ctx.IsolationScope()); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := convertParts(ctx, cfg, event)
+		parts, err := convertParts(ctx, cfg, event, nil)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
@@ -536,6 +554,21 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	}
 
 	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
+	// A scoped node dispatch receives its input through UserContent, which is
+	// not an event in the shared session. Seed from it when the scope has no
+	// history of its own yet.
+	if ctx.IsolationScope() != "" && !hasIsolationScopeHistory(events, ctx.IsolationScope()) {
+		if uc := ctx.UserContent(); uc != nil && len(uc.Parts) > 0 {
+			event := session.NewEvent(ctx, ctx.InvocationID())
+			event.Author = "user"
+			event.Content = uc
+			seeded, err := convertParts(ctx, cfg, event, nil)
+			if err != nil {
+				return nil, fmt.Errorf("event part conversion failed: %w", err)
+			}
+			parts = seeded
+		}
+	}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
