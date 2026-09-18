@@ -43,6 +43,10 @@
 //	            HTTPOptions apart from Timeout and Headers
 //	Ignored     HTTPOptions.Headers
 //
+// Function tools are sent with strict parameter validation disabled, and that
+// is not configurable, so tool call arguments are best effort rather than
+// guaranteed to match the declared parameter schema.
+//
 // Model reasoning is reported to the caller as thought parts, but it is not
 // sent back on a later turn: the Responses API accepts reasoning only as an
 // input item referencing the id of the item that produced it, and ADK does not
