@@ -92,9 +92,11 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	idx := sort.Search(len(s.events), func(i int) bool {
 		return s.events[i].Timestamp.After(processedEvent.Timestamp)
 	})
-	s.events = append(s.events, nil)
-	copy(s.events[idx+1:], s.events[idx:])
-	s.events[idx] = processedEvent
+	next := make([]*session.Event, len(s.events)+1)
+	copy(next, s.events[:idx])
+	next[idx] = processedEvent
+	copy(next[idx+1:], s.events[idx:])
+	s.events = next
 	return nil
 }
 

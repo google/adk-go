@@ -378,6 +378,29 @@ func eventIDs(sess session.Session) []string {
 	return ids
 }
 
+func TestLocalSession_AppendEventDoesNotMutateRetainedEvents(t *testing.T) {
+	base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	initial := make([]*session.Event, 3, 4)
+	initial[0] = &session.Event{ID: "e0", Timestamp: base}
+	initial[1] = &session.Event{ID: "e1", Timestamp: base.Add(2 * time.Second)}
+	initial[2] = &session.Event{ID: "e2", Timestamp: base.Add(3 * time.Second)}
+	sess := &localSession{events: initial}
+	retained := sess.Events()
+
+	if err := sess.appendEvent(&session.Event{ID: "mid", Timestamp: base.Add(time.Second)}); err != nil {
+		t.Fatalf("appendEvent: %v", err)
+	}
+
+	for i, want := range []string{"e0", "e1", "e2"} {
+		if got := retained.At(i).ID; got != want {
+			t.Errorf("retained event %d = %q, want %q", i, got, want)
+		}
+	}
+	if diff := cmp.Diff([]string{"e0", "mid", "e1", "e2"}, eventIDs(sess)); diff != "" {
+		t.Errorf("live events not in chronological order (-want +got):\n%s", diff)
+	}
+}
+
 // TestDatabaseService_AppendEvent_StaleRetryIsOptIn guards the default
 // behaviour: without EnableStaleRetry, a stale handle keeps failing instead
 // of silently retrying and overwriting whatever the caller wanted to
