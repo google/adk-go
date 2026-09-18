@@ -64,6 +64,11 @@ type SaveRequest struct {
 
 	// Below are optional fields.
 
+	// CustomMetadata contains caller-defined metadata persisted with the artifact.
+	// Service implementations must convert each value to its string representation
+	// when saving it and return the value as a string.
+	CustomMetadata map[string]any
+
 	// If set, the artifact will be saved with this version.
 	// If unset, a new version will be created.
 	Version int64
@@ -267,20 +272,26 @@ type VersionsResponse struct {
 }
 
 // ArtifactVersion contains metadata describing a specific version of an artifact.
+// Service implementations must populate its fields as documented below.
 type ArtifactVersion struct {
 	Version int64
 
-	// CanonicalURI identifies the stored payload in the scheme native to the
-	// backing store, such as gs:// for Google Cloud Storage. It is an identity,
-	// not a download endpoint: it is what a consumer that understands the
-	// scheme resolves, including a model handed it as the FileURI of a
-	// [genai.Part] FileData. It is not an authenticated HTTP URL, and a service
-	// that has no such scheme may leave it empty.
+	// CanonicalURI is a stable identity for the stored payload. Implementations
+	// with a native scheme should use it, such as gs:// for Google Cloud Storage;
+	// other implementations should define a stable service-specific scheme. It
+	// is not necessarily a download endpoint or an authenticated HTTP URL.
 	CanonicalURI string
 
+	// CustomMetadata is non-nil and contains only string values. It is empty when
+	// no custom metadata was saved.
 	CustomMetadata map[string]any
-	CreateTime     time.Time
-	MimeType       string
+
+	// CreateTime is when this artifact version was created.
+	CreateTime time.Time
+
+	// MimeType is the media type associated with the stored part. It may be empty
+	// when the part was saved without a media type.
+	MimeType string
 }
 
 // GetArtifactVersionRequest is the parameter for [ArtifactService.GetArtifactVersion].

@@ -28,6 +28,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -134,6 +135,13 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	var customMetadata map[string]string
+	if req.CustomMetadata != nil {
+		customMetadata = make(map[string]string, len(req.CustomMetadata))
+		for key, value := range req.CustomMetadata {
+			customMetadata[key] = fmt.Sprint(value)
+		}
+	}
 
 	var lastErr error
 	for attempt := range maxSaveAttempts {
@@ -150,7 +158,7 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 
 		blobName := buildBlobName(appName, userID, sessionID, fileName, nextVersion)
 		obj := s.bucket.object(blobName).ifNotExist()
-		err = writeArtifact(ctx, obj, req.Part)
+		err = writeArtifact(ctx, obj, req.Part, customMetadata)
 		if err == nil {
 			return &artifact.SaveResponse{Version: nextVersion}, nil
 		}
@@ -202,13 +210,14 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 
 // writeArtifact streams part to obj. A precondition on obj surfaces as an error
 // from Close, not Write.
-func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part) (err error) {
+func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part, metadata map[string]string) (err error) {
 	writer := obj.newWriter(ctx)
 	defer func() {
 		if closeErr := writer.Close(); closeErr != nil && err == nil {
 			err = fmt.Errorf("failed to close blob writer: %w", closeErr)
 		}
 	}()
+	writer.SetMetadata(metadata)
 
 	if part.InlineData != nil {
 		writer.SetContentType(part.InlineData.MIMEType)
@@ -484,7 +493,15 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 	// object's MediaLink is an authenticated JSON API download URL, which a
 	// consumer handed the URI cannot fetch: a model given it as the file_uri of
 	// a file_data part treats it as a web page and fails to read it.
-	canonicalURI := fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
+	escapedAppName := url.PathEscape(appName)
+	escapedUserID := url.PathEscape(userID)
+	escapedFileName := url.PathEscape(fileName)
+	var canonicalURI string
+	if fileHasUserNamespace(fileName) {
+		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/user/%s/%d", s.bucketName, escapedAppName, escapedUserID, escapedFileName, version)
+	} else {
+		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/%s/%s/%d", s.bucketName, escapedAppName, escapedUserID, url.PathEscape(sessionID), escapedFileName, version)
+	}
 
 	customMeta := make(map[string]any)
 	if attrs.Metadata != nil {

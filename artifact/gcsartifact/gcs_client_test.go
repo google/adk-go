@@ -21,8 +21,21 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/api/option"
 )
+
+func TestGCSWriterWrapperSetMetadata(t *testing.T) {
+	writer := &storage.Writer{}
+	wrapper := &gcsWriterWrapper{w: writer}
+	want := map[string]string{"key": "value"}
+
+	wrapper.SetMetadata(want)
+
+	if diff := cmp.Diff(want, writer.Metadata); diff != "" {
+		t.Errorf("writer.Metadata mismatch (-want +got):\n%s", diff)
+	}
+}
 
 // TestObjectWrapperIfNotExist checks that the wrapper puts the does-not-exist
 // precondition on the wire. Everything else in this package tests against the
