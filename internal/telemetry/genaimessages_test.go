@@ -418,6 +418,7 @@ func TestSchemaFinishReason(t *testing.T) {
 	tests := []struct {
 		name string
 		resp *model.LLMResponse
+		err  error
 		want string
 	}{
 		{"stop", &model.LLMResponse{FinishReason: genai.FinishReasonStop}, "stop"},
@@ -456,10 +457,16 @@ func TestSchemaFinishReason(t *testing.T) {
 			},
 			want: "error",
 		},
+		{
+			name: "error beats a successful finish reason",
+			resp: &model.LLMResponse{FinishReason: genai.FinishReasonStop},
+			err:  errTest,
+			want: "error",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := schemaFinishReason(tc.resp, nil); got != tc.want {
+			if got := schemaFinishReason(tc.resp, tc.err); got != tc.want {
 				t.Errorf("schemaFinishReason() = %q, want %q", got, tc.want)
 			}
 		})
