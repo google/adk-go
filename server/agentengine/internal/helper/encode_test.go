@@ -16,9 +16,11 @@ package helper
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -254,6 +256,62 @@ func TestRawMessageOmitEmpty(t *testing.T) {
 	}
 	if _, present := m["default"]; present {
 		t.Errorf("default should be omitted for an empty json.RawMessage, got: %v", m["default"])
+	}
+}
+
+// TestEmitJSONSchemaSnakeCase drives public EmitJSON with a real session.Event
+// carrying a jsonschema.Schema, so a json.RawMessage field can no longer make
+// ConvertSnake fall back to its camelCase input unnoticed.
+func TestEmitJSONSchemaSnakeCase(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		RequestedInput: &session.RequestInput{
+			InterruptID: "abc",
+			ResponseSchema: &jsonschema.Schema{
+				Default: json.RawMessage(`{"approved":false}`),
+				Properties: map[string]*jsonschema.Schema{
+					"approved": {
+						Default: json.RawMessage(`true`),
+					},
+				},
+			},
+		},
+	}
+
+	rw := httptest.NewRecorder()
+	if err := EmitJSON(rw, event); err != nil {
+		t.Fatalf("EmitJSON() failed: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+	}
+
+	if _, present := got["requestedInput"]; present {
+		t.Errorf("output fell back to camelCase key requestedInput: %v", got)
+	}
+	requestedInput, ok := got["requested_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("requested_input missing or not an object: %v", got)
+	}
+	responseSchema, ok := requestedInput["response_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_schema missing or not an object: %v", requestedInput)
+	}
+	if diff := cmp.Diff(responseSchema["default"], map[string]any{"approved": false}); diff != "" {
+		t.Errorf("response_schema.default mismatch (-got +want):\n%s", diff)
+	}
+	properties, ok := responseSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing or not an object: %v", responseSchema)
+	}
+	approved, ok := properties["approved"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties.approved missing or not an object: %v", properties)
+	}
+	if approved["default"] != true {
+		t.Errorf("properties.approved.default = %v, want true", approved["default"])
 	}
 }
 
