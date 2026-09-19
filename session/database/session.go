@@ -37,6 +37,11 @@ type localSession struct {
 	events    []*session.Event
 	state     map[string]any
 	updatedAt time.Time
+
+	// Keep the event window used to create this handle so an OCC refresh can
+	// rebuild the same view instead of silently expanding it to full history.
+	eventsAfter     time.Time
+	numRecentEvents int
 }
 
 func (s *localSession) ID() string {

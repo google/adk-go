@@ -370,6 +370,70 @@ func TestDatabaseService_AppendEvent_RefreshesStaleHandle(t *testing.T) {
 	}
 }
 
+func TestDatabaseService_AppendEvent_PreservesEventWindowOnRefresh(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		filter session.GetRequest
+		want   []string
+	}{
+		{
+			name:   "recent event limit",
+			filter: session.GetRequest{NumRecentEvents: 2},
+			want:   []string{"e4", "writer", "own"},
+		},
+		{
+			name:   "after timestamp",
+			filter: session.GetRequest{After: time.Date(2026, time.December, 1, 0, 0, 3, 0, time.UTC)},
+			want:   []string{"e3", "e4", "writer", "own"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+			s := emptyService(t)
+			if err := EnableStaleRetry(s); err != nil {
+				t.Fatalf("EnableStaleRetry: %v", err)
+			}
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+			for i := range 5 {
+				if err := s.AppendEvent(ctx, created.Session, &session.Event{
+					ID: fmt.Sprintf("e%d", i), Timestamp: base.Add(time.Duration(i) * time.Second),
+				}); err != nil {
+					t.Fatalf("AppendEvent(e%d): %v", i, err)
+				}
+			}
+
+			test.filter.AppName = "app"
+			test.filter.UserID = "user"
+			test.filter.SessionID = "session"
+			bounded, err := s.Get(ctx, &test.filter)
+			if err != nil {
+				t.Fatalf("Get(bounded): %v", err)
+			}
+			writer, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+			if err != nil {
+				t.Fatalf("Get(writer): %v", err)
+			}
+
+			if err := s.AppendEvent(ctx, writer.Session, &session.Event{ID: "writer", Timestamp: base.Add(5 * time.Second)}); err != nil {
+				t.Fatalf("AppendEvent(writer): %v", err)
+			}
+			if err := s.AppendEvent(ctx, bounded.Session, &session.Event{ID: "own", Timestamp: base.Add(6 * time.Second)}); err != nil {
+				t.Fatalf("AppendEvent(own): %v", err)
+			}
+
+			if diff := cmp.Diff(test.want, eventIDs(bounded.Session)); diff != "" {
+				t.Errorf("events after stale refresh (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func eventIDs(sess session.Session) []string {
 	var ids []string
 	for ev := range sess.Events().All() {

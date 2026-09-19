@@ -259,6 +259,8 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	if err != nil {
 		return nil, fmt.Errorf("failed to map storage object: %w", err)
 	}
+	responseSession.eventsAfter = req.After
+	responseSession.numRecentEvents = req.NumRecentEvents
 
 	// We fetched in DESC order to get the most recent ones (due to LIMIT).
 	// Now we reverse them to be in chronological ASC order for the response.
@@ -445,7 +447,11 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 // current database snapshot after another writer advances its OCC lease.
 func (s *databaseService) refreshSession(ctx context.Context, sess *localSession) error {
 	resp, err := s.Get(ctx, &session.GetRequest{
-		AppName: sess.AppName(), UserID: sess.UserID(), SessionID: sess.ID(),
+		AppName:         sess.AppName(),
+		UserID:          sess.UserID(),
+		SessionID:       sess.ID(),
+		After:           sess.eventsAfter,
+		NumRecentEvents: sess.numRecentEvents,
 	})
 	if err != nil {
 		return err
