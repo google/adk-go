@@ -20,6 +20,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -200,5 +201,39 @@ func TestEventarcTriggerHandler(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEventarcBinaryModeRejectsOversizedBody verifies that a body over the
+// configured limit is reported as a client error in binary mode, matching the
+// structured branch and the Pub/Sub trigger, rather than as an internal error.
+func TestEventarcBinaryModeRejectsOversizedBody(t *testing.T) {
+	testAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	controller := triggers.NewEventarcController(sessionService, agent.NewSingleLoader(testAgent), nil, nil, runner.PluginConfig{}, defaultTriggerConfig)
+
+	const limit = 16
+	rr := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/eventarc", bytes.NewBufferString(strings.Repeat("a", int(limit)+1)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	req.Body = http.MaxBytesReader(rr, req.Body, limit)
+
+	controller.EventarcTriggerHandler(rr, req)
+
+	if got, want := rr.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("oversized binary-mode body: status %d, want %d (body: %s)", got, want, rr.Body.String())
 	}
 }
