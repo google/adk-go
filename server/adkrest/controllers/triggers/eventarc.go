@@ -16,6 +16,7 @@ package triggers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,6 +102,13 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		// We just read it as raw bytes into event.Data.
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			// A body over the limit set by MaxBytesMiddleware is a client
+			// error, reported the same way as in the structured branch above.
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to read body: %v", err))
+				return
+			}
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read body: %v", err))
 			return
 		}

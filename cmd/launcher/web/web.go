@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
 	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -49,6 +50,7 @@ type webConfig struct {
 	shutdownTimeout time.Duration
 	otelToCloud     bool
 	useH2C          bool
+	maxPayloadSize  int64
 }
 
 // webLauncher can launch web server
@@ -191,25 +193,9 @@ func applyServiceDefaults(config *launcher.Config) {
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	applyServiceDefaults(config)
 
-	router := BuildBaseRouter()
-	registerHealthRoute(router)
-
-	// check if there are any active sublaunchers
-	if len(w.activeSublaunchers) == 0 {
-		availableSublaunchers := make([]string, len(w.sublaunchers))
-		for i, l := range w.sublaunchers {
-			availableSublaunchers[i] = l.Keyword()
-		}
-		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
-	}
-
-	// Setup subrouters
-	for _, l := range w.sublaunchers {
-		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
-			if err := l.SetupSubrouters(router, config); err != nil {
-				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
-			}
-		}
+	router, err := w.buildRouter(config)
+	if err != nil {
+		return err
 	}
 
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
@@ -257,6 +243,40 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 }
 
+// buildRouter builds the base router and mounts the active sublaunchers on it.
+// The request-body size limit middleware is applied to the base router itself,
+// so every route mounted by a sublauncher (including the Eventarc and PubSub
+// trigger endpoints) enforces the limit.
+func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) {
+	router := BuildBaseRouter()
+	registerHealthRoute(router)
+	router.Use(adkrest.MaxBytesMiddleware(w.config.maxPayloadSize))
+
+	// Thread the web launcher's configured limit through to sublaunchers so the
+	// ADK REST API server applies the same limit as the base router instead of
+	// its 10 MiB default. A value <= 0 keeps the default behavior in adkrest.
+	config.MaxPayloadSize = w.config.maxPayloadSize
+
+	// check if there are any active sublaunchers
+	if len(w.activeSublaunchers) == 0 {
+		availableSublaunchers := make([]string, len(w.sublaunchers))
+		for i, l := range w.sublaunchers {
+			availableSublaunchers[i] = l.Keyword()
+		}
+		return nil, fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
+	}
+
+	// Setup subrouters
+	for _, l := range w.sublaunchers {
+		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
+			if err := l.SetupSubrouters(router, config); err != nil {
+				return nil, fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+			}
+		}
+	}
+	return router, nil
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
@@ -298,6 +318,7 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	fs.BoolVar(&config.useH2C, "h2c", false, "Enable prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1 Upgrade) on the web server listener. Cleartext is insecure; do not expose it to untrusted networks. Long-lived streaming responses may require increasing --write-timeout.")
+	fs.Int64Var(&config.maxPayloadSize, "max_payload_size", 0, "Maximum request body size in bytes. Larger requests are rejected with HTTP 400. 0 uses the default (10 MiB). Applied to the base router so all sublauncher and trigger routes are covered.")
 
 	return &webLauncher{
 		config:       config,
