@@ -93,7 +93,8 @@ func AutoMigrate(service session.Service) error {
 
 // EnableStaleRetry opts a database session service into refreshing a stale
 // OCC handle and retrying an append once, instead of returning
-// errStaleSession to the caller. See issue #1229.
+// errStaleSession to the caller. Call it before sharing the service with
+// other goroutines. See issue #1229.
 //
 // NOTE: This function relies on a type assertion to the concrete
 // *databaseService implementation. It will return an error if the provided
