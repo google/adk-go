@@ -411,6 +411,25 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 	}
 }
 
+func TestTraceGenerateContentResult_NilResponseNilErrorLeavesSpanSuccessful(t *testing.T) {
+	exporter := setupTestTracer(t)
+	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
+
+	TraceGenerateContentResult(span, TraceGenerateContentResultParams{})
+	span.End()
+
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+	if got := spans[0].Status.Code; got != codes.Unset {
+		t.Fatalf("span status = %v, want %v", got, codes.Unset)
+	}
+	if attrs := attributesToMap(spans[0].Attributes); attrs[semconv.GenAIResponseFinishReasonsKey] != "" {
+		t.Fatalf("finish reason = %q, want attribute to be absent", attrs[semconv.GenAIResponseFinishReasonsKey])
+	}
+}
+
 func TestExecuteTool(t *testing.T) {
 	tests := []struct {
 		name         string

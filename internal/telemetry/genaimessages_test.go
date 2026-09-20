@@ -418,27 +418,27 @@ func TestSchemaFinishReason(t *testing.T) {
 	tests := []struct {
 		name string
 		resp *model.LLMResponse
-		err  error
 		want string
+		err  error
 	}{
-		{"stop", &model.LLMResponse{FinishReason: genai.FinishReasonStop}, "stop"},
-		{"stop with a tool call", &model.LLMResponse{
+		{name: "stop", resp: &model.LLMResponse{FinishReason: genai.FinishReasonStop}, want: "stop"},
+		{name: "stop with a tool call", resp: &model.LLMResponse{
 			Content:      &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{}}}},
 			FinishReason: genai.FinishReasonStop,
-		}, "tool_call"},
-		{"unset", &model.LLMResponse{}, "stop"},
-		{"unset with a tool call", &model.LLMResponse{
+		}, want: "tool_call"},
+		{name: "unset", resp: &model.LLMResponse{}, want: "stop"},
+		{name: "unset with a tool call", resp: &model.LLMResponse{
 			Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{}}}},
-		}, "tool_call"},
-		{"unspecified", &model.LLMResponse{FinishReason: genai.FinishReasonUnspecified}, "stop"},
-		{"max tokens", &model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens}, "length"},
-		{"safety", &model.LLMResponse{FinishReason: genai.FinishReasonSafety}, "content_filter"},
-		{"recitation", &model.LLMResponse{FinishReason: genai.FinishReasonRecitation}, "content_filter"},
-		{"blocklist", &model.LLMResponse{FinishReason: genai.FinishReasonBlocklist}, "content_filter"},
-		{"spii", &model.LLMResponse{FinishReason: genai.FinishReasonSPII}, "content_filter"},
-		{"malformed function call", &model.LLMResponse{FinishReason: genai.FinishReasonMalformedFunctionCall}, "error"},
-		{"too many tool calls", &model.LLMResponse{FinishReason: genai.FinishReasonTooManyToolCalls}, "error"},
-		{"other", &model.LLMResponse{FinishReason: genai.FinishReasonOther}, "error"},
+		}, want: "tool_call"},
+		{name: "unspecified", resp: &model.LLMResponse{FinishReason: genai.FinishReasonUnspecified}, want: "stop"},
+		{name: "max tokens", resp: &model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens}, want: "length"},
+		{name: "safety", resp: &model.LLMResponse{FinishReason: genai.FinishReasonSafety}, want: "content_filter"},
+		{name: "recitation", resp: &model.LLMResponse{FinishReason: genai.FinishReasonRecitation}, want: "content_filter"},
+		{name: "blocklist", resp: &model.LLMResponse{FinishReason: genai.FinishReasonBlocklist}, want: "content_filter"},
+		{name: "spii", resp: &model.LLMResponse{FinishReason: genai.FinishReasonSPII}, want: "content_filter"},
+		{name: "malformed function call", resp: &model.LLMResponse{FinishReason: genai.FinishReasonMalformedFunctionCall}, want: "error"},
+		{name: "too many tool calls", resp: &model.LLMResponse{FinishReason: genai.FinishReasonTooManyToolCalls}, want: "error"},
+		{name: "other", resp: &model.LLMResponse{FinishReason: genai.FinishReasonOther}, want: "error"},
 		{
 			name: "error code beats a successful finish reason",
 			resp: &model.LLMResponse{FinishReason: genai.FinishReasonStop, ErrorCode: "429"},
