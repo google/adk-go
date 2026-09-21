@@ -249,24 +249,15 @@ func (t *callTracker) newFunctionCall(fc *genai.FunctionCall) (*responses.Respon
 	if fc.Name == "" {
 		return nil, ErrFunctionCallMissingName
 	}
-	callID := fc.ID
-	if callID == "" {
-		callID = fmt.Sprintf("adk-openai-call-%d", t.nextID)
-		t.nextID++
-	}
-	t.pending = append(t.pending, callID)
-	argsValue := fc.Args
-	if argsValue == nil {
-		argsValue = map[string]any{}
-	}
-	args, err := json.Marshal(argsValue)
+	callID := t.takeCallID(fc)
+	args, err := marshalFunctionArgs(fc.Args)
 	if err != nil {
-		return nil, fmt.Errorf("openai: marshal function args: %w", err)
+		return nil, err
 	}
 	return &responses.ResponseFunctionToolCallParam{
 		Name:      fc.Name,
 		CallID:    callID,
-		Arguments: string(args),
+		Arguments: args,
 		Type:      constant.FunctionCall("function_call"),
 	}, nil
 }
@@ -276,25 +267,9 @@ func (t *callTracker) newFunctionCall(fc *genai.FunctionCall) (*responses.Respon
 // function call. If an explicit callID is provided, we find and remove it from our
 // pending list. Otherwise, we assume it corresponds to the oldest pending call.
 func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*responses.ResponseInputItemFunctionCallOutputParam, error) {
-	callID := fr.ID
-	if callID == "" {
-		if len(t.pending) == 0 {
-			return nil, fmt.Errorf("openai: response for %q missing call id", fr.Name)
-		}
-		callID = t.pending[0]
-		t.pending = t.pending[1:]
-	} else {
-		found := false
-		for i, pending := range t.pending {
-			if pending == callID {
-				t.pending = append(t.pending[:i], t.pending[i+1:]...)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("openai: received function response for unknown or already completed call id %q", callID)
-		}
+	callID, err := t.resolveResponseID(fr)
+	if err != nil {
+		return nil, err
 	}
 	payload, err := json.Marshal(fr.Response)
 	if err != nil {
@@ -307,6 +282,52 @@ func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*response
 		},
 		Type: constant.FunctionCallOutput("function_call_output"),
 	}, nil
+}
+
+// resolveResponseID reports the call ID a function response answers, consuming
+// it from the pending list. An unset ID pairs with the oldest outstanding call,
+// which is the only pairing available when the caller did not supply one.
+func (t *callTracker) resolveResponseID(fr *genai.FunctionResponse) (string, error) {
+	if fr.ID == "" {
+		if len(t.pending) == 0 {
+			return "", fmt.Errorf("openai: response for %q missing call id", fr.Name)
+		}
+		callID := t.pending[0]
+		t.pending = t.pending[1:]
+		return callID, nil
+	}
+	for i, pending := range t.pending {
+		if pending == fr.ID {
+			t.pending = append(t.pending[:i], t.pending[i+1:]...)
+			return fr.ID, nil
+		}
+	}
+	return "", fmt.Errorf("openai: received function response for unknown or already completed call id %q", fr.ID)
+}
+
+// takeCallID reports the ID to send for a function call, minting one when the
+// caller left it unset so the matching response can still be paired.
+func (t *callTracker) takeCallID(fc *genai.FunctionCall) string {
+	callID := fc.ID
+	if callID == "" {
+		callID = fmt.Sprintf("adk-openai-call-%d", t.nextID)
+		t.nextID++
+	}
+	t.pending = append(t.pending, callID)
+	return callID
+}
+
+// marshalFunctionArgs encodes a call's arguments, reading a nil map as a call
+// that takes none rather than as JSON null.
+func marshalFunctionArgs(args map[string]any) (string, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "", fmt.Errorf("openai: marshal function args: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // applyGenerationConfig translates our generic generation configuration into
@@ -586,10 +607,7 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 // unsupportedConfigFields lists the GenerateContentConfig fields this package
 // cannot translate, each with a predicate reporting whether the caller set it.
 // Presence, not value: setting a knob at all means the caller expected an effect.
-var unsupportedConfigFields = []struct {
-	name  string
-	isSet func(*genai.GenerateContentConfig) bool
-}{
+var unsupportedConfigFields = []configField{
 	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
 	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
 	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
@@ -604,6 +622,13 @@ var unsupportedConfigFields = []struct {
 	}},
 	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
 	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+}
+
+// configField names a GenerateContentConfig field alongside a predicate
+// reporting whether the caller set it.
+type configField struct {
+	name  string
+	isSet func(*genai.GenerateContentConfig) bool
 }
 
 // rejectUnsupportedConfigFields reports the first unsupported field the caller set.

@@ -312,7 +312,8 @@ func carriesResponse(resp *responses.Response) bool {
 // isEmptyOutput reports whether a conversion failed for want of anything to
 // convert, as against something unusable.
 func isEmptyOutput(err error) bool {
-	return errors.Is(err, ErrNoOutputItems) || errors.Is(err, ErrNoTextOrToolContent)
+	return errors.Is(err, ErrNoOutputItems) || errors.Is(err, ErrNoTextOrToolContent) ||
+		errors.Is(err, ErrNoChoices)
 }
 
 // carriesContent reports whether a response holds anything a caller can read.

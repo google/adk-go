@@ -15,25 +15,124 @@
 package openaimodel
 
 import (
+	"fmt"
+
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
 )
 
 // convertChatTools converts function declarations into Chat Completions tools,
-// whose declaration nests under a "function" object the Responses shape does
-// not have.
-func convertChatTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletionToolUnionParam, error) { //nolint:unused // scaffold; wired when the conversion code lands
-	return nil, errNotImplemented
+// whose declaration nests under a "function" object that the flat Responses
+// shape does not have.
+func convertChatTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletionToolUnionParam, error) {
+	if cfg == nil || len(cfg.Tools) == 0 {
+		return nil, nil
+	}
+	var tools []openai.ChatCompletionToolUnionParam
+	for i, tool := range cfg.Tools {
+		if err := ensureFunctionToolOnly(i, tool); err != nil {
+			return nil, err
+		}
+		for _, decl := range tool.FunctionDeclarations {
+			fn, err := convertChatFunctionDeclaration(decl)
+			if err != nil {
+				return nil, err
+			}
+			tools = append(tools, openai.ChatCompletionToolUnionParam{OfFunction: fn})
+		}
+	}
+	return tools, nil
 }
 
 // convertChatFunctionDeclaration converts one function declaration into a Chat
 // Completions function tool.
-func convertChatFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatCompletionFunctionToolParam, error) { //nolint:unused // scaffold; wired when the conversion code lands
-	return nil, errNotImplemented
+func convertChatFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatCompletionFunctionToolParam, error) {
+	if fn == nil {
+		return nil, fmt.Errorf("openai: nil function declaration")
+	}
+	if fn.Name == "" {
+		return nil, fmt.Errorf("openai: function declaration missing name")
+	}
+
+	paramsMap, err := schemaToMap(fn.Parameters)
+	if err != nil {
+		return nil, err
+	}
+	if paramsMap == nil && fn.ParametersJsonSchema != nil {
+		paramsMap, err = normalizeSchema(fn.ParametersJsonSchema)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if paramsMap == nil {
+		paramsMap = map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
+	}
+
+	def := shared.FunctionDefinitionParam{
+		Name:       fn.Name,
+		Parameters: paramsMap,
+	}
+	if fn.Description != "" {
+		def.Description = param.NewOpt(fn.Description)
+	}
+	return &openai.ChatCompletionFunctionToolParam{Function: def}, nil
 }
 
 // convertChatToolChoice translates a tool config into the Chat Completions
 // tool_choice, which names a function one level deeper than Responses does.
-func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToolChoiceOptionUnionParam, error) { //nolint:unused // scaffold; wired when the conversion code lands
-	return nil, errNotImplemented
+func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToolChoiceOptionUnionParam, error) {
+	if toolCfg == nil || toolCfg.FunctionCallingConfig == nil {
+		return nil, nil
+	}
+	cfg := toolCfg.FunctionCallingConfig
+	choice := &openai.ChatCompletionToolChoiceOptionUnionParam{}
+	switch cfg.Mode {
+	case "", genai.FunctionCallingConfigModeUnspecified, genai.FunctionCallingConfigModeAuto:
+		if len(cfg.AllowedFunctionNames) == 0 {
+			// Nothing named, so the provider's own default stands.
+			return nil, nil
+		}
+		choice.OfAllowedTools = chatAllowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeAuto)
+	case genai.FunctionCallingConfigModeNone:
+		choice.OfAuto = param.NewOpt("none")
+	case genai.FunctionCallingConfigModeAny:
+		if len(cfg.AllowedFunctionNames) == 0 {
+			choice.OfAuto = param.NewOpt("required")
+		} else {
+			choice.OfAllowedTools = chatAllowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeRequired)
+		}
+	default:
+		return nil, fmt.Errorf("openai: unsupported tool calling mode %q", cfg.Mode)
+	}
+
+	if !param.IsOmitted(choice.OfAuto) || choice.OfAllowedTools != nil {
+		return choice, nil
+	}
+	return nil, nil
+}
+
+// chatAllowedToolParam builds the allowed-tools choice. Each entry nests the
+// name under "function", unlike the flat Responses form.
+func chatAllowedToolParam(names []string, mode openai.ChatCompletionAllowedToolsMode) *openai.ChatCompletionAllowedToolChoiceParam {
+	tools := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		tools = append(tools, map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": name},
+		})
+	}
+	if len(tools) == 0 {
+		return nil
+	}
+	return &openai.ChatCompletionAllowedToolChoiceParam{
+		AllowedTools: openai.ChatCompletionAllowedToolsParam{Mode: mode, Tools: tools},
+	}
 }

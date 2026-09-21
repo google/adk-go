@@ -16,22 +16,22 @@ package openaimodel
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"iter"
 	"time"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/model"
 )
 
-// errNotImplemented marks a scaffolded Chat Completions stub, and disappears
-// with the conversion code that replaces it.
-var errNotImplemented = errors.New("openai: chat completions support is not implemented yet")
-
 // chatModel talks to the Chat Completions API, the surface OpenAI-compatible
-// third-party providers implement. It is the [model.LLM] a [ClientConfig] with
-// API set to [APIChatCompletions] produces.
+// third-party providers implement. It is what [NewModel] returns for a
+// [ClientConfig] whose API is [APIChatCompletions].
 type chatModel struct {
 	client *openai.Client
 	name   string
@@ -56,19 +56,138 @@ func (m *chatModel) GenerateContent(ctx context.Context, req *model.LLMRequest, 
 	return m.generate(ctx, params, timeout)
 }
 
-// generate runs one blocking Chat Completions call, bounded by timeout when the
-// caller asked for one.
+// generate runs one blocking Chat Completions call.
 func (m *chatModel) generate(ctx context.Context, params openai.ChatCompletionNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
-	return singleErrorSequence(errNotImplemented)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		// Shadowed, not reassigned: the closure captures ctx by reference, so
+		// assigning to it would leave a second range over this sequence
+		// starting from the deadline the first one already cancelled.
+		ctx := ctx
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		resp, err := m.client.Chat.Completions.New(ctx, params)
+		if err != nil {
+			yield(nil, fmt.Errorf("openai: call failed: %w", err))
+			return
+		}
+		genaiResp, err := convertChatCompletion(resp)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		llmResp := converters.Genai2LLMResponse(genaiResp)
+		attachChatMetadata(llmResp, resp)
+		yield(llmResp, nil)
+	}
 }
 
 // generateStream runs one streamed Chat Completions call, yielding a partial
-// per delta and one final response the blocking converter builds.
+// per delta and one final response built from the accumulated turn.
 func (m *chatModel) generateStream(ctx context.Context, params openai.ChatCompletionNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
-	return singleErrorSequence(errNotImplemented)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		ctx := ctx
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		// Chat Completions reports usage on a streamed turn only when asked, so
+		// a streamed turn would otherwise account for nothing.
+		params.StreamOptions.IncludeUsage = param.NewOpt(true)
+
+		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
+		defer func() { _ = stream.Close() }()
+
+		aggregator := llminternal.NewStreamingResponseAggregator()
+		translator := newChatStreamTranslator()
+
+		for stream.Next() {
+			genaiResp := translator.process(stream.Current())
+			if genaiResp == nil {
+				continue
+			}
+			for resp, err := range aggregator.ProcessResponse(ctx, genaiResp) {
+				if err == nil {
+					attachChatMetadata(resp, translator.completion())
+				}
+				if !yield(resp, err) {
+					return
+				}
+			}
+		}
+		if err := stream.Err(); err != nil {
+			yield(nil, err)
+			return
+		}
+
+		final := aggregator.Close()
+		completion := translator.completion()
+		genaiResp, err := convertChatCompletion(completion)
+		switch {
+		case err == nil && !carriesContent(final):
+			// The deltas contributed nothing that survived aggregation, which is
+			// what a turn of nothing but tool calls looks like. The snapshot
+			// holds the whole turn.
+			final = converters.Genai2LLMResponse(genaiResp)
+		case err == nil:
+			// Only the snapshot states the turn's tool calls, so it replaces the
+			// aggregate whenever it retains everything already streamed.
+			if content := genaiResp.Candidates[0].Content; completedContentSupersedes(final.Content, content) {
+				final.Content = content
+			}
+		case carriesContent(final):
+			// The snapshot is unusable but the deltas produced a turn: report it
+			// rather than fail a call the model answered.
+		default:
+			yield(nil, err)
+			return
+		}
+		if final == nil {
+			return
+		}
+		finalizeChatStreamResponse(final, completion)
+		yield(final, nil)
+	}
 }
 
-// attachChatMetadata records the response ID and model on an LLMResponse, the
-// way the Responses path records its own.
-func attachChatMetadata(resp *model.LLMResponse, completion *openai.ChatCompletion) { //nolint:unused // scaffold; wired when the conversion code lands
+// finalizeChatStreamResponse closes out a streamed turn. Deltas carry no finish
+// reason or usage, so this is the one response that reports them, and it takes
+// both from the accumulated snapshot rather than from anything streamed.
+func finalizeChatStreamResponse(final *model.LLMResponse, completion *openai.ChatCompletion) {
+	final.TurnComplete = true
+	if completion == nil {
+		return
+	}
+	attachChatMetadata(final, completion)
+	if completion.Model != "" {
+		final.ModelVersion = completion.Model
+	}
+	final.UsageMetadata = convertChatUsage(completion.Usage)
+	if len(completion.Choices) == 0 {
+		// Nothing said why the turn ended, and reading that as a clean stop
+		// would have a caller that retries on anything but STOP accept a
+		// partial answer as final.
+		final.FinishReason = genai.FinishReasonUnspecified
+		return
+	}
+	choice := completion.Choices[0]
+	final.FinishReason = chatFinishReason(choice.FinishReason)
+	final.LogprobsResult = convertChatLogprobs(choice.Logprobs)
+}
+
+// attachChatMetadata records the response ID and model, under the same keys the
+// Responses path uses. The model is a plain string here, which is what the key
+// has always been documented to carry.
+func attachChatMetadata(resp *model.LLMResponse, completion *openai.ChatCompletion) {
+	if resp == nil || completion == nil || completion.ID == "" {
+		return
+	}
+	if resp.CustomMetadata == nil {
+		resp.CustomMetadata = map[string]any{}
+	}
+	resp.CustomMetadata["openai_response_id"] = completion.ID
+	resp.CustomMetadata["openai_model"] = completion.Model
 }

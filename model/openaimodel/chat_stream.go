@@ -19,27 +19,48 @@ import (
 	"google.golang.org/genai"
 )
 
-// chatStreamTranslator turns Chat Completions chunks into genai responses. Tool
-// calls are not emitted as they stream: the protocol has no event marking one
-// complete, so they reach the caller only on the final response the
-// accumulator's snapshot builds.
-type chatStreamTranslator struct { //nolint:unused // scaffold; wired when the conversion code lands
+// chatStreamTranslator turns Chat Completions chunks into genai responses while
+// accumulating the whole turn.
+//
+// Tool calls are not emitted as they stream. The protocol has no event marking
+// one complete — arguments arrive as fragments and the only signal they have
+// stopped is the stream ending — so they reach the caller on the final response,
+// built from the accumulated snapshot by the same converter the blocking path
+// uses.
+type chatStreamTranslator struct {
 	acc openai.ChatCompletionAccumulator
 }
 
 // newChatStreamTranslator returns a translator for one streamed turn.
-func newChatStreamTranslator() *chatStreamTranslator { //nolint:unused // scaffold; wired when the conversion code lands
+func newChatStreamTranslator() *chatStreamTranslator {
 	return &chatStreamTranslator{}
 }
 
-// process folds one chunk into the accumulated turn and returns the partial it
+// process folds one chunk into the accumulated turn and reports the partial it
 // contributes, or nil for a chunk a caller sees nothing of.
-func (t *chatStreamTranslator) process(chunk openai.ChatCompletionChunk) (*genai.GenerateContentResponse, error) { //nolint:unused // scaffold; wired when the conversion code lands
-	return nil, errNotImplemented
+func (t *chatStreamTranslator) process(chunk openai.ChatCompletionChunk) *genai.GenerateContentResponse {
+	// A chunk the accumulator rejects — a choice index beyond its bounds, or a
+	// tool-call index that would grow it too far — leaves the snapshot
+	// untouched. The delta is still yielded, so text a caller could read does
+	// not vanish because the snapshot could not hold it.
+	t.acc.AddChunk(chunk)
+
+	if len(chunk.Choices) == 0 {
+		// The usage-only chunk that closes a stream requesting usage.
+		return nil
+	}
+	delta := chunk.Choices[0].Delta
+	switch {
+	case delta.Content != "":
+		return singlePartResponse(&genai.Part{Text: delta.Content})
+	case delta.Refusal != "":
+		// Blocking reports a refusal as text, so streaming does the same.
+		return singlePartResponse(&genai.Part{Text: delta.Refusal})
+	}
+	return nil
 }
 
-// completion is the whole turn as the blocking path would have received it,
-// which is what the final streamed response is built from.
-func (t *chatStreamTranslator) completion() *openai.ChatCompletion { //nolint:unused // scaffold; wired when the conversion code lands
-	return nil
+// completion is the whole turn as the blocking path would have received it.
+func (t *chatStreamTranslator) completion() *openai.ChatCompletion {
+	return &t.acc.ChatCompletion
 }
