@@ -87,6 +87,9 @@ func (m *geminiModel) Name() string {
 // GenerateContent calls the underlying model.
 func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	m.maybeAppendUserContent(req)
+	if m.GetGoogleLLMVariant() == genai.BackendVertexAI {
+		stripReplayedFunctionCallIDs(req.Contents)
+	}
 	if req.Config == nil {
 		req.Config = &genai.GenerateContentConfig{}
 	}
@@ -155,6 +158,24 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 		}
 		if closeResult := aggregator.Close(); closeResult != nil {
 			yield(closeResult, nil)
+		}
+	}
+}
+
+// stripReplayedFunctionCallIDs clears FunctionCall.ID on every part of
+// contents. Vertex AI has been reported to reject a replayed FunctionCall
+// that still carries an id. FunctionResponse.ID is left untouched since it
+// may still be needed to correlate with a same-turn FunctionCall.
+func stripReplayedFunctionCallIDs(contents []*genai.Content) {
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil || part.FunctionCall == nil {
+				continue
+			}
+			part.FunctionCall.ID = ""
 		}
 	}
 }
