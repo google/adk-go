@@ -288,38 +288,37 @@ func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	var payload struct {
 		Text struct {
 			Format struct {
-				Schema struct {
-					Properties struct {
-						Audit struct {
-							Type                 string          `json:"type"`
-							Properties           *map[string]any `json:"properties"`
-							AdditionalProperties *bool           `json:"additionalProperties"`
-							Required             *[]string       `json:"required"`
-						} `json:"audit"`
-					} `json:"properties"`
-				} `json:"schema"`
+				Schema map[string]any `json:"schema"`
 			} `json:"format"`
 		} `json:"text"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("json.Unmarshal() err = %v", err)
 	}
-	audit := payload.Text.Format.Schema.Properties.Audit
-	if audit.Type != "object" {
-		t.Fatalf("audit type = %q, want object: %s", audit.Type, data)
+	props, _ := payload.Text.Format.Schema["properties"].(map[string]any)
+	audit, ok := props["audit"].(map[string]any)
+	if !ok {
+		t.Fatalf("audit missing from the request body: %s", data)
 	}
-	if audit.Properties == nil {
+	if got := audit["type"]; got != "object" {
+		t.Fatalf("audit.type = %v, want object: %s", got, data)
+	}
+	// The two-value index tells an absent key from an empty value, which is the
+	// whole point here: the API rejects the request when a key is missing.
+	if got, ok := audit["properties"]; !ok {
 		t.Errorf("audit.properties missing from the request body: %s", data)
-	} else if len(*audit.Properties) != 0 {
-		t.Errorf("audit.properties = %v, want empty", *audit.Properties)
+	} else if m, isMap := got.(map[string]any); !isMap || len(m) != 0 {
+		t.Errorf("audit.properties = %v, want an empty object", got)
 	}
-	if audit.AdditionalProperties == nil || *audit.AdditionalProperties {
-		t.Errorf("audit.additionalProperties = %v, want false: %s", audit.AdditionalProperties, data)
+	if got, ok := audit["additionalProperties"]; !ok {
+		t.Errorf("audit.additionalProperties missing from the request body: %s", data)
+	} else if got != false {
+		t.Errorf("audit.additionalProperties = %v, want false", got)
 	}
-	if audit.Required == nil {
+	if got, ok := audit["required"]; !ok {
 		t.Errorf("audit.required missing from the request body: %s", data)
-	} else if len(*audit.Required) != 0 {
-		t.Errorf("audit.required = %v, want empty", *audit.Required)
+	} else if s, isSlice := got.([]any); !isSlice || len(s) != 0 {
+		t.Errorf("audit.required = %v, want an empty array", got)
 	}
 }
 
@@ -1576,6 +1575,33 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 								},
 								map[string]any{"type": "string"},
 							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// A node that carries properties without declaring type: object is
+			// not rewritten itself, but the walk still descends into it.
+			name: "properties are walked even when the parent declares no type",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"properties": map[string]any{
+						"a": map[string]any{"type": "object"},
+					},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"properties": map[string]any{
+						"a": map[string]any{
+							"type":                 "object",
+							"properties":           map[string]any{},
+							"additionalProperties": false,
+							"required":             []string{},
 						},
 					},
 				},
