@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
@@ -238,11 +239,17 @@ func promptTokenEstimator(ctx agent.InvocationContext) compactioninternal.TokenC
 		// history it counts turns the real prompt will not carry. That
 		// divergence predates this change — an explicit IncludeContents="none"
 		// reached it the same way — and a placement is now a second route in.
-		contents, err := buildContentsDefault(
+		// A suffix may omit a response's call without making that response stale.
+		allEvents := events
+		if ctx.Session() != nil {
+			allEvents = slices.Collect(ctx.Session().Events().All())
+		}
+		contents, err := buildContentsDefaultWithCallSource(
 			ctx.Agent().Name(),
 			ctx.Branch(),
 			ctx.IsolationScope(),
 			events,
+			allEvents,
 			ModeFor(ctx, ctx.Agent().Name(), state) == ModeSingleTurn,
 			ctx.UserContent(),
 		)

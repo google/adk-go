@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -44,6 +45,9 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+	authorizer        authz.Authorizer
+
+	checkOrigin func(*http.Request) bool
 
 	eventsCompactionConfig *compaction.Config
 }
@@ -65,6 +69,7 @@ type RuntimeAPIControllerConfig struct {
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
+	Authorizer        authz.Authorizer
 
 	// Compaction enables context compaction for the runners this controller
 	// creates, replacing older session events with summaries.
@@ -77,6 +82,21 @@ type RuntimeAPIControllerConfig struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// CheckOrigin reports whether a /run_live upgrade carrying this request's
+	// Origin may proceed. It becomes the WebSocket upgrader's CheckOrigin hook,
+	// and a false answer refuses the handshake with 403.
+	//
+	// [google.golang.org/adk/v2/server/adkrest.NewServer] supplies one built
+	// from its AllowedOrigins, which is where the check belongs for anyone
+	// using that server. Set this only when mounting this controller in a
+	// router of your own.
+	//
+	// optional; nil keeps gorilla/websocket's default, which accepts a request
+	// with no Origin and otherwise requires Origin's host to equal Host — and
+	// so accepts a page that reached this server by rebinding its own DNS name,
+	// since such a page controls both
+	CheckOrigin func(*http.Request) bool
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
@@ -97,6 +117,12 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 	})
 }
 
+// WithAuthorizer sets the authorizer. Provided to be compatible with [NewRuntimeAPIController]
+// Deprecated: use [NewRuntimeAPIControllerWithConfig] to set authorizer directly in RuntimeAPIControllerConfig.
+func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
 // NewRuntimeAPIControllerWithConfig creates the controller for the Runtime API.
 //
 // A separate constructor rather than a variadic parameter on the one above:
@@ -104,6 +130,11 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 // holding it as a value even though ordinary call sites still compile, and it
 // is released API.
 func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
@@ -112,7 +143,9 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 		sseTimeout:             cfg.SSETimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
+		checkOrigin:            cfg.CheckOrigin,
 		eventsCompactionConfig: cfg.Compaction,
+		authorizer:             authorizer,
 	}
 }
 
@@ -122,6 +155,14 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
@@ -185,6 +226,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -333,6 +381,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		CheckOrigin:     c.checkOrigin,
 	}
 
 	q := req.URL.Query()
@@ -344,6 +393,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if userID == "" {
 		userID = q.Get("user_id")
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), userID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionID := q.Get("sessionId")
 	if sessionID == "" {
 		sessionID = q.Get("session_id")
@@ -465,6 +522,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
+			if !errors.Is(err, websocket.ErrCloseSent) {
+				log.Printf("WebSocket write error for app %s: %v", appName, err)
+			}
 			break
 		}
 	}

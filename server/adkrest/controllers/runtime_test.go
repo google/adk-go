@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -217,6 +218,7 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 			reqBytes, _ := json.Marshal(reqObj)
 			req := httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: reqObj.UserId}))
 
 			// Record response
 			rr := httptest.NewRecorder()
@@ -307,5 +309,36 @@ func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
 	})
 	if c.eventsCompactionConfig != cfg {
 		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
+	}
+}
+
+// TestRunLiveHandlerUsesConfiguredCheckOrigin pins that the configured hook
+// replaces gorilla/websocket's default same-origin check, which would reject an
+// Origin the operator allowed.
+func TestRunLiveHandlerUsesConfiguredCheckOrigin(t *testing.T) {
+	var got *http.Request
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: session.InMemoryService(),
+		AgentLoader:    agent.NewSingleLoader(nil),
+		CheckOrigin: func(r *http.Request) bool {
+			got = r
+			return false
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/run_live?appName=a&userId=u&sessionId=s", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-Websocket-Version", "13")
+	req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Origin", "http://localhost:4200")
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunLiveHandler)(rr, req)
+
+	if got == nil {
+		t.Fatal("CheckOrigin was not called, want the upgrader to use it")
+	}
+	if want := http.StatusForbidden; rr.Code != want {
+		t.Errorf("status = %d, want %d (body %q)", rr.Code, want, rr.Body.String())
 	}
 }

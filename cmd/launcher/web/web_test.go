@@ -26,11 +26,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
@@ -380,7 +382,8 @@ func TestApplyServiceDefaultsServesRESTRoutes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := serveWithoutPanic(t, server, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := serveWithoutPanic(t, server, req)
 			if rec.Code != http.StatusOK {
 				t.Errorf("GET %s status = %d (%s), want %d", tc.path, rec.Code, rec.Body.String(), http.StatusOK)
 			}
@@ -477,5 +480,271 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
+	}
+}
+
+type trackingSpanProcessor struct {
+	shutdownCalled atomic.Bool
+}
+
+func (p *trackingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *trackingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *trackingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *trackingSpanProcessor) Shutdown(context.Context) error {
+	p.shutdownCalled.Store(true)
+	return nil
+}
+
+// TestRunShutsDownTelemetryWhenServerFailsToStart covers issue #1469:
+// when the HTTP server fails to start (e.g. port already bound),
+// Run must shut down the initialized OpenTelemetry providers.
+func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	tracker := &trackingSpanProcessor{}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(tracker)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("telemetry shutdown was not called after server startup failure")
+	}
+}
+
+type failingSpanProcessor struct {
+	shutdownErr error
+}
+
+func (p *failingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *failingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *failingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *failingSpanProcessor) Shutdown(context.Context) error {
+	return p.shutdownErr
+}
+
+// TestRunLogsWhenTelemetryShutdownFails covers the defer error branch:
+// when telemetry shutdown fails, the error is logged to stderr rather than
+// terminating or panicking.
+func TestRunLogsWhenTelemetryShutdownFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	failingProcessor := &failingSpanProcessor{
+		shutdownErr: fmt.Errorf("simulated flush error"),
+	}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(failingProcessor)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if got := buf.String(); !strings.Contains(got, "telemetry shutdown failed: simulated flush error") {
+		t.Errorf("expected log output to contain telemetry shutdown error, got %q", got)
+	}
+}
+
+type trackingSublauncher struct {
+	telemetryFailSublauncher
+	userMessageCalled atomic.Bool
+}
+
+func (s *trackingSublauncher) UserMessage(webURL string, printer func(v ...any)) {
+	s.userMessageCalled.Store(true)
+}
+
+// TestRunDoesNotAnnounceURLWhenTelemetryInitFails covers issue #1469:
+// sublauncher UserMessage and URL announcements must only occur after telemetry
+// initialization succeeds.
+func TestRunDoesNotAnnounceURLWhenTelemetryInitFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	sub := &trackingSublauncher{}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil || !strings.Contains(err.Error(), "telemetry initialization failed") {
+		t.Fatalf("Run() error = %v, want error containing %q", err, "telemetry initialization failed")
+	}
+
+	if sub.userMessageCalled.Load() {
+		t.Errorf("UserMessage was called before telemetry initialization succeeded")
+	}
+	startingPrefix := strings.Split(logStartingWebServer, "%")[0]
+	startsOnPrefix := strings.Split(logWebServerStartsOn, "%")[0]
+	if got := buf.String(); strings.Contains(got, startingPrefix) || strings.Contains(got, startsOnPrefix) {
+		t.Errorf("startup banner was logged before telemetry initialization succeeded: %q", got)
+	}
+}
+
+type optionAppendingSublauncher struct {
+	telemetryFailSublauncher
+	processor *trackingSpanProcessor
+}
+
+func (s *optionAppendingSublauncher) Keyword() string { return "appending" }
+
+func (s *optionAppendingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	c.TelemetryOptions = append(c.TelemetryOptions, telemetry.WithSpanProcessors(s.processor))
+	return nil
+}
+
+// TestRunSetupSubroutersCanAppendTelemetryOptions verifies the invariant that
+// SetupSubrouters runs before telemetry initialization, so that subrouters can
+// append telemetry options (e.g. span processors) that are picked up by Run.
+func TestRunSetupSubroutersCanAppendTelemetryOptions(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	tracker := &trackingSpanProcessor{}
+	sub := &optionAppendingSublauncher{processor: tracker}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "appending"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	config := &launcher.Config{}
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("span processor appended in SetupSubrouters was not initialized/shut down")
+	}
+}
+
+func TestHostBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			// The web server must default to loopback-only so it cannot
+			// accidentally be exposed to the network.
+			name: "loopback by default",
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "explicit loopback",
+			args: []string{"--host", "127.0.0.1"},
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "all interfaces",
+			args: []string{"--host", "0.0.0.0"},
+			want: "0.0.0.0:8080",
+		},
+		{
+			// An empty value must not resolve to ":8080", which binds every
+			// interface. Only the explicit 0.0.0.0 above may do that.
+			name: "empty host falls back to loopback",
+			args: []string{"--host", ""},
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "IPv6 loopback",
+			args: []string{"--host", "::1"},
+			want: "[::1]:8080",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := NewLauncher().(*webLauncher)
+			if _, err := launcher.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", tc.args, err)
+			}
+			srv := launcher.buildHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			if got := srv.Addr; got != tc.want {
+				t.Errorf("server Addr = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWebURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "localhost", host: "localhost", port: 8080, want: "http://localhost:8080"},
+		// Loopback-ish hosts are normalized to "localhost" so the displayed
+		// URL matches the ADK Web UI backend origin (http://localhost:8080/api)
+		// and avoids a browser CORS mismatch.
+		{name: "IPv4 loopback", host: "127.0.0.1", port: 8080, want: "http://localhost:8080"},
+		{name: "IPv6 loopback", host: "::1", port: 8080, want: "http://localhost:8080"},
+		{name: "all interfaces IPv4", host: "0.0.0.0", port: 8080, want: "http://localhost:8080"},
+		{name: "all interfaces IPv6", host: "::", port: 8080, want: "http://localhost:8080"},
+		// Non-loopback configured hosts are left untouched.
+		{name: "custom hostname", host: "example.com", port: 8080, want: "http://example.com:8080"},
+		{name: "custom IP", host: "192.168.1.10", port: 8080, want: "http://192.168.1.10:8080"},
+		// A non-loopback IPv6 host is not normalized, so the URL must bracket
+		// it rather than emit an ambiguous host:port string.
+		{name: "custom IPv6", host: "2001:db8::1", port: 8080, want: "http://[2001:db8::1]:8080"},
+		// An empty host is the default, so it must print the loopback URL
+		// rather than the malformed "http://:8080".
+		{name: "empty host", host: "", port: 8080, want: "http://localhost:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &webLauncher{config: &webConfig{host: tc.host, port: tc.port}}
+			if got := w.webURL(); got != tc.want {
+				t.Errorf("webURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
