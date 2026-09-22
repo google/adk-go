@@ -710,12 +710,15 @@ func preserveSchemaNumbers(val any) any {
 // every property, and a $ref keeps no siblings. An object that declares no
 // properties is given an empty properties map and an empty required array
 // alongside additionalProperties=false, because the API rejects the whole
-// request when any object in the schema omits one of the three.
+// request when any object in the schema omits one of the three. Any
+// additionalProperties the caller wrote is replaced: strict mode accepts only
+// false, so a schema spelling a map as additionalProperties={"type":"string"}
+// becomes an empty object rather than the 400 it would otherwise draw.
 //
-// That last part diverges from adk-python deliberately. Its
-// _enforce_strict_openai_schema rewrites an object only when the schema already
-// carries a properties key (lite_llm.py:1920), which leaves a property-less
-// object to 400 on the same request; Go fixes it here first.
+// Treating a property-less object that way diverges from adk-python
+// deliberately. Its _enforce_strict_openai_schema rewrites an object only when
+// the schema already carries a properties key, which leaves one without to fail
+// the same request.
 func enforceStrictOpenAISchema(val any) {
 	schema, ok := val.(map[string]any)
 	if !ok {

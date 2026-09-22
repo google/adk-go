@@ -295,28 +295,31 @@ func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("json.Unmarshal() err = %v", err)
 	}
-	props, _ := payload.Text.Format.Schema["properties"].(map[string]any)
+	// Failures report the schema alone, never the marshalled request, which
+	// carries the prompt.
+	sent := payload.Text.Format.Schema
+	props, _ := sent["properties"].(map[string]any)
 	audit, ok := props["audit"].(map[string]any)
 	if !ok {
-		t.Fatalf("audit missing from the request body: %s", data)
+		t.Fatalf("audit missing from the request schema: %v", sent)
 	}
 	if got := audit["type"]; got != "object" {
-		t.Fatalf("audit.type = %v, want object: %s", got, data)
+		t.Fatalf("audit.type = %v, want object", got)
 	}
 	// The two-value index tells an absent key from an empty value, which is the
 	// whole point here: the API rejects the request when a key is missing.
 	if got, ok := audit["properties"]; !ok {
-		t.Errorf("audit.properties missing from the request body: %s", data)
+		t.Errorf("audit.properties missing from the request schema: %v", sent)
 	} else if m, isMap := got.(map[string]any); !isMap || len(m) != 0 {
 		t.Errorf("audit.properties = %v, want an empty object", got)
 	}
 	if got, ok := audit["additionalProperties"]; !ok {
-		t.Errorf("audit.additionalProperties missing from the request body: %s", data)
+		t.Errorf("audit.additionalProperties missing from the request schema: %v", sent)
 	} else if got != false {
 		t.Errorf("audit.additionalProperties = %v, want false", got)
 	}
 	if got, ok := audit["required"]; !ok {
-		t.Errorf("audit.required missing from the request body: %s", data)
+		t.Errorf("audit.required missing from the request schema: %v", sent)
 	} else if s, isSlice := got.([]any); !isSlice || len(s) != 0 {
 		t.Errorf("audit.required = %v, want an empty array", got)
 	}
@@ -1605,6 +1608,47 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		{
+			// A map spelled as additionalProperties loses its value schema:
+			// strict mode accepts only additionalProperties=false, so the map
+			// cannot survive in any form.
+			name: "a map written as additionalProperties becomes an empty object",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"type": "string"},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			// Sibling stripping runs before the object rewrite, so a $ref does
+			// not collect the three keys on the way past.
+			name: "a $ref keeps no siblings even when it declares type object",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"$defs": map[string]any{"x": map[string]any{"type": "object"}},
+					"$ref":  "#/$defs/x",
+					"type":  "object",
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{"$ref": "#/$defs/x"},
 			},
 		},
 		{
