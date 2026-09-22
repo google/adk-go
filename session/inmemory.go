@@ -226,11 +226,21 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
 
+	// Trim here, before sess.appendEvent publishes its own trimmed event into
+	// the live session's event list: the map cloned below is then one no other
+	// goroutine can reach. The database backend trims twice for the same
+	// reason, once for the live session and once for what it persists.
+	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
+
 	// update the in-memory session
 	if err := sess.appendEvent(event); err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	// Only StateDelta comes from the trim above; every other field below is
+	// read off event. The canonical record is not a mirror of the one
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
+	// RequestedToolConfirmations where the local record aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -239,7 +249,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		Branch:         event.Branch,
 		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
-			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			StateDelta:                 trimmedDelta,
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
 			TransferToAgent:            event.Actions.TransferToAgent,
