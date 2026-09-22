@@ -705,9 +705,20 @@ func preserveSchemaNumbers(val any) any {
 }
 
 // enforceStrictOpenAISchema recursively walks the schema and enforces the rules
-// required by OpenAI's structured outputs with strict=true. Specifically, it
-// sets additionalProperties=false on all object types, and ensures that all
-// properties are listed in the required array.
+// required by OpenAI's structured outputs with strict=true: every object type
+// carries properties, additionalProperties=false and a required array naming
+// every property, and a $ref keeps no siblings. An object that declares no
+// properties is given an empty properties map and an empty required array
+// alongside additionalProperties=false, because the API rejects the whole
+// request when any object in the schema omits one of the three. Any
+// additionalProperties the caller wrote is replaced: strict mode accepts only
+// false, so a schema spelling a map as additionalProperties={"type":"string"}
+// becomes an empty object rather than the 400 it would otherwise draw.
+//
+// Treating a property-less object that way diverges from adk-python
+// deliberately. Its _enforce_strict_openai_schema rewrites an object only when
+// the schema already carries a properties key, which leaves one without to fail
+// the same request.
 func enforceStrictOpenAISchema(val any) {
 	schema, ok := val.(map[string]any)
 	if !ok {
@@ -725,18 +736,20 @@ func enforceStrictOpenAISchema(val any) {
 
 	t, hasType := schema["type"]
 	isObj := hasType && t == "object"
-	propsVal, hasProps := schema["properties"]
+	propsMap, _ := schema["properties"].(map[string]any)
 
-	if isObj && hasProps {
-		schema["additionalProperties"] = false
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			req := make([]string, 0, len(propsMap))
-			for k := range propsMap {
-				req = append(req, k)
-			}
-			sort.Strings(req)
-			schema["required"] = req
+	if isObj {
+		if propsMap == nil {
+			propsMap = map[string]any{}
+			schema["properties"] = propsMap
 		}
+		schema["additionalProperties"] = false
+		req := make([]string, 0, len(propsMap))
+		for k := range propsMap {
+			req = append(req, k)
+		}
+		sort.Strings(req)
+		schema["required"] = req
 	}
 
 	if defsVal, ok := schema["$defs"]; ok {
@@ -747,12 +760,8 @@ func enforceStrictOpenAISchema(val any) {
 		}
 	}
 
-	if hasProps {
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			for _, prop := range propsMap {
-				enforceStrictOpenAISchema(prop)
-			}
-		}
+	for _, prop := range propsMap {
+		enforceStrictOpenAISchema(prop)
 	}
 
 	for _, key := range []string{"anyOf", "oneOf", "allOf"} {

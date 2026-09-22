@@ -159,10 +159,9 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 	}
 	delete(t.itemToCallID, done.ItemID)
 
-	name := done.Name
-	if name == "" {
-		name = t.itemToName[done.ItemID]
-	}
+	// The done event carries no name of its own: it arrived on the
+	// function_call item of the earlier response.output_item.added event.
+	name := t.itemToName[done.ItemID]
 	delete(t.itemToName, done.ItemID)
 
 	if payload == "" {
