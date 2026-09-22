@@ -425,8 +425,10 @@ func TestTraceGenerateContentResult_NilResponseNilErrorLeavesSpanSuccessful(t *t
 	if got := spans[0].Status.Code; got != codes.Unset {
 		t.Fatalf("span status = %v, want %v", got, codes.Unset)
 	}
-	if attrs := attributesToMap(spans[0].Attributes); attrs[semconv.GenAIResponseFinishReasonsKey] != "" {
-		t.Fatalf("finish reason = %q, want attribute to be absent", attrs[semconv.GenAIResponseFinishReasonsKey])
+	if attrs := attributesToMap(spans[0].Attributes); attrs != nil {
+		if _, ok := attrs[semconv.GenAIResponseFinishReasonsKey]; ok {
+			t.Fatalf("finish reason attribute is present, want it to be absent")
+		}
 	}
 }
 
