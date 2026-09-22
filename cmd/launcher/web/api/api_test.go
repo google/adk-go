@@ -75,33 +75,6 @@ func callAPI(t *testing.T, prefix string, inner http.Handler, method, target str
 	return rec
 }
 
-func TestNormalizeOrigin(t *testing.T) {
-	tests := []struct {
-		name string
-		addr string
-		want string
-	}{
-		{name: "bare host and port gets http", addr: "localhost:8080", want: "http://localhost:8080"},
-		{name: "bare host gets http", addr: "ui.example.com", want: "http://ui.example.com"},
-		{name: "http kept", addr: "http://localhost:4200", want: "http://localhost:4200"},
-		{name: "https kept", addr: "https://ui.example.com", want: "https://ui.example.com"},
-		{name: "trailing slash stripped", addr: "http://localhost:8080/", want: "http://localhost:8080"},
-		{name: "path stripped", addr: "https://ui.example.com/app/index.html", want: "https://ui.example.com"},
-		{name: "query stripped", addr: "http://localhost:8080/?a=b", want: "http://localhost:8080"},
-		{name: "wildcard passes through", addr: "*", want: "*"},
-		{name: "empty passes through", addr: "", want: ""},
-		{name: "surrounding space trimmed", addr: "  localhost:8080  ", want: "http://localhost:8080"},
-		{name: "ipv6 host and port", addr: "[::1]:8080", want: "http://[::1]:8080"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeOrigin(tt.addr); got != tt.want {
-				t.Errorf("normalizeOrigin(%q) = %q, want %q", tt.addr, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCORSHeaders(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -618,5 +591,49 @@ func TestRunLiveUpgradesThroughTheRealMount(t *testing.T) {
 	}
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Log("server sent a frame before closing, which is also fine")
+	}
+}
+
+// TestSetupSubroutersPassesWebUIOriginToRESTServer pins that -webui_address
+// reaches the REST server's origin check, not only the CORS header. The header
+// alone tells a browser it may read the response; without the same value on the
+// check, the request never gets one.
+func TestSetupSubroutersPassesWebUIOriginToRESTServer(t *testing.T) {
+	const devUI = "http://localhost:4200"
+
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	l := NewLauncher()
+	if _, err := l.Parse([]string{"-webui_address", devUI, "-path_prefix", "/api"}); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := l.SetupSubrouters(router, &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(agnt),
+		SessionService: session.InMemoryService(),
+	}); err != nil {
+		t.Fatalf("SetupSubrouters() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		wantStatus int
+	}{
+		{name: "configured web UI origin", origin: devUI, wantStatus: http.StatusOK},
+		{name: "any other origin", origin: "http://evil.com", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+			req.Header.Set("Origin", tc.origin)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }

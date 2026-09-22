@@ -311,3 +311,34 @@ func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
 		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
 	}
 }
+
+// TestRunLiveHandlerUsesConfiguredCheckOrigin pins that the configured hook
+// replaces gorilla/websocket's default same-origin check, which would reject an
+// Origin the operator allowed.
+func TestRunLiveHandlerUsesConfiguredCheckOrigin(t *testing.T) {
+	var got *http.Request
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: session.InMemoryService(),
+		AgentLoader:    agent.NewSingleLoader(nil),
+		CheckOrigin: func(r *http.Request) bool {
+			got = r
+			return false
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/run_live?appName=a&userId=u&sessionId=s", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-Websocket-Version", "13")
+	req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Origin", "http://localhost:4200")
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunLiveHandler)(rr, req)
+
+	if got == nil {
+		t.Fatal("CheckOrigin was not called, want the upgrader to use it")
+	}
+	if want := http.StatusForbidden; rr.Code != want {
+		t.Errorf("status = %d, want %d (body %q)", rr.Code, want, rr.Body.String())
+	}
+}

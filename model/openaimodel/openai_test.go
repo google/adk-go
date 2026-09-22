@@ -1137,7 +1137,6 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 	const (
 		evAddedNameOnly = `{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","name":"get_weather"}}`
 		evAddedOtherID  = `{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","name":"get_weather","call_id":"call_A"}}`
-		evArgsDoneNamed = `{"type":"response.function_call_arguments.done","item_id":"fc_1","name":"get_weather","arguments":"{\"city\":\"SF\"}"}`
 		evArgsDoneSF    = `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"city\":\"SF\"}"}`
 		callSF          = `{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"}`
 		evOneCall       = `{"type":"response.completed","response":{"id":"resp_1","model":"stream-model",` +
@@ -1145,14 +1144,16 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 	)
 	wantSF := []*genai.FunctionCall{{Name: "get_weather", ID: "call_1", Args: map[string]any{"city": "SF"}}}
 
-	// The three shapes in which the streamed ID cannot match the terminal
-	// item's, each of which appended a second copy of the one call.
+	// The three shapes in which the streamed call cannot be paired with the
+	// terminal item, each of which appended a second copy of the one call.
+	// Without an added event there is no streamed call to pair at all: the
+	// name lives on that event, and a nameless call never reaches the turn.
 	tests := []struct {
 		name   string
 		events []string
 	}{
 		{"the added event carries no call_id", []string{evCreated, evAddedNameOnly, evArgsDoneSF, evOneCall}},
-		{"no added event, the name arrives on the done event", []string{evCreated, evArgsDoneNamed, evOneCall}},
+		{"no added event at all", []string{evCreated, evArgsDoneSF, evOneCall}},
 		{"the added event and the terminal item disagree", []string{evCreated, evAddedOtherID, evArgsDoneSF, evOneCall}},
 	}
 	for _, tc := range tests {
@@ -2282,7 +2283,7 @@ func TestModel_GenerateStream_ErrorsEndTheTurn(t *testing.T) {
 		},
 		{
 			name:    "translator rejects the event",
-			events:  []string{evCreated, `{"type":"response.function_call_arguments.done","item_id":"i1","name":"f","arguments":"{"}`},
+			events:  []string{evCreated, `{"type":"response.function_call_arguments.done","item_id":"i1","arguments":"{"}`},
 			wantErr: "parse streamed function args",
 		},
 		{
