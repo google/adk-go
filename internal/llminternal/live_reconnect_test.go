@@ -581,6 +581,55 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 	}
 }
 
+// TestRunLiveConsecutiveBudgetSparesASilentSession covers the session the
+// consecutive budget must not end: nobody is speaking, so the model sends no
+// content, and the Live API cycles the connection as ordinary lifecycle. With
+// no content to reset that budget, how long each connection lasts is the only
+// thing separating this session from a backend that hangs up on every dial.
+func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
+	const connLifetime = 120 * time.Millisecond
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		// No content on any connection, only the setup exchange and a drop.
+		time.Sleep(connLifetime)
+	})
+	// A ceiling far above the dials this test can reach, so the
+	// consecutive-attempt bound is the only one that can fire.
+	p := testLiveReconnectPolicy(2, 1000)
+	p.healthyUptime = connLifetime / 4
+	f := newReconnectFlow(client, p)
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	var wg sync.WaitGroup
+	var streamErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, err := range seq {
+			if err != nil {
+				streamErr = err
+			}
+		}
+	}()
+
+	// Long enough for many more cycles than maxAttempts.
+	time.Sleep(10 * connLifetime)
+	got := connCount.Load()
+	_ = sess.Close()
+	wg.Wait()
+
+	if streamErr != nil {
+		t.Errorf("session ended with %v; a connection that served past healthyUptime must not spend the consecutive budget", streamErr)
+	}
+	if want := int32(p.maxAttempts + 1); got <= want {
+		t.Errorf("dialled %d times, want more than %d: the consecutive budget killed a silent session", got, want)
+	}
+}
+
 // TestRunLiveCeilingIgnoresConsumerLatency pins where a connection's life is
 // measured. The consumer loop blocks on the caller between dequeuing the error
 // and acting on it, so reading the clock there charges the caller's own

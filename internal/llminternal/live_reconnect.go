@@ -68,7 +68,8 @@ type liveConnError struct {
 // Two counters bound the loop, because either alone leaves a hole:
 //
 //   - maxAttempts bounds consecutive reconnects and drives the backoff. It
-//     resets whenever the model delivers content, so a call that rides out an
+//     resets whenever a connection works — the model delivers content, or the
+//     connection outlives healthyUptime — so a call that rides out an
 //     occasional dropped connection is never killed for it. On its own it never
 //     fires against a backend that serves one frame per connection and then
 //     hangs up, because that backend keeps resetting it.
@@ -90,7 +91,8 @@ type liveReconnectPolicy struct {
 	// jitter spreads each delay over ±jitter, so clients that dropped together
 	// do not redial together. Non-positive means no jitter.
 	jitter float64
-	// maxAttempts bounds consecutive reconnects that delivered no content.
+	// maxAttempts bounds consecutive reconnects since a connection last
+	// delivered content or outlived healthyUptime.
 	maxAttempts int
 	// maxTotal bounds short-lived connections over the invocation's life.
 	maxTotal int

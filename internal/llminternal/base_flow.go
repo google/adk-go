@@ -413,15 +413,19 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		if policy == nil {
 			policy = defaultLiveReconnectPolicy()
 		}
-		// reconnectAttempts counts consecutive reconnects that delivered no
-		// content and resets when the model produces some; totalReconnects
-		// counts every reconnect this invocation made and never resets.
+		// reconnectAttempts counts consecutive reconnects since a connection
+		// last worked and drives the backoff; a connection works by delivering
+		// content or by outliving healthyUptime. shortLivedReconnects counts
+		// only the connections that died inside healthyUptime, and never
+		// resets.
 		reconnectAttempts := 0
-		totalReconnects := 0
+		shortLivedReconnects := 0
 		currentBackoff := policy.initialBackoff
-		// lastConnWasBrief gates the invocation-wide ceiling. A connection the
-		// server cycles after minutes of service is routine and must not count
-		// towards it, or a long call dies of old age.
+		// lastConnWasBrief records whether the connection that just dropped
+		// died inside healthyUptime. A connection the server cycles after
+		// minutes of service is routine, so it spends neither budget and clears
+		// the consecutive one; charging it would let a long call die of old
+		// age.
 		lastConnWasBrief := false
 		var lastErr error
 		// isReconnect is false only for the very first dial; every path back to
@@ -433,7 +437,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if isReconnect {
 				reconnectAttempts++
 				if lastConnWasBrief {
-					totalReconnects++
+					shortLivedReconnects++
 				}
 				if reconnectAttempts > policy.maxAttempts {
 					// Resumable errors are swallowed while retrying, so
@@ -442,7 +446,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						fmt.Sprintf("%d consecutive attempts delivered no content", policy.maxAttempts), lastErr))
 					return
 				}
-				if totalReconnects > policy.maxTotal {
+				if shortLivedReconnects > policy.maxTotal {
 					sess.pushError(liveReconnectGaveUpError(
 						fmt.Sprintf("%d short-lived connections in one invocation", policy.maxTotal), lastErr))
 					return
@@ -450,8 +454,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				sleepDuration := policy.jittered(currentBackoff)
 				currentBackoff = policy.nextBackoff(currentBackoff)
 
-				log.Printf("live session: reconnect attempt %d/%d (%d total) in %v",
-					reconnectAttempts, policy.maxAttempts, totalReconnects, sleepDuration)
+				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v",
+					reconnectAttempts, policy.maxAttempts, shortLivedReconnects, sleepDuration)
 				if !waitBeforeReconnect(ctx, sess, sleepDuration) {
 					// Cancellation reports itself, matching the consumer
 					// loop's ctx.Done arm; Close is a clean teardown.
@@ -607,9 +611,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						return
 					}
 					// Content proves this connection is serving, so the
-					// consecutive budget starts over; totalReconnects does not,
-					// which is what bounds a backend that serves one frame per
-					// connection and then hangs up.
+					// consecutive budget starts over; shortLivedReconnects does
+					// not, which is what bounds a backend that serves one frame
+					// per connection and then hangs up.
 					if ev != nil && ev.LLMResponse.Content != nil {
 						reconnectAttempts = 0
 						currentBackoff = policy.initialBackoff
@@ -689,6 +693,16 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						// and blocks on the caller, and crediting that time as
 						// uptime would let a flapping backend pass as healthy.
 						lastConnWasBrief = ce.at.Sub(connectedAt) < policy.healthyUptime
+						if !lastConnWasBrief {
+							// The connection served for as long as a healthy
+							// one does, which is the only evidence a session
+							// the model has nothing to say on ever produces.
+							// Without this the consecutive budget ends such a
+							// call after maxAttempts of the cycles the Live API
+							// performs as ordinary lifecycle.
+							reconnectAttempts = 0
+							currentBackoff = policy.initialBackoff
+						}
 						reconnect = true
 						break // Break the select
 					}
