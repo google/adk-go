@@ -38,6 +38,20 @@ import (
 // drained by now is not terminating at all.
 const drainTimeout = 30 * time.Second
 
+// intermediaryWebsocketTimeout is how long a working websocket survives behind
+// an intermediary that caps total connection duration rather than idle time. A
+// Google Cloud load balancer does exactly that, on the backend service's
+// timeoutSec, which defaults to 30 seconds; a session behind one is cut and
+// redialled at a little under that for as long as the call runs.
+//
+// intermediaryHeadroom is the margin healthyUptime keeps from that interval, so
+// that an intermediary configured tighter than the default still reads as
+// ordinary service.
+const (
+	intermediaryWebsocketTimeout = 25 * time.Second
+	intermediaryHeadroom         = 4
+)
+
 // testLiveReconnectPolicy is the default policy with the delays shrunk, so a
 // test that exercises the bounds does not also sleep through the production
 // backoff.
@@ -476,6 +490,22 @@ func TestDefaultLiveReconnectPolicy(t *testing.T) {
 	if worst > 30*time.Second {
 		t.Errorf("worst-case reconnect window is %v; that is how long Send blocks with no way for the caller to bound it", worst)
 	}
+	// healthyUptime decides which connections spend the ceiling, so it has to
+	// clear both of the intervals it sits between. Above it, a connection an
+	// intermediary cut is ordinary service: charging those spends the whole
+	// ceiling on a session that is working.
+	if p.healthyUptime*intermediaryHeadroom > intermediaryWebsocketTimeout {
+		t.Errorf("healthyUptime = %v, want at most %v (%dx under the %v an intermediary cycles a working connection at); at this setting such a session ends after %v",
+			p.healthyUptime, intermediaryWebsocketTimeout/intermediaryHeadroom, intermediaryHeadroom,
+			intermediaryWebsocketTimeout, time.Duration(p.maxTotal+1)*intermediaryWebsocketTimeout)
+	}
+	// Below it, a backend that hangs up after every frame: content restarts the
+	// backoff, so it comes back every initialBackoff, and the ceiling reaches it
+	// only while that cycle still reads as short-lived.
+	if p.healthyUptime <= intermediaryHeadroom*p.initialBackoff {
+		t.Errorf("healthyUptime = %v, want well above initialBackoff %v: a backend that hangs up after every frame returns at that pace and no bound reaches it",
+			p.healthyUptime, p.initialBackoff)
+	}
 }
 
 func TestTornDown(t *testing.T) {
@@ -578,6 +608,64 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 	}
 	if want := int32(p.maxTotal + 1); got <= want {
 		t.Errorf("dialled %d times, want more than %d: the ceiling stopped a healthy session", got, want)
+	}
+}
+
+// TestRunLiveCeilingSparesAnIntermediaryCycledSession models a working session
+// behind an intermediary that caps how long a websocket may live. The model
+// serves content throughout and every connection dies on the intermediary's
+// clock rather than on anything wrong with the backend, so none of them may
+// spend a ceiling slot: a session that pays one per cycle is over within
+// minutes.
+//
+// Both the intermediary's interval and healthyUptime are divided by the same
+// factor, because what decides this is the margin between the two and not their
+// absolute size. At full scale the session dies eight minutes in, which is no
+// use as a test.
+func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
+	const (
+		scale        = 100
+		connLifetime = intermediaryWebsocketTimeout / scale
+	)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong))
+		time.Sleep(connLifetime)
+	})
+	// A ceiling this low ends a misclassified session inside the test rather
+	// than after the twenty cycles the default would take.
+	p := testLiveReconnectPolicy(100, 2)
+	p.healthyUptime = defaultLiveReconnectHealthyUptime / scale
+	f := newReconnectFlow(client, p)
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	var wg sync.WaitGroup
+	var streamErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, err := range seq {
+			if err != nil {
+				streamErr = err
+			}
+		}
+	}()
+
+	// Long enough for more cycles than the ceiling would allow.
+	time.Sleep(6 * connLifetime)
+	got := connCount.Load()
+	_ = sess.Close()
+	wg.Wait()
+
+	if streamErr != nil {
+		t.Errorf("session ended with %v; a connection an intermediary cut after %v of service must not spend the ceiling", streamErr, connLifetime)
+	}
+	if want := int32(p.maxTotal + 1); got <= want {
+		t.Errorf("dialled %d times, want more than %d: the ceiling ended a session that was serving content", got, want)
 	}
 }
 

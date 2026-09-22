@@ -26,13 +26,21 @@ import (
 // The attempt limit matches adk-python's DEFAULT_MAX_RECONNECT_ATTEMPTS. The
 // rest have no Python counterpart: adk-python neither paces its reconnects nor
 // bounds a backend that keeps accepting connections and dropping them.
+//
+// healthyUptime is the threshold the invocation-wide ceiling turns on, so it
+// has to sit between two real intervals. Above it is how often an intermediary
+// cuts a working websocket: a Google Cloud load balancer does so on the backend
+// service's timeoutSec, which caps total duration rather than idle time and
+// defaults to 30 seconds. Below it is how fast a backend that hangs up after
+// every frame comes back, which is initialBackoff, because content restarts the
+// backoff.
 const (
 	defaultLiveReconnectInitialBackoff = 250 * time.Millisecond
 	defaultLiveReconnectMaxBackoff     = 2 * time.Second
 	defaultLiveReconnectJitter         = 0.2
 	defaultLiveReconnectMaxAttempts    = 5
 	defaultLiveReconnectMaxTotal       = 20
-	defaultLiveReconnectHealthyUptime  = 30 * time.Second
+	defaultLiveReconnectHealthyUptime  = 5 * time.Second
 )
 
 // errLiveReconnectExhausted reports that RunLive stopped reconnecting a live
@@ -80,7 +88,8 @@ type liveConnError struct {
 //
 // What this does not bound is a backend that serves for longer than
 // healthyUptime and then drops, over and over. That is indistinguishable from a
-// healthy session the server keeps cycling, so it is left to run. A caller slow
+// healthy session the server keeps cycling, so it is left to run; healthyUptime
+// is at the same time the floor on how often such a loop can dial. A caller slow
 // enough to stretch every connection past healthyUptime buys the same
 // treatment, which is safe for the failure this bounds: the loop can only run
 // as fast as the caller consumes it, so it cannot become a redial storm.
