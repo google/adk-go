@@ -748,3 +748,69 @@ func TestWebURL(t *testing.T) {
 		})
 	}
 }
+
+// bindHostRecordingSublauncher captures the bind address the launcher hands its
+// sublaunchers.
+type bindHostRecordingSublauncher struct {
+	telemetryFailSublauncher
+	seen string
+}
+
+func (s *bindHostRecordingSublauncher) Keyword() string { return "recording" }
+
+func (s *bindHostRecordingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	s.seen = c.BindHost
+	return nil
+}
+
+// TestRunPassesResolvedBindHostToSublaunchers pins that sublaunchers receive the
+// address the server is bound to, resolved rather than raw.
+//
+// The REST server arms its Host check on a declared loopback bind, and that
+// check is the only one that sees a rebound page's same-origin GET, which
+// carries no Origin header. An empty -host must therefore arrive as the
+// loopback default, not as "": the check reads an empty value as "no bind
+// declared" and stays off.
+func TestRunPassesResolvedBindHostToSublaunchers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default", want: defaultHost},
+		{name: "empty host resolves to the default", args: []string{"--host", ""}, want: defaultHost},
+		{name: "explicit loopback", args: []string{"--host", "127.0.0.1"}, want: "127.0.0.1"},
+		{name: "all interfaces", args: []string{"--host", "0.0.0.0"}, want: "0.0.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Occupy the port so Run fails at bind, after SetupSubrouters.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("net.Listen() failed: %v", err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			port := ln.Addr().(*net.TCPAddr).Port
+
+			sub := &bindHostRecordingSublauncher{}
+			l := NewLauncher(sub).(*webLauncher)
+			args := append(append([]string{}, tc.args...), "--port", fmt.Sprint(port), "recording")
+			if _, err := l.Parse(args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", args, err)
+			}
+
+			config := &launcher.Config{}
+			if err := l.Run(t.Context(), config); err == nil {
+				t.Fatalf("Run() succeeded, want server bind failure")
+			}
+
+			if sub.seen != tc.want {
+				t.Errorf("sublauncher saw BindHost = %q, want %q", sub.seen, tc.want)
+			}
+			if host, _, err := net.SplitHostPort(l.buildHTTPServer(nil).Addr); err != nil {
+				t.Fatalf("SplitHostPort(%q) failed: %v", l.buildHTTPServer(nil).Addr, err)
+			} else if host != sub.seen {
+				t.Errorf("sublauncher saw BindHost = %q, but the server binds %q", sub.seen, host)
+			}
+		})
+	}
+}

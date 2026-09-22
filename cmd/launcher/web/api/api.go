@@ -282,6 +282,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		Authenticator:   config.Authenticator,
 		Authorizer:      config.Authorizer,
 		Compaction:      config.Compaction,
+		BindHost:        config.BindHost,
 		// The same value the CORS header advertises. An origin whose script may
 		// read our responses is one we should accept requests from, and whose
 		// host is a legitimate way to reach us.
