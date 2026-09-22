@@ -537,9 +537,13 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
-	if userFnCall := getUserFunctionCallAt(events, events.Len()-1, ctx.IsolationScope()); userFnCall != nil {
+	// Resume path: do not rewrite function responses to text. A single user
+	// event can mix peer and local tool answers (parallel tool merge); Python's
+	// preserve_as_resume forbids flattening any FR when any other stays as data.
+	// IsolationScope prevents sibling-scope function calls from leaking TaskID/contextID.
+	if userFnCall := getUserFunctionCallAt(events, events.Len()-1, ctx.Agent().Name(), ctx.IsolationScope()); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := convertParts(ctx, cfg, event)
+		parts, err := convertParts(ctx, cfg, event, nil)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
@@ -558,7 +562,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 			event := session.NewEvent(ctx, ctx.InvocationID())
 			event.Author = "user"
 			event.Content = uc
-			seeded, err := convertParts(ctx, cfg, event)
+			seeded, err := convertParts(ctx, cfg, event, nil)
 			if err != nil {
 				return nil, fmt.Errorf("event part conversion failed: %w", err)
 			}

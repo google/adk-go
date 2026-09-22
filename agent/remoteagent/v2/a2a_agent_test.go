@@ -1480,6 +1480,49 @@ func TestRemoteAgent_ScopedMessage_NoUserContentUsesScopedHistory(t *testing.T) 
 // A same-scope event that the remote has not seen must be included even when
 // out-of-scope events are interleaved around it (positive control for the
 // utils.go isolation filter).
+
+// A peer function call from another isolation scope must not license an
+// in-scope function response to go out as A2A data (reopens #1482 if
+// collectRemoteFunctionCallIDs ignores IsolationScope).
+func TestRemoteAgent_ScopedMessage_ForeignScopeCallIDDoesNotLicenseInScopeResponse(t *testing.T) {
+	const scope, other, remoteName = "workflow/node@1", "workflow/other@1", "remote-agent"
+
+	foreignCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-foreign", Name: "peer_tool"}})
+	foreignCall.IsolationScope = other
+
+	inScopeResponse := newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: "fc-foreign", Name: "peer_tool", Response: map[string]any{"ok": true},
+	}})
+	inScopeResponse.IsolationScope = scope
+
+	// Extra in-scope user text so this is not the resume path (last event is not the FR alone as resume trigger with matching call in scope).
+	follow := newEventFromParts("user", genai.NewPartFromText("continue"))
+	follow.IsolationScope = scope
+
+	ictx := newScopedCtx(t, remoteName, scope, nil, foreignCall, inScopeResponse, follow)
+	msg, err := newMessage(ictx, A2AConfig{})
+	if err != nil {
+		t.Fatalf("newMessage() error = %v", err)
+	}
+	for i, part := range msg.Parts {
+		meta := part.Metadata
+		if meta != nil && meta[adka2a.ToA2AMetaKey("type")] == "function_response" {
+			t.Fatalf("part[%d] kept as function_response data; foreign-scope call ID must not license in-scope FR", i)
+		}
+	}
+	found := false
+	for _, part := range msg.Parts {
+		if strings.HasPrefix(part.Text(), "Tool peer_tool returned:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		b, _ := json.Marshal(msg.Parts)
+		t.Fatalf("expected rewritten tool text for in-scope FR; parts=%s", b)
+	}
+}
+
 func TestRemoteAgent_ScopedMessage_SameScopePositiveControl(t *testing.T) {
 	const scope, remoteName = "workflow/node@1", "remote-agent"
 
@@ -1779,7 +1822,7 @@ func TestRemoteAgent_PartConverter(t *testing.T) {
 
 	ictx := newTestInvocationContext(t, "test-agent", newUserHello())
 
-	parts, err := convertParts(ictx, cfg, event)
+	parts, err := convertParts(ictx, cfg, event, map[string]struct{}{})
 	if err != nil {
 		t.Fatalf("convertParts() error = %v", err)
 	}
