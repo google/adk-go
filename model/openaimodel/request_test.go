@@ -259,6 +259,120 @@ func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 	}
 }
 
+// TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire checks the
+// serialized body rather than the schema map, because omitzero and the SDK's
+// union arms decide what the API actually receives. A property-less object
+// reaching OpenAI without all three keys is rejected with a 400.
+func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("respond JSON", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+			ResponseSchema: &genai.Schema{
+				Type: genai.TypeObject,
+				Properties: map[string]*genai.Schema{
+					"city":  {Type: genai.TypeString},
+					"audit": {Type: genai.TypeObject},
+				},
+			},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal() err = %v", err)
+	}
+	var payload struct {
+		Text struct {
+			Format struct {
+				Schema map[string]any `json:"schema"`
+			} `json:"format"`
+		} `json:"text"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v", err)
+	}
+	// Failures report the schema alone, never the marshalled request, which
+	// carries the prompt.
+	sent := payload.Text.Format.Schema
+	props, _ := sent["properties"].(map[string]any)
+	audit, ok := props["audit"].(map[string]any)
+	if !ok {
+		t.Fatalf("audit missing from the request schema: %v", sent)
+	}
+	if got := audit["type"]; got != "object" {
+		t.Fatalf("audit.type = %v, want object", got)
+	}
+	// The two-value index tells an absent key from an empty value, which is the
+	// whole point here: the API rejects the request when a key is missing.
+	if got, ok := audit["properties"]; !ok {
+		t.Errorf("audit.properties missing from the request schema: %v", sent)
+	} else if m, isMap := got.(map[string]any); !isMap || len(m) != 0 {
+		t.Errorf("audit.properties = %v, want an empty object", got)
+	}
+	if got, ok := audit["additionalProperties"]; !ok {
+		t.Errorf("audit.additionalProperties missing from the request schema: %v", sent)
+	} else if got != false {
+		t.Errorf("audit.additionalProperties = %v, want false", got)
+	}
+	if got, ok := audit["required"]; !ok {
+		t.Errorf("audit.required missing from the request schema: %v", sent)
+	} else if s, isSlice := got.([]any); !isSlice || len(s) != 0 {
+		t.Errorf("audit.required = %v, want an empty array", got)
+	}
+}
+
+// TestBuildOpenAIParams_ToolsPinStrictOff checks the strict flag on the request
+// body rather than on the converted tool, because that is what decides the
+// validation mode. The declaration below is already strict-compatible, which is
+// the case the Responses API would otherwise normalize into strict mode.
+func TestBuildOpenAIParams_ToolsPinStrictOff(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("weather?", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name: "get_weather",
+					ParametersJsonSchema: map[string]any{
+						"type":                 "object",
+						"properties":           map[string]any{"city": map[string]any{"type": "string"}},
+						"required":             []any{"city"},
+						"additionalProperties": false,
+					},
+				}},
+			}},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal() err = %v", err)
+	}
+	var payload struct {
+		Tools []struct {
+			Strict *bool `json:"strict"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v", err)
+	}
+	if len(payload.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1: %s", len(payload.Tools), data)
+	}
+	if payload.Tools[0].Strict == nil {
+		t.Fatalf("strict missing from the request body: %s", data)
+	}
+	if *payload.Tools[0].Strict {
+		t.Errorf("strict = true, want false")
+	}
+}
+
 func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
@@ -368,7 +482,10 @@ func TestApplyGenerationConfig(t *testing.T) {
 							Strict: param.NewOpt(true),
 							Type:   constant.JSONSchema("json_schema"),
 							Schema: map[string]any{
-								"type": "object",
+								"type":                 "object",
+								"properties":           map[string]any{},
+								"additionalProperties": false,
+								"required":             []string{},
 							},
 						},
 					},
@@ -1261,8 +1378,11 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
 				Schema: map[string]any{
-					"title": "CustomTitle",
-					"type":  "object",
+					"title":                "CustomTitle",
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
 				},
 			},
 		},
@@ -1277,8 +1397,258 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
 				Schema: map[string]any{
-					"type": "object",
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
 				},
+			},
+		},
+		{
+			name: "property-less nested object gets the strict keys",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"city":  map[string]any{"type": "string"},
+						"audit": map[string]any{"type": "object"},
+					},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"audit", "city"},
+					"properties": map[string]any{
+						"city": map[string]any{"type": "string"},
+						"audit": map[string]any{
+							"type":                 "object",
+							"properties":           map[string]any{},
+							"additionalProperties": false,
+							"required":             []string{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "property-less object inside array items and $defs",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"rows": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "object"},
+						},
+						"bag": map[string]any{"$ref": "#/$defs/bag"},
+					},
+					"$defs": map[string]any{"bag": map[string]any{"type": "object"}},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"bag", "rows"},
+					"properties": map[string]any{
+						"rows": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"type":                 "object",
+								"properties":           map[string]any{},
+								"additionalProperties": false,
+								"required":             []string{},
+							},
+						},
+						"bag": map[string]any{"$ref": "#/$defs/bag"},
+					},
+					"$defs": map[string]any{
+						"bag": map[string]any{
+							"type":                 "object",
+							"properties":           map[string]any{},
+							"additionalProperties": false,
+							"required":             []string{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "non-object properties are left alone",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name": map[string]any{"type": "string"},
+						"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"name", "tags"},
+					"properties": map[string]any{
+						"name": map[string]any{"type": "string"},
+						"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+				},
+			},
+		},
+		{
+			// The one case where a caller's value is replaced rather than
+			// added to. A non-object properties is invalid JSON Schema and the
+			// API rejects it whatever we send.
+			name: "properties that is not an object becomes empty",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{"type": "object", "properties": "garbage"},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			name: "properties that is null becomes empty",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{"type": "object", "properties": nil},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			name: "property-less object in an anyOf branch",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"m": map[string]any{
+							"anyOf": []any{
+								map[string]any{"type": "object"},
+								map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"m"},
+					"properties": map[string]any{
+						"m": map[string]any{
+							"anyOf": []any{
+								map[string]any{
+									"type":                 "object",
+									"properties":           map[string]any{},
+									"additionalProperties": false,
+									"required":             []string{},
+								},
+								map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// A node that carries properties without declaring type: object is
+			// not rewritten itself, but the walk still descends into it.
+			name: "properties are walked even when the parent declares no type",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"properties": map[string]any{
+						"a": map[string]any{"type": "object"},
+					},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"properties": map[string]any{
+						"a": map[string]any{
+							"type":                 "object",
+							"properties":           map[string]any{},
+							"additionalProperties": false,
+							"required":             []string{},
+						},
+					},
+				},
+			},
+		},
+		{
+			// A map spelled as additionalProperties loses its value schema:
+			// strict mode accepts only additionalProperties=false, so the map
+			// cannot survive in any form.
+			name: "a map written as additionalProperties becomes an empty object",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"type": "string"},
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			// Sibling stripping runs before the object rewrite, so a $ref does
+			// not collect the three keys on the way past.
+			name: "a $ref keeps no siblings even when it declares type object",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"$defs": map[string]any{"x": map[string]any{"type": "object"}},
+					"$ref":  "#/$defs/x",
+					"type":  "object",
+				},
+			},
+			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{"$ref": "#/$defs/x"},
 			},
 		},
 		{

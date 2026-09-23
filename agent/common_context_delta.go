@@ -16,6 +16,12 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"google.golang.org/genai"
 )
@@ -46,7 +52,7 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.WithICDelta(d.InvocationContextDelta)
+	res.invocationContext = withICDelta(res.invocationContext, d.InvocationContextDelta)
 
 	if d.InvocationContextDelta != nil {
 		if d.InvocationContextDelta.Context != nil {
@@ -78,6 +84,140 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 		return c
 	}
 	res := *c
-	res.invocationContext = res.invocationContext.WithICDelta(d)
+	res.invocationContext = withICDelta(res.invocationContext, d)
 	return &res
+}
+
+// withICDelta applies d to the invocation this context speaks for, and refuses a
+// nil result.
+//
+// Nothing in this repository returns nil from WithICDelta. The guard is for
+// implementations written outside it, which the exported interface allows and
+// which cannot be enumerated — and which reach the shape easily, because a
+// decorator that embeds InvocationContext has to override WithICDelta or lose
+// itself on the first delta.
+//
+// Storing that nil leaves a commonContext whose invocation is gone, and most of
+// its accessors — Agent, Branch, Session, UserID among them — dereference it.
+// Where that panic surfaces depends on the node: a plain workflow node
+// dereferences the invocation inside startNodeSpan, which runNode calls before
+// installing its recover, so the process dies. A node that emits its own span
+// gets a noop span and an untouched context, so the panic happens inside Run
+// and is recovered as "node %q panicked".
+//
+// Keeping the previous invocation is the better of the two, but it is not free:
+// the delta is gone, so the caller runs on with the previous Agent, Branch and
+// IsolationScope. Nothing else distinguishes that from the delta having been
+// applied, so it is reported. An agent running under the wrong parent is not a
+// quiet kind of wrong.
+//
+// It also hands every sibling derivation the same invocation object, where the
+// working path gives each one a copy. That is the one cost a reader cannot
+// recover by inspecting a value: EndInvocation on any child now ends the parent
+// and its siblings, and the write races their Ended. #1135 makes that
+// propagation deliberate and synchronises the flag, and until it lands this
+// branch has the sharing without either.
+func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
+	if ic == nil {
+		return nil
+	}
+	if next := ic.WithICDelta(d); next != nil {
+		return next
+	}
+	// d is forwarded above even when nil, because an implementation may treat a
+	// nil delta as something other than "no change" — both wrappers in this
+	// package delegate, and the inner commonContext answers a nil delta by
+	// returning itself, which unwraps them. Only the report is skipped.
+	if d != nil {
+		reportDiscardedDelta(ic, d)
+	}
+	return ic
+}
+
+// reportedNilICDelta remembers which losses have already been reported, as one
+// bitmask of field sets per implementation type. A nil return is a static
+// property of the implementation rather than a transient, so without this
+// withICDelta reports once per derived context — per workflow node, per agent
+// activation, per parallel item.
+//
+// The type alone would be the wrong key now that the message carries a field
+// list: a later discard that loses different fields does say something the first
+// line did not, and on the workflow path the first one is often the least
+// informative — a Branch-only derivation from the scheduler, ahead of the Agent
+// the run actually swapped. Field values do not enter the key, so a
+// thousand-item fan-out deriving the same shape still reports once.
+//
+// The mask is a value rather than part of the key because a struct key would
+// have to be boxed into an interface on every lookup, which allocates on exactly
+// the repeat path this exists to make cheap.
+var reportedNilICDelta sync.Map // reflect.Type -> *atomic.Uint32
+
+const (
+	lostAgent uint8 = 1 << iota
+	lostBranch
+	lostIsolationScope
+	lostUserContent
+	lostContext
+)
+
+func reportDiscardedDelta(ic InvocationContext, d *InvocationContextDelta) {
+	// The mask is built first so a repeat pays neither the slice nor the
+	// formatting below. Only an implementation that returns nil reaches here at
+	// all, but it reaches here on every derivation for the life of the process.
+	var fields uint8
+	if d.Agent != nil {
+		fields |= lostAgent
+	}
+	if d.Branch != nil {
+		fields |= lostBranch
+	}
+	if d.IsolationScope != nil {
+		fields |= lostIsolationScope
+	}
+	if d.UserContent != nil {
+		fields |= lostUserContent
+	}
+	if d.Context != nil {
+		fields |= lostContext
+	}
+	if fields == 0 {
+		// The delta asked for nothing, so nothing was lost and no report is owed —
+		// and claiming a bit here would spend one a real loss needs.
+		return
+	}
+	typ := reflect.TypeOf(ic)
+	seen, ok := reportedNilICDelta.Load(typ)
+	if !ok {
+		seen, _ = reportedNilICDelta.LoadOrStore(typ, new(atomic.Uint32))
+	}
+	if prev := seen.(*atomic.Uint32).Or(1 << fields); prev&(1<<fields) != 0 {
+		return
+	}
+
+	// Only what the delta asked for is safe to render. An implementation that
+	// has just returned nil is by definition partial, so calling its accessors
+	// to enrich this message risks a second failure inside the error path.
+	var lost []string
+	if fields&lostAgent != 0 {
+		lost = append(lost, "Agent")
+	}
+	if fields&lostBranch != 0 {
+		lost = append(lost, fmt.Sprintf("Branch=%q", *d.Branch))
+	}
+	if fields&lostIsolationScope != 0 {
+		lost = append(lost, fmt.Sprintf("IsolationScope=%q", *d.IsolationScope))
+	}
+	if fields&lostUserContent != 0 {
+		lost = append(lost, "UserContent")
+	}
+	if fields&lostContext != 0 {
+		lost = append(lost, "Context")
+	}
+	// The subject is the invocation, not the context the caller gets back.
+	// WithDelta installs d.Context on the latter afterwards, so saying the delta
+	// was "discarded" would be read as covering both. These fields did not reach
+	// the invocation, which is true on either entry point.
+	log.Printf("agent: %T.WithICDelta returned nil, so the previous invocation is kept and "+
+		"these delta fields did not reach it: %s. Further occurrences of this loss from "+
+		"this type are not reported", ic, strings.Join(lost, ", "))
 }
