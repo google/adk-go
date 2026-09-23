@@ -40,16 +40,21 @@ func convertChatCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentR
 	if len(parts) == 0 {
 		return nil, ErrNoTextOrToolContent
 	}
-	return &genai.GenerateContentResponse{
+	out := &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
 			Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
 			FinishReason:   chatFinishReason(choice.FinishReason),
 			LogprobsResult: convertChatLogprobs(choice.Logprobs),
 		}},
-		ModelVersion:  resp.Model,
-		ResponseID:    resp.ID,
-		UsageMetadata: convertChatUsage(resp.Usage),
-	}, nil
+		ModelVersion: resp.Model,
+		ResponseID:   resp.ID,
+	}
+	if resp.JSON.Usage.Valid() {
+		// A provider that omits usage has not said the turn cost nothing, which
+		// zeros would; streaming leaves it unset in the same case.
+		out.UsageMetadata = convertChatUsage(resp.Usage)
+	}
+	return out, nil
 }
 
 // convertChatMessage converts an assistant message into genai parts. A refusal

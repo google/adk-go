@@ -307,11 +307,12 @@ func TestChatModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
 	}
 }
 
-// TestChatModel_GenerateStream_NoUsageReportedLeavesUsageUnset covers a
-// provider that ignores stream_options.include_usage. Zeros would report a
-// turn that did real work as having cost nothing. The tool-call turn matters
-// most: its final response is rebuilt from the snapshot, whose usage is zero.
-func TestChatModel_GenerateStream_NoUsageReportedLeavesUsageUnset(t *testing.T) {
+// TestChatModel_NoUsageReportedLeavesUsageUnset covers a provider that reports
+// no usage, as one ignoring stream_options.include_usage does. Zeros would
+// report a turn that did real work as having cost nothing. The streamed
+// tool-call turn matters most: its final response is rebuilt from the
+// snapshot, whose usage is zero.
+func TestChatModel_NoUsageReportedLeavesUsageUnset(t *testing.T) {
 	for name, frames := range map[string][]string{
 		"text": {
 			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"sunny"}}]}`,
@@ -333,6 +334,17 @@ func TestChatModel_GenerateStream_NoUsageReportedLeavesUsageUnset(t *testing.T) 
 			}
 		})
 	}
+	// Blocking agrees, so one provider does not read differently by mode.
+	t.Run("blocking", func(t *testing.T) {
+		rig := newChatRig(t, chatJSON(`{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sunny"}}]}`))
+		got, err := askChat(t, rig.model(t), false)
+		if err != nil {
+			t.Fatalf("GenerateContent() err = %v", err)
+		}
+		if usage := got[0].UsageMetadata; usage != nil {
+			t.Errorf("usage = %#v, want nil when the provider reported none", usage)
+		}
+	})
 }
 
 // TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
