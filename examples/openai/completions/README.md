@@ -11,8 +11,8 @@ Ollama by changing two environment variables.
 ## Goal
 
 Show that reaching a non-OpenAI provider is a configuration change, not a code
-change. The sibling [responses](../responses) sample is the same agent on
-OpenAI's newer API; the only difference between the two programs is one field:
+change. The [parent sample](..) is the same agent on OpenAI's newer API; the
+only difference between the two programs is one field:
 
 ```go
 m, err := openaimodel.NewModel(ctx, modelName, &openaimodel.ClientConfig{
@@ -67,7 +67,7 @@ Against OpenAI:
 
 ```bash
 export OPENAI_API_KEY=sk-...
-go run ./examples/openai/completions
+go run ./examples/openai/completions console
 ```
 
 Against another provider, for example Groq:
@@ -76,7 +76,7 @@ Against another provider, for example Groq:
 export OPENAI_API_KEY="$GROQ_API_KEY"
 export OPENAI_BASE_URL=https://api.groq.com/openai/v1
 export OPENAI_MODEL=llama-3.3-70b-versatile
-go run ./examples/openai/completions
+go run ./examples/openai/completions console
 ```
 
 ## Example session

@@ -44,6 +44,13 @@ func (t *chatStreamTranslator) process(chunk openai.ChatCompletionChunk) *genai.
 	// untouched. The delta is still yielded, so text a caller could read does
 	// not vanish because the snapshot could not hold it.
 	t.acc.AddChunk(chunk)
+	if chunk.JSON.Usage.Valid() {
+		// The accumulator sums usage across chunks, which is right only for a
+		// provider reporting it once; several resend the running total on
+		// every chunk. The latest report is the turn's total either way, which
+		// is also how adk-python's LiteLLM path reads it.
+		t.acc.Usage = chunk.Usage
+	}
 
 	if len(chunk.Choices) == 0 {
 		// The usage-only chunk that closes a stream requesting usage.

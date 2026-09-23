@@ -77,7 +77,10 @@ func buildChatParams(modelName string, req *model.LLMRequest) (openai.ChatComple
 		if err != nil {
 			return openai.ChatCompletionNewParams{}, err
 		}
-		if choice != nil {
+		// Only alongside tools: the API rejects a tool_choice sent without
+		// them, "none" included, so a turn whose toolset came up empty would
+		// fail. adk-python's LiteLLM path drops it in the same case.
+		if choice != nil && len(tools) > 0 {
 			params.ToolChoice = *choice
 		}
 	}
@@ -284,8 +287,9 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 	}
 	if cfg.TopK != nil {
 		// Chat Completions has no top_k either, and forwarding it would trade a
-		// clear error for a field the provider ignores.
-		return ErrTopKNotSupported
+		// clear error for a field the provider ignores. Wrapped because the
+		// sentinel's own message names only the Responses API.
+		return fmt.Errorf("%w, nor by Chat Completions", ErrTopKNotSupported)
 	}
 	if cfg.MaxOutputTokens > 0 {
 		params.MaxCompletionTokens = param.NewOpt(int64(cfg.MaxOutputTokens))
@@ -345,8 +349,15 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 	if cfg.SafetySettings != nil {
 		return ErrSafetySettingsNotSupported
 	}
-	if err := applyChatThinkingConfig(params, cfg.ThinkingConfig); err != nil {
-		return err
+	if cfg.ThinkingConfig != nil {
+		// IncludeThoughts is accepted and ignored: this endpoint has no
+		// reasoning summary to ask for, and refusing it would break a config
+		// that works against Responses.
+		effort, err := reasoningEffortFor(cfg.ThinkingConfig)
+		if err != nil {
+			return err
+		}
+		params.ReasoningEffort = effort
 	}
 	if cfg.ServiceTier != "" {
 		tier, ok := chatServiceTiers[cfg.ServiceTier]
@@ -400,43 +411,4 @@ func newChatResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatComple
 			},
 		},
 	}, nil
-}
-
-// applyChatThinkingConfig maps genai's thinking config onto reasoning_effort,
-// reusing the Responses level mapping because both endpoints take the same
-// effort values.
-//
-// IncludeThoughts is accepted and ignored: this endpoint has no reasoning
-// summary to ask for, and refusing it would break a config that works against
-// Responses.
-func applyChatThinkingConfig(params *openai.ChatCompletionNewParams, cfg *genai.ThinkingConfig) error {
-	if cfg == nil {
-		return nil
-	}
-	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget < dynamicThinkingBudget {
-		return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
-	}
-	// A level outranks a budget, but only when it names one.
-	level := cfg.ThinkingLevel
-	if level == genai.ThinkingLevelUnspecified && cfg.ThinkingBudget != nil {
-		level = ""
-	}
-	switch {
-	case level != "":
-		effort, ok := reasoningEfforts[level]
-		if !ok {
-			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
-		}
-		params.ReasoningEffort = effort
-	case cfg.ThinkingBudget != nil:
-		switch *cfg.ThinkingBudget {
-		case 0:
-			params.ReasoningEffort = shared.ReasoningEffortNone
-		case dynamicThinkingBudget:
-			// The caller asked the model to decide, so no effort is sent.
-		default:
-			params.ReasoningEffort = shared.ReasoningEffortMedium
-		}
-	}
-	return nil
 }

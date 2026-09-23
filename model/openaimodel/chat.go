@@ -138,9 +138,12 @@ func (m *chatModel) generateStream(ctx context.Context, params openai.ChatComple
 			if content := genaiResp.Candidates[0].Content; completedContentSupersedes(final.Content, content) {
 				final.Content = content
 			}
-		case carriesContent(final):
-			// The snapshot is unusable but the deltas produced a turn: report it
-			// rather than fail a call the model answered.
+		case carriesContent(final) && isEmptyOutput(err):
+			// The snapshot holds nothing but the deltas produced a turn, so
+			// report it rather than fail a call the model answered. An unusable
+			// snapshot, such as a tool call whose arguments do not parse, fails
+			// as blocking does: only it states the calls, so dropping one would
+			// pass the turn off as whole.
 		default:
 			yield(nil, err)
 			return

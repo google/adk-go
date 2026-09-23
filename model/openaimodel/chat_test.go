@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,12 +42,10 @@ func newChatRig(t *testing.T, handler func(w http.ResponseWriter, r *http.Reques
 	t.Helper()
 	rig := &chatRig{}
 	rig.server = newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, r.ContentLength)
-		if r.ContentLength > 0 {
-			_, _ = r.Body.Read(buf)
-		}
+		// ReadAll rather than one Read, which may return part of the body.
+		body, _ := io.ReadAll(r.Body)
 		rig.paths = append(rig.paths, r.URL.Path)
-		rig.requests = append(rig.requests, string(buf))
+		rig.requests = append(rig.requests, string(body))
 		handler(w, r)
 	}))
 	t.Cleanup(rig.server.Close)
@@ -283,6 +282,128 @@ func TestChatModel_GenerateStream_EmptyStream(t *testing.T) {
 	_, err := askChat(t, rig.model(t), true)
 	if !errors.Is(err, ErrNoChoices) {
 		t.Fatalf("err = %v, want %v", err, ErrNoChoices)
+	}
+}
+
+// TestChatModel_GenerateStream_UsageIsTheLatestReport covers a provider that
+// resends the running usage on every chunk. Summing those reports would count
+// the prompt once per chunk.
+func TestChatModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"at -7 C"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	usage := got[len(got)-1].UsageMetadata
+	if usage == nil || usage.PromptTokenCount != 8 || usage.CandidatesTokenCount != 4 || usage.TotalTokenCount != 12 {
+		t.Errorf("usage = %#v, want the last report: 8 prompt, 4 candidates, 12 total", usage)
+	}
+}
+
+// TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
+// whose streamed text survived still fails when its tool call cannot be read,
+// because only the snapshot states the calls and blocking rejects the same
+// body.
+func TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	_, err := askChat(t, rig.model(t), true)
+	if !errors.Is(err, ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, ErrFunctionCallArgs)
+	}
+}
+
+// TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText covers a delta
+// the accumulator refuses, here for a choice index past its bound, while the
+// text it carried still reached the caller as a partial.
+func TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":500,"delta":{"role":"assistant","content":"sunny"}}]}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if text := responseText(final); text != "sunny" {
+		t.Errorf("final text = %q, want the streamed text", text)
+	}
+	// Nothing states why the turn ended, which must not read as a clean stop.
+	if final.FinishReason != genai.FinishReasonUnspecified {
+		t.Errorf("finish reason = %v, want UNSPECIFIED", final.FinishReason)
+	}
+}
+
+func TestChatModel_GenerateStream_ErrorMidStream(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
+		`{"error":{"message":"overloaded","type":"server_error"}}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if err == nil {
+		t.Fatal("err = nil, want the stream error surfaced")
+	}
+	if len(got) == 0 || responseText(got[0]) != "hail " {
+		t.Errorf("responses = %d, want the partial that streamed before the error", len(got))
+	}
+	for _, resp := range got {
+		if resp.TurnComplete {
+			t.Error("a response closed the turn, but the stream failed")
+		}
+	}
+}
+
+// TestChatModel_GenerateStream_EarlyBreakClosesTheStream pins that a consumer
+// leaving the range releases the connection rather than leaving the provider
+// streaming into a reader that is gone.
+func TestChatModel_GenerateStream_EarlyBreakClosesTheStream(t *testing.T) {
+	released := make(chan struct{})
+	rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, `data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(released)
+	})
+	for resp, err := range rig.model(t).GenerateContent(t.Context(), toolReq(nil), true) {
+		if err != nil {
+			t.Fatalf("GenerateContent() err = %v", err)
+		}
+		if resp.Partial {
+			break
+		}
+	}
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection was still open after the consumer stopped")
+	}
+}
+
+func TestChatModel_GenerateStream_HonoursTimeout(t *testing.T) {
+	rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	timeout := time.Nanosecond
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+	}
+	var gotErr error
+	for _, err := range rig.model(t).GenerateContent(t.Context(), req, true) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a deadline error", gotErr)
 	}
 }
 

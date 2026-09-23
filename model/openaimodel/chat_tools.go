@@ -103,6 +103,13 @@ func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToo
 	case genai.FunctionCallingConfigModeAny:
 		if len(cfg.AllowedFunctionNames) == 0 {
 			choice.OfAuto = param.NewOpt("required")
+		} else if name, ok := soleFunctionName(cfg.AllowedFunctionNames); ok {
+			// Naming the one function says the same as allowed_tools, in the
+			// older form that compatible providers accept and many that do not
+			// know allowed_tools reject.
+			choice.OfFunctionToolChoice = &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: name},
+			}
 		} else {
 			choice.OfAllowedTools = chatAllowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeRequired)
 		}
@@ -110,10 +117,26 @@ func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToo
 		return nil, fmt.Errorf("openai: unsupported tool calling mode %q", cfg.Mode)
 	}
 
-	if !param.IsOmitted(choice.OfAuto) || choice.OfAllowedTools != nil {
+	if !param.IsOmitted(choice.OfAuto) || choice.OfAllowedTools != nil || choice.OfFunctionToolChoice != nil {
 		return choice, nil
 	}
 	return nil, nil
+}
+
+// soleFunctionName reports the one function names allows, skipping the empty
+// entries chatAllowedToolParam also skips, and false for none or several.
+func soleFunctionName(names []string) (string, bool) {
+	sole := ""
+	for _, name := range names {
+		switch {
+		case name == "":
+		case sole != "":
+			return "", false
+		default:
+			sole = name
+		}
+	}
+	return sole, sole != ""
 }
 
 // chatAllowedToolParam builds the allowed-tools choice. Each entry nests the

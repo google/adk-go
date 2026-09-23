@@ -30,12 +30,12 @@ var (
 	// ErrFunctionCallMissingName is returned when a function call is missing a name.
 	ErrFunctionCallMissingName = errors.New("openai: function call missing name")
 	// ErrTopKNotSupported is returned when TopK is used, which is not supported.
-	ErrTopKNotSupported = errors.New("openai: topK is not supported")
-	// ErrStopSequencesNotSupported is returned when stop sequences are used, which is not supported.
+	ErrTopKNotSupported = errors.New("openai: topK is not supported by the Responses API")
+	// ErrStopSequencesNotSupported is returned when stop sequences are used with the Responses API, which does not support them.
 	ErrStopSequencesNotSupported = errors.New("openai: stop sequences are not supported")
 	// ErrMultipleCandidatesNotSupported is returned when multiple candidates are requested, which is not supported.
 	ErrMultipleCandidatesNotSupported = errors.New("openai: multiple candidates per request are not supported")
-	// ErrPenaltiesNotSupported is returned when frequency/presence penalties are used, which is not supported.
+	// ErrPenaltiesNotSupported is returned when frequency/presence penalties are used with the Responses API, which does not support them.
 	ErrPenaltiesNotSupported = errors.New("openai: frequency/presence penalties are not supported")
 	// ErrLabelsNotSupported is returned when request labels are used, which is not supported.
 	ErrLabelsNotSupported = errors.New("openai: request labels are not supported")
@@ -43,7 +43,7 @@ var (
 	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
-	// ErrUnsupportedConfigField is returned when a generation config field has no Responses API equivalent; the message names it.
+	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.

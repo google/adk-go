@@ -69,9 +69,9 @@ func main() {
 		modelName = defaultModel
 	}
 
-	// The one line that differs from the Responses sample next door. Without
-	// it the package posts to /v1/responses, which a Chat-Completions-only
-	// provider does not serve.
+	// The one line that differs from the Responses sample in examples/openai.
+	// Without it the package posts to /v1/responses, which a
+	// Chat-Completions-only provider does not serve.
 	m, err := openaimodel.NewModel(ctx, modelName, &openaimodel.ClientConfig{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
