@@ -30,7 +30,7 @@ var (
 	// ErrFunctionCallMissingName is returned when a function call is missing a name.
 	ErrFunctionCallMissingName = errors.New("openai: function call missing name")
 	// ErrTopKNotSupported is returned when TopK is used, which is not supported.
-	ErrTopKNotSupported = errors.New("openai: topK is not supported by the Responses API")
+	ErrTopKNotSupported = errors.New("openai: topK is not supported")
 	// ErrStopSequencesNotSupported is returned when stop sequences are used with the Responses API, which does not support them.
 	ErrStopSequencesNotSupported = errors.New("openai: stop sequences are not supported")
 	// ErrMultipleCandidatesNotSupported is returned when multiple candidates are requested, which is not supported.

@@ -287,9 +287,8 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 	}
 	if cfg.TopK != nil {
 		// Chat Completions has no top_k either, and forwarding it would trade a
-		// clear error for a field the provider ignores. Wrapped because the
-		// sentinel's own message names only the Responses API.
-		return fmt.Errorf("%w, nor by Chat Completions", ErrTopKNotSupported)
+		// clear error for a field the provider ignores.
+		return ErrTopKNotSupported
 	}
 	if cfg.MaxOutputTokens > 0 {
 		params.MaxCompletionTokens = param.NewOpt(int64(cfg.MaxOutputTokens))
