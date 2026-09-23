@@ -307,6 +307,34 @@ func TestChatModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
 	}
 }
 
+// TestChatModel_GenerateStream_NoUsageReportedLeavesUsageUnset covers a
+// provider that ignores stream_options.include_usage. Zeros would report a
+// turn that did real work as having cost nothing. The tool-call turn matters
+// most: its final response is rebuilt from the snapshot, whose usage is zero.
+func TestChatModel_GenerateStream_NoUsageReportedLeavesUsageUnset(t *testing.T) {
+	for name, frames := range map[string][]string{
+		"text": {
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"sunny"}}]}`,
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		},
+		"tool call": {
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}`,
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newChatRig(t, chatSSE(frames...))
+			got, err := askChat(t, rig.model(t), true)
+			if err != nil {
+				t.Fatalf("GenerateContent() err = %v", err)
+			}
+			if usage := got[len(got)-1].UsageMetadata; usage != nil {
+				t.Errorf("usage = %#v, want nil when the provider reported none", usage)
+			}
+		})
+	}
+}
+
 // TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
 // whose streamed text survived still fails when its tool call cannot be read,
 // because only the snapshot states the calls and blocking rejects the same

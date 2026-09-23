@@ -151,16 +151,24 @@ func (m *chatModel) generateStream(ctx context.Context, params openai.ChatComple
 		if final == nil {
 			return
 		}
-		finalizeChatStreamResponse(final, completion)
+		finalizeChatStreamResponse(final, completion, translator.usage)
 		yield(final, nil)
 	}
 }
 
 // finalizeChatStreamResponse closes out a streamed turn. Deltas carry no finish
-// reason or usage, so this is the one response that reports them, and it takes
-// both from the accumulated snapshot rather than from anything streamed.
-func finalizeChatStreamResponse(final *model.LLMResponse, completion *openai.ChatCompletion) {
+// reason or usage, so this is the one response that reports them: the finish
+// reason from the accumulated snapshot, and usage from the latest report, if
+// any arrived.
+func finalizeChatStreamResponse(final *model.LLMResponse, completion *openai.ChatCompletion, usage *openai.CompletionUsage) {
 	final.TurnComplete = true
+	// A provider that ignores stream_options reports no usage, and zeros would
+	// say a turn that did real work cost nothing; the Responses path leaves
+	// usage unset in the same case.
+	final.UsageMetadata = nil
+	if usage != nil {
+		final.UsageMetadata = convertChatUsage(*usage)
+	}
 	if completion == nil {
 		return
 	}
@@ -168,7 +176,6 @@ func finalizeChatStreamResponse(final *model.LLMResponse, completion *openai.Cha
 	if completion.Model != "" {
 		final.ModelVersion = completion.Model
 	}
-	final.UsageMetadata = convertChatUsage(completion.Usage)
 	if len(completion.Choices) == 0 {
 		// Nothing said why the turn ended, and reading that as a clean stop
 		// would have a caller that retries on anything but STOP accept a

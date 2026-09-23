@@ -29,6 +29,12 @@ import (
 // uses.
 type chatStreamTranslator struct {
 	acc openai.ChatCompletionAccumulator
+	// usage is the latest usage a chunk reported, or nil if none did. It is
+	// kept apart from the accumulator, which sums every report: right only for
+	// a provider sending usage once, while several resend the running total on
+	// every chunk. The latest report is the turn's total either way, which is
+	// also how adk-python's LiteLLM path reads it.
+	usage *openai.CompletionUsage
 }
 
 // newChatStreamTranslator returns a translator for one streamed turn.
@@ -45,11 +51,8 @@ func (t *chatStreamTranslator) process(chunk openai.ChatCompletionChunk) *genai.
 	// not vanish because the snapshot could not hold it.
 	t.acc.AddChunk(chunk)
 	if chunk.JSON.Usage.Valid() {
-		// The accumulator sums usage across chunks, which is right only for a
-		// provider reporting it once; several resend the running total on
-		// every chunk. The latest report is the turn's total either way, which
-		// is also how adk-python's LiteLLM path reads it.
-		t.acc.Usage = chunk.Usage
+		usage := chunk.Usage
+		t.usage = &usage
 	}
 
 	if len(chunk.Choices) == 0 {
