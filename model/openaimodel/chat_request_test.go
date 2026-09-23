@@ -440,6 +440,9 @@ func TestApplyChatThinkingConfig(t *testing.T) {
 		// No reasoning summary exists on this endpoint, so asking for thoughts
 		// is accepted and changes nothing rather than failing the call.
 		{name: "include thoughts alone is ignored", cfg: &genai.ThinkingConfig{IncludeThoughts: true}, absent: true},
+		// Non-reasoning models reject reasoning_effort, so nothing asked for
+		// must mean nothing sent.
+		{name: "no thinking config sends nothing", cfg: nil, absent: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

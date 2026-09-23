@@ -17,6 +17,7 @@ package openaimodel
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -128,6 +129,30 @@ func TestConvertChatCompletion_ParallelToolCalls(t *testing.T) {
 	// An empty argument payload is a call that takes none, not a nil map.
 	if parts[1].FunctionCall.Args == nil || len(parts[1].FunctionCall.Args) != 0 {
 		t.Errorf("args = %#v, want an empty map", parts[1].FunctionCall.Args)
+	}
+}
+
+// TestConvertChatCompletion_EmptyToolArguments covers the two ways a provider
+// says a call takes no arguments besides "{}": leaving them out, and JSON null.
+// Either must reach the tool as an empty map rather than a nil one.
+func TestConvertChatCompletion_EmptyToolArguments(t *testing.T) {
+	for _, args := range []string{``, `null`} {
+		t.Run(fmt.Sprintf("%q", args), func(t *testing.T) {
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{
+				"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":`+string(raw)+`}}]}}]}`)
+			got, err := convertChatCompletion(resp)
+			if err != nil {
+				t.Fatalf("convertChatCompletion() err = %v", err)
+			}
+			call := got.Candidates[0].Content.Parts[0].FunctionCall
+			if call == nil || call.Args == nil || len(call.Args) != 0 {
+				t.Errorf("call = %#v, want an empty, non-nil argument map", call)
+			}
+		})
 	}
 }
 

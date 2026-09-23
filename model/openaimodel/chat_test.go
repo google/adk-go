@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -191,8 +192,10 @@ func TestChatModel_GenerateContent_ServerError(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
 	})
-	if _, err := askChat(t, rig.model(t), false); err == nil {
-		t.Fatal("err = nil, want the transport failure surfaced")
+	_, err := askChat(t, rig.model(t), false)
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("err = %v, want the provider's 429 surfaced as an *openai.Error", err)
 	}
 }
 
