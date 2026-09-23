@@ -11,8 +11,8 @@ Ollama by changing two environment variables.
 ## Goal
 
 Show that reaching a non-OpenAI provider is a configuration change, not a code
-change. The [parent sample](..) is the same agent on OpenAI's newer API; the
-only difference between the two programs is one field:
+change. The sibling [responses](../responses) sample is the same agent on
+OpenAI's newer API; the only difference between the two programs is one field:
 
 ```go
 m, err := openaimodel.NewModel(ctx, modelName, &openaimodel.ClientConfig{
