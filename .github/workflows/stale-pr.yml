@@ -1,0 +1,173 @@
+name: Stale pull requests
+
+# Daily sweep. Labels a pull request `stale` once a reviewer has asked for
+# changes and two weeks pass with no answer from the author, and takes the
+# label off again when the author answers. CONTRIBUTING.md states the policy.
+#
+# A schedule rather than pull_request_target: labelling needs a write token,
+# which a pull_request run from a fork does not get, and pull_request_target
+# and workflow_run are both blocked by the Actions security scan.
+
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: stale-pr
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write    # label the PR and post the comment
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const MARKER = '<!-- stale-pr -->';
+            const LABEL = 'stale';
+            const QUIET_DAYS = 14;   // silence that counts as stalled
+            const MAX_MARKS = 10;    // stampede guard, per run
+            const WRITE = ['admin', 'maintain', 'write'];
+            const MAINTAINER = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+            // Reviews, conversation comments and inline comments each live in
+            // their own list, and a nudge can be any of the three.
+            const QUERY = `
+              query($q: String!, $cursor: String) {
+                search(query: $q, type: ISSUE, first: 20, after: $cursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { ... on PullRequest {
+                    number isDraft reviewDecision
+                    author { login __typename }
+                    labels(first: 30) { nodes { name } }
+                    comments(last: 50) {
+                      nodes { createdAt authorAssociation body author { login __typename } } }
+                    reviews(last: 50) {
+                      nodes { submittedAt authorAssociation author { login __typename } } }
+                    reviewThreads(last: 40) { nodes { comments(last: 30) {
+                      nodes { createdAt authorAssociation author { login __typename } } } } }
+                    commits(last: 1) { nodes { commit { committedDate } } }
+                  } }
+                }
+              }`;
+
+            async function search(filter) {
+              const q = `repo:${context.repo.owner}/${context.repo.repo} ${filter}`;
+              const out = [];
+              let cursor = null;
+              do {
+                const { search } = await github.graphql(QUERY, { q, cursor });
+                out.push(...search.nodes.filter(n => n.number));
+                cursor = search.pageInfo.hasNextPage ? search.pageInfo.endCursor : null;
+              } while (cursor);
+              return out;
+            }
+
+            // authorAssociation misses members whose org membership is private,
+            // so fall back to the permission API, which 404s for everyone else.
+            // One lookup per login, however many PRs that person touched.
+            const permCache = new Map();
+            async function hasWriteAccess(login) {
+              if (!permCache.has(login)) {
+                const { data } = await github.rest.repos
+                  .getCollaboratorPermissionLevel({ ...context.repo, username: login })
+                  .catch(() => ({ data: { permission: 'none' } }));
+                permCache.set(login, WRITE.includes(data.permission));
+              }
+              return permCache.get(login);
+            }
+
+            const latest = (times) => {
+              const ms = times.filter(Boolean).map(Date.parse).filter(Number.isFinite);
+              return ms.length ? Math.max(...ms) : null;
+            };
+            const isBot = (u) => u.__typename === 'Bot' || u.login.endsWith('[bot]');
+
+            // Who said what, and when. gemini-code-assist and google-cla both
+            // post here, so a bot must never stand in for either side.
+            async function activity(pr) {
+              const author = pr.author?.login ?? '';
+              const said = [
+                ...pr.comments.nodes.map(c => ({ ...c, at: c.createdAt })),
+                ...pr.reviews.nodes.map(c => ({ ...c, at: c.submittedAt })),
+                ...pr.reviewThreads.nodes.flatMap(
+                  t => t.comments.nodes.map(c => ({ ...c, at: c.createdAt }))),
+              ].filter(c => c.at && c.author);
+
+              const fromMaintainer = [];
+              for (const c of said) {
+                if (c.author.login === author || isBot(c.author)) continue;
+                if (!MAINTAINER.includes(c.authorAssociation)
+                    && !await hasWriteAccess(c.author.login)) continue;
+                fromMaintainer.push(c.at);
+              }
+
+              return {
+                author,
+                maintainer: latest(fromMaintainer),
+                // Pushing a commit answers a review as well as a reply does.
+                byAuthor: latest([
+                  ...said.filter(c => c.author.login === author).map(c => c.at),
+                  pr.commits.nodes[0]?.commit?.committedDate,
+                ]),
+                // Our own past nudge, which is what makes a manually removed
+                // label stick rather than coming straight back tomorrow.
+                nudged: latest(pr.comments.nodes
+                  .filter(c => (c.body ?? '').includes(MARKER)).map(c => c.createdAt)),
+              };
+            }
+
+            // Authors who came back get the label taken off. Only ours: a label
+            // applied by hand is somebody's judgement, not this sweep's to undo.
+            let cleared = 0;
+            for (const pr of await search(`is:pr is:open label:"${LABEL}"`)) {
+              const when = await activity(pr);
+              if (!when.nudged) continue;
+              if (!(when.byAuthor > when.nudged)) continue;
+              await github.rest.issues.removeLabel(
+                { ...context.repo, issue_number: pr.number, name: LABEL }).catch(() => {});
+              cleared++;
+              core.info(`cleared #${pr.number}`);
+            }
+
+            const cutoff = Date.now() - QUIET_DAYS * 86400 * 1000;
+            const stalled = [];
+            for (const pr of await search('is:pr is:open review:changes_requested')) {
+              if (pr.isDraft || pr.reviewDecision !== 'CHANGES_REQUESTED') continue;
+              if (pr.labels.nodes.some(l => l.name === LABEL)) continue;
+
+              const when = await activity(pr);
+              if (!when.maintainer || when.maintainer > cutoff) continue;
+              if (when.byAuthor >= when.maintainer) continue;  // ball is in our court
+              if (when.nudged && !(when.byAuthor > when.nudged)) continue;
+
+              stalled.push({ pr, since: when.maintainer });
+            }
+            stalled.sort((a, b) => a.since - b.since);  // longest silence first
+
+            let marked = 0;
+            for (const { pr, since } of stalled.slice(0, MAX_MARKS)) {
+              const days = Math.floor((Date.now() - since) / 86400000);
+              await github.rest.issues.addLabels(
+                { ...context.repo, issue_number: pr.number, labels: [LABEL] });
+              await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
+                body:
+                  `Marking this pull request stale, @${pr.author.login}.\n\n` +
+                  `A reviewer asked for changes ${days} days ago and nothing has come back ` +
+                  'since. Our [contribution guide]' +
+                  '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#stale-pull-requests) ' +
+                  'gives you two weeks to reply before a maintainer may take the change over, ' +
+                  'and this one is past that.\n\n' +
+                  'Reply to the review or push a commit and the label comes off on the next ' +
+                  'sweep. Saying you need more time counts. If you would rather someone else ' +
+                  'finished it, say so and we will look for an owner.\n\n' +
+                  MARKER });
+              marked++;
+              core.info(`marked #${pr.number} stale (quiet ${days}d)`);
+            }
+            core.info(`marked ${marked} of ${stalled.length} stalled PR(s), cleared ${cleared}`);
