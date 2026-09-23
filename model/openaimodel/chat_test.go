@@ -470,6 +470,45 @@ func TestChatModel_HonoursTimeout(t *testing.T) {
 	}
 }
 
+// TestChatModel_HTTPOptionsHeadersNeverReachTheWire holds this endpoint to the
+// promise the Responses path keeps: a header a caller put in HTTPOptions, which
+// may be a Gemini credential, never reaches the provider or displaces the
+// configured key.
+func TestChatModel_HTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			var got http.Header
+			rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Clone()
+				chatJSON(`{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`)(w, r)
+			})
+			timeout := 30 * time.Second
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+				Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
+					Timeout: &timeout,
+					Headers: http.Header{
+						"Authorization":  []string{"Bearer caller"},
+						"X-Goog-Api-Key": []string{"gemini-key"},
+						"X-Trace-Id":     []string{"harmless"},
+					},
+				}},
+			}
+			for range rig.model(t).GenerateContent(t.Context(), req, stream) {
+			}
+			if v := got.Get("Authorization"); v != "Bearer test" {
+				t.Errorf("Authorization = %s, want the configured key: a caller header displaced it", redact(v))
+			}
+			if v := got.Get("X-Goog-Api-Key"); v != "" {
+				t.Errorf("X-Goog-Api-Key = %s, want absent: a Gemini credential reached the provider", redact(v))
+			}
+			if v := got.Get("X-Trace-Id"); v != "" {
+				t.Errorf("X-Trace-Id = %s, want absent: headers are not forwarded", redact(v))
+			}
+		})
+	}
+}
+
 func onlyCall(t *testing.T, resp *model.LLMResponse) *genai.FunctionCall {
 	t.Helper()
 	for _, part := range resp.Content.Parts {
