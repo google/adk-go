@@ -16,6 +16,7 @@
 package functiontool
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -237,8 +238,15 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 	// functions.py __build_response_event does the following
 	// if not isinstance(function_result, dict):
 	// 		function_result = {'result': function_result}
-	if f.outputSchema != nil {
-		if err1 := f.outputSchema.Validate(output); err1 != nil {
+	// Diverges from the python impl above: a result encoding/json cannot represent
+	// must not be wrapped, because it cannot be sent.
+	if _, mErr := json.Marshal(output); mErr != nil {
+		return nil, mErr
+	}
+	// A schema inferred from TResults describes the type, not what encoding/json
+	// emits for it.
+	if f.cfg.OutputSchema != nil {
+		if err1 := typeutil.ValidateWithJSONSchema(output, f.outputSchema); err1 != nil {
 			return resp, err // if it fails propagate original err.
 		}
 	}
