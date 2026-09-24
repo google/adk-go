@@ -15,176 +15,144 @@
 package telemetrytest
 
 import (
-	"sort"
+	"cmp"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"google.golang.org/adk/v2/internal/telemetry"
 )
 
-// PRESENT is the sentinel used to mark attributes whose value is
-// non-deterministic across runs but whose presence must still be
-// asserted (e.g. invocation_id, session_id).
-const PRESENT = "<PRESENT>"
+// present stands in for a value that cannot be pinned, such as a generated id,
+// so a golden asserts only that it is there. Same literal as adk-python's
+// tests/unittests/telemetry/functional/_digests.py.
+const present = "PRESENT"
 
-// nonDeterministicSpanAttributes are span attributes whose VALUE
-// varies run-to-run. [BuildDigests] replaces these with [PRESENT]
-// so the comparison shape is stable while still asserting the key
-// is set.
-var nonDeterministicSpanAttributes = map[string]bool{
-	"gcp.vertex.agent.event_id":       true,
-	"gen_ai.tool.call.id":             true,
-	"gen_ai.conversation.id":          true,
-	"gcp.vertex.agent.invocation_id":  true,
-	"gcp.vertex.agent.session_id":     true,
-	"gcp.vertex.agent.tool_call_args": true, // contains generated arg ids
-	"gcp.vertex.agent.tool_response":  true, // contains generated event ids
+// nonDeterministicAttributes are attributes whose value changes run to run.
+var nonDeterministicAttributes = map[string]bool{
+	"gcp.vertex.agent.event_id":      true,
+	"gen_ai.tool.call.id":            true,
+	"gen_ai.conversation.id":         true,
+	"gcp.vertex.agent.invocation_id": true,
 }
 
-// SpanDigest is a deterministic snapshot of a span: name, normalised
-// attributes, status, child spans, and the log records emitted while
-// the span was active.
+// jsonStringAttributes are span attributes holding a JSON string. A golden
+// shows one parsed, wrapped as {jsonStringKey: value}. adk-python's
+// _digests.py parses them in place, but Go can also record these attributes as
+// structured values, and the wrapper keeps the two encodings apart.
+var jsonStringAttributes = map[string]bool{
+	"gen_ai.input.messages":           true,
+	"gen_ai.output.messages":          true,
+	"gen_ai.system_instructions":      true,
+	"gcp.vertex.agent.tool_call_args": true,
+	"gcp.vertex.agent.tool_response":  true,
+}
+
+const jsonStringKey = "JSON_STRING"
+
+// Digest is what a golden compares of one scenario run: the span tree, with
+// each log record attached to the span it was emitted under. Of a span it
+// keeps the name, attributes and status code; of a log record, the event name,
+// body and attributes.
+type Digest struct {
+	RootSpan *SpanDigest `json:"root_span"`
+}
+
+// SpanDigest is a deterministic snapshot of one span.
 type SpanDigest struct {
-	Name string
-	// Status is the span's status code ("Error" or "Ok"); empty for
-	// the default Unset status. Lets error-handling scenarios assert
-	// that a failed span was actually marked as an error.
-	Status     string
-	Attributes map[string]any
-	Children   []*SpanDigest
-	Logs       []*LogDigest
+	Name       string         `json:"name"`
+	Attributes map[string]any `json:"attributes"`
+	// Status is "UNSET", "ERROR" or "OK".
+	Status   string        `json:"status"`
+	Children []*SpanDigest `json:"children"`
+	Logs     []*LogDigest  `json:"logs"`
 }
 
 type spanWithMeta struct {
 	digest    *SpanDigest
-	spanID    trace.SpanID
 	parentID  trace.SpanID
 	startTime int64
 }
 
-// BuildDigests collects the spans and log records into a single
-// tree, attaching each log to the SpanDigest of the span
-// it was emitted under. The scenario MUST produce exactly one root span.
-func BuildDigests(t *testing.T, spans tracetest.SpanStubs, logs []sdklog.Record) *SpanDigest {
+// BuildDigest collects spans and log records into one tree. The scenario must
+// produce exactly one root span, and emit every log record under a span.
+func BuildDigest(t *testing.T, spans tracetest.SpanStubs, logs []sdklog.Record) *Digest {
 	t.Helper()
-	digests := make([]*spanWithMeta, 0, len(spans))
+	ordered := make([]*spanWithMeta, 0, len(spans))
+	bySpanID := make(map[trace.SpanID]*spanWithMeta, len(spans))
 	for _, s := range spans {
-		digests = append(digests, buildSpanDigest(s))
+		d := &spanWithMeta{
+			digest: &SpanDigest{
+				Name:       s.Name,
+				Attributes: normalizeSpanAttributes(s.Attributes),
+				Status:     strings.ToUpper(s.Status.Code.String()),
+				Children:   []*SpanDigest{},
+				Logs:       []*LogDigest{},
+			},
+			parentID:  s.Parent.SpanID(),
+			startTime: s.StartTime.UnixNano(),
+		}
+		ordered = append(ordered, d)
+		bySpanID[s.SpanContext.SpanID()] = d
 	}
-	digests = attachLogs(digests, logs)
-	roots := linkAndSort(digests)
+	for _, r := range logs {
+		s, ok := bySpanID[r.SpanID()]
+		if !ok {
+			t.Fatalf("log record %q was emitted outside any collected span", r.EventName())
+		}
+		s.digest.Logs = append(s.digest.Logs, buildLogDigest(&r))
+	}
+	roots := linkAndSort(ordered, bySpanID)
 	if len(roots) != 1 {
 		t.Fatalf("expected exactly 1 root span, got %d", len(roots))
 	}
-	return roots[0]
+	return &Digest{RootSpan: roots[0]}
 }
 
-func buildSpanDigest(s tracetest.SpanStub) *spanWithMeta {
-	return &spanWithMeta{
-		digest: &SpanDigest{
-			Name:       s.Name,
-			Status:     statusString(s.Status.Code),
-			Attributes: normaliseSpanAttributes(s.Attributes),
-		},
-		spanID:    s.SpanContext.SpanID(),
-		parentID:  s.Parent.SpanID(),
-		startTime: s.StartTime.UnixNano(),
-	}
-}
-
-// attachLogs populates the Logs slice of each digest whose SpanID
-// matches a log record's SpanID. Log iteration order is emit
-// order, so the resulting per-span Logs slices end up
-// chronological. Logs not associated with any collected span
-// (e.g. emitted at module init) are dropped silently.
-func attachLogs(digests []*spanWithMeta, logs []sdklog.Record) []*spanWithMeta {
-	bySpanID := make(map[trace.SpanID]*SpanDigest, len(digests))
-	for _, d := range digests {
-		bySpanID[d.spanID] = d.digest
-	}
-	for _, r := range logs {
-		if d, ok := bySpanID[r.SpanID()]; ok {
-			d.Logs = append(d.Logs, buildLogDigest(&r))
-		}
-	}
-	return digests
-}
-
-// linkAndSort assembles the parent→children adjacency, recursively
-// sorts each level by start time (name as tiebreaker), assigns the
-// sorted children to the SpanDigest.Children slices, and returns
-// the roots (spans whose parent was not collected).
-func linkAndSort(digests []*spanWithMeta) []*SpanDigest {
-	bySpanID := make(map[trace.SpanID]*spanWithMeta, len(digests))
-	for _, sw := range digests {
-		bySpanID[sw.spanID] = sw
-	}
-	childrenOf := map[*spanWithMeta][]*spanWithMeta{}
-	var roots []*spanWithMeta
-	for _, sw := range digests {
-		if parent, ok := bySpanID[sw.parentID]; ok {
-			childrenOf[parent] = append(childrenOf[parent], sw)
+// linkAndSort links each span to its parent, orders siblings by start time
+// (name as tiebreaker), and returns the spans whose parent was not collected.
+func linkAndSort(ordered []*spanWithMeta, bySpanID map[trace.SpanID]*spanWithMeta) []*SpanDigest {
+	slices.SortStableFunc(ordered, func(a, b *spanWithMeta) int {
+		return cmp.Or(cmp.Compare(a.startTime, b.startTime), cmp.Compare(a.digest.Name, b.digest.Name))
+	})
+	var roots []*SpanDigest
+	for _, s := range ordered {
+		if parent, ok := bySpanID[s.parentID]; ok {
+			parent.digest.Children = append(parent.digest.Children, s.digest)
 		} else {
-			roots = append(roots, sw)
+			roots = append(roots, s.digest)
 		}
 	}
-	less := func(a, b *spanWithMeta) bool {
-		if a.startTime != b.startTime {
-			return a.startTime < b.startTime
-		}
-		return a.digest.Name < b.digest.Name
-	}
-	var assignSorted func(sw *spanWithMeta)
-	assignSorted = func(sw *spanWithMeta) {
-		children := childrenOf[sw]
-		if len(children) == 0 {
-			return
-		}
-		sort.SliceStable(children, func(i, j int) bool { return less(children[i], children[j]) })
-		sw.digest.Children = make([]*SpanDigest, len(children))
-		for i, c := range children {
-			sw.digest.Children[i] = c.digest
-			assignSorted(c)
-		}
-	}
-	sort.SliceStable(roots, func(i, j int) bool { return less(roots[i], roots[j]) })
-	out := make([]*SpanDigest, len(roots))
-	for i, r := range roots {
-		assignSorted(r)
-		out[i] = r.digest
-	}
-	return out
+	return roots
 }
 
-// statusString renders a span status code as a stable string,
-// collapsing the default Unset code to "" so unaffected spans don't
-// need to declare a Status in their expected digest.
-func statusString(c codes.Code) string {
-	switch c {
-	case codes.Error:
-		return "Error"
-	case codes.Ok:
-		return "Ok"
-	default:
-		return ""
-	}
-}
-
-// normaliseSpanAttributes converts the OTel attribute slice into a
-// map[string]any with non-deterministic values collapsed to
-// [PRESENT].
-func normaliseSpanAttributes(attrs []attribute.KeyValue) map[string]any {
+func normalizeSpanAttributes(attrs []attribute.KeyValue) map[string]any {
 	out := make(map[string]any, len(attrs))
 	for _, kv := range attrs {
 		key := string(kv.Key)
-		if nonDeterministicSpanAttributes[key] {
-			out[key] = PRESENT
-			continue
+		value := telemetry.FromLogValue(kv.Value)
+		if s, ok := value.(string); ok && jsonStringAttributes[key] {
+			// Not every value is JSON: a legacy tool response can be
+			// "<not specified>", which is kept as it is.
+			var parsed any
+			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+				value = map[string]any{jsonStringKey: parsed}
+			}
 		}
-		out[key] = kv.Value.AsInterface()
+		out[key] = normalizeAttribute(key, value)
 	}
 	return out
+}
+
+func normalizeAttribute(key string, value any) any {
+	if nonDeterministicAttributes[key] {
+		return present
+	}
+	return value
 }

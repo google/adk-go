@@ -1,0 +1,101 @@
+{
+  "root_span": {
+    "name": "invoke_workflow my_workflow",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "my_workflow"
+    },
+    "status": "ERROR",
+    "children": [
+      {
+        "name": "invoke_node static_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "static_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "UNSET",
+        "children": [],
+        "logs": []
+      },
+      {
+        "name": "invoke_node router_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "router_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "ERROR",
+        "children": [
+          {
+            "name": "invoke_agent task_agent",
+            "attributes": {
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.agent.description": "collaborative task_agent",
+              "gen_ai.agent.name": "task_agent",
+              "gen_ai.conversation.id": "PRESENT",
+              "gen_ai.operation.name": "invoke_agent"
+            },
+            "status": "ERROR",
+            "children": [
+              {
+                "name": "generate_content mock",
+                "attributes": {
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.input.messages": {
+                    "JSON_STRING": [
+                      {
+                        "parts": [
+                          {
+                            "content": "hello",
+                            "type": "text"
+                          }
+                        ],
+                        "role": "user"
+                      }
+                    ]
+                  },
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "error"
+                  ],
+                  "gen_ai.system_instructions": {
+                    "JSON_STRING": [
+                      {
+                        "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n",
+                        "type": "text"
+                      }
+                    ]
+                  }
+                },
+                "status": "ERROR",
+                "children": [],
+                "logs": [
+                  {
+                    "event_name": "gen_ai.system.message",
+                    "body": {
+                      "content": "<elided>"
+                    },
+                    "attributes": {}
+                  },
+                  {
+                    "event_name": "gen_ai.user.message",
+                    "body": {
+                      "content": "<elided>"
+                    },
+                    "attributes": {}
+                  }
+                ]
+              }
+            ],
+            "logs": []
+          }
+        ],
+        "logs": []
+      }
+    ],
+    "logs": []
+  }
+}
