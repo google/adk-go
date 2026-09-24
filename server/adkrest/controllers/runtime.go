@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -46,6 +47,8 @@ type RuntimeAPIController struct {
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
 	authorizer        authz.Authorizer
+
+	checkOrigin func(*http.Request) bool
 
 	eventsCompactionConfig *compaction.Config
 }
@@ -80,6 +83,21 @@ type RuntimeAPIControllerConfig struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// CheckOrigin reports whether a /run_live upgrade carrying this request's
+	// Origin may proceed. It becomes the WebSocket upgrader's CheckOrigin hook,
+	// and a false answer refuses the handshake with 403.
+	//
+	// [google.golang.org/adk/v2/server/adkrest.NewServer] supplies one built
+	// from its AllowedOrigins, which is where the check belongs for anyone
+	// using that server. Set this only when mounting this controller in a
+	// router of your own.
+	//
+	// optional; nil keeps gorilla/websocket's default, which accepts a request
+	// with no Origin and otherwise requires Origin's host to equal Host — and
+	// so accepts a page that reached this server by rebinding its own DNS name,
+	// since such a page controls both
+	CheckOrigin func(*http.Request) bool
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
@@ -126,6 +144,7 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 		sseTimeout:             cfg.SSETimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
+		checkOrigin:            cfg.CheckOrigin,
 		eventsCompactionConfig: cfg.Compaction,
 		authorizer:             authorizer,
 	}
@@ -363,6 +382,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		CheckOrigin:     c.checkOrigin,
 	}
 
 	q := req.URL.Query()
@@ -400,7 +420,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 
 	sendClose := func(code int, reason string) {
-		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(reason)))
 		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
@@ -497,7 +517,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	for event, err := range eventIter {
 		if err != nil {
 			log.Printf("RunLive failed: %v\n", err)
-			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
 			break
 		}
 
@@ -511,4 +531,23 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}
 
 	return nil
+}
+
+// maxCloseReason is the longest reason a websocket close frame can carry: a
+// control frame payload is capped at 125 bytes and the close code takes two.
+const maxCloseReason = 123
+
+// truncateCloseReason trims reason to fit a close frame, on a rune boundary
+// because the reason must be valid UTF-8. gorilla refuses to send an over-long
+// control frame at all, so without this a long error reaches the browser as a
+// bare abnormal closure carrying no explanation.
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReason {
+		return reason
+	}
+	truncated := reason[:maxCloseReason]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }

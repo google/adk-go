@@ -246,7 +246,7 @@ FROM gcr.io/distroless/static-debian11
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(f.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(f.cloudRun.serverPort) + `"`)
+CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + strconv.Itoa(f.cloudRun.serverPort) + `"`)
 
 			if f.cloudRun.api {
 				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)

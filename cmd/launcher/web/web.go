@@ -17,11 +17,12 @@ package web
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,9 +37,19 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+const (
+	logStartingWebServer = "Starting the web server: %+v"
+	logWebServerStartsOn = "Web servers starts on %s"
+
+	// defaultHost keeps the server off the network unless the caller opts in
+	// with -host. See bindHost and the -host flag.
+	defaultHost = "127.0.0.1"
+)
+
 // webConfig contains parameters for launching web server
 type webConfig struct {
 	port            int
+	host            string
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
 	idleTimeout     time.Duration
@@ -182,7 +193,8 @@ func applyServiceDefaults(config *launcher.Config) {
 	}
 }
 
-// Run implements launcher.SubLauncher.
+// Run implements launcher.SubLauncher. It takes ownership of the telemetry
+// providers initialized for execution and shuts them down on exit.
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	applyServiceDefaults(config)
 
@@ -198,6 +210,10 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
+	// Sublaunchers that build a server need the resolved bind address rather
+	// than the raw flag, so an empty -host arms the same checks the default does.
+	config.BindHost = w.bindHost()
+
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
@@ -207,19 +223,26 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		}
 	}
 
-	log.Printf("Starting the web server: %+v", w.config)
-	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
-	log.Printf("Web servers starts on %s", webUrl)
-	for _, l := range w.activeSublaunchers {
-		l.UserMessage(webUrl, log.Println)
-	}
-	log.Println()
-
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
 	if err != nil {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
+		defer cancel()
+		if err := telemetryService.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown failed: %v", err)
+		}
+	}()
+
+	log.Printf(logStartingWebServer, w.config)
+	log.Println()
+	webUrl := w.webURL()
+	log.Printf(logWebServerStartsOn, webUrl)
+	for _, l := range w.activeSublaunchers {
+		l.UserMessage(webUrl, log.Println)
+	}
+	log.Println()
 
 	srv := w.buildHTTPServer(router)
 
@@ -236,9 +259,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		log.Println("Shutting down the web server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
 		defer cancel()
-		serverErr := srv.Shutdown(shutdownCtx)
-		telemetryErr := telemetryService.Shutdown(shutdownCtx)
-		return errors.Join(serverErr, telemetryErr)
+		return srv.Shutdown(shutdownCtx)
 	case err, ok := <-errChan:
 		if !ok {
 			return nil
@@ -247,9 +268,46 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 }
 
+// webURL returns the user-facing URL for the configured host and port so the
+// startup message reflects the actual bind address (including bracketed IPv6
+// hosts such as "::1").
+//
+// The loopback hosts 127.0.0.1, ::1, 0.0.0.0 and :: are normalized to
+// "localhost" in the URL shown/opened to the user. The ADK Web UI is served
+// from http://localhost:8080/api, so presenting the server as
+// http://127.0.0.1:8080 would be a different browser origin and fail CORS.
+// This changes only the displayed URL - it does not change the server bind
+// address, which is controlled by the -host flag and used by buildHTTPServer.
+func (w *webLauncher) webURL() string {
+	host := displayHost(w.bindHost())
+	return fmt.Sprintf("http://%s", net.JoinHostPort(host, strconv.Itoa(w.config.port)))
+}
+
+// bindHost returns the host the server listens on. An empty -host is treated
+// as the default. net.JoinHostPort("", port) yields ":port", which binds every
+// interface, so leaving an empty value unresolved would reintroduce exactly the
+// exposure this launcher refuses to default to.
+func (w *webLauncher) bindHost() string {
+	if w.config.host == "" {
+		return defaultHost
+	}
+	return w.config.host
+}
+
+// displayHost maps loopback-ish listen hosts to "localhost" for the URL shown
+// to the user, and otherwise returns the host unchanged. See webURL.
+func displayHost(host string) string {
+	switch host {
+	case "127.0.0.1", "::1", "0.0.0.0", "::":
+		return "localhost"
+	default:
+		return host
+	}
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		Addr:         net.JoinHostPort(w.bindHost(), strconv.Itoa(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -281,7 +339,8 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.StringVar(&config.host, "host", defaultHost, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
+	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
