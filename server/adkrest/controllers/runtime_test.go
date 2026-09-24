@@ -140,10 +140,11 @@ func TestRunSSEHandler(t *testing.T) {
 		{
 			name: "success case",
 			results: []testAgentResult{
-				{event: makeEvent("invocation-1", "testApp", "Hello from agent"), err: nil},
+				// Non-ASCII text: the stream must carry it through as UTF-8.
+				{event: makeEvent("invocation-1", "testApp", "Hello from agent: 72°F"), err: nil},
 			},
 			wantStatus: http.StatusOK,
-			wantBody:   []string{"data: {", "Hello from agent"},
+			wantBody:   []string{"data: {", "Hello from agent: 72°F"},
 		},
 		{
 			name: "error case",
@@ -232,6 +233,12 @@ func TestRunSSEHandler(t *testing.T) {
 				t.Errorf("expected status %d, got %d", tt.wantStatus, rr.Code)
 			}
 
+			// Without the charset, clients that apply the legacy ISO-8859-1
+			// default for text/* mojibake every non-ASCII rune in the stream.
+			if got, want := rr.Header().Get("Content-Type"), "text/event-stream; charset=UTF-8"; got != want {
+				t.Errorf("Content-Type = %q, want %q", got, want)
+			}
+
 			body := rr.Body.String()
 			for _, s := range tt.wantBody {
 				if !strings.Contains(body, s) {
@@ -309,5 +316,36 @@ func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
 	})
 	if c.eventsCompactionConfig != cfg {
 		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
+	}
+}
+
+// TestRunLiveHandlerUsesConfiguredCheckOrigin pins that the configured hook
+// replaces gorilla/websocket's default same-origin check, which would reject an
+// Origin the operator allowed.
+func TestRunLiveHandlerUsesConfiguredCheckOrigin(t *testing.T) {
+	var got *http.Request
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: session.InMemoryService(),
+		AgentLoader:    agent.NewSingleLoader(nil),
+		CheckOrigin: func(r *http.Request) bool {
+			got = r
+			return false
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/run_live?appName=a&userId=u&sessionId=s", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-Websocket-Version", "13")
+	req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Origin", "http://localhost:4200")
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunLiveHandler)(rr, req)
+
+	if got == nil {
+		t.Fatal("CheckOrigin was not called, want the upgrader to use it")
+	}
+	if want := http.StatusForbidden; rr.Code != want {
+		t.Errorf("status = %d, want %d (body %q)", rr.Code, want, rr.Body.String())
 	}
 }
