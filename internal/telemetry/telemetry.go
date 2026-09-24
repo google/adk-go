@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
@@ -48,6 +49,8 @@ var (
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
+	genAIToolCallArguments          = attribute.Key("gen_ai.tool.call.arguments")
+	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -80,20 +83,20 @@ func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
 	recordErrorAndStatus(span, params.Error)
 }
 
-// StartGenerateContentSpanParams contains parameters for [StartGenerateContentSpan].
-type StartGenerateContentSpanParams struct {
+// GenerateContentParams describes one model call.
+type GenerateContentParams struct {
 	// ModelName is the name of the model being used for generation.
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
-	// Request is the request about to be sent to the model. It is used only
-	// to record the opt-in gen_ai.input.messages and
-	// gen_ai.system_instructions attributes, and may be nil.
+	// Request is the request about to be sent to the model. Required.
 	Request *model.LLMRequest
+	// Backend is the Google backend serving the model, if any.
+	Backend genai.Backend
 }
 
-// StartGenerateContentSpan starts a new semconv generate_content span.
-func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
+// startGenerateContentSpan starts a new semconv generate_content span.
+func startGenerateContentSpan(ctx context.Context, params GenerateContentParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
 	attrs := []attribute.KeyValue{
 		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
@@ -108,46 +111,59 @@ func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSp
 	// sampling, and content is not among them. Still before the model call, so
 	// the prompt is on the span even when the call fails and no response is
 	// ever traced.
-	if span.IsRecording() {
-		span.SetAttributes(requestContentAttributes(params.Request)...)
+	if span.IsRecording() && captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes(requestContent(params.Request))...)
 	}
 	return spanCtx, span
 }
 
-type TraceGenerateContentResultParams struct {
+// generateContentResult is the outcome of a model call: its last response, the
+// id of the event that response becomes, and its error.
+type generateContentResult struct {
 	Response *model.LLMResponse
 	EventID  string
 	Error    error
 }
 
-// TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
-func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
+// traceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
+func traceGenerateContentResult(span trace.Span, params generateContentResult) {
 	recordErrorAndStatus(span, params.Error)
+	span.SetAttributes(generateContentResultAttributes(params)...)
+	if captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes(responseContent(params.Response, params.Error))...)
+	}
+}
+
+// generateContentResultAttributes returns the content-free attributes describing
+// a model call's result, shared by the generate_content span and the
+// gen_ai.client.inference.operation.details event.
+func generateContentResultAttributes(params generateContentResult) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
 	// Record a finish reason when the call produced a response or an error; a
 	// nil response and nil error means there is no result to describe.
 	if params.Response != nil || params.Error != nil {
-		span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
+		attrs = append(attrs, semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
 	}
 	if params.Response == nil {
-		return
+		return attrs
 	}
-	span.SetAttributes(gcpVertexAgentEventID.String(params.EventID))
-	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
-	if params.Response.UsageMetadata != nil {
-		span.SetAttributes(
+	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
+	if u := params.Response.UsageMetadata; u != nil {
+		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
 			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
 			// matches the semantic-conventions reference implementation for google-genai:
 			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
+			semconv.GenAIUsageInputTokens(int(u.PromptTokenCount+u.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.
-			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
-			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
-			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			semconv.GenAIUsageOutputTokens(int(u.CandidatesTokenCount+u.ThoughtsTokenCount)),
+			genAIUsageCacheReadInputTokens.Int(int(u.CachedContentTokenCount)),
+			genAIUsageReasoningOutputTokens.Int(int(u.ThoughtsTokenCount)),
 		)
 	}
+	return attrs
 }
 
 // StartExecuteToolSpanParams contains parameters for [StartExecuteToolSpan].
@@ -159,12 +175,28 @@ type StartExecuteToolSpanParams struct {
 }
 
 // StartExecuteToolSpan starts a new semconv execute_tool span.
+//
+// The arguments are content, so they are recorded as gen_ai.tool.call.arguments
+// only when content capture on spans is on. The legacy schema records them
+// unconditionally under gcp.vertex.agent.tool_call_args instead. adk-python has
+// not made this switch yet; it is step 3 of the plan in its _schema_version.py.
 func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams) (context.Context, trace.Span) {
 	toolName := params.ToolName
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
+	}
+	legacy := useLegacySchema()
+	if legacy {
+		attrs = append(attrs, gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args)))
+	}
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(attrs...))
+	// After the sampling decision, as for the generate_content span: a sampler
+	// sees start attributes, content is not for it, and a dropped span is not
+	// worth the conversion.
+	if !legacy && params.Args != nil && span.IsRecording() && captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes([]contentAttr{{genAIToolCallArguments, toolPayload(params.Args)}})...)
+	}
 	return spanCtx, span
 }
 
@@ -184,31 +216,41 @@ func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 		semconv.GenAIToolDescriptionKey.String(params.Description),
 	}
 
-	toolCallID := "<not specified>"
-	toolResponse := "<not specified>"
-
+	var functionResponse *genai.FunctionResponse
 	if params.ResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(params.ResponseEvent.ID))
-		if params.ResponseEvent.LLMResponse.Content != nil {
-			responseParts := params.ResponseEvent.LLMResponse.Content.Parts
-
-			if len(responseParts) > 0 {
-				functionResponse := responseParts[0].FunctionResponse
-				if functionResponse != nil {
-					if functionResponse.ID != "" {
-						toolCallID = functionResponse.ID
-					}
-					if functionResponse.Response != nil {
-						toolResponse = safeSerialize(functionResponse.Response)
-					}
-				}
-			}
+		if c := params.ResponseEvent.LLMResponse.Content; c != nil && len(c.Parts) > 0 {
+			functionResponse = c.Parts[0].FunctionResponse
 		}
 	}
 
-	attributes = append(attributes, semconv.GenAIToolCallIDKey.String(toolCallID))
-	attributes = append(attributes, gcpVertexAgentToolResponseName.String(toolResponse))
+	if !useLegacySchema() {
+		if functionResponse != nil {
+			if functionResponse.ID != "" {
+				attributes = append(attributes, semconv.GenAIToolCallID(functionResponse.ID))
+			}
+			// The conventions record a result only for a call that succeeded.
+			if captureContentOnSpans() && functionResponse.Response != nil && params.Error == nil {
+				attributes = append(attributes, spanContentAttributes([]contentAttr{{genAIToolCallResult, toolPayload(functionResponse.Response)}})...)
+			}
+		}
+		span.SetAttributes(attributes...)
+		return
+	}
 
+	toolCallID := "<not specified>"
+	toolResponse := "<not specified>"
+	if functionResponse != nil {
+		if functionResponse.ID != "" {
+			toolCallID = functionResponse.ID
+		}
+		if functionResponse.Response != nil {
+			toolResponse = safeSerialize(functionResponse.Response)
+		}
+	}
+	attributes = append(attributes,
+		semconv.GenAIToolCallID(toolCallID),
+		gcpVertexAgentToolResponseName.String(toolResponse))
 	span.SetAttributes(attributes...)
 }
 
@@ -261,8 +303,12 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 		semconv.GenAIOperationNameKey.String(executeToolName),
 		semconv.GenAIToolNameKey.String(mergeToolName),
 		semconv.GenAIToolDescriptionKey.String(mergeToolName),
-		gcpVertexAgentToolCallArgsName.String("N/A"),
-		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
+	}
+	// Each merged call's own execute_tool span carries its arguments and result.
+	if useLegacySchema() {
+		attributes = append(attributes,
+			gcpVertexAgentToolCallArgsName.String("N/A"),
+			gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)))
 	}
 	if fnResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(fnResponseEvent.ID))

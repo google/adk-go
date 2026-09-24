@@ -53,18 +53,16 @@
                 "children": [],
                 "logs": [
                   {
-                    "event_name": "gen_ai.system.message",
-                    "body": {
-                      "content": "<elided>"
-                    },
-                    "attributes": {}
-                  },
-                  {
-                    "event_name": "gen_ai.user.message",
-                    "body": {
-                      "content": "<elided>"
-                    },
-                    "attributes": {}
+                    "event_name": "gen_ai.client.inference.operation.details",
+                    "body": null,
+                    "attributes": {
+                      "gcp.vertex.agent.invocation_id": "PRESENT",
+                      "gen_ai.operation.name": "generate_content",
+                      "gen_ai.request.model": "mock",
+                      "gen_ai.response.finish_reasons": [
+                        "error"
+                      ]
+                    }
                   }
                 ]
               }

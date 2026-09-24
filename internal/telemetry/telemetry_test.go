@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -239,19 +240,19 @@ func TestGenerateContent(t *testing.T) {
 	invocationID := "test-invocation-id"
 	tests := []struct {
 		name         string
-		startParams  StartGenerateContentSpanParams
-		resultParams TraceGenerateContentResultParams
+		startParams  GenerateContentParams
+		resultParams generateContentResult
 		wantName     string
 		wantStatus   codes.Code
 		wantAttrs    map[attribute.Key]string
 	}{
 		{
 			name: "Success",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:        10,
@@ -280,11 +281,11 @@ func TestGenerateContent(t *testing.T) {
 			// the model as input and reports them outside PromptTokenCount, so
 			// input_tokens must be the sum of the two.
 			name: "ToolUsePromptTokensCountAsInput",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:        10,
@@ -304,11 +305,11 @@ func TestGenerateContent(t *testing.T) {
 		},
 		{
 			name: "Error",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Error: errTest,
 			},
 			wantName:   "generate_content test-model",
@@ -327,8 +328,8 @@ func TestGenerateContent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartGenerateContentSpan(ctx, tc.startParams)
-			TraceGenerateContentResult(span, tc.resultParams)
+			_, span := startGenerateContentSpan(ctx, tc.startParams)
+			traceGenerateContentResult(span, tc.resultParams)
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -415,8 +416,8 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setupTestTracer(t)
-			_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
-			TraceGenerateContentResult(span, TraceGenerateContentResultParams{Response: tc.response, Error: tc.err})
+			_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "test-model"})
+			traceGenerateContentResult(span, generateContentResult{Response: tc.response, Error: tc.err})
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -440,9 +441,9 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 
 func TestTraceGenerateContentResult_NilResponseNilErrorLeavesSpanSuccessful(t *testing.T) {
 	exporter := setupTestTracer(t)
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "test-model"})
 
-	TraceGenerateContentResult(span, TraceGenerateContentResultParams{})
+	traceGenerateContentResult(span, generateContentResult{})
 	span.End()
 
 	spans := exporter.GetSpans()
@@ -537,6 +538,103 @@ func TestExecuteTool(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTraceMergedToolCallsResult pins that only the legacy schema puts the
+// merged function response, which is content, on the merged span.
+func TestTraceMergedToolCallsResult(t *testing.T) {
+	for _, tc := range []struct {
+		schemaVersion string
+		want          map[attribute.Key]string
+	}{
+		{otelSemconv136, map[attribute.Key]string{
+			semconv.GenAIOperationNameKey:   "execute_tool",
+			semconv.GenAIToolNameKey:        mergeToolName,
+			semconv.GenAIToolDescriptionKey: mergeToolName,
+			gcpVertexAgentToolCallArgsName:  "N/A",
+			gcpVertexAgentToolResponseName:  "null",
+		}},
+		{"otel_semconv_1_44", map[attribute.Key]string{
+			semconv.GenAIOperationNameKey:   "execute_tool",
+			semconv.GenAIToolNameKey:        mergeToolName,
+			semconv.GenAIToolDescriptionKey: mergeToolName,
+		}},
+	} {
+		t.Run(tc.schemaVersion, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schemaVersion})
+			exporter := setupTestTracer(t)
+
+			_, span := StartTrace(t.Context(), "execute_tool (merged)")
+			TraceMergedToolCallsResult(span, nil, nil)
+			span.End()
+
+			if diff := cmp.Diff(tc.want, attributesToMap(exporter.GetSpans()[0].Attributes)); diff != "" {
+				t.Errorf("attributes mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestExecuteTool_OmitsWhatIsUnknown pins that, with content capture on, a
+// tool span leaves out a call id, arguments or result that do not exist rather
+// than recording an empty or "null" value.
+func TestExecuteTool_OmitsWhatIsUnknown(t *testing.T) {
+	setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44", captureMessageContentEnvVar: "SPAN_ONLY"})
+	exporter := setupTestTracer(t)
+
+	_, span := StartExecuteToolSpan(t.Context(), StartExecuteToolSpanParams{ToolName: "t"})
+	TraceToolResult(span, TraceToolResultParams{Description: "d", ResponseEvent: &session.Event{ID: "e", LLMResponse: model.LLMResponse{
+		Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "t"}}}},
+	}}})
+	span.End()
+
+	want := map[attribute.Key]string{
+		semconv.GenAIOperationNameKey:   "execute_tool",
+		semconv.GenAIToolNameKey:        "t",
+		semconv.GenAIToolDescriptionKey: "d",
+		gcpVertexAgentEventID:           "e",
+	}
+	if diff := cmp.Diff(want, attributesToMap(exporter.GetSpans()[0].Attributes)); diff != "" {
+		t.Errorf("attributes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestInvokeWorkflowNested pins that only the default schema marks an
+// invoke_workflow span started inside another as nested.
+func TestInvokeWorkflowNested(t *testing.T) {
+	for _, tc := range []struct {
+		schemaVersion string
+		want          bool
+	}{{otelSemconv136, false}, {"otel_semconv_1_44", true}} {
+		t.Run(tc.schemaVersion, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schemaVersion})
+			exporter := setupTestTracer(t)
+
+			ctx, outer := startInvokeWorkflowSpan(t.Context(), "outer", "s")
+			_, inner := startInvokeWorkflowSpan(ctx, "inner", "s")
+			inner.End()
+			outer.End()
+
+			for _, s := range exporter.GetSpans() {
+				_, nested := attributesToMap(s.Attributes)[genAIWorkflowNested]
+				if want := tc.want && s.Name == "invoke_workflow inner"; nested != want {
+					t.Errorf("%s: nested = %t, want %t", s.Name, nested, want)
+				}
+			}
+		})
+	}
+}
+
+// setEnvForTesting sets env and applies it, restoring both the environment and
+// the package state it was read into when the test ends.
+func setEnvForTesting(t *testing.T, env map[string]string) {
+	t.Helper()
+	// Registered before t.Setenv, so it runs after the environment is restored.
+	t.Cleanup(ApplyEnv)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	ApplyEnv()
 }
 
 func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
