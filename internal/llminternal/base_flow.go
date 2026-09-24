@@ -32,6 +32,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -75,6 +76,10 @@ type Flow struct {
 	BeforeToolCallbacks   []BeforeToolCallback
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
+
+	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
+	// only tests set it, to shrink the delays.
+	reconnect *liveReconnectPolicy
 }
 
 var (
@@ -311,6 +316,37 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
+// tornDown reports whether the session was closed or the invocation cancelled.
+func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
+	select {
+	case <-sess.done:
+		return true
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// waitBeforeReconnect paces a reconnect, reporting whether it should go ahead.
+// Teardown during the wait cuts it short, so Close stays prompt.
+//
+// The re-check after the timer matters: select picks uniformly among ready
+// cases, so a teardown landing as the timer fires would otherwise report
+// "proceed" half the time and dial a socket nobody reads.
+func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return !tornDown(ctx, sess)
+	case <-sess.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -374,7 +410,62 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
 
+		policy := f.reconnect
+		if policy == nil {
+			policy = defaultLiveReconnectPolicy()
+		}
+		// reconnectAttempts counts consecutive reconnects since a connection
+		// last worked and drives the backoff; a connection works by delivering
+		// content or by outliving healthyUptime. shortLivedReconnects counts
+		// only the connections that died inside healthyUptime, and never
+		// resets.
+		reconnectAttempts := 0
+		shortLivedReconnects := 0
+		currentBackoff := policy.initialBackoff
+		// lastConnWasBrief records whether the connection that just dropped
+		// died inside healthyUptime. A connection the server cycles after
+		// minutes of service is routine, so it spends neither budget and clears
+		// the consecutive one; charging it would let a long call die of old
+		// age.
+		lastConnWasBrief := false
+		var lastErr error
+		// isReconnect is false only for the very first dial; every path back to
+		// the loop top sets it. It is what makes a first-ever connect failure
+		// fatal while a failed redial is charged to the budget.
+		isReconnect := false
+
 		for {
+			if isReconnect {
+				reconnectAttempts++
+				if lastConnWasBrief {
+					shortLivedReconnects++
+				}
+				if reconnectAttempts > policy.maxAttempts {
+					// Resumable errors are swallowed while retrying, so
+					// without this the caller's stream just goes quiet.
+					sess.pushError(liveReconnectGaveUpError(
+						fmt.Sprintf("%d consecutive attempts delivered no content", policy.maxAttempts), lastErr))
+					return
+				}
+				if shortLivedReconnects > policy.maxTotal {
+					sess.pushError(liveReconnectGaveUpError(
+						fmt.Sprintf("%d short-lived connections in one invocation", policy.maxTotal), lastErr))
+					return
+				}
+				sleepDuration := policy.jittered(currentBackoff)
+				currentBackoff = policy.nextBackoff(currentBackoff)
+
+				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v",
+					reconnectAttempts, policy.maxAttempts, shortLivedReconnects, sleepDuration)
+				if !waitBeforeReconnect(ctx, sess, sleepDuration) {
+					// Cancellation reports itself, matching the consumer
+					// loop's ctx.Done arm; Close is a clean teardown.
+					if err := ctx.Err(); err != nil {
+						sess.pushError(err)
+					}
+					return
+				}
+			}
 			if isIContext {
 				handle := iCtx.LiveSessionResumptionHandle()
 				if handle != "" {
@@ -397,10 +488,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if err != nil {
 				cancelConn()
 				log.Printf("failed to connect live session: %v\n", err)
+				if isReconnect {
+					// genai returns without closing the socket it dialled when
+					// the setup write fails, and it dials with a context-less
+					// dialer, so cancelConn cannot release it either. Each
+					// budgeted redial against such an endpoint strands one fd
+					// until the process exits; the bounds above cap how many.
+					lastErr = err
+					lastConnWasBrief = true
+					continue
+				}
 				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
 				return
 			}
 
+			connectedAt := time.Now()
 			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
 
 			cleanup := func() {
@@ -412,7 +514,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// Producers must guard sends with connCtx: once a reconnect (or any
 			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
 			// what unblocks them (issue #1152).
-			errChan := make(chan error)
+			errChan := make(chan liveConnError)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
 			if len(nreq.Contents) > 0 {
@@ -435,7 +537,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
 						select {
-						case errChan <- err:
+						case errChan <- liveConnError{err: err, at: time.Now()}:
 						case <-connCtx.Done():
 						}
 						return
@@ -479,7 +581,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
 								select {
-								case errChan <- err:
+								case errChan <- liveConnError{err: err, at: time.Now()}:
 								case <-connCtx.Done():
 								}
 								return
@@ -491,7 +593,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
 								select {
-								case errChan <- err:
+								case errChan <- liveConnError{err: err, at: time.Now()}:
 								case <-connCtx.Done():
 								}
 								return
@@ -508,6 +610,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if !sess.pushEvent(ev) {
 						cleanup()
 						return
+					}
+					// Content proves this connection is serving, so the
+					// consecutive budget starts over; shortLivedReconnects does
+					// not, which is what bounds a backend that serves one frame
+					// per connection and then hangs up.
+					if ev != nil && ev.LLMResponse.Content != nil {
+						reconnectAttempts = 0
+						currentBackoff = policy.initialBackoff
 					}
 					// Flush caches if needed
 					if runCfg.Live.SaveLiveBlob {
@@ -575,13 +685,29 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 						}
 					}
-				case err := <-errChan:
-					if isResumable(err) {
-						log.Printf("Connection error, attempting to resume: %v\n", err)
+				case ce := <-errChan:
+					if isResumable(ce.err) {
+						log.Printf("Connection error, attempting to resume: %v\n", ce.err)
+						lastErr = ce.err
+						// Score the connection's life from where the error was
+						// produced, not from here: this loop also runs tools
+						// and blocks on the caller, and crediting that time as
+						// uptime would let a flapping backend pass as healthy.
+						lastConnWasBrief = ce.at.Sub(connectedAt) < policy.healthyUptime
+						if !lastConnWasBrief {
+							// The connection served for as long as a healthy
+							// one does, which is the only evidence a session
+							// the model has nothing to say on ever produces.
+							// Without this the consecutive budget ends such a
+							// call after maxAttempts of the cycles the Live API
+							// performs as ordinary lifecycle.
+							reconnectAttempts = 0
+							currentBackoff = policy.initialBackoff
+						}
 						reconnect = true
 						break // Break the select
 					}
-					sess.pushError(err)
+					sess.pushError(ce.err)
 					cleanup()
 					return
 				case <-sess.done:
@@ -603,6 +729,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if !reconnect {
 				break
 			}
+			isReconnect = true
 		}
 	}()
 
@@ -1087,6 +1214,12 @@ Suggested fixes:
 
 type cancelledToolContext struct {
 	agent.Context
+	// Marker: this is one of ADK's own context types, so the identity procedure
+	// asks it rather than reading a session it does not have. Without it the
+	// procedure would fall back to the embedded tool context's Session(), which
+	// is nil by design, and a streaming tool that re-derives its context would
+	// lose the acting user.
+	adkcontext.Marker
 	cancelCtx context.Context
 }
 
@@ -1103,6 +1236,12 @@ func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
 }
 
 func (c *cancelledToolContext) Value(key any) any {
+	// Fails closed rather than dereferencing: this type carries the identity
+	// marker, so the identity procedure asks it directly, and that ask can arrive
+	// from inside http.RoundTripper where net/http does not recover.
+	if c == nil || c.cancelCtx == nil {
+		return nil
+	}
 	return c.cancelCtx.Value(key)
 }
 
@@ -1579,3 +1718,8 @@ type pluginManager interface {
 	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }
+
+// Asserted rather than left to the [adkcontext.Marker] embed: dropping the embed
+// would also drop the import, breaking the build for an unrelated reason. This
+// fails on the type.
+var _ adkcontext.Source = (*cancelledToolContext)(nil)

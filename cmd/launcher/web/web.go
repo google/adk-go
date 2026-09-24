@@ -210,6 +210,10 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
+	// Sublaunchers that build a server need the resolved bind address rather
+	// than the raw flag, so an empty -host arms the same checks the default does.
+	config.BindHost = w.bindHost()
+
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
