@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/adkcontext"
 )
 
 // CommonContextDelta holds all the changes which should be applied to a new child context based on agent.Context.
@@ -111,6 +113,23 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 // applied, so it is reported. An agent running under the wrong parent is not a
 // quiet kind of wrong.
 //
+// It does NOT try to detect the larger problem, which is that an
+// InvocationContext written outside the module inherits WithICDelta by
+// promotion, so the promoted method hands back the invocation it embeds and the
+// decorator — with the session naming its own user — is dropped. Two attempts to
+// catch that from here were measured and both were worse than the disease. Keying
+// on "is the receiver one of ours" refuses the delta for an in-module test double
+// that implements WithICDelta perfectly well. Keying on "did a value that could
+// not answer for itself turn into one that can" misses a decorator whose parent
+// is also from outside the module, and where it does fire it discards the whole
+// delta — so agent.Run then reads Agent, Branch and IsolationScope from the
+// enclosing invocation, or nil-panics when there is no enclosing agent.
+//
+// The defect is in the decorator contract, not here: a type that cannot override
+// WithICDelta cannot survive a delta, and no amount of inspection at this call
+// site reconstructs what it should have returned. It predates the identity key
+// and is documented on IdentityFromContext instead.
+//
 // It also hands every sibling derivation the same invocation object, where the
 // working path gives each one a copy. That is the one cost a reader cannot
 // recover by inspecting a value: EndInvocation on any child now ends the parent
@@ -120,6 +139,52 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
 	if ic == nil {
 		return nil
+	}
+	// A delta with nothing to say about the invocation must not cost an
+	// invocation from outside the module its identity. A promoted WithICDelta
+	// hands back the invocation the decorator embeds whatever the delta says, so
+	// merely asking is what drops the decorator — and entering a workflow does
+	// exactly that, with a CommonContextDelta carrying no InvocationContextDelta
+	// at all (workflow.go sets Path, RunID, OutputForAncestors and SubScheduler).
+	//
+	// "Nothing to say" is emptiness, not a nil pointer. A caller that allocates
+	// the delta and then fills it conditionally hands over an empty one whenever
+	// no condition fires, and keying on nil alone made that one-token neighbour
+	// drop the decorator where the nil case did not.
+	//
+	// Ours are still asked, because for them an empty delta is not a no-op: the
+	// tool and callback wrappers forward to the commonContext they hold, which
+	// returns that inner context, and skipping the call would leave the wrapper
+	// in place with the nil session it reports by design. That is the same reason
+	// the report below forwards a nil d rather than short-circuiting on it.
+	//
+	// What it costs, which is not nothing. An invocation from outside the module
+	// that is ALSO a session-less forwarding view — the shape tool_context_wrapper
+	// has, written out there instead of in here — is kept rather than unwrapped,
+	// so the session it does not have is the one the caller gets, and UserID
+	// nil-panics on it. That is a real regression against forwarding through, and
+	// it is accepted because the two shapes cannot be told apart here: measured,
+	// a forwarding view and a decorator whose own session is nil are both "not
+	// ours, session unreadable" before the call, and diverge only after it, into
+	// the right user and the enclosing one respectively. Preferring the call
+	// rescues the first and hands the second a live user who made no such call.
+	// So an out-of-module InvocationContext must carry its own session.
+	//
+	// It also hands back the invocation itself rather than whatever the call would
+	// have produced, and that is true of BOTH shapes of zero delta — nil and
+	// allocated-but-empty. Out-of-module invocations are the only population this
+	// reaches, and for them both cases changed: without the shortcut each is passed
+	// through, so a forwarding view is unwrapped and a decorator is dropped onto
+	// what it embeds; with it, each is kept. Two dimensions move together, which
+	// object comes back and whether the decorator survives, and the second is why
+	// the trade is worth making.
+	//
+	// One consequence of keeping the object: EndInvocation on a context derived
+	// this way reaches the invocation it was derived from, where an ADK-owned
+	// invocation handed an empty non-nil delta gets a copy instead, because
+	// agent.go's WithICDelta allocates once any delta is present.
+	if _, ours := ic.(adkcontext.Source); d.isZero() && !ours {
+		return ic
 	}
 	if next := ic.WithICDelta(d); next != nil {
 		return next
@@ -220,4 +285,12 @@ func reportDiscardedDelta(ic InvocationContext, d *InvocationContextDelta) {
 	log.Printf("agent: %T.WithICDelta returned nil, so the previous invocation is kept and "+
 		"these delta fields did not reach it: %s. Further occurrences of this loss from "+
 		"this type are not reported", ic, strings.Join(lost, ", "))
+}
+
+// isZero reports whether d asks for no change to the invocation. A nil delta and
+// an allocated one with every field unset are the same request, and treating
+// them differently is what let an empty delta drop an out-of-module invocation
+// while a nil one preserved it.
+func (d *InvocationContextDelta) isZero() bool {
+	return d == nil || *d == InvocationContextDelta{}
 }
