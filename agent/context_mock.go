@@ -39,6 +39,29 @@ import (
 // Done, Err and Value): those read from the supplied Ctx rather than panicking,
 // so the mock carries a usable context payload. If Ctx is nil they panic like
 // everything else.
+//
+// Which identity a fake embedding this mock reports depends on where it sits, and
+// it is worth knowing both. Passed as the CONTEXT — IdentityFromContext(fake) —
+// Value forwards every key to Ctx, so the answer is Ctx's invocation and an
+// embedder's Session() override does not change it. Passed as the INVOCATION, to
+// Promote or any of the New*Context constructors, the mock carries no identity
+// marker, so the procedure READS it rather than asking, and the override DOES take
+// effect: the fake reports its own session's user. Neither position reports an
+// enclosing invocation's user. [IdentityFromContext] states the rule.
+//
+// The same change has a second consequence, on the loud failure promised above.
+// withICDelta now skips WithICDelta entirely when the delta asks for no change
+// to the invocation and the invocation is not one of ADK's own context types,
+// which this mock is not. So an empty or nil delta no longer reaches
+// WithICDelta, its panic does not fire, and an embedder that overrides the
+// method to count or record calls stops being invoked for those deltas. The empty
+// delta is exercised in-tree, but never against a mock, so what changed is what
+// the exported mock promises rather than any behaviour here.
+//
+// A third consequence, on the same promise: a panic out of Value — including the
+// one a nil Ctx raises — is contained by [IdentityFromContext] rather than
+// failing the test, because that entry point recovers before returning. The loud
+// failure still fires for every other caller.
 type StrictContextMock struct {
 	// Ctx supplies the values returned by Deadline, Done, Err and Value.
 	Ctx context.Context
