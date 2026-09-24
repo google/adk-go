@@ -60,6 +60,16 @@ const serverContentPong = `{"serverContent":{"modelTurn":{"parts":[{"text":"pong
 // When serveConn returns, the connection is hard-closed (no close handshake).
 func startFakeLiveServer(t *testing.T, serveConn func(connNum int, conn *websocket.Conn)) (*genai.Client, *atomic.Int32) {
 	t.Helper()
+	client, connCount, _ := startClosableLiveServer(t, serveConn)
+	return client, connCount
+}
+
+// startClosableLiveServer is startFakeLiveServer plus a func that stops the
+// server accepting new connections, so a test can turn a working endpoint into
+// one that refuses every later dial. It closes the listener rather than the
+// server, which needs no in-flight connection to have finished first.
+func startClosableLiveServer(t *testing.T, serveConn func(connNum int, conn *websocket.Conn)) (*genai.Client, *atomic.Int32, func()) {
+	t.Helper()
 	var upgrader websocket.Upgrader
 	var connCount atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +102,21 @@ func startFakeLiveServer(t *testing.T, serveConn func(connNum int, conn *websock
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	return client, &connCount
+	return client, &connCount, func() { _ = ts.Listener.Close() }
+}
+
+// waitForConns blocks until the fake server has accepted at least n
+// connections, failing the test rather than hanging if it never does.
+func waitForConns(t *testing.T, connCount *atomic.Int32, n int32) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if connCount.Load() >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("server accepted %d connections, want at least %d", connCount.Load(), n)
 }
 
 // blockUntilClientCloses parks the fake connection until the client tears it
