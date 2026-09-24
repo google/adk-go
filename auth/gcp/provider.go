@@ -123,6 +123,13 @@ const defaultInitTimeout = 30 * time.Second
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
 //
+// Nothing is cached. Every call reaches the credential service, and
+// [auth.Transport] calls Credential once per outbound request, so a tool that
+// makes n requests costs n retrievals plus any pending poll they incur. That is
+// deliberate for this change rather than an oversight — a cache is the whole of
+// the follow-up, and it is where cross-user leaks live, so it wants its own
+// review of what the key must cover.
+//
 // ctx is used only to build the default client, and only for its values. Its
 // cancellation is not honored, because that client outlives any one request.
 // Pass the process-scoped context the rest of the app is wired with, not a
@@ -177,9 +184,12 @@ type provider struct {
 	pending *clientInit // in-flight lazy init, shared by concurrent callers
 }
 
-// clientInit is one attempt at building the default client. Its fields are
-// written by the attempt's own goroutine and read by waiters only after done is
-// closed.
+// clientInit is one attempt at building the default client.
+//
+// done and deadline are set by the caller that creates the attempt, under
+// p.mu, and are never written again — every later reader takes them under the
+// same lock or after reading pending under it. client and err belong to the
+// attempt's own goroutine and are safe to read only once done is closed.
 type clientInit struct {
 	done   chan struct{}
 	client *Client
@@ -206,7 +216,11 @@ var _ auth.CredentialProvider = (*provider)(nil)
 func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	id, ok := agent.IdentityFromContext(ctx)
 	if !ok {
-		return nil, fmt.Errorf("%w: no ADK invocation identity on the context — not an agent invocation, or its session is unset", ErrNoActingUser)
+		// Reports that the identity is absent, not why. Several different things
+		// produce that answer, [agent.IdentityFromContext] does not distinguish
+		// them, and its doc says the list is not closed — so naming two of them
+		// here would read as a diagnosis while being a guess.
+		return nil, fmt.Errorf("%w: no ADK invocation identity on the context", ErrNoActingUser)
 	}
 	if id.UserID == "" {
 		// No ids in the message: this text is fed to the model and persisted in
@@ -351,10 +365,12 @@ func (p *provider) runInit(in *clientInit) {
 // attempt is retried rather than cached, and releases the waiters.
 func (p *provider) publish(in *clientInit) {
 	// Deferred for symmetry and against a future early return inside the critical
-	// section, not against a panic. runInit is the only caller and sets published
-	// before calling, so its recover has already declined by the time this runs —
-	// a panic here would escape a goroutine nobody owns and end the process, which
-	// leaves no later resolveClient to wedge.
+	// section, not against a panic. runInit is the only caller and reaches this
+	// from two places, and neither leaves a recover able to catch: from the tail
+	// it has set published, so the deferred closure returns before calling
+	// recover, and from inside that closure recover has already run. Either way a
+	// panic here escapes a goroutine nobody owns and ends the process, so there is
+	// no later resolveClient left to wedge.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if in.err == nil {

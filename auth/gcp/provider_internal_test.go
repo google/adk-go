@@ -327,12 +327,19 @@ func TestResolveClientRejectsNilClient(t *testing.T) {
 	}
 }
 
-// TestNewProviderIgnoresWiringContextCancellation pins the documented contract
-// that NewProvider's ctx supplies values only: the default client outlives any
-// one request, so cancelling what was passed at wiring time must not stop it
-// being built.
-func TestNewProviderIgnoresWiringContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
+type wiringKey struct{}
+
+// TestNewProviderKeepsWiringContextValuesNotCancellation pins both halves of
+// what NewProvider promises about its ctx: values reach the builder, and
+// cancellation does not.
+//
+// Both halves, because either one alone is satisfied by the wrong
+// implementation. Asserting only that cancellation is stripped passes for
+// context.Background(), which strips it by having none — and that swap is the
+// mutation worth catching here, since adk-go is imported into a tree whose
+// presubmit rejects context.Background() outside main, tests and examples.
+func TestNewProviderKeepsWiringContextValuesNotCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), wiringKey{}, "wired"))
 	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
@@ -342,8 +349,10 @@ func TestNewProviderIgnoresWiringContextCancellation(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
 	prov := p.(*provider)
 	var sawErr error
+	var sawValue any
 	prov.newClient = func(ctx context.Context) (*Client, error) {
 		sawErr = ctx.Err()
+		sawValue = ctx.Value(wiringKey{})
 		return built, nil
 	}
 	got, err := prov.resolveClient(t.Context())
@@ -352,6 +361,9 @@ func TestNewProviderIgnoresWiringContextCancellation(t *testing.T) {
 	}
 	if sawErr != nil {
 		t.Errorf("the builder saw ctx.Err() = %v, want the cancellation stripped", sawErr)
+	}
+	if sawValue != "wired" {
+		t.Errorf("the builder saw the wiring value = %v, want %q kept", sawValue, "wired")
 	}
 }
 
@@ -448,5 +460,35 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 	// half of it. Anything at or beyond a full bound means it started its own.
 	if late >= p.initTimeout {
 		t.Errorf("a caller arriving halfway through the bound waited %v, a full bound being %v: the bound must be the attempt's, not the waiter's", late, p.initTimeout)
+	}
+}
+
+// TestResolveClientPrefersALandedResultOverAnExpiredBound pins that a caller
+// arriving with both the result and the bound ready gets the client, not
+// ErrClientUnavailable.
+//
+// Go picks uniformly among ready select arms, so an implementation that races
+// the two fails about half the time — undetectable in one pass, which is why
+// this loops. It pins the pair of re-checks rather than either alone: the two
+// are mutually redundant, so deleting one leaves the other to answer and the
+// test stays green, and deleting both turns it red. That is the honest scope.
+// Either one surviving is enough for the caller, who only ever sees the result.
+func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
+	built := &Client{httpClient: http.DefaultClient}
+	// 200 trials puts the odds of an unguarded implementation passing at 2^-200.
+	// Deterministic arrangement, so each one is a fresh provider rather than a
+	// retry of the same state.
+	for i := range 200 {
+		p := newTestProvider(t)
+		// The attempt has already landed and its bound has already passed, so both
+		// select arms are ready the moment the caller reaches them.
+		in := &clientInit{done: make(chan struct{}), client: built, deadline: time.Now().Add(-time.Hour)}
+		close(in.done)
+		p.pending = in
+
+		got, err := p.resolveClient(t.Context())
+		if err != nil || got != built {
+			t.Fatalf("trial %d: resolveClient() = %v, %v; want the landed client, because a result that is already there beats a bound that has already passed", i, got, err)
+		}
 	}
 }

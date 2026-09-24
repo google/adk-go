@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -416,12 +417,24 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 		cfg  gcp.ProviderConfig
 	}{
 		{"empty name", gcp.ProviderConfig{}},
-		{"path traversal", cfgFor("projects/p/locations/l/authProviders/../../secret")},
+		// The next three are rejected by the two collection patterns alone, which
+		// anchor the whole name and allow no slash inside a segment. Worth a row
+		// each, since they are what a caller actually mistypes, but none of them
+		// reaches the character and segment validation, so none of them pins it.
+		{"extra segments where the provider id belongs", cfgFor("projects/p/locations/l/authProviders/../../secret")},
 		{"empty path segment", cfgFor("projects/p/locations/l/authProviders//ap")},
 		{"trailing slash routes differently after normalization", cfgFor("projects/p/locations/l/connectors/c/")},
 		{"not a resource name at all", cfgFor("Bearer")},
 		{"unknown collection", cfgFor("projects/p/locations/l/authProvidrs/ap")},
 		{"truncated", cfgFor("projects/p")},
+		// These three are the collection patterns' blind spot and the only rows
+		// that pin the character validation: each matches
+		// projects/*/locations/*/authProviders/* exactly, so dropping that check
+		// lets all three through to be interpolated into a request URL. The query
+		// one is the reason the check exists.
+		{"query injected into the provider id", cfgFor("projects/p/locations/l/authProviders/ap?alt=json")},
+		{"percent-escape in the provider id", cfgFor("projects/p/locations/l/authProviders/a%2Fb")},
+		{"space in the provider id", cfgFor("projects/p/locations/l/authProviders/a b")},
 		{"unconstructed client", gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: testResource}, Client: &gcp.Client{}}},
 	}
 	for _, tt := range bad {
@@ -444,6 +457,100 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 				t.Fatalf("NewProvider(%q) error = %v", name, err)
 			}
 		})
+	}
+}
+
+// TestProviderErrorsStayClassifiableThroughCredential pins that the error types
+// a caller behind an http.RoundTripper classifies on survive the provider.
+//
+// Credential wraps what RetrieveCredential returns, and a caller cannot reach
+// past it: the tool layer decides whether to raise a human-in-the-loop consent
+// round-trip by finding *auth.ConsentRequiredError, and retry logic keys on the
+// sentinels. Each arm is reached through the exported Credential rather than
+// through the client, because it is the wrap that could break them and the
+// client's own tests cannot see it.
+func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		// check reports whether the error is still classifiable as the arm expects.
+		check func(error) bool
+		want  string
+	}{
+		{
+			name:   "consent required",
+			status: http.StatusOK,
+			body:   `{"uriConsentRequired":{"authorizationUri":"https://consent.example/auth","consentNonce":"n"}}`,
+			check: func(err error) bool {
+				var consent *auth.ConsentRequiredError
+				return errors.As(err, &consent) && consent.AuthURI == "https://consent.example/auth"
+			},
+			want: "*auth.ConsentRequiredError with its AuthURI intact",
+		},
+		{
+			name:   "undecodable response",
+			status: http.StatusOK,
+			body:   `{"success": NOT JSON`,
+			check:  func(err error) bool { return errors.Is(err, gcp.ErrMalformedResponse) },
+			want:   "gcp.ErrMalformedResponse",
+		},
+		{
+			name:   "permission denied",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"message":"denied"}}`,
+			check: func(err error) bool {
+				var apiErr *gcp.APIError
+				return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
+			},
+			want: "*gcp.APIError carrying the status",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+			_, err := p.Credential(adkContext(t, "alice@example.test"))
+			if err == nil {
+				t.Fatal("Credential() = nil error, want the service failure surfaced")
+			}
+			if !tt.check(err) {
+				t.Errorf("Credential() error = %v, want it still classifiable as %s", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCredentialSurfacesAnUnavailableClient pins that a failure to build the
+// default client reaches the caller as ErrClientUnavailable through the
+// exported Credential, and not only through the unexported resolveClient the
+// internal tests drive.
+//
+// The lazy path is the one a caller gets by leaving ProviderConfig.Client nil,
+// so its only error branch on the exported surface is worth an assertion. The
+// resource is deliberately absent from the message: a client-init failure is
+// about this process's own credentials, and every provider in the process
+// fails it identically.
+func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
+	// A wiring context that is already cancelled does not stop the build — that
+	// is the documented contract — so the failure is forced by pointing
+	// Application Default Credentials at a file that is not credentials.
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "not-credentials.json"))
+
+	p, err := gcp.NewProvider(t.Context(), cfgFor(testResource))
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	_, err = p.Credential(adkContext(t, "alice@example.test"))
+	if !errors.Is(err, gcp.ErrClientUnavailable) {
+		t.Fatalf("Credential() error = %v, want ErrClientUnavailable", err)
+	}
+	if strings.Contains(err.Error(), testResource) {
+		t.Errorf("Credential() error = %q, want the resource left out of a client-init failure", err)
 	}
 }
 
