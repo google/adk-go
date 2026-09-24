@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,10 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+
+	"github.com/openai/openai-go/v3/option"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 func TestModel_Generate(t *testing.T) {
@@ -45,16 +50,16 @@ func TestModel_Generate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	clientCfg := &ClientConfig{
+	clientCfg := &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: server.Client(),
 	}
 
 	ctx := t.Context()
-	llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
+	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
 	if err != nil {
-		t.Fatalf("NewModel() err = %v", err)
+		t.Fatalf("newTestModel() err = %v", err)
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
@@ -140,8 +145,8 @@ func TestModel_FailedStatus(t *testing.T) {
 			} else {
 				got, err = runBlocking(t, tc.body)
 			}
-			if !errors.Is(err, ErrResponseFailed) {
-				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, ErrResponseFailed)", err)
+			if !errors.Is(err, openaicommon.ErrResponseFailed) {
+				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, openaicommon.ErrResponseFailed)", err)
 			}
 			for _, want := range []string{"upstream exploded", "resp_123", "server_error"} {
 				if !strings.Contains(err.Error(), want) {
@@ -198,16 +203,16 @@ func TestModel_GenerateStream_Metadata(t *testing.T) {
 	}))
 	defer server.Close()
 
-	clientCfg := &ClientConfig{
+	clientCfg := &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: server.Client(),
 	}
 
 	ctx := t.Context()
-	llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
+	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
 	if err != nil {
-		t.Fatalf("NewModel() err = %v", err)
+		t.Fatalf("newTestModel() err = %v", err)
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
@@ -331,13 +336,13 @@ func runBlocking(t *testing.T, body string) ([]*model.LLMResponse, error) {
 func collectResponses(t *testing.T, server *httptest.Server, stream bool) ([]*model.LLMResponse, error) {
 	t.Helper()
 	ctx := t.Context()
-	llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: server.Client(),
 	})
 	if err != nil {
-		t.Fatalf("NewModel() err = %v", err)
+		t.Fatalf("newTestModel() err = %v", err)
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
@@ -669,7 +674,7 @@ func TestIncompleteWithoutReason_MatchesBlocking(t *testing.T) {
 // and server/adka2a both read as a failed turn.
 func assertFinishSignal(t *testing.T, resp *model.LLMResponse, wantMessage string) {
 	t.Helper()
-	if !carriesContent(resp) {
+	if !openaicommon.CarriesContent(resp) {
 		t.Fatal("response carries no content, so this is not the case being asserted")
 	}
 	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
@@ -720,7 +725,7 @@ func TestBlockedTurnSurfacesBlockReason(t *testing.T) {
 			t.Fatalf("streaming err = %v", err)
 		}
 		final := assertTurnShape(t, got)
-		if carriesContent(final) {
+		if openaicommon.CarriesContent(final) {
 			t.Fatalf("final carries content %+v, so this is not the case being asserted", final.Content)
 		}
 		if final.FinishReason != genai.FinishReasonSafety {
@@ -750,7 +755,7 @@ func TestUnfinishedTurnWithNothingToReadReportsErrorCode(t *testing.T) {
 		t.Fatalf("streaming err = %v", err)
 	}
 	final := assertTurnShape(t, got)
-	if carriesContent(final) {
+	if openaicommon.CarriesContent(final) {
 		t.Fatalf("final carries content %+v, so this is not the case being asserted", final.Content)
 	}
 	if final.FinishReason != genai.FinishReasonOther {
@@ -786,7 +791,7 @@ func TestModel_GenerateStream_LogprobsDescribeTheAnswer(t *testing.T) {
 		{
 			// Reasoning is not part of the answer the logprobs describe. The
 			// snapshot restates the thought, so it survives superseding the
-			// deltas and answerText still has to leave it out.
+			// deltas and openaicommon.AnswerText still has to leave it out.
 			name:         "thoughts do not count against the answer",
 			events:       []string{evCreated, evReasoning, evDelta1, evDelta2, evCompletedReasoning},
 			wantText:     "thinkinghello",
@@ -895,7 +900,7 @@ func TestModel_GenerateStream_EmptyAggregateUsesTerminalEvent(t *testing.T) {
 
 // TestModel_GenerateStream_CreatedOnly pins what a stream that announces a
 // response and then produces nothing yields: no turn at all. Blocking fails
-// with ErrNoOutputItems on the same body, an asymmetry this test records rather
+// with openaicommon.ErrNoOutputItems on the same body, an asymmetry this test records rather
 // than endorses.
 func TestModel_GenerateStream_CreatedOnly(t *testing.T) {
 	got, err := runStream(t, evCreated)
@@ -905,8 +910,8 @@ func TestModel_GenerateStream_CreatedOnly(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("stream emitted %d responses, want none", len(got))
 	}
-	if _, err := runBlocking(t, `{"id":"resp_1","model":"stream-model"}`); !errors.Is(err, ErrNoOutputItems) {
-		t.Errorf("blocking err = %v, want %v", err, ErrNoOutputItems)
+	if _, err := runBlocking(t, `{"id":"resp_1","model":"stream-model"}`); !errors.Is(err, openaicommon.ErrNoOutputItems) {
+		t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrNoOutputItems)
 	}
 }
 
@@ -963,13 +968,13 @@ func TestModel_GenerateStream_StopsWhenTheConsumerStops(t *testing.T) {
 	client.Transport = spy
 
 	ctx := t.Context()
-	llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: client,
 	})
 	if err != nil {
-		t.Fatalf("NewModel() err = %v", err)
+		t.Fatalf("newTestModel() err = %v", err)
 	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
@@ -1010,8 +1015,8 @@ func TestModel_GenerateStream_OutputlessTerminalEventKeepsTheReason(t *testing.T
 
 	// With nothing in the aggregator either, there is no turn to report and the
 	// call fails the way blocking does on the same body.
-	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, ErrNoOutputItems) {
-		t.Errorf("streaming err = %v, want %v", err, ErrNoOutputItems)
+	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, openaicommon.ErrNoOutputItems) {
+		t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrNoOutputItems)
 	}
 }
 
@@ -1118,11 +1123,11 @@ func TestModel_GenerateStream_AdoptsTerminalToolCalls(t *testing.T) {
 			`{"type":"message","content":[{"type":"output_text","text":"hello"}]},` +
 			`{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{"}]}`
 		_, err := runStream(t, evCreated, evDelta1, evDelta2, `{"type":"response.completed","response":`+bodyBadArgs+`}`)
-		if !errors.Is(err, ErrFunctionCallArgs) {
-			t.Errorf("streaming err = %v, want %v", err, ErrFunctionCallArgs)
+		if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+			t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 		}
-		if _, err := runBlocking(t, bodyBadArgs); !errors.Is(err, ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, ErrFunctionCallArgs)
+		if _, err := runBlocking(t, bodyBadArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 		}
 	})
 }
@@ -1341,8 +1346,8 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
 		}
-		if _, err := runBlocking(t, badArgs); !errors.Is(err, ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, ErrFunctionCallArgs)
+		if _, err := runBlocking(t, badArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 		}
 	})
 
@@ -1354,11 +1359,11 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 			`"output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"},` +
 			`{"type":"function_call","name":"lookup","call_id":"call_9","arguments":"{"}]}`
 		if _, err := runStream(t, evCreated, evAdded1, evArgs1,
-			`{"type":"response.completed","response":`+badArgs+`}`); !errors.Is(err, ErrFunctionCallArgs) {
-			t.Errorf("streaming err = %v, want %v", err, ErrFunctionCallArgs)
+			`{"type":"response.completed","response":`+badArgs+`}`); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+			t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 		}
-		if _, err := runBlocking(t, badArgs); !errors.Is(err, ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, ErrFunctionCallArgs)
+		if _, err := runBlocking(t, badArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 		}
 	})
 
@@ -1983,84 +1988,6 @@ func TestModel_GenerateStream_CompletedContentOrder(t *testing.T) {
 	}
 }
 
-func TestCompletedContentSupersedes(t *testing.T) {
-	call := func(id, city string) *genai.Part {
-		return &genai.Part{FunctionCall: &genai.FunctionCall{
-			ID: id, Name: "get_weather", Args: map[string]any{"city": city},
-		}}
-	}
-	tests := []struct {
-		name      string
-		aggregate []*genai.Part
-		completed []*genai.Part
-		want      bool
-	}{
-		{
-			name:      "reasoning containing the answer is not visible output",
-			aggregate: []*genai.Part{{Text: "hello"}},
-			completed: []*genai.Part{{Text: "hello is the answer", Thought: true}},
-		},
-		{
-			name:      "reasoning alone does not justify replacement",
-			aggregate: []*genai.Part{{Text: "Checking", Thought: true}},
-			completed: []*genai.Part{{Text: "Checked", Thought: true}},
-		},
-		{
-			name:      "completed text can precede and follow streamed refusal",
-			aggregate: []*genai.Part{{Text: "I cannot help."}},
-			completed: []*genai.Part{{Text: "Here is "}, {Text: "I cannot help."}, {Text: " Sorry."}},
-			want:      true,
-		},
-		{
-			name:      "shorter text does not replace the answer",
-			aggregate: []*genai.Part{{Text: "hello"}},
-			completed: []*genai.Part{{Text: "hel"}},
-		},
-		{
-			name:      "same name with different arguments is a different call",
-			aggregate: []*genai.Part{call("call_1", "SF")},
-			completed: []*genai.Part{call("call_1", "NY")},
-		},
-		{
-			name:      "different call IDs remain distinct",
-			aggregate: []*genai.Part{call("call_1", "SF")},
-			completed: []*genai.Part{call("call_2", "SF")},
-		},
-		{
-			name:      "one completed call cannot replace two streamed calls",
-			aggregate: []*genai.Part{call("call_1", "SF"), call("call_1", "SF")},
-			completed: []*genai.Part{call("call_1", "SF")},
-		},
-		{
-			name:      "matching calls allow recovery of completed text",
-			aggregate: []*genai.Part{call("call_1", "SF")},
-			completed: []*genai.Part{call("call_1", "SF"), {Text: "Checking the weather."}},
-			want:      true,
-		},
-		{
-			name:      "reordered calls can match one to one",
-			aggregate: []*genai.Part{call("call_1", "SF"), call("call_2", "NY")},
-			completed: []*genai.Part{call("call_2", "NY"), call("call_1", "SF")},
-			want:      true,
-		},
-		{
-			name:      "completed function call replaces reasoning alone",
-			aggregate: []*genai.Part{{Text: "Checking", Thought: true}},
-			completed: []*genai.Part{call("call_1", "SF")},
-			want:      true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			aggregate := &genai.Content{Role: genai.RoleModel, Parts: tc.aggregate}
-			completed := &genai.Content{Role: genai.RoleModel, Parts: tc.completed}
-			if got := completedContentSupersedes(aggregate, completed); got != tc.want {
-				t.Errorf("completedContentSupersedes() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestModel_GenerateStream_NarrowerCompletedContentPreservesAggregate(t *testing.T) {
 	const (
 		reasoningSummaryDelta = `{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Weighing options"}`
@@ -2250,15 +2177,15 @@ func TestModel_GenerateStream_TruncatedLeavesUsageUnset(t *testing.T) {
 // with a silently empty answer.
 func TestModel_GenerateStream_NoOutputItems(t *testing.T) {
 	got, err := runStream(t, evCreated, evFiltered)
-	if !errors.Is(err, ErrNoOutputItems) {
-		t.Errorf("streaming err = %v, want %v", err, ErrNoOutputItems)
+	if !errors.Is(err, openaicommon.ErrNoOutputItems) {
+		t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrNoOutputItems)
 	}
 	if len(got) != 0 {
 		t.Errorf("stream emitted %d responses, want none", len(got))
 	}
 	const filteredBody = `{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"}}`
-	if _, err := runBlocking(t, filteredBody); !errors.Is(err, ErrNoOutputItems) {
-		t.Errorf("blocking err = %v, want %v", err, ErrNoOutputItems)
+	if _, err := runBlocking(t, filteredBody); !errors.Is(err, openaicommon.ErrNoOutputItems) {
+		t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrNoOutputItems)
 	}
 }
 
@@ -2430,13 +2357,13 @@ func TestModel_GenerateContent_DoesNotSendReplayedReasoning(t *testing.T) {
 			defer server.Close()
 
 			ctx := t.Context()
-			llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+			llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
 				APIKey:     "test",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
 			})
 			if err != nil {
-				t.Fatalf("NewModel() err = %v", err)
+				t.Fatalf("newTestModel() err = %v", err)
 			}
 			for _, err := range llm.GenerateContent(ctx, &model.LLMRequest{Contents: contents}, stream) {
 				if err != nil {
@@ -2476,13 +2403,13 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 			defer server.Close()
 
 			ctx := t.Context()
-			llm, err := NewModel(ctx, openai.ChatModelGPT4oMini, &ClientConfig{
+			llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
 				APIKey:     "test",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
 			})
 			if err != nil {
-				t.Fatalf("NewModel() err = %v", err)
+				t.Fatalf("newTestModel() err = %v", err)
 			}
 			req := &model.LLMRequest{Contents: []*genai.Content{
 				{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "still thinking", Thought: true}}},
@@ -2494,8 +2421,8 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 					gotErr = err
 				}
 			}
-			if !errors.Is(gotErr, ErrNoContents) {
-				t.Errorf("GenerateContent() err = %v, want it to wrap %v", gotErr, ErrNoContents)
+			if !errors.Is(gotErr, openaicommon.ErrNoContents) {
+				t.Errorf("GenerateContent() err = %v, want it to wrap %v", gotErr, openaicommon.ErrNoContents)
 			}
 			if calls != 0 {
 				t.Errorf("model was called %d times, want 0", calls)
@@ -2504,10 +2431,34 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 	}
 }
 
-func TestModel_ValidateModelNameInput(t *testing.T) {
-	clientCfg := ClientConfig{APIKey: "test"}
-	_, err := NewModel(t.Context(), "", &clientCfg)
-	if !errors.Is(err, ErrModelNameRequired) {
-		t.Fatalf("NewModel() err = %v, want %v", err, ErrModelNameRequired)
+// testClientConfig mirrors the parent package's ClientConfig for the tests that
+// moved here with the code they exercise. The parent builds the client and
+// hands it to New; these tests do the same through this shim.
+type testClientConfig struct {
+	APIKey     string
+	BaseURL    string
+	HTTPClient *http.Client
+	Options    []option.RequestOption
+}
+
+func newTestModel(_ context.Context, modelName string, cfg *testClientConfig) (model.LLM, error) {
+	if modelName == "" {
+		return nil, openaicommon.ErrModelNameRequired
 	}
+	if cfg == nil {
+		cfg = &testClientConfig{}
+	}
+	var opts []option.RequestOption
+	if cfg.APIKey != "" {
+		opts = append(opts, option.WithAPIKey(cfg.APIKey))
+	}
+	if cfg.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+	if cfg.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
+	}
+	opts = append(opts, cfg.Options...)
+	client := openai.NewClient(opts...)
+	return New(&client, modelName), nil
 }

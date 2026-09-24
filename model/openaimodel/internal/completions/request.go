@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"encoding/json"
@@ -25,23 +25,25 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // The message roles Chat Completions accepts from a caller. The tool role is
 // absent on purpose: it comes from a function response, never from a content
 // role.
 const (
-	chatRoleUser      = "user"
-	chatRoleAssistant = "assistant"
-	chatRoleSystem    = "system"
-	chatRoleDeveloper = "developer"
+	roleUser      = "user"
+	roleAssistant = "assistant"
+	roleSystem    = "system"
+	roleDeveloper = "developer"
 )
 
-// buildChatParams converts a generic LLMRequest into Chat Completions request
+// buildParams converts a generic LLMRequest into Chat Completions request
 // params.
-func buildChatParams(modelName string, req *model.LLMRequest) (openai.ChatCompletionNewParams, error) {
+func buildParams(modelName string, req *model.LLMRequest) (openai.ChatCompletionNewParams, error) {
 	if req == nil {
-		return openai.ChatCompletionNewParams{}, ErrRequestNil
+		return openai.ChatCompletionNewParams{}, openaicommon.ErrRequestNil
 	}
 
 	params := openai.ChatCompletionNewParams{Model: shared.ChatModel(modelName)}
@@ -49,22 +51,22 @@ func buildChatParams(modelName string, req *model.LLMRequest) (openai.ChatComple
 		params.Model = shared.ChatModel(req.Model)
 	}
 
-	messages, err := convertChatMessages(req.Contents)
+	messages, err := convertContents(req.Contents)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
 	if len(messages) == 0 {
-		return openai.ChatCompletionNewParams{}, ErrNoContents
+		return openai.ChatCompletionNewParams{}, openaicommon.ErrNoContents
 	}
 	params.Messages = messages
 
 	// Runs after the messages exist, because the system instruction joins them
 	// as the first one rather than as a field of its own.
-	if err := applyChatGenerationConfig(&params, req.Config); err != nil {
+	if err := applyGenerationConfig(&params, req.Config); err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
 
-	tools, err := convertChatTools(req.Config)
+	tools, err := convertTools(req.Config)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -73,7 +75,7 @@ func buildChatParams(modelName string, req *model.LLMRequest) (openai.ChatComple
 	}
 
 	if cfg := req.Config; cfg != nil && cfg.ToolConfig != nil {
-		choice, err := convertChatToolChoice(cfg.ToolConfig)
+		choice, err := convertToolChoice(cfg.ToolConfig)
 		if err != nil {
 			return openai.ChatCompletionNewParams{}, err
 		}
@@ -88,19 +90,19 @@ func buildChatParams(modelName string, req *model.LLMRequest) (openai.ChatComple
 	return params, nil
 }
 
-// convertChatMessages converts ADK contents into a Chat Completions message
+// convertContents converts ADK contents into a Chat Completions message
 // list. One content can produce several messages, because a tool result is a
 // message of its own rather than a part of the turn that carried it.
-func convertChatMessages(contents []*genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
+func convertContents(contents []*genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
 	var (
 		messages []openai.ChatCompletionMessageParamUnion
-		tracker  callTracker
+		tracker  openaicommon.CallTracker
 	)
 	for _, content := range contents {
 		if content == nil || len(content.Parts) == 0 {
 			continue
 		}
-		converted, err := convertChatContent(content, &tracker)
+		converted, err := convertContent(content, &tracker)
 		if err != nil {
 			return nil, err
 		}
@@ -109,10 +111,10 @@ func convertChatMessages(contents []*genai.Content) ([]openai.ChatCompletionMess
 	return messages, nil
 }
 
-// convertChatContent converts one content into the messages it becomes: a tool
+// convertContent converts one content into the messages it becomes: a tool
 // message per function response, then at most one message for the rest.
-func convertChatContent(content *genai.Content, tracker *callTracker) ([]openai.ChatCompletionMessageParamUnion, error) {
-	role, err := chatRole(genai.Role(content.Role))
+func convertContent(content *genai.Content, tracker *openaicommon.CallTracker) ([]openai.ChatCompletionMessageParamUnion, error) {
+	role, err := normalizeRole(genai.Role(content.Role))
 	if err != nil {
 		return nil, err
 	}
@@ -134,13 +136,13 @@ func convertChatContent(content *genai.Content, tracker *callTracker) ([]openai.
 		case part.Text != "":
 			texts = append(texts, part.Text)
 		case part.FunctionCall != nil:
-			call, err := newChatToolCall(tracker, part.FunctionCall)
+			call, err := newToolCall(tracker, part.FunctionCall)
 			if err != nil {
 				return nil, err
 			}
 			calls = append(calls, *call)
 		case part.FunctionResponse != nil:
-			msg, err := newChatToolMessage(tracker, part.FunctionResponse)
+			msg, err := newToolMessage(tracker, part.FunctionResponse)
 			if err != nil {
 				return nil, err
 			}
@@ -150,9 +152,9 @@ func convertChatContent(content *genai.Content, tracker *callTracker) ([]openai.
 		}
 	}
 
-	text := joinChatText(texts)
+	text := joinText(texts)
 	switch {
-	case role == chatRoleAssistant:
+	case role == roleAssistant:
 		if text == "" && len(calls) == 0 {
 			break
 		}
@@ -162,9 +164,9 @@ func convertChatContent(content *genai.Content, tracker *callTracker) ([]openai.
 		}
 		messages = append(messages, openai.ChatCompletionMessageParamUnion{OfAssistant: &msg})
 	case text == "":
-	case role == chatRoleSystem:
+	case role == roleSystem:
 		messages = append(messages, openai.SystemMessage(text))
-	case role == chatRoleDeveloper:
+	case role == roleDeveloper:
 		messages = append(messages, openai.DeveloperMessage(text))
 	default:
 		messages = append(messages, openai.UserMessage(text))
@@ -172,27 +174,27 @@ func convertChatContent(content *genai.Content, tracker *callTracker) ([]openai.
 	return messages, nil
 }
 
-// chatRole maps a genai content role onto a Chat Completions message role. The
+// normalizeRole maps a genai content role onto a Chat Completions message role. The
 // system and developer roles survive rather than folding into user, which is
 // what adk-python's LiteLLM path does, because Chat Completions has both.
-func chatRole(role genai.Role) (string, error) {
+func normalizeRole(role genai.Role) (string, error) {
 	switch role {
 	case "", genai.RoleUser:
-		return chatRoleUser, nil
+		return roleUser, nil
 	case genai.RoleModel:
-		return chatRoleAssistant, nil
-	case chatRoleSystem:
-		return chatRoleSystem, nil
-	case chatRoleDeveloper:
-		return chatRoleDeveloper, nil
+		return roleAssistant, nil
+	case roleSystem:
+		return roleSystem, nil
+	case roleDeveloper:
+		return roleDeveloper, nil
 	default:
 		return "", fmt.Errorf("openai: unsupported role %q", role)
 	}
 }
 
-// joinChatText flattens a turn's text parts into the one string a Chat
+// joinText flattens a turn's text parts into the one string a Chat
 // Completions message carries, dropping parts holding only whitespace.
-func joinChatText(texts []string) string {
+func joinText(texts []string) string {
 	var b strings.Builder
 	for _, text := range texts {
 		if strings.TrimSpace(text) == "" {
@@ -206,14 +208,14 @@ func joinChatText(texts []string) string {
 	return b.String()
 }
 
-// newChatToolCall converts a function call into the tool call an assistant
+// newToolCall converts a function call into the tool call an assistant
 // message carries.
-func newChatToolCall(tracker *callTracker, fc *genai.FunctionCall) (*openai.ChatCompletionMessageToolCallUnionParam, error) {
+func newToolCall(tracker *openaicommon.CallTracker, fc *genai.FunctionCall) (*openai.ChatCompletionMessageToolCallUnionParam, error) {
 	if fc.Name == "" {
-		return nil, ErrFunctionCallMissingName
+		return nil, openaicommon.ErrFunctionCallMissingName
 	}
-	callID := tracker.takeCallID(fc)
-	args, err := marshalFunctionArgs(fc.Args)
+	callID := tracker.TakeCallID(fc)
+	args, err := openaicommon.MarshalFunctionArgs(fc.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -228,10 +230,10 @@ func newChatToolCall(tracker *callTracker, fc *genai.FunctionCall) (*openai.Chat
 	}, nil
 }
 
-// newChatToolMessage converts a function response into the tool-role message
+// newToolMessage converts a function response into the tool-role message
 // that answers its call.
-func newChatToolMessage(tracker *callTracker, fr *genai.FunctionResponse) (*openai.ChatCompletionMessageParamUnion, error) {
-	callID, err := tracker.resolveResponseID(fr)
+func newToolMessage(tracker *openaicommon.CallTracker, fr *genai.FunctionResponse) (*openai.ChatCompletionMessageParamUnion, error) {
+	callID, err := tracker.ResolveResponseID(fr)
 	if err != nil {
 		return nil, err
 	}
@@ -243,39 +245,24 @@ func newChatToolMessage(tracker *callTracker, fr *genai.FunctionResponse) (*open
 	return &msg, nil
 }
 
-// chatServiceTiers maps genai's processing tiers onto the Chat Completions
+// serviceTiers maps genai's processing tiers onto the Chat Completions
 // equivalents, reading an unspecified tier the way the Responses path does.
-var chatServiceTiers = map[genai.ServiceTier]openai.ChatCompletionNewParamsServiceTier{
+var serviceTiers = map[genai.ServiceTier]openai.ChatCompletionNewParamsServiceTier{
 	genai.ServiceTierUnspecified: openai.ChatCompletionNewParamsServiceTierDefault,
 	genai.ServiceTierStandard:    openai.ChatCompletionNewParamsServiceTierDefault,
 	genai.ServiceTierFlex:        openai.ChatCompletionNewParamsServiceTierFlex,
 	genai.ServiceTierPriority:    openai.ChatCompletionNewParamsServiceTierPriority,
 }
 
-// chatUnsupportedConfigFields is unsupportedConfigFields without the fields
+// unsupportedConfigFields is openaicommon.UnsupportedConfigFields without the fields
 // Chat Completions can express, so this endpoint does not refuse a setting it
 // supports.
-var chatUnsupportedConfigFields = configFieldsWithout("Seed")
+var unsupportedConfigFields = openaicommon.ConfigFieldsWithout("Seed")
 
-// configFieldsWithout returns unsupportedConfigFields minus the named entries.
-func configFieldsWithout(names ...string) []configField {
-	drop := make(map[string]bool, len(names))
-	for _, name := range names {
-		drop[name] = true
-	}
-	kept := make([]configField, 0, len(unsupportedConfigFields))
-	for _, field := range unsupportedConfigFields {
-		if !drop[field.name] {
-			kept = append(kept, field)
-		}
-	}
-	return kept
-}
-
-// applyChatGenerationConfig translates the generation config onto Chat
+// applyGenerationConfig translates the generation config onto Chat
 // Completions params. Stop sequences, the penalties and seed are translated
 // here and rejected on the Responses path, because only this endpoint has them.
-func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *genai.GenerateContentConfig) error {
+func applyGenerationConfig(params *openai.ChatCompletionNewParams, cfg *genai.GenerateContentConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -288,7 +275,7 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 	if cfg.TopK != nil {
 		// Chat Completions has no top_k either, and forwarding it would trade a
 		// clear error for a field the provider ignores.
-		return ErrTopKNotSupported
+		return openaicommon.ErrTopKNotSupported
 	}
 	if cfg.MaxOutputTokens > 0 {
 		params.MaxCompletionTokens = param.NewOpt(int64(cfg.MaxOutputTokens))
@@ -302,7 +289,7 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 	if cfg.CandidateCount > 1 {
 		// The API has "n", but a genai response carries one candidate and the
 		// rest of this package assumes it.
-		return ErrMultipleCandidatesNotSupported
+		return openaicommon.ErrMultipleCandidatesNotSupported
 	}
 	if cfg.FrequencyPenalty != nil {
 		params.FrequencyPenalty = param.NewOpt(float64(*cfg.FrequencyPenalty))
@@ -322,7 +309,7 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 		}
 	}
 	if cfg.SystemInstruction != nil {
-		inst, err := flattenContentText(cfg.SystemInstruction)
+		inst, err := openaicommon.FlattenContentText(cfg.SystemInstruction)
 		if err != nil {
 			return fmt.Errorf("openai: system instruction: %w", err)
 		}
@@ -333,53 +320,46 @@ func applyChatGenerationConfig(params *openai.ChatCompletionNewParams, cfg *gena
 		}
 	}
 	if cfg.ResponseMIMEType != "" && cfg.ResponseMIMEType != "text/plain" && cfg.ResponseMIMEType != "application/json" {
-		return fmt.Errorf("%w: %s", ErrUnsupportedMIMEType, cfg.ResponseMIMEType)
+		return fmt.Errorf("%w: %s", openaicommon.ErrUnsupportedMIMEType, cfg.ResponseMIMEType)
 	}
 	if cfg.ResponseMIMEType == "application/json" || cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil {
-		format, err := newChatResponseFormat(cfg)
+		format, err := newResponseFormat(cfg)
 		if err != nil {
 			return err
 		}
 		params.ResponseFormat = *format
 	}
 	if cfg.Labels != nil {
-		return ErrLabelsNotSupported
+		return openaicommon.ErrLabelsNotSupported
 	}
 	if cfg.SafetySettings != nil {
-		return ErrSafetySettingsNotSupported
+		return openaicommon.ErrSafetySettingsNotSupported
 	}
-	if cfg.ThinkingConfig != nil {
-		// IncludeThoughts is accepted and ignored: this endpoint has no
-		// reasoning summary to ask for, and refusing it would break a config
-		// that works against Responses.
-		effort, err := reasoningEffortFor(cfg.ThinkingConfig)
-		if err != nil {
-			return err
-		}
-		params.ReasoningEffort = effort
+	// IncludeThoughts is accepted and ignored: this endpoint has no reasoning
+	// summary to ask for, and refusing it would break a config that works
+	// against Responses.
+	effort, err := openaicommon.ReasoningEffortFor(cfg.ThinkingConfig)
+	if err != nil {
+		return err
 	}
+	params.ReasoningEffort = effort
 	if cfg.ServiceTier != "" {
-		tier, ok := chatServiceTiers[cfg.ServiceTier]
+		tier, ok := serviceTiers[cfg.ServiceTier]
 		if !ok {
-			return fmt.Errorf("%w: ServiceTier %q", ErrUnsupportedConfigField, cfg.ServiceTier)
+			return fmt.Errorf("%w: ServiceTier %q", openaicommon.ErrUnsupportedConfigField, cfg.ServiceTier)
 		}
 		params.ServiceTier = tier
 	}
-	if err := rejectUntranslatableValues(cfg); err != nil {
+	if err := openaicommon.RejectUntranslatableValues(cfg); err != nil {
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	for _, field := range chatUnsupportedConfigFields {
-		if field.isSet(cfg) {
-			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.name)
-		}
-	}
-	return nil
+	return openaicommon.RejectConfigFields(unsupportedConfigFields, cfg)
 }
 
-// newChatResponseFormat builds the response_format Chat Completions takes,
+// newResponseFormat builds the response_format Chat Completions takes,
 // carrying the same schema the Responses path puts under text.format.
-func newChatResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletionNewParamsResponseFormatUnion, error) {
+func newResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletionNewParamsResponseFormatUnion, error) {
 	if cfg.ResponseSchema == nil && cfg.ResponseJsonSchema == nil {
 		obj := shared.NewResponseFormatJSONObjectParam()
 		return &openai.ChatCompletionNewParamsResponseFormatUnion{OfJSONObject: &obj}, nil
@@ -389,14 +369,14 @@ func newChatResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatComple
 		err    error
 	)
 	if cfg.ResponseJsonSchema != nil {
-		schema, err = normalizeSchema(cfg.ResponseJsonSchema)
+		schema, err = openaicommon.NormalizeSchema(cfg.ResponseJsonSchema)
 	} else {
-		schema, err = schemaToMap(cfg.ResponseSchema)
+		schema, err = openaicommon.SchemaToMap(cfg.ResponseSchema)
 	}
 	if err != nil {
 		return nil, err
 	}
-	enforceStrictOpenAISchema(schema)
+	openaicommon.EnforceStrictOpenAISchema(schema)
 	name := "adk_response"
 	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
 		name = cfg.ResponseSchema.Title

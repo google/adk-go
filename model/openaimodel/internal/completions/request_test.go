@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"encoding/json"
@@ -24,6 +24,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // chatWire marshals the params the way the SDK sends them, so assertions read
@@ -31,9 +33,9 @@ import (
 // package's defects live.
 func chatWire(t *testing.T, req *model.LLMRequest) map[string]any {
 	t.Helper()
-	params, err := buildChatParams("gpt-4o-mini", req)
+	params, err := buildParams("gpt-4o-mini", req)
 	if err != nil {
-		t.Fatalf("buildChatParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -67,7 +69,7 @@ func userReq(parts ...*genai.Part) *model.LLMRequest {
 	return &model.LLMRequest{Contents: []*genai.Content{{Role: "user", Parts: parts}}}
 }
 
-func TestBuildChatParams_Roles(t *testing.T) {
+func TestBuildParams_Roles(t *testing.T) {
 	tests := []struct {
 		name     string
 		role     string
@@ -98,8 +100,8 @@ func TestBuildChatParams_Roles(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_UnsupportedRole(t *testing.T) {
-	_, err := buildChatParams("m", &model.LLMRequest{Contents: []*genai.Content{
+func TestBuildParams_UnsupportedRole(t *testing.T) {
+	_, err := buildParams("m", &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "wizard", Parts: []*genai.Part{{Text: "hi"}}},
 	}})
 	if err == nil || !strings.Contains(err.Error(), "wizard") {
@@ -107,7 +109,7 @@ func TestBuildChatParams_UnsupportedRole(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_SystemInstructionLeadsMessages(t *testing.T) {
+func TestBuildParams_SystemInstructionLeadsMessages(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
@@ -129,7 +131,7 @@ func TestBuildChatParams_SystemInstructionLeadsMessages(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_MultiTurnHistory(t *testing.T) {
+func TestBuildParams_MultiTurnHistory(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "my locker is 8123"}}},
 		{Role: "model", Parts: []*genai.Part{{Text: "noted"}}},
@@ -152,7 +154,7 @@ func TestBuildChatParams_MultiTurnHistory(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_TextPartsJoin(t *testing.T) {
+func TestBuildParams_TextPartsJoin(t *testing.T) {
 	wire := chatWire(t, userReq(&genai.Part{Text: "one"}, &genai.Part{Text: "  "}, &genai.Part{Text: "two"}))
 	msgs := chatMessages(t, wire)
 	if got := msgs[0]["content"]; got != "one\ntwo" {
@@ -160,7 +162,7 @@ func TestBuildChatParams_TextPartsJoin(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_ToolCallAndResultPairing(t *testing.T) {
+func TestBuildParams_ToolCallAndResultPairing(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
 		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
@@ -201,7 +203,7 @@ func TestBuildChatParams_ToolCallAndResultPairing(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_ToolResultWithoutCallID(t *testing.T) {
+func TestBuildParams_ToolResultWithoutCallID(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "f"}}}},
 		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "f"}}}},
@@ -219,8 +221,8 @@ func TestBuildChatParams_ToolResultWithoutCallID(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_UnknownToolResultIDRejected(t *testing.T) {
-	_, err := buildChatParams("m", &model.LLMRequest{Contents: []*genai.Content{
+func TestBuildParams_UnknownToolResultIDRejected(t *testing.T) {
+	_, err := buildParams("m", &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "nope", Name: "f"}}}},
 	}})
 	if err == nil || !strings.Contains(err.Error(), "nope") {
@@ -228,9 +230,9 @@ func TestBuildChatParams_UnknownToolResultIDRejected(t *testing.T) {
 	}
 }
 
-// TestBuildChatParams_ThoughtsNotReplayed pins the deliberate divergence from
+// TestBuildParams_ThoughtsNotReplayed pins the deliberate divergence from
 // the Responses path, which replays prior-turn reasoning as assistant text.
-func TestBuildChatParams_ThoughtsNotReplayed(t *testing.T) {
+func TestBuildParams_ThoughtsNotReplayed(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{
 			{Text: "the user wants a joke", Thought: true},
@@ -246,39 +248,39 @@ func TestBuildChatParams_ThoughtsNotReplayed(t *testing.T) {
 	}
 }
 
-func TestBuildChatParams_ThoughtOnlyTurnProducesNoMessage(t *testing.T) {
-	_, err := buildChatParams("m", &model.LLMRequest{Contents: []*genai.Content{
+func TestBuildParams_ThoughtOnlyTurnProducesNoMessage(t *testing.T) {
+	_, err := buildParams("m", &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{{Text: "thinking", Thought: true}}},
 	}})
-	if !errors.Is(err, ErrNoContents) {
-		t.Fatalf("err = %v, want %v", err, ErrNoContents)
+	if !errors.Is(err, openaicommon.ErrNoContents) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoContents)
 	}
 }
 
-func TestBuildChatParams_NoContents(t *testing.T) {
-	_, err := buildChatParams("m", &model.LLMRequest{})
-	if !errors.Is(err, ErrNoContents) {
-		t.Fatalf("err = %v, want %v", err, ErrNoContents)
+func TestBuildParams_NoContents(t *testing.T) {
+	_, err := buildParams("m", &model.LLMRequest{})
+	if !errors.Is(err, openaicommon.ErrNoContents) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoContents)
 	}
 }
 
-func TestBuildChatParams_NilRequest(t *testing.T) {
-	_, err := buildChatParams("m", nil)
-	if !errors.Is(err, ErrRequestNil) {
-		t.Fatalf("err = %v, want %v", err, ErrRequestNil)
+func TestBuildParams_NilRequest(t *testing.T) {
+	_, err := buildParams("m", nil)
+	if !errors.Is(err, openaicommon.ErrRequestNil) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrRequestNil)
 	}
 }
 
-func TestBuildChatParams_UnsupportedPart(t *testing.T) {
-	_, err := buildChatParams("m", userReq(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}}))
+func TestBuildParams_UnsupportedPart(t *testing.T) {
+	_, err := buildParams("m", userReq(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}}))
 	if err == nil || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Fatalf("err = %v, want an unsupported-part error", err)
 	}
 }
 
-// TestApplyChatGenerationConfig_EndpointOnlyFields covers the three settings
+// TestApplyGenerationConfig_EndpointOnlyFields covers the three settings
 // Chat Completions honours that the Responses path rejects outright.
-func TestApplyChatGenerationConfig_EndpointOnlyFields(t *testing.T) {
+func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	seed := int32(42)
 	freq := float32(0.5)
 	pres := float32(-0.25)
@@ -306,7 +308,7 @@ func TestApplyChatGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	}
 }
 
-func TestApplyChatGenerationConfig_TranslatedFields(t *testing.T) {
+func TestApplyGenerationConfig_TranslatedFields(t *testing.T) {
 	temp := float32(0.3)
 	topP := float32(0.9)
 	logprobs := int32(3)
@@ -343,24 +345,24 @@ func TestApplyChatGenerationConfig_TranslatedFields(t *testing.T) {
 	}
 }
 
-func TestApplyChatGenerationConfig_RejectedFields(t *testing.T) {
+func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 	topK := float32(5)
 	tests := []struct {
 		name string
 		cfg  *genai.GenerateContentConfig
 		want error
 	}{
-		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: &topK}, want: ErrTopKNotSupported},
-		{name: "candidate count", cfg: &genai.GenerateContentConfig{CandidateCount: 2}, want: ErrMultipleCandidatesNotSupported},
-		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: ErrLabelsNotSupported},
-		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: ErrSafetySettingsNotSupported},
-		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: ErrUnsupportedMIMEType},
-		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: ErrUnsupportedConfigField},
-		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: ErrUnsupportedConfigField},
+		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: &topK}, want: openaicommon.ErrTopKNotSupported},
+		{name: "candidate count", cfg: &genai.GenerateContentConfig{CandidateCount: 2}, want: openaicommon.ErrMultipleCandidatesNotSupported},
+		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: openaicommon.ErrLabelsNotSupported},
+		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: openaicommon.ErrSafetySettingsNotSupported},
+		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: openaicommon.ErrUnsupportedMIMEType},
+		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: openaicommon.ErrUnsupportedConfigField},
+		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: openaicommon.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildChatParams("m", &model.LLMRequest{
+			_, err := buildParams("m", &model.LLMRequest{
 				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 				Config:   tt.cfg,
 			})
@@ -371,20 +373,20 @@ func TestApplyChatGenerationConfig_RejectedFields(t *testing.T) {
 	}
 }
 
-// TestApplyChatGenerationConfig_SeedAccepted is the counterpart of the rejected
+// TestApplyGenerationConfig_SeedAccepted is the counterpart of the rejected
 // list: Seed is refused on Responses and must not be refused here.
-func TestApplyChatGenerationConfig_SeedAccepted(t *testing.T) {
+func TestApplyGenerationConfig_SeedAccepted(t *testing.T) {
 	seed := int32(7)
-	_, err := buildChatParams("m", &model.LLMRequest{
+	_, err := buildParams("m", &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config:   &genai.GenerateContentConfig{Seed: &seed},
 	})
 	if err != nil {
-		t.Fatalf("buildChatParams() err = %v, want nil", err)
+		t.Fatalf("buildParams() err = %v, want nil", err)
 	}
 }
 
-func TestApplyChatGenerationConfig_ResponseFormat(t *testing.T) {
+func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 	t.Run("json object without a schema", func(t *testing.T) {
 		wire := chatWire(t, &model.LLMRequest{
 			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
@@ -425,7 +427,7 @@ func TestApplyChatGenerationConfig_ResponseFormat(t *testing.T) {
 	})
 }
 
-func TestApplyChatThinkingConfig(t *testing.T) {
+func TestApplyThinkingConfig(t *testing.T) {
 	budget := func(n int32) *int32 { return &n }
 	tests := []struct {
 		name   string
@@ -467,18 +469,18 @@ func TestApplyChatThinkingConfig(t *testing.T) {
 	}
 }
 
-func TestApplyChatThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
+func TestApplyThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
 	budget := int32(-5)
-	_, err := buildChatParams("m", &model.LLMRequest{
+	_, err := buildParams("m", &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &budget}},
 	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("err = %v, want %v", err, ErrUnsupportedConfigField)
+	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
 	}
 }
 
-// TestBuildChatParams_InterleavedTextAndCall covers the shape a streamed turn
+// TestBuildParams_InterleavedTextAndCall covers the shape a streamed turn
 // actually leaves in the session. The aggregator starts a new text part
 // whenever the content kind changes, so speech either side of a tool call
 // arrives as two parts in one content
@@ -487,7 +489,7 @@ func TestApplyChatThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
 // A Chat Completions assistant message has one content string and one
 // tool_calls array, so the interleaving has to flatten. What must not happen is
 // either half of the speech going missing.
-func TestBuildChatParams_InterleavedTextAndCall(t *testing.T) {
+func TestBuildParams_InterleavedTextAndCall(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{
 			{Text: "thinking about it", Thought: true},

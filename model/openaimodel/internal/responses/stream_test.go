@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"context"
@@ -23,6 +23,8 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 
 	"google.golang.org/adk/v2/internal/llminternal"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 func decodeEvent(t *testing.T, body string) responses.ResponseStreamEventUnion {
@@ -167,8 +169,8 @@ func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	if resp != nil {
 		t.Errorf("process() = %+v, want nil alongside the error", resp)
 	}
-	if !errors.Is(err, ErrResponseFailed) {
-		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
+	if !errors.Is(err, openaicommon.ErrResponseFailed) {
+		t.Fatalf("process() err = %v, want errors.Is(err, openaicommon.ErrResponseFailed)", err)
 	}
 	if want := `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`; err.Error() != want {
 		t.Errorf("process() err = %q, want %q", err, want)
@@ -198,8 +200,8 @@ func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 			_, blockErr := convertResponse(&failed.Response)
 
 			for path, err := range map[string]error{"stream": streamErr, "blocking": blockErr} {
-				if !errors.Is(err, ErrResponseFailed) {
-					t.Fatalf("%s path err = %v, want errors.Is(err, ErrResponseFailed)", path, err)
+				if !errors.Is(err, openaicommon.ErrResponseFailed) {
+					t.Fatalf("%s path err = %v, want errors.Is(err, openaicommon.ErrResponseFailed)", path, err)
 				}
 			}
 			if streamErr.Error() != blockErr.Error() {

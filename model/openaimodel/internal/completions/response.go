@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"encoding/json"
@@ -20,31 +20,33 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
-// convertChatCompletion converts a Chat Completions response into the generic
+// convertCompletion converts a Chat Completions response into the generic
 // genai response. A streamed turn is finalized through here too, so the two
 // paths cannot disagree about tool calls, finish reason or usage.
-func convertChatCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentResponse, error) {
+func convertCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentResponse, error) {
 	if resp == nil {
-		return nil, ErrEmptyResponse
+		return nil, openaicommon.ErrEmptyResponse
 	}
 	if len(resp.Choices) == 0 {
-		return nil, ErrNoChoices
+		return nil, openaicommon.ErrNoChoices
 	}
 	choice := resp.Choices[0]
-	parts, err := convertChatMessage(choice.Message)
+	parts, err := convertMessage(choice.Message)
 	if err != nil {
 		return nil, err
 	}
 	if len(parts) == 0 {
-		return nil, ErrNoTextOrToolContent
+		return nil, openaicommon.ErrNoTextOrToolContent
 	}
 	out := &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
 			Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
-			FinishReason:   chatFinishReason(choice.FinishReason),
-			LogprobsResult: convertChatLogprobs(choice.Logprobs),
+			FinishReason:   finishReason(choice.FinishReason),
+			LogprobsResult: convertLogprobs(choice.Logprobs),
 		}},
 		ModelVersion: resp.Model,
 		ResponseID:   resp.ID,
@@ -52,15 +54,15 @@ func convertChatCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentR
 	if resp.JSON.Usage.Valid() {
 		// A provider that omits usage has not said the turn cost nothing, which
 		// zeros would; streaming leaves it unset in the same case.
-		out.UsageMetadata = convertChatUsage(resp.Usage)
+		out.UsageMetadata = convertUsage(resp.Usage)
 	}
 	return out, nil
 }
 
-// convertChatMessage converts an assistant message into genai parts. A refusal
+// convertMessage converts an assistant message into genai parts. A refusal
 // becomes text, matching what the Responses path does with a refusal content
 // block, so one model reports a refusal the same way on either endpoint.
-func convertChatMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
+func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 	var parts []*genai.Part
 	if msg.Content != "" {
 		parts = append(parts, &genai.Part{Text: msg.Content})
@@ -70,7 +72,7 @@ func convertChatMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error)
 	}
 	for _, call := range msg.ToolCalls {
 		fn := call.Function
-		args, err := chatToolCallArgs(fn.Arguments)
+		args, err := functionCallArgs(fn.Arguments)
 		if err != nil {
 			// Name the offending call: conversion aborts on the first error, so
 			// nothing else identifies it.
@@ -83,15 +85,15 @@ func convertChatMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error)
 	return parts, nil
 }
 
-// chatToolCallArgs decodes a tool call's arguments, reading an empty payload as
+// functionCallArgs decodes a tool call's arguments, reading an empty payload as
 // a call that takes none.
-func chatToolCallArgs(raw string) (map[string]any, error) {
+func functionCallArgs(raw string) (map[string]any, error) {
 	if raw == "" {
 		return map[string]any{}, nil
 	}
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrFunctionCallArgs, err)
+		return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
 	}
 	if args == nil {
 		// The payload was JSON null: the call takes no arguments.
@@ -100,10 +102,10 @@ func chatToolCallArgs(raw string) (map[string]any, error) {
 	return args, nil
 }
 
-// chatFinishReason maps a Chat Completions finish_reason onto the genai finish
+// finishReason maps a Chat Completions finish_reason onto the genai finish
 // reason. "tool_calls" is a clean stop, as it is in adk-python's LiteLLM path:
 // the model finished its turn by calling a tool.
-func chatFinishReason(reason string) genai.FinishReason {
+func finishReason(reason string) genai.FinishReason {
 	switch reason {
 	case "stop", "tool_calls", "function_call":
 		return genai.FinishReasonStop
@@ -121,28 +123,28 @@ func chatFinishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertChatUsage converts Chat Completions token accounting into genai usage
+// convertUsage converts Chat Completions token accounting into genai usage
 // metadata, whose field names differ from this endpoint's on every count.
-func convertChatUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        safeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    safeInt32(usage.CompletionTokens),
-		TotalTokenCount:         safeInt32(usage.TotalTokens),
-		CachedContentTokenCount: safeInt32(usage.PromptTokensDetails.CachedTokens),
+		PromptTokenCount:        openaicommon.SafeInt32(usage.PromptTokens),
+		CandidatesTokenCount:    openaicommon.SafeInt32(usage.CompletionTokens),
+		TotalTokenCount:         openaicommon.SafeInt32(usage.TotalTokens),
+		CachedContentTokenCount: openaicommon.SafeInt32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: safeInt32(usage.PromptTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: safeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.CompletionTokens)},
 		},
-		ThoughtsTokenCount: safeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: openaicommon.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
 	}
 }
 
-// convertChatLogprobs converts a choice's content log probabilities into the
+// convertLogprobs converts a choice's content log probabilities into the
 // genai shape. Refusal logprobs are left out, because the tokens they describe
 // are not the ones a caller reads back as the answer.
-func convertChatLogprobs(logprobs openai.ChatCompletionChoiceLogprobs) *genai.LogprobsResult {
+func convertLogprobs(logprobs openai.ChatCompletionChoiceLogprobs) *genai.LogprobsResult {
 	if len(logprobs.Content) == 0 {
 		return nil
 	}

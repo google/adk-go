@@ -12,23 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // convertResponse takes an OpenAI API response and transforms it into our
 // generic genai.GenerateContentResponse format.
 func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, error) {
 	if resp == nil {
-		return nil, ErrEmptyResponse
+		return nil, openaicommon.ErrEmptyResponse
 	}
 	if reportsFailure(resp) {
 		return nil, failedResponseError(resp)
@@ -45,32 +46,6 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 	}, nil
 }
 
-// maxServerTextRunes bounds any server-chosen string an error quotes.
-const maxServerTextRunes = 256
-
-// clipServerText trims a server-chosen string and caps its length, so that a
-// pathological one — a megabyte of message — cannot become the error a caller
-// logs. Truncation is marked, so a clipped value does not read as the whole of
-// what the server said.
-//
-// Callers render the result with %q. That, rather than an escaper of our own,
-// is what stops a control character in it from forging a line in an operator's
-// log; see the same reasoning at [google.golang.org/adk/v2/auth/gcp].
-func clipServerText(s string) string {
-	s = strings.TrimSpace(s)
-	// Counted by ranging rather than by materialising []rune: an 8 MiB message
-	// would otherwise cost 32 MiB to yield at most a kilobyte. Ranging a string
-	// yields the byte index of each rune, so s[:i] never splits one.
-	n := 0
-	for i := range s {
-		if n == maxServerTextRunes {
-			return strings.TrimSpace(s[:i]) + "…"
-		}
-		n++
-	}
-	return s
-}
-
 // reportsFailure reports whether the server is describing a failure rather than
 // a turn, which on an HTTP 200 is the whole of what separates the two. Only
 // "failed" qualifies — "incomplete" is an ordinary truncation — except that a
@@ -84,7 +59,7 @@ func reportsFailure(resp *responses.Response) bool {
 		// Clipped, not raw: the renderer reports what clipping leaves, so a
 		// predicate reading the raw value would send a body whose error is
 		// nothing but whitespace down the failure path and then name nothing.
-		return clipServerText(resp.Error.Message) != "" || clipServerText(string(resp.Error.Code)) != ""
+		return openaicommon.ClipServerText(resp.Error.Message) != "" || openaicommon.ClipServerText(string(resp.Error.Code)) != ""
 	default:
 		return false
 	}
@@ -103,24 +78,24 @@ func reportsFailure(resp *responses.Response) bool {
 func failedResponseError(resp *responses.Response) error {
 	// Clipped, so a value of nothing but spaces contributes nothing rather than
 	// a label or separator with nothing after it.
-	msg := clipServerText(resp.Error.Message)
+	msg := openaicommon.ClipServerText(resp.Error.Message)
 	var details []string
-	if id := clipServerText(resp.ID); id != "" {
+	if id := openaicommon.ClipServerText(resp.ID); id != "" {
 		details = append(details, fmt.Sprintf("id %q", id))
 	}
-	if code := clipServerText(string(resp.Error.Code)); code != "" {
+	if code := openaicommon.ClipServerText(string(resp.Error.Code)); code != "" {
 		details = append(details, fmt.Sprintf("code %q", code))
 	}
 	switch joined := strings.Join(details, ", "); {
 	case joined != "" && msg != "":
-		return fmt.Errorf("%w (%s): %q", ErrResponseFailed, joined, msg)
+		return fmt.Errorf("%w (%s): %q", openaicommon.ErrResponseFailed, joined, msg)
 	case joined != "":
-		return fmt.Errorf("%w (%s)", ErrResponseFailed, joined)
+		return fmt.Errorf("%w (%s)", openaicommon.ErrResponseFailed, joined)
 	case msg != "":
-		return fmt.Errorf("%w: %q", ErrResponseFailed, msg)
+		return fmt.Errorf("%w: %q", openaicommon.ErrResponseFailed, msg)
 	default:
 		// The server said "failed" and nothing more.
-		return ErrResponseFailed
+		return openaicommon.ErrResponseFailed
 	}
 }
 
@@ -148,7 +123,7 @@ func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
 // for each.
 func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Part, error) {
 	if len(items) == 0 {
-		return nil, ErrNoOutputItems
+		return nil, openaicommon.ErrNoOutputItems
 	}
 	var parts []*genai.Part
 	for _, item := range items {
@@ -163,7 +138,7 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 				case "refusal":
 					parts = append(parts, &genai.Part{Text: content.Refusal})
 				default:
-					return nil, fmt.Errorf("%w: %q", ErrUnsupportedMessageContentType, content.Type)
+					return nil, fmt.Errorf("%w: %q", openaicommon.ErrUnsupportedMessageContentType, content.Type)
 				}
 			}
 		case "function_call":
@@ -185,11 +160,11 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 				}
 			}
 		default:
-			return nil, fmt.Errorf("%w: %q", ErrUnsupportedOutputItemType, item.Type)
+			return nil, fmt.Errorf("%w: %q", openaicommon.ErrUnsupportedOutputItemType, item.Type)
 		}
 	}
 	if len(parts) == 0 {
-		return nil, ErrNoTextOrToolContent
+		return nil, openaicommon.ErrNoTextOrToolContent
 	}
 	return parts, nil
 }
@@ -227,7 +202,7 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 			// is no original payload for a re-encode to disagree with.
 			b, err := json.Marshal(v)
 			if err != nil {
-				return nil, fmt.Errorf("%w: %w", ErrFunctionCallArgs, err)
+				return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
 			}
 			raw = string(b)
 		}
@@ -237,7 +212,7 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 	}
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrFunctionCallArgs, err)
+		return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
 	}
 	if args == nil {
 		// The payload was JSON null: the call takes no arguments.
@@ -328,26 +303,19 @@ func finishMessage(resp *responses.Response, incompleteEvent bool) string {
 	return ""
 }
 
-func safeInt32(v int64) int32 {
-	if v > math.MaxInt32 {
-		return math.MaxInt32
-	}
-	return int32(v)
-}
-
 func convertUsage(usage responses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        safeInt32(usage.InputTokens),
-		CandidatesTokenCount:    safeInt32(usage.OutputTokens),
-		TotalTokenCount:         safeInt32(usage.TotalTokens),
-		CachedContentTokenCount: safeInt32(usage.InputTokensDetails.CachedTokens),
+		PromptTokenCount:        openaicommon.SafeInt32(usage.InputTokens),
+		CandidatesTokenCount:    openaicommon.SafeInt32(usage.OutputTokens),
+		TotalTokenCount:         openaicommon.SafeInt32(usage.TotalTokens),
+		CachedContentTokenCount: openaicommon.SafeInt32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: safeInt32(usage.InputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: safeInt32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.OutputTokens)},
 		},
-		ThoughtsTokenCount: safeInt32(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: openaicommon.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
 	}
 }
 

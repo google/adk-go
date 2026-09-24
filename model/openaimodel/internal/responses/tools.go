@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // convertTools takes our generic tool definitions and converts them into
@@ -34,7 +34,7 @@ func convertTools(cfg *genai.GenerateContentConfig) ([]responses.ToolUnionParam,
 	}
 	var tools []responses.ToolUnionParam
 	for i, tool := range cfg.Tools {
-		if err := ensureFunctionToolOnly(i, tool); err != nil {
+		if err := openaicommon.EnsureFunctionToolOnly(i, tool); err != nil {
 			return nil, err
 		}
 		for _, decl := range tool.FunctionDeclarations {
@@ -46,21 +46,6 @@ func convertTools(cfg *genai.GenerateContentConfig) ([]responses.ToolUnionParam,
 		}
 	}
 	return tools, nil
-}
-
-func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
-	if tool == nil {
-		return fmt.Errorf("openai: tool %d is nil", idx)
-	}
-	if tool.Retrieval != nil || tool.GoogleSearch != nil || tool.GoogleSearchRetrieval != nil ||
-		tool.GoogleMaps != nil || tool.EnterpriseWebSearch != nil ||
-		tool.URLContext != nil || tool.ComputerUse != nil || tool.CodeExecution != nil {
-		return fmt.Errorf("openai: non-function tools are not supported (tool %d)", idx)
-	}
-	if len(tool.FunctionDeclarations) == 0 {
-		return fmt.Errorf("openai: tool %d does not declare any functions", idx)
-	}
-	return nil
 }
 
 // convertFunctionDeclaration takes a generic genai.FunctionDeclaration and
@@ -80,12 +65,12 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := schemaToMap(fn.Parameters)
+	paramsMap, err := openaicommon.SchemaToMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = normalizeSchema(fn.ParametersJsonSchema)
+		paramsMap, err = openaicommon.NormalizeSchema(fn.ParametersJsonSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -170,46 +155,5 @@ func allowedToolParam(names []string, mode responses.ToolChoiceAllowedMode) *res
 		Mode:  mode,
 		Type:  constant.AllowedTools("allowed_tools"),
 		Tools: tools,
-	}
-}
-
-func schemaToMap(schema *genai.Schema) (map[string]any, error) {
-	if schema == nil {
-		return nil, nil
-	}
-	bytes, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("openai: marshal schema: %w", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(bytes, &result); err != nil {
-		return nil, fmt.Errorf("openai: unmarshal schema: %w", err)
-	}
-	lowercaseSchemaTypes(result)
-	return result, nil
-}
-
-func lowercaseSchemaTypes(val any) {
-	switch v := val.(type) {
-	case map[string]any:
-		if t, ok := v["type"]; ok {
-			switch tVal := t.(type) {
-			case string:
-				v["type"] = strings.ToLower(tVal)
-			case []any:
-				for i, item := range tVal {
-					if str, ok := item.(string); ok {
-						tVal[i] = strings.ToLower(str)
-					}
-				}
-			}
-		}
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
-		}
-	case []any:
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
-		}
 	}
 }
