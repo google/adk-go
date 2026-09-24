@@ -17,6 +17,7 @@ package a2a
 import (
 	"iter"
 	"net"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/gorilla/mux"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -174,4 +176,49 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 			t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], wantMessage)
 		}
 	})
+}
+
+// TestSetupSubroutersContributesAgentURL pins that the URL the agent card
+// advertises is contributed as an allowed origin.
+//
+// The web launcher guards every route it serves against DNS rebinding, and a
+// loopback bind is what arms that check. Advertising a name while binding
+// loopback is how this runs behind a proxy on the same machine, so without the
+// contribution every call the card describes would be refused as a rebound one.
+func TestSetupSubroutersContributesAgentURL(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default", want: "http://localhost:8080"},
+		{
+			name: "advertised name",
+			args: []string{"-a2a_agent_url", "https://agent.example.com"},
+			want: "https://agent.example.com",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) error = %v", tc.args, err)
+			}
+			config := &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+				BindHost:       "127.0.0.1",
+			}
+			if err := l.SetupSubrouters(mux.NewRouter(), config); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+			if !slices.Contains(config.AllowedOrigins, tc.want) {
+				t.Errorf("AllowedOrigins = %q, want it to contain %q", config.AllowedOrigins, tc.want)
+			}
+		})
+	}
 }

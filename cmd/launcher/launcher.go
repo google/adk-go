@@ -100,6 +100,27 @@ type Config struct {
 	// Empty means no bind was declared and that check stays off.
 	BindHost string
 
+	// AllowedOrigins lists the web origins allowed to call the web launcher's
+	// server from a browser, as scheme://host[:port]; a bare host or host:port
+	// is read as http. A "*" entry turns off both checks described here.
+	//
+	// The web launcher checks every request against one policy, built from
+	// this list once every sublauncher is set up. A cross-origin browser
+	// request from an origin not on the list is refused with 403; a
+	// same-origin one is served. When BindHost is a loopback address, a
+	// request whose Host is neither loopback nor the host of a listed origin
+	// is refused too, whether or not it carries an Origin, which is what stops
+	// a DNS-rebinding page. On any other bind that check is off, and a
+	// rebound page gets through. The Authenticator then protects the REST API
+	// alone; the other routes, A2A among them, have no authentication.
+	//
+	// A caller may set it, the web launcher's -allow_origins flag appends to
+	// it, and a sublauncher appends the origins it serves, such as the web UI
+	// origin or an advertised agent URL, in SetupSubrouters. A sublauncher sees
+	// only the entries added before its own SetupSubrouters runs, and that is
+	// the list anything it builds from this field is given.
+	AllowedOrigins []string
+
 	// Authorizer provides a way to check whether the calling user and user from payload match.
 	// You can leave nil if you accept any combination. You will get [authz.Noop] as a default.
 	// You can also use [authz.Strict] which will ensure that the calling user and the
