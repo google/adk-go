@@ -49,8 +49,9 @@ type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
-// In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
-// decides to not emit an A2A event.
+// For streaming requests, the callback is invoked for every response that enters normal event processing. Responses consumed
+// only to discover remote task information during cancellation cleanup are not converted and do not invoke this callback.
+// The session event parameter may be nil if conversion logic decides not to emit an A2A event.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
@@ -121,7 +122,11 @@ type A2AConfig struct {
 	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 	// If Run exited due to an error including context cancellation it will be passed as cause.
 	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
-	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	// If no callback is provided, the default behavior is to make a CancelTask RPC request.
+	// During streaming, if Run is canceled before task information arrives, it may wait up to five seconds
+	// for that information, bounded by the caller's deadline. CancelTask uses the remainder of that budget
+	// if at least 100 milliseconds remain; otherwise, it gets a new detached five-second timeout.
+	// This fallback can extend total cleanup time beyond the shared budget and the caller's deadline.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
