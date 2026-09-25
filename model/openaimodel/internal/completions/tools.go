@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"fmt"
@@ -21,22 +21,24 @@ import (
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
-// convertChatTools converts function declarations into Chat Completions tools,
+// convertTools converts function declarations into Chat Completions tools,
 // whose declaration nests under a "function" object that the flat Responses
 // shape does not have.
-func convertChatTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletionToolUnionParam, error) {
+func convertTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletionToolUnionParam, error) {
 	if cfg == nil || len(cfg.Tools) == 0 {
 		return nil, nil
 	}
 	var tools []openai.ChatCompletionToolUnionParam
 	for i, tool := range cfg.Tools {
-		if err := ensureFunctionToolOnly(i, tool); err != nil {
+		if err := openaicommon.EnsureFunctionToolOnly(i, tool); err != nil {
 			return nil, err
 		}
 		for _, decl := range tool.FunctionDeclarations {
-			fn, err := convertChatFunctionDeclaration(decl)
+			fn, err := convertFunctionDeclaration(decl)
 			if err != nil {
 				return nil, err
 			}
@@ -46,9 +48,9 @@ func convertChatTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletion
 	return tools, nil
 }
 
-// convertChatFunctionDeclaration converts one function declaration into a Chat
+// convertFunctionDeclaration converts one function declaration into a Chat
 // Completions function tool.
-func convertChatFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatCompletionFunctionToolParam, error) {
+func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatCompletionFunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
 	}
@@ -56,12 +58,12 @@ func convertChatFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.Chat
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := schemaToMap(fn.Parameters)
+	paramsMap, err := openaicommon.SchemaToMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = normalizeSchema(fn.ParametersJsonSchema)
+		paramsMap, err = openaicommon.NormalizeSchema(fn.ParametersJsonSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -83,9 +85,9 @@ func convertChatFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.Chat
 	return &openai.ChatCompletionFunctionToolParam{Function: def}, nil
 }
 
-// convertChatToolChoice translates a tool config into the Chat Completions
+// convertToolChoice translates a tool config into the Chat Completions
 // tool_choice, which names a function one level deeper than Responses does.
-func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToolChoiceOptionUnionParam, error) {
+func convertToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToolChoiceOptionUnionParam, error) {
 	if toolCfg == nil || toolCfg.FunctionCallingConfig == nil {
 		return nil, nil
 	}
@@ -97,7 +99,7 @@ func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToo
 			// Nothing named, so the provider's own default stands.
 			return nil, nil
 		}
-		choice.OfAllowedTools = chatAllowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeAuto)
+		choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeAuto)
 	case genai.FunctionCallingConfigModeNone:
 		choice.OfAuto = param.NewOpt("none")
 	case genai.FunctionCallingConfigModeAny:
@@ -111,7 +113,7 @@ func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToo
 				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: name},
 			}
 		} else {
-			choice.OfAllowedTools = chatAllowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeRequired)
+			choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, openai.ChatCompletionAllowedToolsModeRequired)
 		}
 	default:
 		return nil, fmt.Errorf("openai: unsupported tool calling mode %q", cfg.Mode)
@@ -124,7 +126,7 @@ func convertChatToolChoice(toolCfg *genai.ToolConfig) (*openai.ChatCompletionToo
 }
 
 // soleFunctionName reports the one function names allows, skipping the empty
-// entries chatAllowedToolParam also skips, and false for none or several.
+// entries allowedToolParam also skips, and false for none or several.
 func soleFunctionName(names []string) (string, bool) {
 	sole := ""
 	for _, name := range names {
@@ -139,9 +141,9 @@ func soleFunctionName(names []string) (string, bool) {
 	return sole, sole != ""
 }
 
-// chatAllowedToolParam builds the allowed-tools choice. Each entry nests the
+// allowedToolParam builds the allowed-tools choice. Each entry nests the
 // name under "function", unlike the flat Responses form.
-func chatAllowedToolParam(names []string, mode openai.ChatCompletionAllowedToolsMode) *openai.ChatCompletionAllowedToolChoiceParam {
+func allowedToolParam(names []string, mode openai.ChatCompletionAllowedToolsMode) *openai.ChatCompletionAllowedToolChoiceParam {
 	tools := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		if name == "" {

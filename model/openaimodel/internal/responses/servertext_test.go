@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"errors"
@@ -22,117 +22,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/openai/openai-go/v3/responses"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
-
-// TestClipServerText pins the cap's arithmetic, which counts runes while the
-// strings it guards are bytes.
-func TestClipServerText(t *testing.T) {
-	tests := []struct {
-		name      string
-		in        string
-		wantRunes int
-		wantMark  bool
-	}{
-		{name: "short", in: "upstream exploded", wantRunes: 17},
-		{name: "blank", in: "  \n\t ", wantRunes: 0},
-		{
-			// Exactly at the cap: nothing was dropped, so nothing may claim it
-			// was. Paired with the row below, it pins the boundary at exactly
-			// maxServerTextRunes, catching an off-by-one on either side.
-			name:      "exactly the cap",
-			in:        strings.Repeat("A", maxServerTextRunes),
-			wantRunes: maxServerTextRunes,
-		},
-		{
-			name:      "one past the cap",
-			in:        strings.Repeat("A", maxServerTextRunes+1),
-			wantRunes: maxServerTextRunes + 1, // the cap plus the marker
-			wantMark:  true,
-		},
-		{
-			// Multi-byte, so slicing by bytes rather than runes would sever a
-			// rune and emit invalid UTF-8.
-			name:      "multi-byte past the cap",
-			in:        strings.Repeat("世", maxServerTextRunes+10),
-			wantRunes: maxServerTextRunes + 1,
-			wantMark:  true,
-		},
-		{
-			name:      "astral past the cap",
-			in:        strings.Repeat("🙂", maxServerTextRunes+10),
-			wantRunes: maxServerTextRunes + 1,
-			wantMark:  true,
-		},
-		{
-			// The cap lands inside a run of spaces, so the marker would
-			// otherwise be pushed out behind them.
-			name:      "cut inside whitespace",
-			in:        strings.Repeat("A", 250) + strings.Repeat(" ", 10) + strings.Repeat("B", 10),
-			wantRunes: 251, // 250 kept, the spaces dropped, plus the marker
-			wantMark:  true,
-		},
-	}
-	// Asserted absolutely, once. Every other bound in this file is written in
-	// terms of maxServerTextRunes, so raising the constant would otherwise slip
-	// past all of them at once.
-	if maxServerTextRunes != 256 {
-		t.Errorf("maxServerTextRunes = %d, want 256; raising the cap is a deliberate change, so update this line and the bounds written against it", maxServerTextRunes)
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := clipServerText(tc.in)
-			if n := utf8.RuneCountInString(got); n != tc.wantRunes {
-				t.Errorf("clipServerText() returned %d runes, want %d", n, tc.wantRunes)
-			}
-			if !utf8.ValidString(got) {
-				t.Errorf("clipServerText() returned invalid UTF-8: %q", got)
-			}
-			if marked := strings.HasSuffix(got, "…"); marked != tc.wantMark {
-				t.Errorf("clipServerText() truncation marked = %v, want %v", marked, tc.wantMark)
-			}
-		})
-	}
-}
-
-// FuzzClipServerText pins the invariants the cap exists for, on input no table
-// would think to write. Severing a multi-byte rune shows up here as invalid
-// UTF-8, which is what covers the boundary arithmetic.
-func FuzzClipServerText(f *testing.F) {
-	for _, seed := range []string{
-		"", "  ", "upstream exploded", "line\r\nforged", "\x1b[2J", "\u2028sep",
-		// An ellipsis the server itself sent, which is not a truncation marker.
-		"rate limited, retrying …",
-		strings.Repeat("A", maxServerTextRunes),
-		strings.Repeat("世", maxServerTextRunes+1),
-		strings.Repeat("🙂", maxServerTextRunes+1),
-		// Clipped mid-whitespace, so the marker assertion below has something
-		// to bite on without waiting for the fuzzer to find it.
-		strings.Repeat("A", 250) + strings.Repeat(" ", 10) + strings.Repeat("B", 10),
-	} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, in string) {
-		got := clipServerText(in)
-		if n := utf8.RuneCountInString(got); n > maxServerTextRunes+1 {
-			t.Errorf("clipServerText(%q) returned %d runes, want at most %d", in, n, maxServerTextRunes+1)
-		}
-		if utf8.ValidString(in) && !utf8.ValidString(got) {
-			t.Errorf("clipServerText(%q) turned valid UTF-8 into %q", in, got)
-		}
-		if strings.TrimSpace(got) != got {
-			t.Errorf("clipServerText(%q) = %q, want no leading or trailing space", in, got)
-		}
-		// The marker sits at the end, so trailing space hides behind it. Gated
-		// on the input having actually been clipped, because a trailing "…" the
-		// server sent is its own text and the space before it is not ours to
-		// judge.
-		if utf8.RuneCountInString(strings.TrimSpace(in)) > maxServerTextRunes {
-			if body, marked := strings.CutSuffix(got, "…"); marked && strings.TrimSpace(body) != body {
-				t.Errorf("clipServerText(%q) = %q, want no space before the truncation marker", in, got)
-			}
-		}
-	})
-}
 
 // FuzzFailedResponseError pins what no server-chosen string may do to the error
 // built from it: carry something into an operator's log that splits a line, or
@@ -166,12 +58,12 @@ func FuzzFailedResponseError(f *testing.F) {
 		// an unprintable astral one — as the ten characters of \U0010ffff, and
 		// wraps the result in two quotes. Three such fields, plus the labels
 		// and the sentinel, is the ceiling.
-		const maxRendered = 3*(10*(maxServerTextRunes+1)+2) + 64
+		const maxRendered = 3*(10*(openaicommon.MaxServerTextRunes+1)+2) + 64
 		if n := utf8.RuneCountInString(got); n > maxRendered {
 			t.Errorf("failedResponseError() produced %d runes, want at most %d", n, maxRendered)
 		}
-		if !errors.Is(err, ErrResponseFailed) {
-			t.Errorf("failedResponseError() = %v, want it to wrap ErrResponseFailed", err)
+		if !errors.Is(err, openaicommon.ErrResponseFailed) {
+			t.Errorf("failedResponseError() = %v, want it to wrap openaicommon.ErrResponseFailed", err)
 		}
 	})
 }
@@ -215,7 +107,7 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 			Error:  responses.ResponseError{Message: strings.Repeat("A", 1<<20)},
 		})
 		// Runes, because that is the unit the cap counts in.
-		if got, max := utf8.RuneCountInString(err.Error()), maxServerTextRunes+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), openaicommon.MaxServerTextRunes+64; got > max {
 			t.Errorf("error is %d runes, want at most %d", got, max)
 		}
 		if !strings.HasSuffix(err.Error(), `…"`) {
@@ -232,7 +124,7 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 		// Non-ASCII on purpose. Both runes are printable, so %q emits them as
 		// themselves — one rune, several bytes each — and a bound counted in
 		// bytes would trip on the encoding rather than on any real growth.
-		if got, max := utf8.RuneCountInString(err.Error()), 3*(maxServerTextRunes+1)+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), 3*(openaicommon.MaxServerTextRunes+1)+64; got > max {
 			t.Errorf("error is %d runes, want at most %d", got, max)
 		}
 	})
@@ -320,7 +212,7 @@ func TestStreamTranslator_ErrorEvent_ServerText(t *testing.T) {
 		if err == nil {
 			t.Fatal("process() err = nil, want the stream error")
 		}
-		if got, max := utf8.RuneCountInString(err.Error()), maxServerTextRunes+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), openaicommon.MaxServerTextRunes+64; got > max {
 			t.Errorf("process() err is %d runes, want at most %d", got, max)
 		}
 	})

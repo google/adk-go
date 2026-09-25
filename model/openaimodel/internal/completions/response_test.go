@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"encoding/json"
@@ -23,6 +23,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // decodeCompletion builds a ChatCompletion from the JSON a provider would send,
@@ -36,15 +38,15 @@ func decodeCompletion(t *testing.T, body string) *openai.ChatCompletion {
 	return &resp
 }
 
-func TestConvertChatCompletion_Text(t *testing.T) {
+func TestConvertCompletion_Text(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"chatcmpl-1","model":"gpt-4o-mini","object":"chat.completion",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hail at -7 C"}}],
 		"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}
 	}`)
-	got, err := convertChatCompletion(resp)
+	got, err := convertCompletion(resp)
 	if err != nil {
-		t.Fatalf("convertChatCompletion() err = %v", err)
+		t.Fatalf("convertCompletion() err = %v", err)
 	}
 	if got.ResponseID != "chatcmpl-1" || got.ModelVersion != "gpt-4o-mini" {
 		t.Errorf("id/model = %q/%q", got.ResponseID, got.ModelVersion)
@@ -64,13 +66,13 @@ func TestConvertChatCompletion_Text(t *testing.T) {
 	}
 }
 
-func TestConvertChatCompletion_Refusal(t *testing.T) {
+func TestConvertCompletion_Refusal(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop",
 		"message":{"role":"assistant","content":"","refusal":"I cannot help with that"}}]}`)
-	got, err := convertChatCompletion(resp)
+	got, err := convertCompletion(resp)
 	if err != nil {
-		t.Fatalf("convertChatCompletion() err = %v", err)
+		t.Fatalf("convertCompletion() err = %v", err)
 	}
 	// Flattened to text, matching what the Responses path does with a refusal
 	// content block, so one refusal reads the same on either endpoint.
@@ -80,15 +82,15 @@ func TestConvertChatCompletion_Refusal(t *testing.T) {
 	}
 }
 
-func TestConvertChatCompletion_ToolCalls(t *testing.T) {
+func TestConvertCompletion_ToolCalls(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{
 			"role":"assistant","content":"",
 			"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]
 		}}]}`)
-	got, err := convertChatCompletion(resp)
+	got, err := convertCompletion(resp)
 	if err != nil {
-		t.Fatalf("convertChatCompletion() err = %v", err)
+		t.Fatalf("convertCompletion() err = %v", err)
 	}
 	parts := got.Candidates[0].Content.Parts
 	if len(parts) != 1 || parts[0].FunctionCall == nil {
@@ -104,7 +106,7 @@ func TestConvertChatCompletion_ToolCalls(t *testing.T) {
 	}
 }
 
-func TestConvertChatCompletion_ParallelToolCalls(t *testing.T) {
+func TestConvertCompletion_ParallelToolCalls(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{
 			"role":"assistant","content":"working on it",
@@ -112,9 +114,9 @@ func TestConvertChatCompletion_ParallelToolCalls(t *testing.T) {
 				{"id":"a","type":"function","function":{"name":"f","arguments":"{}"}},
 				{"id":"b","type":"function","function":{"name":"g","arguments":"{\"n\":3}"}}
 			]}}]}`)
-	got, err := convertChatCompletion(resp)
+	got, err := convertCompletion(resp)
 	if err != nil {
-		t.Fatalf("convertChatCompletion() err = %v", err)
+		t.Fatalf("convertCompletion() err = %v", err)
 	}
 	parts := got.Candidates[0].Content.Parts
 	if len(parts) != 3 {
@@ -132,10 +134,10 @@ func TestConvertChatCompletion_ParallelToolCalls(t *testing.T) {
 	}
 }
 
-// TestConvertChatCompletion_EmptyToolArguments covers the two ways a provider
+// TestConvertCompletion_EmptyToolArguments covers the two ways a provider
 // says a call takes no arguments besides "{}": leaving them out, and JSON null.
 // Either must reach the tool as an empty map rather than a nil one.
-func TestConvertChatCompletion_EmptyToolArguments(t *testing.T) {
+func TestConvertCompletion_EmptyToolArguments(t *testing.T) {
 	for _, args := range []string{``, `null`} {
 		t.Run(fmt.Sprintf("%q", args), func(t *testing.T) {
 			raw, err := json.Marshal(args)
@@ -144,9 +146,9 @@ func TestConvertChatCompletion_EmptyToolArguments(t *testing.T) {
 			}
 			resp := decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{
 				"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":`+string(raw)+`}}]}}]}`)
-			got, err := convertChatCompletion(resp)
+			got, err := convertCompletion(resp)
 			if err != nil {
-				t.Fatalf("convertChatCompletion() err = %v", err)
+				t.Fatalf("convertCompletion() err = %v", err)
 			}
 			call := got.Candidates[0].Content.Parts[0].FunctionCall
 			if call == nil || call.Args == nil || len(call.Args) != 0 {
@@ -156,14 +158,14 @@ func TestConvertChatCompletion_EmptyToolArguments(t *testing.T) {
 	}
 }
 
-func TestConvertChatCompletion_UnparseableToolArguments(t *testing.T) {
+func TestConvertCompletion_UnparseableToolArguments(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{
 			"role":"assistant","tool_calls":[{"id":"call_9","type":"function",
 			"function":{"name":"get_weather","arguments":"{not json"}}]}}]}`)
-	_, err := convertChatCompletion(resp)
-	if !errors.Is(err, ErrFunctionCallArgs) {
-		t.Fatalf("err = %v, want %v", err, ErrFunctionCallArgs)
+	_, err := convertCompletion(resp)
+	if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 	}
 	// Conversion aborts on the first bad call, so the error has to identify it.
 	if !strings.Contains(err.Error(), "get_weather") || !strings.Contains(err.Error(), "call_9") {
@@ -171,30 +173,30 @@ func TestConvertChatCompletion_UnparseableToolArguments(t *testing.T) {
 	}
 }
 
-func TestConvertChatCompletion_Empty(t *testing.T) {
+func TestConvertCompletion_Empty(t *testing.T) {
 	tests := []struct {
 		name string
 		resp *openai.ChatCompletion
 		want error
 	}{
-		{name: "nil", resp: nil, want: ErrEmptyResponse},
-		{name: "no choices", resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[]}`), want: ErrNoChoices},
+		{name: "nil", resp: nil, want: openaicommon.ErrEmptyResponse},
+		{name: "no choices", resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[]}`), want: openaicommon.ErrNoChoices},
 		{
 			name: "choice with nothing to read",
 			resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""}}]}`),
-			want: ErrNoTextOrToolContent,
+			want: openaicommon.ErrNoTextOrToolContent,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := convertChatCompletion(tt.resp); !errors.Is(err, tt.want) {
+			if _, err := convertCompletion(tt.resp); !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
 			}
 		})
 	}
 }
 
-func TestChatFinishReason(t *testing.T) {
+func TestFinishReason(t *testing.T) {
 	tests := []struct {
 		reason string
 		want   genai.FinishReason
@@ -211,20 +213,20 @@ func TestChatFinishReason(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
-			if got := chatFinishReason(tt.reason); got != tt.want {
-				t.Errorf("chatFinishReason(%q) = %v, want %v", tt.reason, got, tt.want)
+			if got := finishReason(tt.reason); got != tt.want {
+				t.Errorf("finishReason(%q) = %v, want %v", tt.reason, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestConvertChatUsage(t *testing.T) {
+func TestConvertUsage(t *testing.T) {
 	resp := decodeCompletion(t, `{"id":"c","model":"m",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],
 		"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
 			"prompt_tokens_details":{"cached_tokens":40},
 			"completion_tokens_details":{"reasoning_tokens":7}}}`)
-	got := convertChatUsage(resp.Usage)
+	got := convertUsage(resp.Usage)
 	// The field names differ from the Responses API's on every count, so this
 	// pins the mapping rather than the arithmetic.
 	if got.PromptTokenCount != 100 || got.CandidatesTokenCount != 20 || got.TotalTokenCount != 120 {
@@ -238,12 +240,12 @@ func TestConvertChatUsage(t *testing.T) {
 	}
 }
 
-func TestConvertChatLogprobs(t *testing.T) {
+func TestConvertLogprobs(t *testing.T) {
 	resp := decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop",
 		"message":{"role":"assistant","content":"hi"},
 		"logprobs":{"content":[{"token":"hi","logprob":-0.25,
 			"top_logprobs":[{"token":"hi","logprob":-0.25},{"token":"yo","logprob":-2.5}]}]}}]}`)
-	got := convertChatLogprobs(resp.Choices[0].Logprobs)
+	got := convertLogprobs(resp.Choices[0].Logprobs)
 	if got == nil || len(got.ChosenCandidates) != 1 {
 		t.Fatalf("logprobs = %#v", got)
 	}
@@ -255,8 +257,8 @@ func TestConvertChatLogprobs(t *testing.T) {
 	}
 }
 
-func TestConvertChatLogprobs_Absent(t *testing.T) {
-	if got := convertChatLogprobs(openai.ChatCompletionChoiceLogprobs{}); got != nil {
+func TestConvertLogprobs_Absent(t *testing.T) {
+	if got := convertLogprobs(openai.ChatCompletionChoiceLogprobs{}); got != nil {
 		t.Errorf("logprobs = %#v, want nil when the provider sent none", got)
 	}
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"encoding/json"
@@ -97,49 +97,6 @@ func TestConvertTools(t *testing.T) {
 				}
 				if !tool.OfFunction.Strict.Valid() || tool.OfFunction.Strict.Value {
 					t.Errorf("tool %d Strict = %+v, want an explicit false", i, tool.OfFunction.Strict)
-				}
-			}
-		})
-	}
-}
-
-func TestEnsureFunctionToolOnly(t *testing.T) {
-	tests := []struct {
-		name    string
-		tool    *genai.Tool
-		wantErr string
-	}{
-		{
-			name:    "nil tool",
-			tool:    nil,
-			wantErr: "tool 0 is nil",
-		},
-		{
-			name:    "non-function tool",
-			tool:    &genai.Tool{GoogleSearch: &genai.GoogleSearch{}},
-			wantErr: "non-function tools",
-		},
-		{
-			name:    "no functions",
-			tool:    &genai.Tool{},
-			wantErr: "does not declare any functions",
-		},
-		{
-			name: "valid",
-			tool: &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "fn1"}}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := ensureFunctionToolOnly(0, tc.tool)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("expected no error, got %v", err)
-				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 				}
 			}
 		})
@@ -290,8 +247,9 @@ func TestConvertFunctionDeclarationMarshalsStrict(t *testing.T) {
 }
 
 // TestConvertFunctionDeclarationKeepsOptionalParameters pins the constraint that
-// rules out simply reusing enforceStrictOpenAISchema here: it rewrites required
-// to list every property, which would make optional tool arguments mandatory.
+// rules out simply reusing openaicommon.EnforceStrictOpenAISchema here: it
+// rewrites required to list every property, which would make optional tool
+// arguments mandatory.
 //
 // All three parameter paths are covered, because the rewrite has to be pinned
 // out of each one separately. ParametersJsonSchema is the path functiontool.New
@@ -363,44 +321,6 @@ func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 			}
 			if got := fn.Parameters["additionalProperties"]; !reflect.DeepEqual(got, tc.wantAdditionalProperties) {
 				t.Errorf("additionalProperties = %v, want %v, in %v", got, tc.wantAdditionalProperties, fn.Parameters)
-			}
-		})
-	}
-}
-
-func TestSchemaToMap(t *testing.T) {
-	tests := []struct {
-		name    string
-		schema  *genai.Schema
-		wantErr bool
-		want    map[string]any
-	}{
-		{
-			name:   "nil schema",
-			schema: nil,
-			want:   nil,
-		},
-		{
-			name:   "string type",
-			schema: &genai.Schema{Type: genai.TypeString},
-			want:   map[string]any{"type": "string"}, // Marshals as "STRING" if using standard json, but we lower it
-		},
-		{
-			name:    "invalid type",
-			schema:  &genai.Schema{Example: make(chan int)},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := schemaToMap(tc.schema)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("schemaToMap() error = %v, wantErr %v", err, tc.wantErr)
-			} else {
-				if got["type"] != tc.want["type"] {
-					t.Fatalf("unexpected map: %+v, want %+v", got, tc.want)
-				}
 			}
 		})
 	}
