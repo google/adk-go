@@ -15,7 +15,9 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
 	"net/http"
 	"path/filepath"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 )
@@ -132,6 +135,247 @@ func TestModel_GenerateStream(t *testing.T) {
 				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.FinalText, tt.want, diff)
 			}
 		})
+	}
+}
+
+func TestModel_GeneratePreservesEmptyTextForTrailingThoughtSignature(t *testing.T) {
+	signature := []byte("trailing-signature")
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	chunks := []*genai.GenerateContentResponse{
+		{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{Text: "Hel"}},
+				},
+			}},
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{Text: "lo"}},
+				},
+			}},
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						Text:             "",
+						ThoughtSignature: signature,
+					}},
+				},
+				FinishReason: genai.FinishReasonStop,
+			}},
+		},
+	}
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+			if err != nil {
+				t.Fatalf("ProcessResponse() error = %v", err)
+			}
+		}
+	}
+	aggregated := aggregator.Close()
+	if aggregated == nil || aggregated.Content == nil {
+		t.Fatal("Close() returned no content")
+	}
+	if got, want := len(aggregated.Content.Parts), 2; got != want {
+		t.Fatalf("len(aggregated.Content.Parts) = %d, want %d", got, want)
+	}
+	if got, want := aggregated.Content.Parts[0].Text, "Hello"; got != want {
+		t.Fatalf("aggregated text = %q, want %q", got, want)
+	}
+	if got := aggregated.Content.Parts[1].ThoughtSignature; !cmp.Equal(got, signature) {
+		t.Fatalf("trailing thought signature mismatch: got %q", got)
+	}
+
+	var requestBody []byte
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var err error
+		requestBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`,
+			)),
+		}, nil
+	})
+	testModel, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "test-project",
+		Location:   "eu",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			aggregated.Content,
+			genai.NewContentFromText("Continue", genai.RoleUser),
+		},
+	}
+	for _, err := range testModel.GenerateContent(t.Context(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+
+	var payload struct {
+		Contents []struct {
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(requestBody, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(request body) error = %v", err)
+	}
+	if got, want := len(payload.Contents), 2; got != want {
+		t.Fatalf("request contents count = %d, want %d", got, want)
+	}
+	parts := payload.Contents[0].Parts
+	if got, want := len(parts), 2; got != want {
+		t.Fatalf("model history parts count = %d, want %d", got, want)
+	}
+	if got, want := parts[0]["text"], any("Hello"); got != want {
+		t.Errorf("serialized answer text = %#v, want %#v", got, want)
+	}
+	if got, ok := parts[1]["text"]; !ok || got != "" {
+		t.Errorf("serialized trailing part text = %#v, present = %t; want present empty text", got, ok)
+	}
+	if _, ok := parts[1]["thoughtSignature"]; !ok {
+		t.Error("serialized trailing part lost thoughtSignature")
+	}
+}
+
+func TestConfigPreservingEmptyTextThoughtSignatures(t *testing.T) {
+	providerCalls := 0
+	originalProvider := func(body map[string]any) map[string]any {
+		providerCalls++
+		body["providerMarker"] = true
+		return body
+	}
+	original := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
+		ExtrasRequestProvider: originalProvider,
+	}}
+	configured := configPreservingEmptyTextThoughtSignatures(original)
+
+	parts := []any{
+		map[string]any{"text": "Hello", "thoughtSignature": "first"},
+		map[string]any{"thoughtSignature": "second"},
+		map[string]any{"functionCall": map[string]any{"name": "tool"}, "thoughtSignature": "tool-signature"},
+		map[string]any{"text": "ordinary"},
+		map[string]any{"thought": true, "thoughtSignature": "thought-only"},
+		map[string]any{"thought": true},
+	}
+	body := map[string]any{
+		"contents": []any{map[string]any{"role": "model", "parts": parts}},
+	}
+	got := configured.HTTPOptions.ExtrasRequestProvider(body)
+
+	if providerCalls != 1 {
+		t.Fatalf("original ExtrasRequestProvider calls = %d, want 1", providerCalls)
+	}
+	if marker, ok := got["providerMarker"].(bool); !ok || !marker {
+		t.Error("original ExtrasRequestProvider result was not preserved")
+	}
+	if got := parts[0].(map[string]any)["text"]; got != "Hello" {
+		t.Errorf("signed text part changed to %#v", got)
+	}
+	if got := parts[0].(map[string]any)["thoughtSignature"]; got != "first" {
+		t.Errorf("first thought signature changed to %#v", got)
+	}
+	if got, ok := parts[1].(map[string]any)["text"]; !ok || got != "" {
+		t.Errorf("signature-only part text = %#v, present = %t; want present empty text", got, ok)
+	}
+	if got := parts[1].(map[string]any)["thoughtSignature"]; got != "second" {
+		t.Errorf("second thought signature changed to %#v", got)
+	}
+	if _, ok := parts[2].(map[string]any)["text"]; ok {
+		t.Error("function-call part gained a second data field")
+	}
+	if got := parts[3].(map[string]any)["text"]; got != "ordinary" {
+		t.Errorf("ordinary text part changed to %#v", got)
+	}
+	if got, ok := parts[4].(map[string]any)["text"]; !ok || got != "" {
+		t.Errorf("thought-only signature part text = %#v, present = %t; want present empty text", got, ok)
+	}
+	if _, ok := parts[5].(map[string]any)["text"]; ok {
+		t.Error("metadata-only part without a thought signature gained a text field")
+	}
+
+	if original.HTTPOptions == configured.HTTPOptions {
+		t.Error("configPreservingEmptyTextThoughtSignatures reused the caller's HTTPOptions")
+	}
+	untouched := map[string]any{}
+	original.HTTPOptions.ExtrasRequestProvider(untouched)
+	if _, ok := untouched["contents"]; ok {
+		t.Error("configPreservingEmptyTextThoughtSignatures mutated the caller's provider")
+	}
+}
+
+func TestModel_GenerateStreamPreservesEmptyTextForThoughtSignature(t *testing.T) {
+	var requestBody []byte
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var err error
+		requestBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+			)),
+		}, nil
+	})
+	testModel, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "test-project",
+		Location:   "eu",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{
+					ThoughtSignature: []byte("stream-signature"),
+				}},
+			},
+			genai.NewContentFromText("Continue", genai.RoleUser),
+		},
+	}
+	for _, err := range testModel.GenerateContent(t.Context(), req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent(stream=true) error = %v", err)
+		}
+	}
+
+	var payload struct {
+		Contents []struct {
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(requestBody, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(request body) error = %v", err)
+	}
+	part := payload.Contents[0].Parts[0]
+	if got, ok := part["text"]; !ok || got != "" {
+		t.Errorf("serialized streaming history part text = %#v, present = %t; want present empty text", got, ok)
+	}
+	if _, ok := part["thoughtSignature"]; !ok {
+		t.Error("serialized streaming history part lost thoughtSignature")
 	}
 }
 
@@ -329,6 +573,12 @@ func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) 
 type headerInterceptor struct {
 	base  http.RoundTripper
 	check func(*http.Request)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (h *headerInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
