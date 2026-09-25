@@ -88,14 +88,14 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		return nil, fmt.Errorf("ListClassMethods() failed: %w", err)
 	}
 
-	log.Println("Supported methods:")
+	log.Println("Supported methods:") //nolint:forbidigo // pre-slog call site
 	for _, m := range methods {
 		sb := &strings.Builder{}
 		err = json.NewEncoder(sb).Encode(m)
 		if err != nil {
 			return nil, fmt.Errorf("json.NewEncoder failed: %w", err)
 		}
-		log.Println(sb.String())
+		log.Println(sb.String()) //nolint:forbidigo // pre-slog call site
 	}
 
 	return router, nil

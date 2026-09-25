@@ -347,7 +347,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	}
 	discardRaced := func() {
 		finish(nil, "another compaction covering the same events landed while summarizing")
-		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
+		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 	}
 
 	lost, err := raced()
@@ -391,7 +391,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 			// prompt.
 			if !compactioninternal.SanitizeSummary(modified) {
 				finish(nil, "a plugin left the summary with nothing usable in it")
-				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it")
+				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it") //nolint:forbidigo // pre-slog call site
 				return nil
 			}
 			summary = modified
@@ -434,12 +434,12 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	repairCtx, cancelRepair := compactioninternal.RepairContext(ctx)
 	defer cancelRepair()
 	if latest, err := r.reloadSession(repairCtx, storedSession); err != nil {
-		log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err)
+		log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err) //nolint:forbidigo // pre-slog call site
 	} else if repair := compactioninternal.RepairAfterAppend(summary, known, latest); repair != nil {
 		if err := r.sessionService.AppendEvent(repairCtx, current, repair); err != nil {
-			log.Printf("adk: could not store a corrected compaction record: %v", err)
+			log.Printf("adk: could not store a corrected compaction record: %v", err) //nolint:forbidigo // pre-slog call site
 		} else {
-			log.Printf("adk: corrected a compaction record that would have covered %d event(s) it did not summarize",
+			log.Printf("adk: corrected a compaction record that would have covered %d event(s) it did not summarize", //nolint:forbidigo // pre-slog call site
 				len(repair.Actions.Compaction.ExcludedEvents)-len(summary.Actions.Compaction.ExcludedEvents))
 		}
 	}
@@ -659,7 +659,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
-				log.Printf("adk: %v", err)
+				log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 			}
 		}()
 
@@ -732,7 +732,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
-				log.Printf("%v", err)
+				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
 				return
 			}
@@ -953,7 +953,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
-				log.Printf("%v", err)
+				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
 				return
 			}
@@ -1154,7 +1154,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		if subAgent != nil {
 			return subAgent, nil
 		}
-		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
+		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
 	}
 
 	events := session.Events()
@@ -1168,7 +1168,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
-			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
 			continue
 		}
 

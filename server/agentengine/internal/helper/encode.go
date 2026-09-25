@@ -30,7 +30,7 @@ import (
 func ConvertSnake(o any) any {
 	res, err := convertSnake("", "", o)
 	if err != nil {
-		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err)
+		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err) //nolint:forbidigo // pre-slog call site
 		// better to return an original version than nothing
 		return o
 	}
