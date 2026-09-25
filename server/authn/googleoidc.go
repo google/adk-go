@@ -80,8 +80,10 @@ type GoogleOIDCConfig struct {
 // token issued for cfg.Audience, verified with [idtoken.Validate].
 //
 // Both fields are required. An empty [GoogleOIDCConfig.Audience] is rejected
-// rather than treated as "verify nothing" (leave the [Authenticator] unset, or
-// use [NewNoop], to run without authentication), and an empty
+// rather than passed through to [idtoken.Validate], which skips the audience
+// check when it is given an empty one and would leave an authenticator that
+// takes a token minted for any audience at all (leave the [Authenticator]
+// unset, or use [NewNoop], to run without authentication). An empty
 // [GoogleOIDCConfig.AllowedServiceAccounts] is rejected too. Because the
 // allow-list is mandatory, an [Authenticator] this returns can never be
 // configured to accept an unlisted principal, including when it is handed
@@ -89,11 +91,16 @@ type GoogleOIDCConfig struct {
 // trigger flag.
 //
 // This mirrors GoogleOidcVerifier(audience, allowed_emails) in adk-python, with
-// one deliberate difference: adk-python's allow-list is optional (allowed_emails
-// defaults to None), whereas here it is mandatory. adk-python already answers
-// 403 for a verified-but-unlisted principal, so the [ErrForbidden]/403 this
-// returns for that case is not itself a difference; a missing, malformed or
-// unverifiable credential is a 401 either way.
+// deliberate differences. adk-python's allow-list is optional (allowed_emails
+// defaults to None), whereas here it is mandatory. adk-python also tests
+// email_verified for Python truthiness, so every non-empty string passes it,
+// "false" included, whereas here the claim must be an actual boolean. And
+// adk-python names the failed check in its response detail, where [Middleware]
+// answers with the same body for every rejection carrying a given status.
+//
+// adk-python already answers 403 for a verified-but-unlisted principal, so the
+// [ErrForbidden]/403 this returns for that case is not itself a difference, and
+// a missing, malformed or unverifiable credential is a 401 either way.
 func NewGoogleOIDC(cfg GoogleOIDCConfig) (Authenticator, error) {
 	if cfg.Audience == "" {
 		return nil, errors.New("authn: NewGoogleOIDC requires an audience")
@@ -104,10 +111,15 @@ func NewGoogleOIDC(cfg GoogleOIDCConfig) (Authenticator, error) {
 	}
 	// A blank or space-padded entry is rejected rather than stored. Length alone
 	// would pass []string{""} -- what an operator gets from an unset environment
-	// variable, or a trailing comma alongside a real entry -- and a "" in the
-	// list can never match a verified email, so it would silently weaken the
-	// allow-list without ever admitting anyone it should not, which is worse
-	// than a startup error.
+	// variable, or a trailing comma alongside a real entry -- and a "" entry is
+	// not inert. Authenticate reads an absent email claim as "", so a payload
+	// carrying email_verified true with no email matches a blank entry and is
+	// admitted. Refusing the entry here keeps that unreachable.
+	//
+	// This is defense in depth rather than protection from a routine token.
+	// getOpenIdToken emits email and email_verified as a pair, so a token minted
+	// without includeEmail carries neither, and !emailVerified in Authenticate
+	// refuses that one whatever the list holds.
 	for _, account := range cfg.AllowedServiceAccounts {
 		if account == "" || account != strings.TrimSpace(account) {
 			return nil, fmt.Errorf("authn: NewGoogleOIDC allowed service account %q is empty or has surrounding whitespace", account)
@@ -158,9 +170,12 @@ func (g *googleOIDC) Authenticate(r *http.Request) (*Caller, error) {
 		return nil, forbid(fmt.Errorf("principal %q (verified=%t) is not an allowed service account", email, emailVerified))
 	}
 
-	// The verified email names the caller; sub is preferred when present because
-	// it is stable across a rename of the service account. One of them is always
-	// set, since a caller that reached here has a non-empty email.
+	// sub distinguishes callers the email cannot: a service account deleted and
+	// recreated under the same name keeps its email, and so is still admitted by
+	// the allow-list above, but is a separate identity carrying a new sub that
+	// Google never reuses. Falling back to the email gives that up, and is here
+	// only because nothing in this package requires a sub. A caller that reached
+	// here always has an email, since it had to match a non-blank entry.
 	userID := payload.Subject
 	if userID == "" {
 		userID = email
@@ -213,10 +228,11 @@ func deny(err error) error {
 
 // forbid logs the reason and returns it as an authorization problem (a 403):
 // the token verified, but the principal it named is outside the allow-list. The
-// reason stays server-side, so the uniform response body never names the
-// refused principal nor distinguishes an unlisted one from an unverified or
-// absent email; the 403 status, not the body, is what separates this from
-// deny's 401.
+// reason stays server-side, so the response body never names the refused
+// principal and does not distinguish an unlisted one from an unverified or
+// absent email. That body is not the one deny's rejection gets -- Middleware
+// writes "forbidden" here and "unauthorized" there -- but it differs only in
+// the way the status already does.
 func forbid(err error) error {
 	log.Printf("adk: authn: refused an OIDC-authenticated principal: %v", err)
 	return fmt.Errorf("%w: %w", ErrForbidden, err)

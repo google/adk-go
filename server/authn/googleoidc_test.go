@@ -300,9 +300,10 @@ func TestGoogleOIDCAuthenticate(t *testing.T) {
 				if !errors.Is(err, wantSentinel) {
 					t.Fatalf("Authenticate() error = %v, want it to wrap %s", err, wantName)
 				}
-				// The two sentinels are disjoint: a forbidden rejection must not
-				// also read as unauthenticated, or Middleware's 403 arm would be
-				// shadowed by its 401 arm.
+				// The two sentinels stay disjoint, so anything classifying a
+				// rejection with errors.Is gets one answer. Middleware would cope
+				// either way, since it matches ErrForbidden first, but nothing
+				// else should have to know that order.
 				if tt.wantForbidden && errors.Is(err, ErrUnauthenticated) {
 					t.Errorf("Authenticate() error = %v, want it not to also wrap ErrUnauthenticated", err)
 				}
@@ -475,10 +476,12 @@ func TestGoogleOIDCPutsCallerOnContext(t *testing.T) {
 	}
 }
 
-// Both arguments are required. Verification is switched off by not wiring an
-// Authenticator at all; an audience-less one would verify nothing while looking
-// configured, and an allow-list-less one would admit any principal holding a
-// token for the audience.
+// Neither field has a usable zero value, and the two fail in opposite
+// directions. An audience-less authenticator would take a token minted for any
+// audience, since idtoken.Validate skips that check when the audience is empty.
+// An empty allow-list matches nobody, so that authenticator refuses every
+// caller while looking configured. Running without authentication is done by
+// leaving the Authenticator unset instead.
 func TestNewGoogleOIDCRequiresAudienceAndAllowList(t *testing.T) {
 	if _, err := NewGoogleOIDC(GoogleOIDCConfig{AllowedServiceAccounts: []string{testServiceAccount}}); err == nil {
 		t.Error("NewGoogleOIDC(no audience) error = nil, want an error for the empty audience")
@@ -522,6 +525,65 @@ func TestNewGoogleOIDCInstallsValidator(t *testing.T) {
 	}
 	if g.validate == nil {
 		t.Error("NewGoogleOIDC() left validate nil; production would reject every request")
+	}
+}
+
+// An authenticator built by NewGoogleOIDC must refuse a token minted for any
+// audience other than the configured one. idtoken.Validate skips the audience
+// check entirely when the audience it is handed is empty, so dropping the
+// constructor's audience wiring would fail silently rather than loudly: it
+// would leave an authenticator that accepts a listed principal's token whatever
+// it was minted for. Going through the constructor is what pins that, since a
+// googleOIDC literal sets the audience itself.
+//
+// The stand-in validator reproduces only idtoken.Validate's audience rule: an
+// empty audience accepts anything, and otherwise the token's own audience has
+// to match.
+func TestNewGoogleOIDCEnforcesAudience(t *testing.T) {
+	quietLogs(t)
+
+	// authenticate runs a token minted for mintedFor through an authenticator
+	// built by the constructor and configured with testAudience.
+	authenticate := func(t *testing.T, mintedFor string) error {
+		t.Helper()
+		a, err := NewGoogleOIDC(GoogleOIDCConfig{
+			Audience:               testAudience,
+			AllowedServiceAccounts: []string{testServiceAccount},
+		})
+		if err != nil {
+			t.Fatalf("NewGoogleOIDC() error = %v", err)
+		}
+		g, ok := a.(*googleOIDC)
+		if !ok {
+			t.Fatalf("NewGoogleOIDC() returned %T, want *googleOIDC", a)
+		}
+		g.validate = func(_ context.Context, _, audience string) (*idtoken.Payload, error) {
+			// Checked directly as well as through the rule below, so that
+			// weakening the rule cannot quietly leave this test asserting
+			// nothing about the audience.
+			if audience != testAudience {
+				t.Errorf("validate called with audience %q, want the configured %q", audience, testAudience)
+			}
+			if audience != "" && audience != mintedFor {
+				return nil, errors.New("idtoken: audience provided does not match aud claim in the JWT")
+			}
+			return googlePayload(mintedFor), nil
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("Authorization", "Bearer some-token")
+		_, err = a.Authenticate(req)
+		return err
+	}
+
+	// The accepted case keeps the refusal below honest: without it a validator
+	// that rejected everything would pass just as well.
+	if err := authenticate(t, testAudience); err != nil {
+		t.Errorf("Authenticate(token for the configured audience) error = %v, want nil", err)
+	}
+	if err := authenticate(t, "https://another-agent.example.com"); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("Authenticate(token for another audience) error = %v, want it to wrap ErrUnauthenticated: "+
+			"the constructor did not install the audience", err)
 	}
 }
 
@@ -579,6 +641,35 @@ func TestGoogleOIDCValidatePanicIsRejected(t *testing.T) {
 	// fail the test rather than record a status.
 	Middleware(g)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("the next handler ran on a token that failed validation")
+	})).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// validate has no default, so a googleOIDC built without one -- which only a
+// test does, since NewGoogleOIDC always assigns it -- holds a nil func. The
+// same recover that absorbs a panic inside the validator absorbs the nil call,
+// so such a struct refuses every request instead of crashing the handler on the
+// first one. That is asserted rather than assumed, because it is what makes the
+// constructor's assignment the only thing standing between production and a
+// provider that rejects everything.
+func TestGoogleOIDCNilValidatorIsRejected(t *testing.T) {
+	quietLogs(t)
+
+	g := &googleOIDC{
+		audience:               testAudience,
+		allowedServiceAccounts: []string{testServiceAccount},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+
+	rec := httptest.NewRecorder()
+	// A nil call that escaped the recover would panic here rather than record a
+	// status.
+	Middleware(g)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the next handler ran with no validator installed")
 	})).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
