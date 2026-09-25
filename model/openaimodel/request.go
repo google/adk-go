@@ -16,6 +16,7 @@ package openaimodel
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,13 +103,14 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 	var (
 		items            responses.ResponseInputParam
 		tracker          callTracker
-		textParts        []string
+		pendingParts     []responses.ResponseInputContentUnionParam
 		droppedReasoning bool
 		curRole          genai.Role = genai.RoleUser
-		// flushText is a helper function that takes any accumulated text parts
-		// and converts them into a message, then appends it to our items.
-		flushText = func() error {
-			if len(textParts) == 0 {
+		// flushParts is a helper function that takes any accumulated content
+		// parts (text mixed with images/files, in original order) and converts
+		// them into a message, then appends it to our items.
+		flushParts = func() error {
+			if len(pendingParts) == 0 {
 				return nil
 			}
 			msgRole, err := normalizeRole(curRole)
@@ -117,16 +119,23 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			}
 			// The Responses API rejects "input_text" for the assistant role, so
 			// a replayed assistant turn goes out as an output message instead.
+			// Output messages only support text content, so an assistant turn
+			// that also carries an image or file part is rejected rather than
+			// silently dropping the non-text parts.
 			if msgRole == responses.EasyInputMessageRoleAssistant {
-				if msg := newOutputMessage(textParts); msg != nil {
+				texts, err := textOnlyParts(pendingParts)
+				if err != nil {
+					return err
+				}
+				if msg := newOutputMessage(texts); msg != nil {
 					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
 				}
 			} else {
-				if msg := newMessage(msgRole, textParts); msg != nil {
+				if msg := newMessage(msgRole, pendingParts); msg != nil {
 					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
 				}
 			}
-			textParts = textParts[:0]
+			pendingParts = pendingParts[:0]
 			return nil
 		}
 	)
@@ -150,9 +159,13 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			// part can carry both. A call and a response on the same part are
 			// still alternatives, and the response is dropped, as on main.
 			sendText := part.Text != "" && !part.Thought
+			// Media is read independently for the same reason, and is appended
+			// after the text of the same part so that the content list keeps
+			// the order the parts arrived in.
+			sendMedia := part.InlineData != nil || part.FileData != nil
 			switch {
 			case sendText:
-				textParts = append(textParts, part.Text)
+				pendingParts = append(pendingParts, newInputTextContent(part.Text))
 			case part.Text != "" || replayedReasoning(part):
 				// Dropping reasoning must not hide a bad role, so the check
 				// still runs. The drop counts toward the emptied-request
@@ -165,10 +178,16 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 					return nil, false, err
 				}
 			}
+			if part.InlineData != nil {
+				pendingParts = append(pendingParts, inlineDataToContent(part.InlineData))
+			}
+			if part.FileData != nil {
+				pendingParts = append(pendingParts, fileDataToContent(part.FileData))
+			}
 			switch {
 			case part.FunctionCall != nil:
-				// Flush first so buffered text keeps its place ahead of the call.
-				if err := flushText(); err != nil {
+				// Flush first so buffered content keeps its place ahead of the call.
+				if err := flushParts(); err != nil {
 					return nil, false, err
 				}
 				callParam, err := tracker.newFunctionCall(part.FunctionCall)
@@ -177,8 +196,8 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
-				// Similarly, for a function response, we flush text before adding the response.
-				if err := flushText(); err != nil {
+				// Similarly, for a function response, we flush content before adding the response.
+				if err := flushParts(); err != nil {
 					return nil, false, err
 				}
 				respParam, err := tracker.newFunctionResponse(part.FunctionResponse)
@@ -186,15 +205,15 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case !sendText && !replayedReasoning(part):
+			case !sendText && !sendMedia && !replayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
 				// before, so a caller matching on that still matches here.
 				return nil, false, errors.New("openai: unsupported content part: carries nothing to send")
 			}
 		}
-		// After processing all parts in a content block, we flush any remaining text.
-		if err := flushText(); err != nil {
+		// After processing all parts in a content block, we flush any remaining content.
+		if err := flushParts(); err != nil {
 			return nil, false, err
 		}
 	}
@@ -225,6 +244,7 @@ func replayedReasoning(part *genai.Part) bool {
 	}
 	// Marking a call or anything else as a thought must not make it vanish.
 	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		part.InlineData == nil && part.FileData == nil &&
 		unsupportedPayload(part) == ""
 }
 
@@ -246,6 +266,8 @@ func unsupportedPayload(part *genai.Part) string {
 	rest.ThoughtSignature = nil // no Responses input item can carry one
 	rest.FunctionCall = nil     // sent as a function_call item
 	rest.FunctionResponse = nil // sent as a function_call_output item
+	rest.InlineData = nil       // sent as an input_image or input_file item
+	rest.FileData = nil         // likewise, by URI or file id
 	rest.VideoMetadata = nil    // qualifies media carried in another field
 	rest.MediaResolution = nil  // likewise
 	rest.PartMetadata = nil     // caller bookkeeping, never content
@@ -259,23 +281,110 @@ func unsupportedPayload(part *genai.Part) string {
 	return ""
 }
 
-// newMessage builds an easy input message for an already-normalized role.
-func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
-	if len(texts) == 0 {
+// newInputTextContent wraps a plain text string as an input_text content item.
+func newInputTextContent(text string) responses.ResponseInputContentUnionParam {
+	return responses.ResponseInputContentUnionParam{
+		OfInputText: &responses.ResponseInputTextParam{
+			Text: text,
+			Type: constant.InputText("input_text"),
+		},
+	}
+}
+
+// inlineDataToContent converts a genai.Blob (raw bytes + MIME type) into an
+// OpenAI content item. Image MIME types become an input_image item carrying a
+// base64 data URL; everything else (e.g. application/pdf) becomes an
+// input_file item, mirroring adk-python's
+// _inline_data_part_to_response_content.
+func inlineDataToContent(blob *genai.Blob) responses.ResponseInputContentUnionParam {
+	mimeType := blob.MIMEType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(blob.Data))
+	if strings.HasPrefix(mimeType, "image/") {
+		return responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				Type:     constant.InputImage("input_image"),
+				Detail:   responses.ResponseInputImageDetailAuto,
+				ImageURL: param.NewOpt(dataURL),
+			},
+		}
+	}
+	filename := blob.DisplayName
+	if filename == "" {
+		filename = "inline_data"
+	}
+	return responses.ResponseInputContentUnionParam{
+		OfInputFile: &responses.ResponseInputFileParam{
+			Type:     constant.InputFile("input_file"),
+			Filename: param.NewOpt(filename),
+			FileData: param.NewOpt(dataURL),
+		},
+	}
+}
+
+// fileDataToContent converts a genai.FileData (remote URI + MIME type) into
+// an OpenAI content item. Image MIME types become an input_image item
+// carrying the URI directly; a URI shaped like an OpenAI file ID ("file-...")
+// is passed through FileID, and every other URI (e.g. an https PDF link)
+// becomes an input_file item carrying FileURL, mirroring adk-python's
+// _file_data_part_to_response_content.
+func fileDataToContent(fd *genai.FileData) responses.ResponseInputContentUnionParam {
+	if strings.HasPrefix(fd.MIMEType, "image/") {
+		return responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				Type:     constant.InputImage("input_image"),
+				Detail:   responses.ResponseInputImageDetailAuto,
+				ImageURL: param.NewOpt(fd.FileURI),
+			},
+		}
+	}
+	if strings.HasPrefix(fd.FileURI, "file-") {
+		return responses.ResponseInputContentUnionParam{
+			OfInputFile: &responses.ResponseInputFileParam{
+				Type:   constant.InputFile("input_file"),
+				FileID: param.NewOpt(fd.FileURI),
+			},
+		}
+	}
+	return responses.ResponseInputContentUnionParam{
+		OfInputFile: &responses.ResponseInputFileParam{
+			Type:    constant.InputFile("input_file"),
+			FileURL: param.NewOpt(fd.FileURI),
+		},
+	}
+}
+
+// textOnlyParts extracts the plain text of a run of content parts, erroring
+// if any part is an image or file: the Responses API's output-message
+// content only supports text (see ResponseOutputMessageContentUnionParam),
+// so a replayed assistant turn carrying media cannot be represented and must
+// fail loudly instead of silently dropping it.
+func textOnlyParts(parts []responses.ResponseInputContentUnionParam) ([]string, error) {
+	texts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p.OfInputText == nil {
+			return nil, fmt.Errorf("openai: replayed assistant turn with image/file content is not supported")
+		}
+		texts = append(texts, p.OfInputText.Text)
+	}
+	return texts, nil
+}
+
+// newMessage builds an easy input message for an already-normalized role from
+// a run of content parts that may mix text with images/files, preserving
+// their original order.
+func newMessage(msgRole responses.EasyInputMessageRole, parts []responses.ResponseInputContentUnionParam) *responses.EasyInputMessageParam {
+	if len(parts) == 0 {
 		return nil
 	}
-	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
-	for _, txt := range texts {
-		if strings.TrimSpace(txt) == "" {
+	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(parts))
+	for _, p := range parts {
+		if p.OfInputText != nil && strings.TrimSpace(p.OfInputText.Text) == "" {
 			continue
 		}
-		textParam := responses.ResponseInputTextParam{
-			Text: txt,
-			Type: constant.InputText("input_text"),
-		}
-		contentList = append(contentList, responses.ResponseInputContentUnionParam{
-			OfInputText: &textParam,
-		})
+		contentList = append(contentList, p)
 	}
 	if len(contentList) == 0 {
 		return nil
