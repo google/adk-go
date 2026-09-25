@@ -254,7 +254,7 @@ func semconvPart(p *genai.Part) any {
 // toolPayload encodes an application-supplied tool value.
 //
 // json.Marshal is both the encoding and the check: it rejects NaN, Inf, funcs
-// and chans, and detects reference cycles. Walking the value to sanitise it
+// and chans, and detects reference cycles. Walking the value to sanitize it
 // would be worse than useless — a map holding two references to itself fans out
 // exponentially and never returns.
 func toolPayload(v map[string]any) json.RawMessage {

@@ -96,7 +96,7 @@ const minCassetteBytes = 1024
 // package claims it. That partitioning is enforced by
 // TestHTTPRecordDirectivesPartitionCassettes: every cassette must be re-recordable
 // by exactly one directive, so neither a stray "go generate ./..." nor a broad
-// pattern can quietly rewrite a neighbour's recording along with this one.
+// pattern can quietly rewrite a neighbor's recording along with this one.
 //
 // This used to carry no directive at all, on the grounds that the package-level
 // one matched every cassette here. It no longer does -- that directive is now
@@ -109,7 +109,7 @@ const minCassetteBytes = 1024
 //
 // The cassette is sensitive to anything that changes prompt bytes, including the
 // summarizer prompt template, the transcript line format, tool-argument
-// rendering and truncation behaviour. Any of those changes requires re-recording.
+// rendering and truncation behavior. Any of those changes requires re-recording.
 //go:generate go test -httprecord=^testdata[/\\]TestCompactionE2E\.httprr$
 
 func TestCompactionE2E(t *testing.T) {
@@ -211,6 +211,7 @@ func TestCompactionE2E(t *testing.T) {
 	const sessionID = "compaction_session"
 	turns := []string{
 		"What is the weather in Zurich?",
+		// Note: prompt strings below match recorded HTTP cassettes; do not edit without re-recording.
 		"My favourite colour is teal, remember that.",
 		"What was my favourite colour again?",
 		// A tool call after the compaction point, so the prompt that follows it
@@ -343,7 +344,7 @@ func TestCompactionE2E(t *testing.T) {
 	// working.
 	recall := strings.ToLower(strings.Join(answers[2], " "))
 	if !strings.Contains(recall, "teal") {
-		t.Errorf("the model could not recall the colour from the summary alone; answer was %q", recall)
+		t.Errorf("the model could not recall the color from the summary alone; answer was %q", recall)
 	}
 
 	// Structural checks, asserted here rather than inferred from the fact that a

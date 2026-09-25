@@ -158,7 +158,7 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	if err != nil {
 		// The Agent Engine answers a missing session with NOT_FOUND (HTTP 404).
 		// Get re-wraps this one rung up, because a NOT_FOUND can also surface
-		// from the concurrent ListEvents call, so this wrap is defence in depth
+		// from the concurrent ListEvents call, so this wrap is defense in depth
 		// rather than the load-bearing one: dropping it changes no observable
 		// behavior. It stays so that getSession's own contract does not depend
 		// on what its callers do with the error.
