@@ -54,6 +54,7 @@ type gcsWriter interface {
 	io.Writer // Provides Write(p []byte) (n int, err error)
 	io.Closer // Provides Close() error
 	SetContentType(string)
+	SetMetadata(map[string]string)
 }
 
 // ---------------------- Wrapper Implementations for Real gcs Types --------------------------------
@@ -144,6 +145,10 @@ func (g *gcsWriterWrapper) Close() error {
 
 func (g *gcsWriterWrapper) SetContentType(cType string) {
 	g.w.ContentType = cType
+}
+
+func (g *gcsWriterWrapper) SetMetadata(metadata map[string]string) {
+	g.w.Metadata = metadata
 }
 
 var (
