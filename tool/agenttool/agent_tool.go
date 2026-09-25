@@ -101,7 +101,8 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
-// the final result.
+// the final result. State changes from non-partial sub-agent events are applied
+// to the parent tool context.
 func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -190,6 +191,16 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	for event, err := range eventCh {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
+		}
+		// Unlike Python, Go's partial events may share a state map that the
+		// producer is still updating. Forward only completed event deltas,
+		// matching the session service's handling of partial events.
+		if !event.Partial {
+			for key, value := range event.Actions.StateDelta {
+				if err := toolCtx.State().Set(key, value); err != nil {
+					return nil, fmt.Errorf("failed to update parent state from sub-agent %s: %w", t.agent.Name(), err)
+				}
+			}
 		}
 		if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
