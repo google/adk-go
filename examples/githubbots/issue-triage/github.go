@@ -1,0 +1,576 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/go-github/v66/github"
+)
+
+// ErrIssueNotFound is returned when an issue does not exist or refers to a pull
+// request. GitHub signals this either with a null repository.issue or a
+// GraphQL error of type NOT_FOUND; GetIssue maps both to this sentinel.
+var ErrIssueNotFound = errors.New("issue not found")
+
+// errNotApplied reports a write GitHub accepted (HTTP 200) but did not apply,
+// which happens when the token lacks push access. It is a distinct sentinel so
+// the log names the likely cause rather than reporting a bare failure.
+//
+// It deliberately does NOT re-open the need. Deciding a write did not land is a
+// judgement about a response, and every version of that judgement has been
+// wrong in some case: the label read-back reports one page of an issue's labels,
+// so a successful add to a heavily labelled issue looks dropped, and a response
+// carrying no body at all decodes to a zero value that looks the same as a
+// dropped type. Re-opening on a write that did land lets the model claim the
+// need again with a DIFFERENT value, which is two labels on one issue. A claim
+// is therefore one-shot per (issue, field) per run, and a genuinely transient
+// failure is picked up by the next scheduled sweep.
+var errNotApplied = errors.New("github did not apply the change")
+
+// GraphQL page sizes. Named so the query and its variables cannot drift apart,
+// and so the cost of widening one is visible at the call site.
+const (
+	// labelPageSize bounds the labels fetched per issue. It must be generous:
+	// a truncated page hides an allow-listed label the issue already carries, and
+	// the bot then adds a SECOND categorization label, breaking the one-label
+	// contract. 100 is the connection maximum.
+	labelPageSize = 100
+	// searchPageSize bounds one page of search results.
+	searchPageSize = 50
+	// labelResponsePage is GitHub's default page size for the label list an add
+	// returns. The endpoint takes no page-size option, so a list this long may
+	// be truncated and cannot be read as complete.
+	labelResponsePage = 30
+)
+
+// maxSearchPages bounds GraphQL search pagination as a safety valve: at
+// searchPageSize results per page it caps one sweep's reads regardless of how
+// large the backlog is.
+const maxSearchPages = 10
+
+// Client wraps the GitHub REST and GraphQL APIs. All mutations route through
+// shouldSkip so dry-run is impossible to forget.
+type Client struct {
+	rest *github.Client
+	cfg  *Config
+	log  *slog.Logger
+
+	// authorized maps each issue number the agent may mutate to the fields it
+	// still needs. It is the second of the two gates in front of every mutation:
+	// only an issue the bot itself selected (the single -issue, or one the sweep
+	// picked) is in the map, and only for the fields that were missing when it
+	// was read, so an already-set type or label cannot be overwritten.
+	// Guarded by mu because the framework may execute tool calls concurrently.
+	mu         sync.Mutex
+	authorized map[int]need
+	// toolErrored records whether any tool hit an infrastructure (non-validation)
+	// error during the run, so the program can exit non-zero and CI fails loudly
+	// even though such errors are also handed back to the model as data.
+	toolErrored bool
+	// attempts counts the tool calls made against each (issue, field), so an
+	// attacker-steered model cannot spend unbounded GitHub reads. See
+	// maxAttemptsPerIssue.
+	attempts map[attemptKey]int
+}
+
+// attemptKey counts per field rather than per issue, so a burst of type calls
+// cannot starve the label the same issue also needs.
+type attemptKey struct {
+	number int
+	field  string
+}
+
+// maxAttemptsPerIssue caps how many mutating tool calls one issue's session may
+// make for one field. A well-behaved run makes exactly one. The model is
+// attacker-controlled by assumption and nothing bounds how many calls it emits
+// in a turn, and each one that clears the allow-list spends a GitHub read
+// (confirmStillNeeded) before the claim refuses it -- enough of them and the
+// repository's shared API budget goes, and the resulting rate-limit error reds
+// the job. The cap is generous enough that no honest run reaches it.
+const maxAttemptsPerIssue = 8
+
+// NewClient builds an authenticated GitHub client.
+func NewClient(cfg *Config, log *slog.Logger) *Client {
+	return &Client{
+		rest:       github.NewClient(nil).WithAuthToken(cfg.GitHubToken),
+		cfg:        cfg,
+		log:        log,
+		authorized: make(map[int]need),
+		attempts:   make(map[attemptKey]int),
+	}
+}
+
+// authorize records that an issue may be mutated, for the given missing fields.
+//
+// It merges rather than overwrites, so a second call for an issue cannot
+// resurrect a need already satisfied this run and re-enable an overwrite: a
+// field stays needed only if it was needed before and still is. triageOne is
+// the only caller and runs once per issue over a deduplicated work set, so the
+// merge is defense in depth against a future second call site rather than a
+// path exercised today.
+func (c *Client) authorize(number int, n need) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.authorized == nil {
+		c.authorized = make(map[int]need)
+	}
+	if existing, ok := c.authorized[number]; ok {
+		n.typ = n.typ && existing.typ
+		n.label = n.label && existing.label
+	}
+	c.authorized[number] = n
+}
+
+// peek reports whether an issue is authorized and which of its fields are still
+// open, WITHOUT consuming anything. It is the cheap pre-check that keeps a call
+// which would be refused anyway from spending a network read; the atomic claim
+// below is still what decides the single writer.
+func (c *Client) peek(number int) (n need, authorized bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, authorized = c.authorized[number]
+	return n, authorized
+}
+
+// claimBarrier, when non-nil, is called inside a claim's critical section --
+// after the need has been observed and before it is cleared. It is nil in
+// production, where it costs one nil check, and exists only so a test can pin
+// the atomicity of the claim.
+//
+// Nothing else could. Racing N goroutines at claimType and asserting that one
+// wins does not: catching a split critical section needs two of them to read
+// "still needed" before either writes, a window two instructions wide, and
+// measured against exactly that mutation the racing test caught it 0 times in
+// 10 fresh processes. A hook inside the section lets a test MAKE that
+// interleaving happen rather than hope for it, because correct code can only
+// ever have one caller inside at a time. See
+// TestAClaimsCriticalSectionAdmitsOneCallerAtATime.
+//
+// It runs while c.mu is held, so it must not touch the Client.
+var claimBarrier func()
+
+// claimType atomically reserves an issue's type need for a single mutation. It
+// reports whether the issue is authorized at all, and whether this call won the
+// reservation (the type was still needed and is now marked satisfied). Reserving
+// before the network write is what makes the no-overwrite guarantee hold under
+// the framework's concurrent tool execution: of several same-issue calls in one
+// turn, exactly one can claim the need and reach the API.
+//
+// A claim is never returned. See errNotApplied for why a failed write does not
+// re-open it.
+func (c *Client) claimType(number int) (claimed, authorized bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.authorized[number]
+	if !ok {
+		return false, false
+	}
+	if !n.typ {
+		return false, true
+	}
+	if claimBarrier != nil {
+		claimBarrier()
+	}
+	n.typ = false
+	c.authorized[number] = n
+	return true, true
+}
+
+// claimLabel atomically reserves an issue's label need for a single mutation,
+// with the same contract as claimType.
+func (c *Client) claimLabel(number int) (claimed, authorized bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.authorized[number]
+	if !ok {
+		return false, false
+	}
+	if !n.label {
+		return false, true
+	}
+	if claimBarrier != nil {
+		claimBarrier()
+	}
+	n.label = false
+	c.authorized[number] = n
+	return true, true
+}
+
+// revoke closes every field of an issue's authorization. triageOne calls it
+// when that issue's session ends, so an authorization cannot outlive the
+// session that justified it and sit in the map for the rest of the sweep. The
+// per-session context scope already refuses a later cross-issue call, but
+// leaving open needs behind would mean any future call site that forgot the
+// scope check could write to every issue the run had touched rather than one.
+//
+// It zeroes the entry rather than deleting it, so authorize's merge above still
+// sees a record. Deleting would let a second authorize for the same issue start
+// from nothing and restore both fields at full strength, which is exactly the
+// resurrection that merge exists to prevent.
+func (c *Client) revoke(number int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.authorized[number]; ok {
+		c.authorized[number] = need{}
+	}
+}
+
+// attempt records one mutating tool call against an issue and reports whether
+// it is within the per-issue cap.
+func (c *Client) attempt(number int, field string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempts == nil {
+		c.attempts = make(map[attemptKey]int)
+	}
+	k := attemptKey{number: number, field: field}
+	c.attempts[k]++
+	return c.attempts[k] <= maxAttemptsPerIssue
+}
+
+// recordToolError flags that a tool hit an infrastructure error this run.
+func (c *Client) recordToolError() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.toolErrored = true
+}
+
+// hadToolError reports whether any tool hit an infrastructure error this run.
+func (c *Client) hadToolError() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.toolErrored
+}
+
+// shouldSkip is the single dry-run chokepoint for every mutation. It logs the
+// intended action and returns true when nothing should be written.
+func (c *Client) shouldSkip(number int, format string, args ...any) bool {
+	if c.cfg.DryRun {
+		c.log.Info("[dry-run] would "+fmt.Sprintf(format, args...), "issue", number)
+		return true
+	}
+	return false
+}
+
+// --- GraphQL plumbing ---
+
+var issueFields = fmt.Sprintf(`
+		number
+		title
+		body
+		issueType { name }
+		labels(first: %d) { nodes { name } }`, labelPageSize)
+
+var issueSearchQuery = `query($q: String!, $first: Int!, $after: String) {
+	search(query: $q, type: ISSUE, first: $first, after: $after) {
+		pageInfo { hasNextPage endCursor }
+		nodes {
+			... on Issue {` + issueFields + `
+			}
+		}
+	}
+}`
+
+var issueByNumberQuery = `query($owner: String!, $name: String!, $number: Int!) {
+	repository(owner: $owner, name: $name) {
+		issue(number: $number) {` + issueFields + `
+		}
+	}
+}`
+
+type graphQLError struct {
+	Type    string   `json:"type"`
+	Message string   `json:"message"`
+	Path    []string `json:"path"`
+}
+
+// isIssueNotFound reports whether e says the ISSUE could not be resolved, as
+// opposed to the repository. GitHub returns type NOT_FOUND for both, and
+// reading a repository-level one as "the issue vanished" would turn a wrong
+// OWNER/REPO into a permanently green run that triages nothing.
+func (e graphQLError) isIssueNotFound() bool {
+	return e.Type == "NOT_FOUND" && len(e.Path) > 0 && e.Path[len(e.Path)-1] == "issue"
+}
+
+type issueNode struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	IssueType *struct {
+		Name string `json:"name"`
+	} `json:"issueType"`
+	Labels struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+}
+
+func (n issueNode) toIssue() Issue {
+	labels := make([]string, 0, len(n.Labels.Nodes))
+	for _, l := range n.Labels.Nodes {
+		labels = append(labels, l.Name)
+	}
+	var typeName string
+	if n.IssueType != nil {
+		typeName = n.IssueType.Name
+	}
+	// Truncate here so long bodies never bloat the prompt, and never sit in
+	// memory for the whole sweep, whether the issue arrives via the batch sweep
+	// or a single-issue fetch. The fact travels with the text so that
+	// buildIssuePrompt can disclose it outside the untrusted fence.
+	body, bodyCut := truncate(n.Body, maxBodyRunes)
+	return Issue{
+		Number:        n.Number,
+		Title:         n.Title,
+		Body:          body,
+		BodyTruncated: bodyCut,
+		Labels:        labels,
+		Type:          typeName,
+	}
+}
+
+type searchResponse struct {
+	Data struct {
+		Search struct {
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+			Nodes []issueNode `json:"nodes"`
+		} `json:"search"`
+	} `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
+type issueResponse struct {
+	Data struct {
+		Repository struct {
+			Issue *issueNode `json:"issue"`
+		} `json:"repository"`
+	} `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
+// graphQL issues a GraphQL request through the authenticated REST client (a raw
+// POST to the /graphql endpoint), decoding the JSON body into out.
+func (c *Client) graphQL(ctx context.Context, query string, vars map[string]any, out any) error {
+	body := map[string]any{"query": query, "variables": vars}
+	req, err := c.rest.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return fmt.Errorf("build graphql request: %w", err)
+	}
+	if _, err := c.rest.Do(ctx, req, out); err != nil {
+		return fmt.Errorf("graphql request: %w", err)
+	}
+	return nil
+}
+
+// --- Reads ---
+
+// ListUntriaged returns up to count open issues (newest first) that need an
+// issue type and/or a categorization label, optionally restricted to a
+// freshness window. Pull requests are excluded by the is:issue qualifier in the
+// search query; the number == 0 check below is a backstop for a node that did
+// not match the ... on Issue fragment.
+func (c *Client) ListUntriaged(ctx context.Context, count int) ([]Issue, error) {
+	q := fmt.Sprintf("repo:%s/%s is:issue is:open sort:created-desc", c.cfg.Owner, c.cfg.Repo)
+	if c.cfg.FreshnessWindow > 0 {
+		cutoff := time.Now().UTC().Add(-c.cfg.FreshnessWindow).Format("2006-01-02")
+		q += " created:>=" + cutoff
+	}
+
+	var (
+		out   []Issue
+		after string
+	)
+	// Dedupe across pages. An issue whose position shifts
+	// between cursor fetches can appear on two pages, and each copy would get its
+	// own agent session -- a wasted model call, and one fewer distinct issue
+	// triaged than `count` promises.
+	seen := make(map[int]bool)
+	for page := 0; page < maxSearchPages && len(out) < count; page++ {
+		vars := map[string]any{"q": q, "first": searchPageSize}
+		if after != "" {
+			vars["after"] = after
+		}
+		var resp searchResponse
+		if err := c.graphQL(ctx, issueSearchQuery, vars, &resp); err != nil {
+			return nil, err
+		}
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("graphql search: %s", resp.Errors[0].Message)
+		}
+		for _, node := range resp.Data.Search.Nodes {
+			iss := node.toIssue()
+			if iss.Number == 0 {
+				continue // not an Issue node
+			}
+			if seen[iss.Number] {
+				continue
+			}
+			if needsTriage(iss, c.cfg.AllowedLabels).any() {
+				seen[iss.Number] = true
+				out = append(out, iss)
+				if len(out) >= count {
+					break
+				}
+			}
+		}
+		// Stop if there's no next page, or if the cursor is missing (guards
+		// against re-requesting the same page on a malformed response).
+		if !resp.Data.Search.PageInfo.HasNextPage || resp.Data.Search.PageInfo.EndCursor == "" {
+			break
+		}
+		after = resp.Data.Search.PageInfo.EndCursor
+	}
+	return out, nil
+}
+
+// confirmStillNeeded re-reads an issue and reports which fields are still
+// missing, immediately before a write.
+//
+// The work set is chosen once, and a sweep can reach the last issue up to
+// SweepTimeout after it was read. Deciding against that snapshot alone would
+// let the bot clobber a type a maintainer set inside that window -- the
+// no-overwrite guarantee would hold only against itself. This narrows the
+// window to one round trip, which is as close to a conditional update as the
+// GitHub issues API gets.
+func (c *Client) confirmStillNeeded(ctx context.Context, number int) (need, error) {
+	iss, err := c.GetIssue(ctx, number)
+	if err != nil {
+		return need{}, err
+	}
+	return needsTriage(iss, c.cfg.AllowedLabels), nil
+}
+
+// GetIssue fetches a single issue by number. It returns ErrIssueNotFound if the
+// issue does not exist or is a pull request.
+func (c *Client) GetIssue(ctx context.Context, number int) (Issue, error) {
+	vars := map[string]any{"owner": c.cfg.Owner, "name": c.cfg.Repo, "number": number}
+	var resp issueResponse
+	if err := c.graphQL(ctx, issueByNumberQuery, vars, &resp); err != nil {
+		return Issue{}, err
+	}
+	if len(resp.Errors) > 0 {
+		// GitHub returns a NOT_FOUND error (not a null issue) when the number
+		// does not exist or refers to a pull request. It returns the same type
+		// for an unresolvable repository, which is a configuration failure and
+		// must stay loud, so the path decides which one this is.
+		for _, e := range resp.Errors {
+			if e.isIssueNotFound() {
+				return Issue{}, fmt.Errorf("issue #%d: %w", number, ErrIssueNotFound)
+			}
+		}
+		return Issue{}, fmt.Errorf("graphql issue: %s", resp.Errors[0].Message)
+	}
+	if resp.Data.Repository.Issue == nil {
+		return Issue{}, fmt.Errorf("issue #%d: %w", number, ErrIssueNotFound)
+	}
+	iss := resp.Data.Repository.Issue.toIssue()
+	// A response that decoded but carries no number is not an issue. Returning
+	// it would put 0 into the session scope and the authorization map.
+	if iss.Number == 0 {
+		return Issue{}, fmt.Errorf("issue #%d: response carried no issue number: %w", number, ErrIssueNotFound)
+	}
+	return iss, nil
+}
+
+// --- Mutations ---
+
+// SetType sets the GitHub issue type via a raw PATCH (go-github v66 has no typed
+// support for issue types yet).
+func (c *Client) SetType(ctx context.Context, number int, issueType string) error {
+	if c.shouldSkip(number, "set issue type to %q", issueType) {
+		return nil
+	}
+	u := fmt.Sprintf("repos/%s/%s/issues/%d", c.cfg.Owner, c.cfg.Repo, number)
+	req, err := c.rest.NewRequest("PATCH", u, map[string]any{"type": issueType})
+	if err != nil {
+		return fmt.Errorf("build set-type request (nothing was sent): %w", err)
+	}
+	// Setting a type requires push access; without it GitHub returns 200 with the
+	// issue unchanged, silently dropping the type. Read back the response and
+	// confirm the type was actually applied so a no-op can't masquerade as success.
+	// (The REST payload names the field "type", unlike GraphQL's "issueType".)
+	var updated struct {
+		Type *struct {
+			Name string `json:"name"`
+		} `json:"type"`
+	}
+	if _, err := c.rest.Do(ctx, req, &updated); err != nil {
+		return fmt.Errorf("set issue type: %w", err)
+	}
+	if updated.Type == nil || !strings.EqualFold(updated.Type.Name, issueType) {
+		return fmt.Errorf("set issue type %q on issue #%d (the token likely lacks push access): %w", issueType, number, errNotApplied)
+	}
+	c.log.Info("set issue type", "issue", number, "type", issueType)
+	return nil
+}
+
+// AddLabel adds a single label to the issue.
+func (c *Client) AddLabel(ctx context.Context, number int, label string) error {
+	if c.shouldSkip(number, "add label %q", label) {
+		return nil
+	}
+	// AddLabelsToIssue returns the issue's labels after the add. Like types,
+	// labels are silently dropped without push access, so confirm ours is present
+	// rather than trusting a 200.
+	labels, _, err := c.rest.Issues.AddLabelsToIssue(ctx, c.cfg.Owner, c.cfg.Repo, number, []string{label})
+	if err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
+	applied := false
+	for _, l := range labels {
+		if strings.EqualFold(l.GetName(), label) {
+			applied = true
+			break
+		}
+	}
+	// Absent from a list that is at the page cap proves nothing: the add may
+	// have landed on a later page. Rather than report a failure we cannot
+	// substantiate -- or a success we have not confirmed -- ask GraphQL, which
+	// fetches labelPageSize labels rather than this endpoint's fixed page.
+	if !applied && len(labels) >= labelResponsePage {
+		fresh, err := c.GetIssue(ctx, number)
+		if err != nil {
+			return fmt.Errorf("confirm label %q on issue #%d after a full-page response: %w", label, number, err)
+		}
+		_, applied = canonicalLabel(label, fresh.Labels)
+		// GraphQL reads labelPageSize labels, so at that cap it is truncated
+		// too and absence still proves nothing. Reporting a failure here would
+		// blame the token for a write that landed, on a public log. Say what is
+		// known and let the write stand -- an issue with this many labels
+		// almost certainly already carried an allow-listed one and would not
+		// have been selected.
+		if !applied && len(fresh.Labels) >= labelPageSize {
+			c.log.Warn("could not confirm the label was applied; the issue carries more labels than either read returns",
+				"issue", number, "label", label, "labels_seen", len(fresh.Labels))
+			applied = true
+		}
+	}
+	if !applied {
+		return fmt.Errorf("add label %q to issue #%d (the token likely lacks push access): %w", label, number, errNotApplied)
+	}
+	c.log.Info("added label", "issue", number, "label", label)
+	return nil
+}
