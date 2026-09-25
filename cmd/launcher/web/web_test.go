@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -812,5 +813,264 @@ func TestRunPassesResolvedBindHostToSublaunchers(t *testing.T) {
 				t.Errorf("sublauncher saw BindHost = %q, but the server binds %q", sub.seen, host)
 			}
 		})
+	}
+}
+
+// guardedSublauncher registers one route and keeps the router it was given, so
+// a test can send requests through the middleware the launcher installs after
+// setup has run.
+type guardedSublauncher struct {
+	telemetryFailSublauncher
+	// keyword selects it on the command line and prefixes its route; empty
+	// means "guarded".
+	keyword string
+	// contributes, when set, is appended to the allowed origins the way a real
+	// sublauncher appends the web UI origin or an advertised agent URL.
+	contributes string
+	// seen is AllowedOrigins as SetupSubrouters found it, which is the list
+	// anything this sublauncher built would have been given.
+	seen   []string
+	router *mux.Router
+}
+
+func (s *guardedSublauncher) Keyword() string {
+	if s.keyword == "" {
+		return "guarded"
+	}
+	return s.keyword
+}
+
+func (s *guardedSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	s.seen = slices.Clone(c.AllowedOrigins)
+	if s.contributes != "" {
+		c.AllowedOrigins = append(c.AllowedOrigins, s.contributes)
+	}
+	// StatusTeapot so that reaching the handler cannot be confused with any
+	// status the guard itself writes.
+	r.PathPrefix("/" + s.Keyword()).HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	s.router = r
+	return nil
+}
+
+// runForRouter runs the launcher with subs far enough to install the guard, and
+// returns the router it built.
+//
+// Run is stopped by an occupied port, which fails the bind after both setup and
+// the guard, so the router comes back in the state a served request would meet.
+func runForRouter(t *testing.T, config *launcher.Config, args []string, subs ...*guardedSublauncher) *mux.Router {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	sublaunchers := make([]Sublauncher, len(subs))
+	for i, s := range subs {
+		sublaunchers[i] = s
+	}
+	l := NewLauncher(sublaunchers...).(*webLauncher)
+	args = append(append([]string{}, args...), "--port", fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
+	for _, s := range subs {
+		args = append(args, s.Keyword())
+	}
+	if _, err := l.Parse(args); err != nil {
+		t.Fatalf("Parse(%v) failed: %v", args, err)
+	}
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+	if subs[0].router == nil {
+		t.Fatalf("Run() returned before SetupSubrouters, so no router was captured")
+	}
+	return subs[0].router
+}
+
+// statusFor sends a GET for path through router, with the Host and Origin
+// headers given, and returns the response status. An empty host leaves
+// httptest's "example.com", and an empty origin sends no Origin header.
+func statusFor(router *mux.Router, path, host, origin string) int {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if host != "" {
+		req.Host = host
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestRunGuardsEverySublauncherRoute pins that the launcher's origin guard
+// covers the routes a sublauncher registered, and the root routes it registers
+// itself.
+//
+// Several of these routes run an agent, so a page that reaches one through
+// rebound DNS executes tools on the machine the server runs on. The guard sits
+// on the launcher's router rather than inside each sublauncher, so that none
+// of them can be added without it.
+func TestRunGuardsEverySublauncherRoute(t *testing.T) {
+	twoFlags := []string{"--allow_origins", "https://one.example.com", "--allow_origins", "https://two.example.com"}
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		contributes string // appended by the sublauncher
+		path        string
+		host        string
+		origin      string
+		want        int
+	}{
+		{
+			name: "loopback host is served",
+			path: "/guarded/x",
+			host: "localhost:8080",
+			want: http.StatusTeapot,
+		},
+		{
+			name:   "rebound host is refused",
+			path:   "/guarded/x",
+			host:   "rebind.attacker.com:8080",
+			origin: "http://rebind.attacker.com:8080",
+			want:   http.StatusForbidden,
+		},
+		{
+			// A rebound page's same-origin request carries no Origin at all,
+			// so the Host header is the only thing that gives it away.
+			name: "rebound host with no origin is refused",
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			// An empty -host binds the loopback default, and the guard has to
+			// be armed by that rather than by the empty flag value.
+			name: "rebound host is refused when -host is empty",
+			args: []string{"--host", ""},
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "root health route is guarded too",
+			path: "/health",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "health is served over loopback",
+			path: "/health",
+			host: "127.0.0.1:8080",
+			want: http.StatusOK,
+		},
+		{
+			name:        "origin a sublauncher contributed is served",
+			contributes: "https://ui.example.com",
+			path:        "/guarded/x",
+			host:        "localhost:8080",
+			origin:      "https://ui.example.com",
+			want:        http.StatusTeapot,
+		},
+		{
+			// Contributing an origin vouches for its host, which is how this
+			// runs behind a proxy on the same machine.
+			name:        "host of a contributed origin is served",
+			contributes: "https://ui.example.com",
+			path:        "/guarded/x",
+			host:        "ui.example.com",
+			want:        http.StatusTeapot,
+		},
+		{
+			name:   "first -allow_origins value is served",
+			args:   twoFlags,
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://one.example.com",
+			want:   http.StatusTeapot,
+		},
+		{
+			name:   "repeated -allow_origins value is served",
+			args:   twoFlags,
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://two.example.com",
+			want:   http.StatusTeapot,
+		},
+		{
+			name:   "unlisted origin is refused",
+			args:   []string{"--allow_origins", "https://one.example.com"},
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://evil.example.com",
+			want:   http.StatusForbidden,
+		},
+		{
+			// The escape hatch has to turn the guard off wholesale, or an
+			// operator who knows their deployment is exposed cannot serve it.
+			name: "star allows a rebound host",
+			args: []string{"--allow_origins", "*"},
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusTeapot,
+		},
+		{
+			// On a non-loopback bind the server is legitimately reachable under
+			// whatever name resolves to it, so the Host check must not fire.
+			name: "no host check when bound to all interfaces",
+			args: []string{"--host", "0.0.0.0"},
+			path: "/guarded/x",
+			host: "anything.example.com",
+			want: http.StatusTeapot,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := runForRouter(t, &launcher.Config{}, tc.args, &guardedSublauncher{contributes: tc.contributes})
+
+			if got := statusFor(router, tc.path, tc.host, tc.origin); got != tc.want {
+				t.Errorf("GET %s with Host %q and Origin %q = %d, want %d", tc.path, tc.host, tc.origin, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunAllowedOriginsReachSublaunchers pins which allowed origins each
+// sublauncher is handed, and which the guard is built from.
+//
+// A sublauncher that builds a server from the list, as the api one builds the
+// REST server, refuses whatever it was not given, even after the launcher's
+// guard passed it. So the caller's entries and the -allow_origins ones must be
+// in place before the first sublauncher runs, and the guard must be built from
+// the list as the last sublauncher left it.
+func TestRunAllowedOriginsReachSublaunchers(t *testing.T) {
+	const (
+		fromCaller = "https://caller.example.com"
+		fromFlag   = "https://flag.example.com"
+		fromFirst  = "https://first.example.com"
+		fromSecond = "https://second.example.com"
+	)
+	// Spare capacity, so that an append into the caller's array would land in
+	// it rather than in a fresh one, where this test could not see it.
+	callerOrigins := make([]string, 1, 4)
+	callerOrigins[0] = fromCaller
+	first := &guardedSublauncher{keyword: "first", contributes: fromFirst}
+	second := &guardedSublauncher{keyword: "second", contributes: fromSecond}
+
+	router := runForRouter(t, &launcher.Config{AllowedOrigins: callerOrigins}, []string{"--allow_origins", fromFlag}, first, second)
+
+	if want := []string{fromCaller, fromFlag}; !slices.Equal(first.seen, want) {
+		t.Errorf("first sublauncher saw AllowedOrigins = %q, want %q", first.seen, want)
+	}
+	if want := []string{fromCaller, fromFlag, fromFirst}; !slices.Equal(second.seen, want) {
+		t.Errorf("second sublauncher saw AllowedOrigins = %q, want %q", second.seen, want)
+	}
+	if spare := callerOrigins[1:cap(callerOrigins)]; slices.ContainsFunc(spare, func(s string) bool { return s != "" }) {
+		t.Errorf("Run wrote %q into the spare capacity of the caller's AllowedOrigins", spare)
+	}
+	for _, origin := range []string{fromCaller, fromFlag, fromFirst, fromSecond} {
+		if got := statusFor(router, "/first/x", "localhost:8080", origin); got != http.StatusTeapot {
+			t.Errorf("GET /first/x with Origin %q = %d, want %d", origin, got, http.StatusTeapot)
+		}
 	}
 }

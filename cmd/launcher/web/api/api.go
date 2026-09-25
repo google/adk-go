@@ -75,24 +75,48 @@ func (a *apiLauncher) CommandLineSyntax() string {
 }
 
 // corsWithArgs adds CORS headers which allow calling ADK REST API from another
-// web app (like ADK WebUI). The configured address is normalised once, when the
-// middleware is built, rather than on every request.
-func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
+// web app (like ADK WebUI).
+//
+// Access-Control-Allow-Origin names the request's Origin when it is one of
+// allowedOrigins, and frontendAddress otherwise, so that every page the REST
+// server's origin check admits can also read the response. A "*" in either
+// makes it "*". Addresses are normalized once, when the middleware is built,
+// rather than on every request.
+func corsWithArgs(frontendAddress string, allowedOrigins []string) func(next http.Handler) http.Handler {
 	// The same normalization the REST server's origin check applies, so that
-	// the origin this header advertises and the origin that check accepts
+	// the origins this header advertises and the origins that check accepts
 	// cannot drift apart.
 	origin := originguard.NormalizeOrigin(frontendAddress)
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		switch o = originguard.NormalizeOrigin(o); o {
+		case "":
+		case "*":
+			origin = "*"
+		default:
+			allowed[o] = true
+		}
+	}
+	if origin == "*" {
+		allowed = nil
+	}
+	// Whether the header can differ between two requests only by their Origin.
+	// A cache must then not serve a response carrying it to a different origin.
+	vary := origin != "*" && (origin != "" || len(allowed) > 0)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if origin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				if origin != "*" {
-					// The response body depends on the configured origin only,
-					// but caches cannot know that, and a cached response
-					// carrying this header must not be served to a request from
-					// a different origin.
-					w.Header().Add("Vary", "Origin")
-				}
+			allowOrigin := origin
+			// Looked up as sent, not parsed: a browser serializes its origin
+			// in the normalized form, and this runs before anything has
+			// authorized the caller.
+			if requestOrigin := r.Header.Get("Origin"); allowed[requestOrigin] {
+				allowOrigin = requestOrigin
+			}
+			if allowOrigin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			}
+			if vary {
+				w.Header().Add("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -271,6 +295,11 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	// The web UI origin belongs to the whole server, not to this mount alone:
+	// the UI is loaded from it and then calls the API, and the launcher's guard
+	// sees those calls before the REST server does.
+	config.AllowedOrigins = append(config.AllowedOrigins, a.config.frontendAddress)
+
 	// Create the ADK REST API handler
 	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService:  config.SessionService,
@@ -283,10 +312,14 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		Authorizer:      config.Authorizer,
 		Compaction:      config.Compaction,
 		BindHost:        config.BindHost,
-		// The same value the CORS header advertises. An origin whose script may
-		// read our responses is one we should accept requests from, and whose
-		// host is a legitimate way to reach us.
-		AllowedOrigins: []string{a.config.frontendAddress},
+		// Everything allowed so far: the web UI origin appended above, the
+		// operator's -allow_origins entries, and whatever the sublaunchers set
+		// up before this one added. An origin whose script may read our
+		// responses is one we should accept requests from, and whose host is a
+		// legitimate way to reach us. This server repeats the launcher's checks
+		// on its own, so an origin missing here is refused on these routes even
+		// though the launcher's guard passed it.
+		AllowedOrigins: config.AllowedOrigins,
 		DebugConfig: adkrest.DebugTelemetryConfig{
 			TraceCapacity: a.config.traceCapacity,
 		},
@@ -300,8 +333,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 
 	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
 
-	// Wrap it with CORS middleware
-	corsHandler := corsWithArgs(a.config.frontendAddress)(restServer)
+	// Wrap it with CORS middleware, over the same origins the REST server was
+	// given.
+	corsHandler := corsWithArgs(a.config.frontendAddress, config.AllowedOrigins)(restServer)
 
 	registerAPIRoutes(router, a.config.pathPrefix, corsHandler)
 	return nil
@@ -338,7 +372,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	config := &apiConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI origin as seen from the user browser. It is sent as the CORS allowed origin and is accepted by the REST server's origin check; every other cross-origin browser request is refused with 403. Accepts a full origin such as 'http://localhost:8080'; a bare hostname and optional port is read as http. '*' allows any origin and turns the origin check off - do not use it on a server reachable from an untrusted network, since these endpoints are unauthenticated.")
+	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI origin as seen from the user browser. It is sent as the CORS allowed origin and is allowed on every route of the web server, like a web -allow_origins entry; other cross-origin browser requests are refused with 403. Accepts a full origin such as 'http://localhost:8080'; a bare hostname and optional port is read as http. '*' allows any origin and turns the origin and DNS-rebinding checks off on every route - do not use it on a server reachable from an untrusted network, since these endpoints are unauthenticated.")
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")

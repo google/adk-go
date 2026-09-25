@@ -98,6 +98,13 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		return err
 	}
 
+	// The agent card tells clients to connect here under this URL, so its host
+	// is a legitimate way to reach the server and its origin a legitimate one
+	// to call from. Without it, advertising a name while binding loopback —
+	// which is how this runs behind a proxy — would make every call the card
+	// describes a 403.
+	config.AllowedOrigins = append(config.AllowedOrigins, a.config.agentURL)
+
 	publicCompatURL, err := url.JoinPath(a.config.agentURL, compatAPIPath)
 	if err != nil {
 		return err

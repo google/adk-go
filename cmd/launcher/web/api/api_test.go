@@ -20,6 +20,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,7 @@ func TestCORSHeaders(t *testing.T) {
 	tests := []struct {
 		name          string
 		addr          string
+		allowed       []string
 		requestOrigin string
 		wantOrigin    string
 		wantVary      string
@@ -102,17 +104,69 @@ func TestCORSHeaders(t *testing.T) {
 			wantVary:   "",
 		},
 		{
-			name:          "request Origin is never reflected",
+			name:          "unlisted request Origin is not reflected",
 			addr:          "localhost:8080",
+			allowed:       []string{"https://ui.example.com"},
 			requestOrigin: "http://evil.example.com",
 			wantOrigin:    "http://localhost:8080",
+			wantVary:      "Origin",
+		},
+		{
+			name:          "allowed request Origin is reflected",
+			addr:          "localhost:8080",
+			allowed:       []string{"https://ui.example.com"},
+			requestOrigin: "https://ui.example.com",
+			wantOrigin:    "https://ui.example.com",
+			wantVary:      "Origin",
+		},
+		{
+			name:          "allowed bare host is read as http",
+			addr:          "localhost:8080",
+			allowed:       []string{"ui.example.com:3000"},
+			requestOrigin: "http://ui.example.com:3000",
+			wantOrigin:    "http://ui.example.com:3000",
+			wantVary:      "Origin",
+		},
+		{
+			name:          "star in the allowed origins allows every origin",
+			addr:          "localhost:8080",
+			allowed:       []string{"*"},
+			requestOrigin: "https://any.example.com",
+			wantOrigin:    "*",
+			wantVary:      "",
+		},
+		{
+			// A reflected origin would need Vary, and "*" already admits it.
+			name:          "star web UI address wins over an allowed origin",
+			addr:          "*",
+			allowed:       []string{"https://ui.example.com"},
+			requestOrigin: "https://ui.example.com",
+			wantOrigin:    "*",
+			wantVary:      "",
+		},
+		{
+			name:          "empty web UI address still reflects an allowed origin",
+			addr:          "",
+			allowed:       []string{"https://ui.example.com"},
+			requestOrigin: "https://ui.example.com",
+			wantOrigin:    "https://ui.example.com",
+			wantVary:      "Origin",
+		},
+		{
+			// With no web UI origin there is no fallback header, but an
+			// allowed origin would get one, so the response still varies.
+			name:          "empty web UI address still varies for an unlisted origin",
+			addr:          "",
+			allowed:       []string{"https://ui.example.com"},
+			requestOrigin: "http://evil.example.com",
+			wantOrigin:    "",
 			wantVary:      "Origin",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			h := corsWithArgs(tt.addr)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := corsWithArgs(tt.addr, tt.allowed)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			}))
 			req := httptest.NewRequest(http.MethodGet, "/list-apps", nil)
@@ -129,7 +183,7 @@ func TestCORSHeaders(t *testing.T) {
 			if gotOrigin != tt.wantOrigin {
 				t.Errorf("Access-Control-Allow-Origin = %q, want %q", gotOrigin, tt.wantOrigin)
 			}
-			if gotOrigin != "*" && !strings.Contains(gotOrigin, "://") {
+			if gotOrigin != "" && gotOrigin != "*" && !strings.Contains(gotOrigin, "://") {
 				t.Errorf("Access-Control-Allow-Origin = %q, want a value carrying a scheme", gotOrigin)
 			}
 			if got := rec.Header().Get("Vary"); got != tt.wantVary {
@@ -147,7 +201,7 @@ func TestCORSHeaders(t *testing.T) {
 
 func TestCORSPreflightStopsAtMiddleware(t *testing.T) {
 	called := false
-	h := corsWithArgs("localhost:8080")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := corsWithArgs("localhost:8080", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusTeapot)
 	}))
@@ -699,6 +753,88 @@ func TestSetupSubroutersPassesBindHostToRESTServer(t *testing.T) {
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSetupSubroutersOrigins pins the two directions the allowed origins move
+// in: this launcher adds the web UI origin to the server-wide list, and the
+// REST server and its CORS headers honor the whole list rather than that one
+// entry.
+//
+// Without the second half, an origin the operator allowed server-wide passes
+// the launcher's guard and is then refused inside the REST server, or admitted
+// but unable to read the response, on the API alone.
+func TestSetupSubroutersOrigins(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		// configured is what the operator allowed server-wide, as the web
+		// launcher would have collected it before this launcher runs.
+		configured []string
+		origin     string
+		wantStatus int
+		wantCORS   string // Access-Control-Allow-Origin
+	}{
+		{
+			name:       "the web UI origin is served",
+			origin:     "http://localhost:8080",
+			wantStatus: http.StatusOK,
+			wantCORS:   "http://localhost:8080",
+		},
+		{
+			name:       "a server-wide origin is served and may read the response",
+			configured: []string{"https://ui.example.com"},
+			origin:     "https://ui.example.com",
+			wantStatus: http.StatusOK,
+			wantCORS:   "https://ui.example.com",
+		},
+		{
+			name:       "an unlisted origin is refused",
+			configured: []string{"https://ui.example.com"},
+			origin:     "https://evil.example.com",
+			wantStatus: http.StatusForbidden,
+			wantCORS:   "http://localhost:8080",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse([]string{"-path_prefix", "/api", "-webui_address", "localhost:8080"}); err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			config := &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+				BindHost:       "127.0.0.1",
+				AllowedOrigins: tc.configured,
+			}
+			router := mux.NewRouter().StrictSlash(true)
+			if err := l.SetupSubrouters(router, config); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+
+			if !slices.Contains(config.AllowedOrigins, "localhost:8080") {
+				t.Errorf("AllowedOrigins = %q, want it to contain the -webui_address value", config.AllowedOrigins)
+			}
+
+			// A Host that differs from every Origin here, so that no request
+			// passes as same-origin and each result comes from the list alone.
+			req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+			req.Host = "127.0.0.1:8080"
+			req.Header.Set("Origin", tc.origin)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("GET /api/list-apps with Origin %q = %d, want %d", tc.origin, rec.Code, tc.wantStatus)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != tc.wantCORS {
+				t.Errorf("GET /api/list-apps with Origin %q: Access-Control-Allow-Origin = %q, want %q", tc.origin, got, tc.wantCORS)
 			}
 		})
 	}

@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/internal/originguard"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 )
@@ -50,6 +52,7 @@ const (
 type webConfig struct {
 	port            int
 	host            string
+	allowOrigins    []string
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
 	idleTimeout     time.Duration
@@ -214,6 +217,12 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	// than the raw flag, so an empty -host arms the same checks the default does.
 	config.BindHost = w.bindHost()
 
+	// Before any sublauncher runs, so that a server one of them builds, like
+	// the REST server, is given the operator's origins too. Clipped so that
+	// neither this append nor a sublauncher's writes into a slice the caller
+	// owns.
+	config.AllowedOrigins = append(slices.Clip(config.AllowedOrigins), w.config.allowOrigins...)
+
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
@@ -222,6 +231,24 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 			}
 		}
 	}
+
+	// One guard over every route registered above, rather than one per
+	// sublauncher, so that a sublauncher added later is covered without having
+	// to remember it. Several of these routes run an agent or return session
+	// data, and a rebound page can reach any of them.
+	//
+	// Built here, after setup, because sublaunchers add origins while they run.
+	// gorilla/mux builds the middleware chain when a route matches, so this
+	// still wraps the routes registered before it.
+	//
+	// The REST server keeps its own copy of these checks, because it is also
+	// mounted outside this launcher. Its copy holds only the origins added
+	// before the api sublauncher ran, so an origin that a later sublauncher adds
+	// passes this guard and is still refused on the REST routes.
+	router.Use(originguard.New(originguard.Config{
+		BindHost:       config.BindHost,
+		AllowedOrigins: config.AllowedOrigins,
+	}).Middleware)
 
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
 	if err != nil {
@@ -341,6 +368,14 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.host, "host", defaultHost, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
 	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
+	// Named, repeated and described like adk-python's --allow_origins, which
+	// also accepts regex: entries. originguard matches literal origins only,
+	// so the help offers none. launcher.Config.AllowedOrigins documents what
+	// the list does.
+	fs.Func("allow_origins", "Optional. Origins to allow for CORS (e.g., 'https://example.com'). Repeat the flag to allow more than one.", func(origin string) error {
+		config.allowOrigins = append(config.allowOrigins, origin)
+		return nil
+	})
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
