@@ -904,14 +904,20 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 // TODO: check need/feasibility of running this concurrently.
 func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []tool.Tool) error {
 	for _, t := range tools {
-		requestProcessor, ok := t.(toolinternal.RequestProcessor)
-		if !ok {
-			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
-		}
 		// TODO: how to prevent mutation on this?
 		toolCtx := agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
-		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
-			return err
+		if requestProcessor, ok := tool.As[tool.RequestProcessor](t); ok {
+			_, existedBefore := req.Tools[t.Name()]
+			if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
+				return err
+			}
+			// A processor may register an inner tool. Keep the outer decorator
+			// on the call path without repeating declaration packing.
+			if _, wrapped := t.(tool.Wrapper); wrapped && !existedBefore && req.Tools[t.Name()] != nil {
+				req.Tools[t.Name()] = t
+			}
+		} else {
+			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 	}
 	return nil
@@ -923,7 +929,7 @@ func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error
 		return nil
 	}
 	for _, toolset := range Reveal(llmAgent).Toolsets {
-		processor, ok := toolset.(toolinternal.RequestProcessor)
+		processor, ok := toolset.(tool.RequestProcessor)
 		if !ok {
 			continue // Not all toolsets implement RequestProcessor.
 		}
@@ -1349,7 +1355,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
-				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
+				} else if streamTool, ok := tool.As[toolinternal.StreamingFunctionTool](curTool); ok {
 					if liveSess != nil {
 						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
 						cancelCtx, cancel := toolCtx.WithAgentCancel()
@@ -1404,19 +1410,19 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							result = map[string]any{"result": sb.String()}
 						}
 					}
-				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
-					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+				} else if _, ok := tool.As[toolinternal.FunctionTool](curTool); !ok {
+					err := fmt.Errorf("tool %q does not implement tool.FunctionTool or tool.StreamingFunctionTool", fnCall.Name)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, curTool, fnCall.Args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
 				} else {
-					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+					result = f.callTool(toolCtx, curTool, fnCall.Args)
 				}
 			}
 
 			if result == nil {
-				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
+				if d, ok := tool.As[tool.ResponseDeferrer](curTool); ok && d.DefersResponse() {
 					return
 				}
 				if curTool != nil && curTool.IsLongRunning() {
@@ -1447,7 +1453,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			// acknowledgement - and those must not have their result leaked into
 			// a visible text part.
 			if actions := toolCtx.Actions(); actions.SkipSummarization {
-				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
+				if displayer, ok := tool.As[tool.SkipSummarizationResultDisplayer](curTool); ok && displayer.DisplayResultOnSkipSummarization() {
 					if text, ok := displayableToolResultText(result); ok {
 						parts = append(parts, &genai.Part{Text: text})
 					}
@@ -1510,28 +1516,29 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
 	if pluginManager != nil {
-		response, err = pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs)
+		response, err = pluginManager.RunBeforeToolCallback(toolCtx, t, fArgs)
 	}
 	if response == nil && err == nil {
-		response, err = f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+		response, err = f.invokeBeforeToolCallbacks(toolCtx, t, fArgs)
 	}
 
 	if response == nil && err == nil {
-		response, err = tool.Run(toolCtx, fArgs)
+		fn, _ := tool.As[toolinternal.FunctionTool](t)
+		response, err = fn.Run(toolCtx, fArgs)
 	}
 
 	var errorResponse map[string]any
 	var cbErr error
 	if err != nil && pluginManager != nil {
-		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, t, fArgs, err)
 	}
 	if err != nil && errorResponse == nil && cbErr == nil {
-		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, t, fArgs, err)
 	}
 	if errorResponse != nil || cbErr != nil {
 		response = errorResponse
@@ -1541,10 +1548,10 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	var alteredResponse map[string]any
 	var alteredErr error
 	if pluginManager != nil {
-		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, t, fArgs, response, err)
 	}
 	if alteredResponse == nil && alteredErr == nil {
-		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, t, fArgs, response, err)
 	}
 	if alteredResponse != nil || alteredErr != nil {
 		response = alteredResponse
@@ -1572,7 +1579,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, 
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
