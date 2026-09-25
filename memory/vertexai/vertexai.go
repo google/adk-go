@@ -58,7 +58,10 @@ func NewService(ctx context.Context, config *ServiceConfig) (memory.Service, err
 	}, nil
 }
 
-var _ memory.Service = &vertexAIService{}
+var (
+	_ memory.Service             = &vertexAIService{}
+	_ memory.AddEventsToMemoryer = &vertexAIService{}
+)
 
 // ErrAddEventsToMemoryUnsupported is returned by
 // [vertexAIService.AddEventsToMemory] to signal that incremental ingestion is not

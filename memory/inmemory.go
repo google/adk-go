@@ -135,6 +135,8 @@ func eventToValue(event *session.Event) (value, bool) {
 	}, true
 }
 
+var _ AddEventsToMemoryer = (*inMemoryService)(nil)
+
 func (s *inMemoryService) AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error {
 	// Convert the events into values before taking the lock: the conversion is
 	// pure and only the per-user write contends, so keeping it out of the

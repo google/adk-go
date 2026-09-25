@@ -33,26 +33,44 @@ type Service interface {
 	//
 	// A session can be added multiple times during its lifetime.
 	AddSessionToMemory(ctx context.Context, s session.Session) error
-	// AddEventsToMemory adds an explicit list of events to the memory service.
-	//
-	// This is intended for callers who want to persist only a subset of
-	// events (e.g. the latest turn) rather than re-ingesting the full
-	// session via AddSessionToMemory. Implementations should treat Events
-	// as an incremental update and must not assume it represents the full
-	// session.
-	//
-	// The direction is not symmetric: AddSessionToMemory replaces the stored
-	// events for a session wholesale, so a later full-session call for the
-	// same session overwrites any events that were added incrementally and
-	// are absent from that call's session. Incremental and full-session
-	// ingestion of the same session are therefore not safely mixable.
-	AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error
 	// SearchMemory returns memory entries relevant to the given query.
 	// Empty slice is returned if there are no matches.
 	SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 
-// AddEventsToMemoryRequest represents a request for [Service.AddEventsToMemory].
+// AddEventsToMemoryer is an optional capability of a [Service] that ingests an
+// explicit list of events, as an extension discovered by a type assertion. It
+// is deliberately kept off [Service] so that existing implementations — in
+// particular custom backends — keep satisfying [Service] without having to
+// implement a method they do not support; this mirrors adk-python, where
+// add_events_to_memory is a concrete method that raises NotImplementedError
+// rather than an abstract one.
+//
+// To use it, assert the capability where it is wanted:
+//
+//	if ingester, ok := svc.(memory.AddEventsToMemoryer); ok {
+//		ingester.AddEventsToMemory(ctx, req)
+//	}
+//
+// and fall back to [Service.AddSessionToMemory] when the assertion fails or the
+// call returns the backend's unsupported error.
+//
+// AddEventsToMemory is intended for callers who want to persist only a subset of
+// events (e.g. the latest turn) rather than re-ingesting the full session via
+// [Service.AddSessionToMemory]. Implementations must treat Events as an
+// incremental update and must not assume it represents the full session.
+//
+// The direction is not symmetric: AddSessionToMemory replaces the stored events
+// for a session wholesale, so a later full-session call for the same session
+// overwrites any events that were added incrementally and are absent from that
+// call's session. Incremental and full-session ingestion of the same session are
+// therefore not safely mixable.
+type AddEventsToMemoryer interface {
+	AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error
+}
+
+// AddEventsToMemoryRequest represents a request for
+// [AddEventsToMemoryer.AddEventsToMemory].
 type AddEventsToMemoryRequest struct {
 	AppName string
 	UserID  string

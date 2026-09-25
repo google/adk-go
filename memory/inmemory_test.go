@@ -176,7 +176,8 @@ func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
 
 	t.Run("events become searchable", func(t *testing.T) {
 		s := memory.InMemoryService()
-		err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+		adder := s.(memory.AddEventsToMemoryer)
+		err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 			AppName:   "app1",
 			UserID:    "user1",
 			SessionID: "sess1",
@@ -197,17 +198,18 @@ func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
 
 	t.Run("repeated calls with overlapping events are deduped by ID", func(t *testing.T) {
 		s := memory.InMemoryService()
+		adder := s.(memory.AddEventsToMemoryer)
 		req := &memory.AddEventsToMemoryRequest{
 			AppName:   "app1",
 			UserID:    "user1",
 			SessionID: "sess1",
 			Events:    []*session.Event{newEvent("event1", "The quick brown fox")},
 		}
-		if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+		if err := adder.AddEventsToMemory(t.Context(), req); err != nil {
 			t.Fatalf("AddEventsToMemory() [1] error = %v", err)
 		}
 		req.Events = []*session.Event{newEvent("event1", "The quick brown fox"), newEvent("event2", "jumps over the lazy dog")}
-		if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+		if err := adder.AddEventsToMemory(t.Context(), req); err != nil {
 			t.Fatalf("AddEventsToMemory() [2] error = %v", err)
 		}
 
@@ -222,7 +224,8 @@ func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
 
 	t.Run("does not affect other sessions or users", func(t *testing.T) {
 		s := memory.InMemoryService()
-		if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+		adder := s.(memory.AddEventsToMemoryer)
+		if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 			AppName:   "app1",
 			UserID:    "user1",
 			SessionID: "sess1",
@@ -242,7 +245,8 @@ func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
 
 	t.Run("events without content are ignored", func(t *testing.T) {
 		s := memory.InMemoryService()
-		err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+		adder := s.(memory.AddEventsToMemoryer)
+		err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 			AppName:   "app1",
 			UserID:    "user1",
 			SessionID: "sess1",
@@ -268,9 +272,10 @@ func Test_inMemoryService_AddEventsToMemory(t *testing.T) {
 // call's events would leave only the second call's event searchable and fail.
 func Test_inMemoryService_AddEventsToMemory_DisjointCallsAccumulate(t *testing.T) {
 	s := memory.InMemoryService()
+	adder := s.(memory.AddEventsToMemoryer)
 	add := func(id, text string) {
 		t.Helper()
-		if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+		if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 			AppName: "app1", UserID: "user1", SessionID: "sess1",
 			Events: []*session.Event{memoryTextEvent(id, text)},
 		}); err != nil {
@@ -296,8 +301,9 @@ func Test_inMemoryService_AddEventsToMemory_DisjointCallsAccumulate(t *testing.T
 // user and never observes which bucket an event landed in.
 func Test_inMemoryService_AddEventsToMemory_SessionScopedDedup(t *testing.T) {
 	s := memory.InMemoryService()
+	adder := s.(memory.AddEventsToMemoryer)
 	for _, sid := range []string{"sess1", "sess2"} {
-		if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+		if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 			AppName: "app1", UserID: "user1", SessionID: sid,
 			Events: []*session.Event{memoryTextEvent("event1", "shared marker word")},
 		}); err != nil {
@@ -321,7 +327,8 @@ func Test_inMemoryService_AddEventsToMemory_SessionScopedDedup(t *testing.T) {
 // nothing in the other subtests would notice.
 func Test_inMemoryService_AddEventsToMemory_ContentlessIdDoesNotBlockRealEvent(t *testing.T) {
 	s := memory.InMemoryService()
-	if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+	adder := s.(memory.AddEventsToMemoryer)
+	if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 		AppName: "app1", UserID: "user1", SessionID: "sess1",
 		Events: []*session.Event{
 			{ID: "event1", Author: "user1"},
@@ -345,7 +352,8 @@ func Test_inMemoryService_AddEventsToMemory_ContentlessIdDoesNotBlockRealEvent(t
 // guard that no separate-call test reaches.
 func Test_inMemoryService_AddEventsToMemory_DuplicateWithinBatch(t *testing.T) {
 	s := memory.InMemoryService()
-	if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+	adder := s.(memory.AddEventsToMemoryer)
+	if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 		AppName: "app1", UserID: "user1", SessionID: "sess1",
 		Events: []*session.Event{
 			memoryTextEvent("event1", "dup marker word"),
@@ -379,7 +387,8 @@ func Test_inMemoryService_AddEventsToMemory_EmptyIDNotDropped(t *testing.T) {
 	}
 
 	s := memory.InMemoryService()
-	if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+	adder := s.(memory.AddEventsToMemoryer)
+	if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 		AppName: "app1", UserID: "user1", SessionID: "sess1",
 		Events: []*session.Event{
 			evt("hello world", genai.RoleUser),
@@ -399,12 +408,13 @@ func Test_inMemoryService_AddEventsToMemory_EmptyIDNotDropped(t *testing.T) {
 	// The same across the two ingestion paths: an ID-less event ingested via
 	// AddSessionToMemory must not block a later ID-less AddEventsToMemory.
 	s = memory.InMemoryService()
+	adder = s.(memory.AddEventsToMemoryer)
 	if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app1", "user1", "sess1", []*session.Event{
 		evt("hello world", genai.RoleUser),
 	})); err != nil {
 		t.Fatalf("AddSessionToMemory() error = %v", err)
 	}
-	if err := s.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
+	if err := adder.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{
 		AppName: "app1", UserID: "user1", SessionID: "sess1",
 		Events: []*session.Event{evt("how can I help you", genai.RoleModel)},
 	}); err != nil {
@@ -426,6 +436,7 @@ func Test_inMemoryService_AddEventsToMemory_EmptyIDNotDropped(t *testing.T) {
 // documented as thread-safe, so this must stay clean under -race, as CI runs it.
 func Test_inMemoryService_AddEventsToMemory_Concurrent(t *testing.T) {
 	s := memory.InMemoryService()
+	adder := s.(memory.AddEventsToMemoryer)
 	ctx := t.Context()
 
 	const workers = 8
@@ -437,7 +448,7 @@ func Test_inMemoryService_AddEventsToMemory_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				id := "e-" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
-				if err := s.AddEventsToMemory(ctx, &memory.AddEventsToMemoryRequest{
+				if err := adder.AddEventsToMemory(ctx, &memory.AddEventsToMemoryRequest{
 					AppName: "app1", UserID: "user1", SessionID: "sess1",
 					Events: []*session.Event{memoryTextEvent(id, "marker")},
 				}); err != nil {
