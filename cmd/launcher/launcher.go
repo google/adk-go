@@ -106,13 +106,23 @@ type Config struct {
 	//
 	// The web launcher checks every request against one policy, built from
 	// this list once every sublauncher is set up. A cross-origin browser
-	// request from an origin not on the list is refused with 403; a
-	// same-origin one is served. When BindHost is a loopback address, a
-	// request whose Host is neither loopback nor the host of a listed origin
-	// is refused too, whether or not it carries an Origin, which is what stops
-	// a DNS-rebinding page. On any other bind that check is off, and a
-	// rebound page gets through. The Authenticator then protects the REST API
-	// alone; the other routes, A2A among them, have no authentication.
+	// request from an origin not on the list is refused with 403. A
+	// same-origin one is served, unless its Origin is not a loopback address
+	// and the server serves only this machine: BindHost is a loopback
+	// address, or a wildcard one such as 0.0.0.0 and the connection was
+	// accepted on loopback. Such a server serves loopback pages, so a page
+	// claiming to be elsewhere got there by rebinding its DNS name. A reverse
+	// proxy on the same machine is refused the same way, so list its origin.
+	//
+	// When BindHost is a loopback address, a request whose Host is neither
+	// loopback nor the host of a listed origin is refused too, whether or not
+	// it carries an Origin, which is what stops a DNS-rebinding page. On any
+	// other bind that check is off, so a rebound page's requests that carry no
+	// Origin get through. So do the rest, unless BindHost is a wildcard
+	// address and the connection was accepted on loopback. Inside a container
+	// behind a published port, it is accepted on a routable address. The
+	// Authenticator then protects the REST API alone; the other routes, A2A
+	// among them, have no authentication.
 	//
 	// A caller may set it, the web launcher's -allow_origins flag appends to
 	// it, and a sublauncher appends the origins it serves, such as the web UI
