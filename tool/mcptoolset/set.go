@@ -160,6 +160,25 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
+// reservedToolNames are tool names the framework itself puts on the wire. In-model
+// built-ins (google_search, google_maps, ...) only append to the request's config
+// tools and never occupy their name in the tool map, so a server advertising one of
+// these would have its tool dispatched in place of the framework's own. Refuse them
+// at registration instead.
+var reservedToolNames = map[string]struct{}{
+	"set_model_response": {},
+	"transfer_to_agent":  {},
+	"finish_task":        {},
+	"task_completed":     {},
+	"google_search":      {},
+	"google_maps":        {},
+	"url_context":        {},
+	"vertex_ai_search":   {},
+	"code_execution":     {},
+	"load_artifacts":     {},
+	"load_memory":        {},
+}
+
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	mcpTools, err := s.mcpClient.ListTools(ctx)
@@ -169,6 +188,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
+		if _, reserved := reservedToolNames[mcpTool.Name]; reserved {
+			return nil, fmt.Errorf("mcp toolset: refusing reserved tool name %q advertised by the server", mcpTool.Name)
+		}
+
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
