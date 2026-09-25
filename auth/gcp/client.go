@@ -48,6 +48,11 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts. The client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
 // use. It cannot inject a query, a fragment, an authority or a percent-escape
 // into the request URL the name is interpolated into. Extra path segments are
@@ -60,7 +65,9 @@ var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
 // validateResource rejects a resource name that cannot be safely interpolated
 // into a request URL, or that would not survive path normalization — an empty,
 // "." or ".." segment blocks traversal, and also keeps the name the caller
-// validated identical to the one connectorResourceRE routes on.
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
 func validateResource(name string) error {
 	if !resourceNameRE.MatchString(name) {
 		return fmt.Errorf("resource %q has invalid characters", name)
