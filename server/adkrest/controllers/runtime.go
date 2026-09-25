@@ -250,7 +250,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	// Flush as soon as possible so the client doesn't drop connection.
 	// Add the headers after the error handling to avoid wrong content type.
-	rw.Header().Set("Content-Type", "text/event-stream")
+	// The charset is redundant — text/event-stream is always UTF-8 — but is
+	// stated anyway, which is what its registration allows the parameter for.
+	// RFC 7231 removed the old ISO-8859-1 default for text/*, yet clients
+	// still implement it and mojibake every non-ASCII rune when it is absent.
+	rw.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
 	if err := rc.Flush(); err != nil {
