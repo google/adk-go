@@ -50,8 +50,30 @@ type RuntimeAPIController struct {
 
 	checkOrigin func(*http.Request) bool
 
+	maxLiveMessageBytes  int64
+	liveKeepaliveTimeout time.Duration
+	// livePingInterval is how often the server pings a live connection. Zero
+	// when the keepalive is off.
+	livePingInterval time.Duration
+	// liveSlots holds one token per live session the controller may serve at
+	// once. Nil when the cap is disabled.
+	liveSlots chan struct{}
+
 	eventsCompactionConfig *compaction.Config
 }
+
+// Defaults for the /run_live limits. The message and keepalive bounds follow
+// uvicorn, which serves adk-python's /run_live: ws_max_size is 16 MiB and
+// ws_ping_interval/ws_ping_timeout are 20s each, so a peer that stops answering
+// pings is dropped after roughly 40s.
+const (
+	defaultMaxLiveMessageBytes  = 16 << 20
+	defaultLiveKeepaliveTimeout = 40 * time.Second
+
+	// liveWriteWait bounds a ping write, which shares the connection with the
+	// event loop's writes.
+	liveWriteWait = 10 * time.Second
+)
 
 // RuntimeAPIControllerConfig carries everything [NewRuntimeAPIControllerWithConfig]
 // needs.
@@ -98,6 +120,41 @@ type RuntimeAPIControllerConfig struct {
 	// so accepts a page that reached this server by rebinding its own DNS name,
 	// since such a page controls both
 	CheckOrigin func(*http.Request) bool
+
+	// MaxLiveMessageBytes caps one client message on a /run_live connection.
+	// A message larger than the cap closes the connection with close code 1009
+	// instead of being buffered, so a single caller cannot make the server
+	// allocate without bound.
+	//
+	// optional; zero means 16 MiB, negative means no cap
+	MaxLiveMessageBytes int64
+
+	// LiveKeepaliveTimeout drops a /run_live peer that has stopped responding.
+	// The server pings at half this interval. While it waits on the client, a
+	// pong or a client message restarts the clock, and a write the peer does
+	// not accept within the timeout also ends the connection.
+	//
+	// It is not an idle timeout: a client that sends nothing but still answers
+	// pings, as every browser does, stays connected. What it removes is a peer
+	// that has gone away without closing, which as a hijacked connection sits
+	// outside [net/http.Server]'s own timeouts and would otherwise hold its
+	// agent session for as long as the process runs.
+	//
+	// optional; zero means 40s, negative turns the keepalive off
+	LiveKeepaliveTimeout time.Duration
+
+	// MaxLiveSessions caps how many /run_live connections this controller
+	// serves at once. Past the cap the handler answers 503 and does not
+	// upgrade, so one caller cannot hold open more agent sessions, model
+	// connections and goroutines than the process can carry.
+	//
+	// There is no cap by default, as in adk-python. Behind an autoscaler such
+	// as Cloud Run, the platform's own per-instance concurrency setting decides
+	// admission, and a lower cap here would refuse sessions the platform has
+	// already routed to this instance instead of letting it scale out.
+	//
+	// optional; zero or negative means no cap
+	MaxLiveSessions int
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
@@ -136,6 +193,24 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 		authorizer = authz.NewNoop()
 	}
 
+	maxLiveMessageBytes := cfg.MaxLiveMessageBytes
+	if maxLiveMessageBytes == 0 {
+		maxLiveMessageBytes = defaultMaxLiveMessageBytes
+	}
+	liveKeepaliveTimeout := cfg.LiveKeepaliveTimeout
+	if liveKeepaliveTimeout == 0 {
+		liveKeepaliveTimeout = defaultLiveKeepaliveTimeout
+	}
+	var livePingInterval time.Duration
+	if liveKeepaliveTimeout > 0 {
+		// A timeout under 2ns would halve to zero, which time.NewTicker rejects.
+		livePingInterval = max(liveKeepaliveTimeout/2, time.Nanosecond)
+	}
+	var liveSlots chan struct{}
+	if cfg.MaxLiveSessions > 0 {
+		liveSlots = make(chan struct{}, cfg.MaxLiveSessions)
+	}
+
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
@@ -145,6 +220,10 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
 		checkOrigin:            cfg.CheckOrigin,
+		maxLiveMessageBytes:    maxLiveMessageBytes,
+		liveKeepaliveTimeout:   liveKeepaliveTimeout,
+		livePingInterval:       livePingInterval,
+		liveSlots:              liveSlots,
 		eventsCompactionConfig: cfg.Compaction,
 		authorizer:             authorizer,
 	}
@@ -411,6 +490,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		return fmt.Errorf("appName, userId, and sessionId are required")
 	}
 
+	// Before the upgrade, so a refusal is an ordinary HTTP response the client
+	// can read rather than a close frame on a connection it just won.
+	release, ok := c.acquireLiveSlot()
+	if !ok {
+		return newStatusError(fmt.Errorf("live session limit of %d reached", cap(c.liveSlots)), http.StatusServiceUnavailable)
+	}
+	defer release()
+
 	ws, err := upgrader.Upgrade(rw, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade to websocket: %w", err)
@@ -419,8 +506,15 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		_ = ws.Close()
 	}()
 
+	stopPings := c.applyLiveConnLimits(ws)
+	defer stopPings()
+
 	sendClose := func(code int, reason string) {
 		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(reason)))
+		// Only the close reply matters from here. The keepalive's pong handler
+		// would push the deadline below out on every pong, so a client sending
+		// pongs could hold the connection open past the drain.
+		ws.SetPongHandler(nil)
 		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
@@ -462,6 +556,10 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			_ = liveSession.Close()
 		}()
 		for {
+			// Armed only while waiting on the client, so neither session
+			// setup nor a slow hand-off to the agent counts against a peer
+			// that answers every ping.
+			_ = ws.SetReadDeadline(c.liveDeadline())
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
@@ -515,6 +613,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 
 	for event, err := range eventIter {
+		// A peer that accepts nothing for the keepalive timeout has stopped
+		// responding too. Without a deadline a write would block on it for
+		// good, holding the handler and its session slot, since the reader
+		// timing out only closes the live session. Set on every pass, before
+		// either write below, so neither inherits a deadline that expired
+		// while the agent was quiet.
+		_ = ws.SetWriteDeadline(c.liveDeadline())
 		if err != nil {
 			log.Printf("RunLive failed: %v\n", err)
 			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
@@ -531,6 +636,73 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}
 
 	return nil
+}
+
+// acquireLiveSlot takes one of the controller's concurrent live-session slots.
+// It reports false when they are all held, and otherwise returns the function
+// that gives the slot back.
+func (c *RuntimeAPIController) acquireLiveSlot() (release func(), ok bool) {
+	if c.liveSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case c.liveSlots <- struct{}{}:
+		return func() { <-c.liveSlots }, true
+	default:
+		return nil, false
+	}
+}
+
+// applyLiveConnLimits bounds what one live connection may consume: a read limit
+// so a client message cannot be buffered without end, and the pings and pong
+// handler of the keepalive, so a peer that stops responding is dropped. The
+// keepalive's deadlines are set around each read and write, from
+// [RuntimeAPIController.liveDeadline]. It returns the function that stops the
+// pinger, which the caller must call.
+func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func()) {
+	if c.maxLiveMessageBytes > 0 {
+		ws.SetReadLimit(c.maxLiveMessageBytes)
+	}
+	if c.liveKeepaliveTimeout <= 0 {
+		return func() {}
+	}
+
+	ws.SetPongHandler(func(string) error {
+		// A failure means the connection is already gone, which the read in
+		// progress reports.
+		_ = ws.SetReadDeadline(c.liveDeadline())
+		return nil
+	})
+
+	// Ping from a goroutine of its own: the caller's write loop blocks on the
+	// event iterator, so it cannot also keep the clock running. WriteControl is
+	// the one write method gorilla allows concurrently with the others.
+	done := make(chan struct{})
+	ticker := time.NewTicker(c.livePingInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(liveWriteWait)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// liveDeadline returns the deadline for the next read or write on a live
+// connection: the keepalive timeout from now, or the zero time, which sets no
+// deadline, when the keepalive is off.
+func (c *RuntimeAPIController) liveDeadline() time.Time {
+	if c.liveKeepaliveTimeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(c.liveKeepaliveTimeout)
 }
 
 // maxCloseReason is the longest reason a websocket close frame can carry: a

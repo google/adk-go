@@ -102,12 +102,20 @@ const (
 	// test verifies that the handler waits for the client's close reply.
 	testCloseDrainGracePeriod = 50 * time.Millisecond
 	testCloseReplyExitTimeout = 100 * time.Millisecond
+	// testMaxHandlerExits is the capacity of the handler-exit channel, large
+	// enough for every connection a test in this file opens.
+	testMaxHandlerExits = 8
 )
 
-func dialRunLiveHandler(
+// startRunLiveServer serves RunLiveHandler over cfg, filling in the session
+// service and agent loader the live tests share. Every handler return sends on
+// exits, which is buffered so a test that never reads it cannot wedge a
+// handler.
+func startRunLiveServer(
 	t *testing.T,
+	cfg RuntimeAPIControllerConfig,
 	runLiveFn func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error),
-) (*websocket.Conn, <-chan struct{}) {
+) (wsURL string, exits <-chan struct{}) {
 	t.Helper()
 
 	baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
@@ -117,7 +125,7 @@ func dialRunLiveHandler(
 	liveAgent := &mockLiveAgent{Agent: baseAgent, runLiveFn: runLiveFn}
 
 	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
-	sessionService := &fakes.FakeSessionService{
+	cfg.SessionService = &fakes.FakeSessionService{
 		Sessions: map[fakes.SessionKey]fakes.TestSession{
 			id: {
 				Id:            id,
@@ -127,21 +135,26 @@ func dialRunLiveHandler(
 			},
 		},
 	}
+	cfg.AgentLoader = agent.NewSingleLoader(liveAgent)
 
-	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
-		SessionService: sessionService,
-		AgentLoader:    agent.NewSingleLoader(liveAgent),
-	})
-	handlerDone := make(chan struct{})
+	controller := NewRuntimeAPIControllerWithConfig(cfg)
+	handlerExits := make(chan struct{}, testMaxHandlerExits)
 	handler := NewErrorHandler(controller.RunLiveHandler)
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		defer close(handlerDone)
+		defer func() { handlerExits <- struct{}{} }()
 		handler(rw, req)
 	}))
 	t.Cleanup(server.Close)
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") +
-		"/run_live?appName=" + testLiveAppName + "&userId=" + testLiveUserID + "&sessionId=" + testLiveSessionID
+	return "ws" + strings.TrimPrefix(server.URL, "http") +
+		"/run_live?appName=" + testLiveAppName + "&userId=" + testLiveUserID + "&sessionId=" + testLiveSessionID, handlerExits
+}
+
+// dialLive opens one /run_live connection and fails the test unless the
+// handshake was accepted.
+func dialLive(t *testing.T, wsURL string) *websocket.Conn {
+	t.Helper()
+
 	conn, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("websocket.Dial() failed: %v", err)
@@ -151,7 +164,17 @@ func dialRunLiveHandler(
 	if response.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("handshake status = %d, want %d", response.StatusCode, http.StatusSwitchingProtocols)
 	}
-	return conn, handlerDone
+	return conn
+}
+
+func dialRunLiveHandler(
+	t *testing.T,
+	runLiveFn func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error),
+) (*websocket.Conn, <-chan struct{}) {
+	t.Helper()
+
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{}, runLiveFn)
+	return dialLive(t, wsURL), exits
 }
 
 func waitForHandlerExit(t *testing.T, handlerDone <-chan struct{}) {
@@ -459,6 +482,38 @@ func TestRunLiveHandler_RunLiveErrorSendsCloseFrameAndDrainsReply(t *testing.T) 
 	}
 }
 
+func TestRunLiveHandler_PongsDoNotExtendCloseDrain(t *testing.T) {
+	conn, handlerDone := dialRunLiveHandler(t, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return nil, nil, errors.New("live agent failed")
+	})
+
+	// The client never reads, so the server's close frame goes unanswered, and
+	// it keeps sending pongs. The drain after the close frame has to end on its
+	// own one-second deadline all the same.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			if err := conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second)); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunLiveHandler was still draining 3s after its close frame while the client sent pongs")
+	}
+}
+
 func TestRunLiveHandler_IteratorErrorSendsCloseFrame(t *testing.T) {
 	wantErr := errors.New("stream failed")
 	liveSession := newRecordingLiveSession()
@@ -603,5 +658,345 @@ func TestTruncateCloseReason(t *testing.T) {
 	// The frame gorilla actually builds must be acceptable to it.
 	if got := len(websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(longErr))); got > 125 {
 		t.Errorf("close frame payload = %d bytes, want at most 125", got)
+	}
+}
+
+// blockingLiveRun returns a run function whose event stream produces nothing
+// and ends only when the live session is closed, so a test can watch the
+// handler's reaction to the client rather than to the agent.
+func blockingLiveRun(liveSession *recordingLiveSession) func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			<-liveSession.closed
+		}, nil
+	}
+}
+
+func TestRunLiveHandler_ClosesConnectionOnOversizedMessage(t *testing.T) {
+	const readLimit = 64
+
+	liveSession := newRecordingLiveSession()
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		MaxLiveMessageBytes: readLimit,
+	}, blockingLiveRun(liveSession))
+	conn := dialLive(t, wsURL)
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, readLimit*2)); err != nil {
+		t.Fatalf("WriteMessage() failed: %v", err)
+	}
+
+	if got, want := readCloseError(t, conn).Code, websocket.CloseMessageTooBig; got != want {
+		t.Errorf("close code = %d, want %d", got, want)
+	}
+	select {
+	case req := <-liveSession.requests:
+		t.Errorf("oversized message reached the live session as %#v, want it dropped", req)
+	default:
+	}
+	waitForHandlerExit(t, exits)
+}
+
+func TestRunLiveHandler_AcceptsMessageAtReadLimit(t *testing.T) {
+	const readLimit = 1024
+
+	liveSession := newRecordingLiveSession()
+	wsURL, _ := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		MaxLiveMessageBytes: readLimit,
+	}, blockingLiveRun(liveSession))
+	conn := dialLive(t, wsURL)
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, readLimit)); err != nil {
+		t.Fatalf("WriteMessage() failed: %v", err)
+	}
+
+	req := waitForLiveRequest(t, liveSession)
+	blob, ok := req.RealtimeInput.(*genai.Blob)
+	if !ok {
+		t.Fatalf("RealtimeInput type = %T, want *genai.Blob", req.RealtimeInput)
+	}
+	if len(blob.Data) != readLimit {
+		t.Errorf("forwarded blob = %d bytes, want %d", len(blob.Data), readLimit)
+	}
+}
+
+func TestRunLiveHandler_ClosesUnresponsiveConnection(t *testing.T) {
+	const keepaliveTimeout = 100 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	// The client never reads, so gorilla never answers the server's pings and
+	// the keepalive is the only thing that can end the connection.
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	}, blockingLiveRun(liveSession))
+	dialLive(t, wsURL)
+
+	select {
+	case <-liveSession.closed:
+	case <-time.After(time.Second):
+		t.Fatal("unresponsive connection was not dropped after the keepalive timeout")
+	}
+	waitForHandlerExit(t, exits)
+}
+
+// answerPings starts a goroutine that reads conn until a read fails. Reading is
+// what makes gorilla answer a ping, so this is a client that is present but has
+// nothing to say.
+func answerPings(conn *websocket.Conn) {
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func TestRunLiveHandler_PongKeepsConnectionOpen(t *testing.T) {
+	const keepaliveTimeout = 100 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	wsURL, _ := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	}, blockingLiveRun(liveSession))
+	answerPings(dialLive(t, wsURL))
+
+	select {
+	case <-liveSession.closed:
+		t.Error("connection was dropped while the client was answering pings")
+	case <-time.After(5 * keepaliveTimeout):
+	}
+}
+
+func TestRunLiveHandler_KeepsResponsiveClientThroughSlowSetup(t *testing.T) {
+	const keepaliveTimeout = 100 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	wsURL, _ := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	}, func(ic agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		time.Sleep(3 * keepaliveTimeout)
+		return blockingLiveRun(liveSession)(ic)
+	})
+	answerPings(dialLive(t, wsURL))
+
+	select {
+	case <-liveSession.closed:
+		t.Error("client answering pings was dropped after a session setup longer than the keepalive timeout")
+	case <-time.After(5 * keepaliveTimeout):
+	}
+}
+
+// slowSendLiveSession takes delay to accept each request, the way a live flow
+// does while its model connection is dialing or reconnecting.
+type slowSendLiveSession struct {
+	*recordingLiveSession
+	delay time.Duration
+}
+
+func (s *slowSendLiveSession) Send(req agent.LiveRequest) error {
+	time.Sleep(s.delay)
+	return s.recordingLiveSession.Send(req)
+}
+
+func TestRunLiveHandler_KeepsResponsiveClientThroughSlowSend(t *testing.T) {
+	const keepaliveTimeout = 100 * time.Millisecond
+
+	recorder := newRecordingLiveSession()
+	liveSession := &slowSendLiveSession{recordingLiveSession: recorder, delay: 3 * keepaliveTimeout}
+	wsURL, _ := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	}, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			<-recorder.closed
+		}, nil
+	})
+	conn := dialLive(t, wsURL)
+	answerPings(conn)
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("audio")); err != nil {
+		t.Fatalf("WriteMessage() failed: %v", err)
+	}
+
+	select {
+	case <-recorder.closed:
+		t.Error("client answering pings was dropped while the agent took longer than the keepalive timeout to accept its message")
+	case <-time.After(8 * keepaliveTimeout):
+	}
+}
+
+func TestRunLiveHandler_IteratorErrorAfterQuietSpellSendsCloseFrame(t *testing.T) {
+	const keepaliveTimeout = 100 * time.Millisecond
+
+	wantErr := errors.New("stream failed")
+	liveSession := newRecordingLiveSession()
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	}, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			if !yield(makeEvent("invocation-1", testLiveAppName, "before failure"), nil) {
+				return
+			}
+			// Quiet for longer than the keepalive timeout, so the deadline set
+			// for the write above has expired by the time the error arrives.
+			time.Sleep(3 * keepaliveTimeout)
+			yield(nil, wantErr)
+		}, nil
+	})
+	conn := dialLive(t, wsURL)
+
+	var event models.Event
+	if err := conn.SetReadDeadline(time.Now().Add(testWebSocketReadTimeout)); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("ReadJSON() failed: %v", err)
+	}
+	// Still reading, so the pings sent while the agent is quiet are answered.
+	closeErr := readCloseError(t, conn)
+	if closeErr.Code != websocket.CloseInternalServerErr {
+		t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
+	}
+	if closeErr.Text != wantErr.Error() {
+		t.Errorf("close reason = %q, want %q", closeErr.Text, wantErr.Error())
+	}
+	waitForHandlerExit(t, exits)
+}
+
+func TestRunLiveHandler_DropsPeerThatStopsReading(t *testing.T) {
+	const keepaliveTimeout = 200 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	// Events large enough to fill the socket buffers within a few writes, so
+	// the handler ends up blocked writing to a peer that reads nothing.
+	text := strings.Repeat("a", 256<<10)
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		LiveKeepaliveTimeout: keepaliveTimeout,
+		MaxLiveSessions:      1,
+	}, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			for {
+				select {
+				case <-liveSession.closed:
+					return
+				default:
+				}
+				if !yield(makeEvent("inv", testLiveAppName, text), nil) {
+					return
+				}
+			}
+		}, nil
+	})
+	dialLive(t, wsURL)
+
+	waitForHandlerExit(t, exits)
+	// With a cap of one, this handshake succeeds only if the stalled peer's
+	// slot was released.
+	dialLive(t, wsURL)
+}
+
+func TestRunLiveHandler_RefusesUpgradePastSessionLimit(t *testing.T) {
+	liveSession := newRecordingLiveSession()
+	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
+		MaxLiveSessions: 1,
+	}, blockingLiveRun(liveSession))
+	first := dialLive(t, wsURL)
+
+	_, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if !errors.Is(err, websocket.ErrBadHandshake) {
+		t.Fatalf("second Dial() error = %v, want %v", err, websocket.ErrBadHandshake)
+	}
+	if got, want := response.StatusCode, http.StatusServiceUnavailable; got != want {
+		t.Errorf("second handshake status = %d, want %d", got, want)
+	}
+	// The refused request ran the handler too, so take its exit before waiting
+	// on the one that releases the slot.
+	waitForHandlerExit(t, exits)
+
+	// The slot goes back when the first session ends, so the cap bounds
+	// concurrency rather than the number of sessions the server ever serves.
+	_ = first.Close()
+	waitForHandlerExit(t, exits)
+	dialLive(t, wsURL)
+}
+
+func TestNewRuntimeAPIControllerWithConfig_LiveLimits(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           RuntimeAPIControllerConfig
+		wantBytes     int64
+		wantKeepalive time.Duration
+		wantPing      time.Duration
+		wantSlotCount int
+		wantCapped    bool
+	}{
+		{
+			name:          "unset takes the defaults, with no session cap",
+			wantBytes:     defaultMaxLiveMessageBytes,
+			wantKeepalive: defaultLiveKeepaliveTimeout,
+			wantPing:      defaultLiveKeepaliveTimeout / 2,
+		},
+		{
+			name: "explicit values are kept",
+			cfg: RuntimeAPIControllerConfig{
+				MaxLiveMessageBytes:  4096,
+				LiveKeepaliveTimeout: time.Minute,
+				MaxLiveSessions:      3,
+			},
+			wantBytes:     4096,
+			wantKeepalive: time.Minute,
+			wantPing:      30 * time.Second,
+			wantSlotCount: 3,
+			wantCapped:    true,
+		},
+		{
+			name: "negative turns each limit off",
+			cfg: RuntimeAPIControllerConfig{
+				MaxLiveMessageBytes:  -1,
+				LiveKeepaliveTimeout: -1,
+				MaxLiveSessions:      -1,
+			},
+			wantBytes:     -1,
+			wantKeepalive: -1,
+		},
+		{
+			// Halving would give zero, which would make time.NewTicker panic
+			// on every /run_live request.
+			name:          "a one-nanosecond keepalive still pings",
+			cfg:           RuntimeAPIControllerConfig{LiveKeepaliveTimeout: time.Nanosecond},
+			wantBytes:     defaultMaxLiveMessageBytes,
+			wantKeepalive: time.Nanosecond,
+			wantPing:      time.Nanosecond,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewRuntimeAPIControllerWithConfig(tc.cfg)
+
+			if c.maxLiveMessageBytes != tc.wantBytes {
+				t.Errorf("maxLiveMessageBytes = %d, want %d", c.maxLiveMessageBytes, tc.wantBytes)
+			}
+			if c.liveKeepaliveTimeout != tc.wantKeepalive {
+				t.Errorf("liveKeepaliveTimeout = %v, want %v", c.liveKeepaliveTimeout, tc.wantKeepalive)
+			}
+			if c.livePingInterval != tc.wantPing {
+				t.Errorf("livePingInterval = %v, want %v", c.livePingInterval, tc.wantPing)
+			}
+			if (c.liveSlots != nil) != tc.wantCapped {
+				t.Fatalf("session cap in effect = %t, want %t", c.liveSlots != nil, tc.wantCapped)
+			}
+			if tc.wantCapped && cap(c.liveSlots) != tc.wantSlotCount {
+				t.Errorf("session cap = %d, want %d", cap(c.liveSlots), tc.wantSlotCount)
+			}
+		})
+	}
+}
+
+func TestAcquireLiveSlot_UncappedAlwaysGrants(t *testing.T) {
+	c := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{})
+
+	for i := range 3 {
+		if _, ok := c.acquireLiveSlot(); !ok {
+			t.Fatalf("acquireLiveSlot() #%d refused with the cap disabled", i+1)
+		}
 	}
 }
