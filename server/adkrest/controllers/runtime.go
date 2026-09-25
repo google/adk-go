@@ -69,10 +69,6 @@ type RuntimeAPIController struct {
 const (
 	defaultMaxLiveMessageBytes  = 16 << 20
 	defaultLiveKeepaliveTimeout = 40 * time.Second
-
-	// liveWriteWait bounds a ping write, which shares the connection with the
-	// event loop's writes.
-	liveWriteWait = 10 * time.Second
 )
 
 // RuntimeAPIControllerConfig carries everything [NewRuntimeAPIControllerWithConfig]
@@ -686,7 +682,11 @@ func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop fun
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(liveWriteWait)); err != nil {
+				// The same deadline as an event write. A shorter one could
+				// expire while a slow event write holds the connection, which
+				// would stop the pings, or fail the connection on a stall the
+				// timeout allows.
+				if err := ws.WriteControl(websocket.PingMessage, nil, c.liveDeadline()); err != nil {
 					return
 				}
 			}

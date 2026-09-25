@@ -19,8 +19,10 @@ import (
 	"errors"
 	"iter"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -892,6 +894,208 @@ func TestRunLiveHandler_DropsPeerThatStopsReading(t *testing.T) {
 	// With a cap of one, this handshake succeeds only if the stalled peer's
 	// slot was released.
 	dialLive(t, wsURL)
+}
+
+// stallingConn is the server's end of a connection whose peer can stop
+// accepting data. While stalled, a write blocks until the stall ends or its
+// write deadline passes, and signals blocked when it starts waiting.
+type stallingConn struct {
+	net.Conn
+	blocked chan struct{}
+
+	mu       sync.Mutex
+	deadline time.Time
+	// resume is non-nil while writes stall, and is closed to end the stall.
+	resume chan struct{}
+}
+
+func (c *stallingConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *stallingConn) stall() {
+	c.mu.Lock()
+	c.resume = make(chan struct{})
+	c.mu.Unlock()
+}
+
+func (c *stallingConn) unstall() {
+	c.mu.Lock()
+	close(c.resume)
+	c.resume = nil
+	c.mu.Unlock()
+}
+
+func (c *stallingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	resume, deadline := c.resume, c.deadline
+	c.mu.Unlock()
+	if resume != nil {
+		var expired <-chan time.Time
+		if !deadline.IsZero() {
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			expired = timer.C
+		}
+		select {
+		case c.blocked <- struct{}{}:
+		default:
+		}
+		select {
+		case <-resume:
+		case <-expired:
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+	return c.Conn.Write(p)
+}
+
+// stallingListener wraps each accepted connection in a stallingConn and hands
+// it to the test on conns.
+type stallingListener struct {
+	net.Listener
+	conns chan *stallingConn
+}
+
+func (l *stallingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	sc := &stallingConn{Conn: conn, blocked: make(chan struct{}, 1)}
+	l.conns <- sc
+	return sc, nil
+}
+
+func TestRunLiveHandler_PingWriteDeadlineIsKeepaliveTimeout(t *testing.T) {
+	const keepaliveTimeout = 200 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
+	if err != nil {
+		t.Fatalf("agent.New() failed: %v", err)
+	}
+	// Echoes each binary message back as an event, so the test can tell
+	// whether the connection still carries writes.
+	liveAgent := &mockLiveAgent{Agent: baseAgent, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			for {
+				select {
+				case req := <-liveSession.requests:
+					blob, ok := req.RealtimeInput.(*genai.Blob)
+					if ok && !yield(makeEvent("inv", testLiveAppName, string(blob.Data)), nil) {
+						return
+					}
+				case <-liveSession.closed:
+					return
+				}
+			}
+		}, nil
+	}}
+	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: &fakes.FakeSessionService{
+			Sessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+		},
+		AgentLoader:          agent.NewSingleLoader(liveAgent),
+		LiveKeepaliveTimeout: keepaliveTimeout,
+	})
+	server := httptest.NewUnstartedServer(NewErrorHandler(controller.RunLiveHandler))
+	listener := &stallingListener{Listener: server.Listener, conns: make(chan *stallingConn, 1)}
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	conn := dialLive(t, "ws"+strings.TrimPrefix(server.URL, "http")+
+		"/run_live?appName="+testLiveAppName+"&userId="+testLiveUserID+"&sessionId="+testLiveSessionID)
+	serverConn := <-listener.conns
+
+	echoes := make(chan string, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			var event models.Event
+			if err := conn.ReadJSON(&event); err != nil {
+				readErr <- err
+				return
+			}
+			if event.Content != nil && len(event.Content.Parts) == 1 {
+				echoes <- event.Content.Parts[0].Text
+			}
+		}
+	}()
+	// Pongs of the client's own keep the server's read deadline from expiring
+	// while its pings are stalled, so only a failed write can end the
+	// connection.
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		ticker := time.NewTicker(keepaliveTimeout / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(keepaliveTimeout)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// The agent is quiet, so the first write to meet the stall is a ping.
+	stallPing := func(d time.Duration) {
+		t.Helper()
+		serverConn.stall()
+		select {
+		case <-serverConn.blocked:
+		case <-time.After(time.Second):
+			serverConn.unstall()
+			t.Fatal("no ping reached the stalled connection")
+		}
+		time.Sleep(d)
+		serverConn.unstall()
+	}
+	send := func(text string) {
+		t.Helper()
+		if err := conn.WriteMessage(websocket.BinaryMessage, []byte(text)); err != nil {
+			t.Fatalf("WriteMessage() failed: %v", err)
+		}
+	}
+
+	stallPing(keepaliveTimeout / 2)
+	send("after short stall")
+	select {
+	case got := <-echoes:
+		if got != "after short stall" {
+			t.Errorf("echo = %q, want %q", got, "after short stall")
+		}
+	case err := <-readErr:
+		t.Fatalf("connection ended after a ping stall shorter than the keepalive timeout: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("echo never arrived after a ping stall shorter than the keepalive timeout")
+	}
+
+	stallPing(2 * keepaliveTimeout)
+	send("after long stall")
+	select {
+	case got := <-echoes:
+		t.Errorf("echo %q arrived after a ping stalled for twice the keepalive timeout, want the connection closed", got)
+	case <-readErr:
+	case <-time.After(time.Second):
+		t.Fatal("connection neither closed nor echoed after a ping stalled for twice the keepalive timeout")
+	}
 }
 
 func TestRunLiveHandler_RefusesUpgradePastSessionLimit(t *testing.T) {
