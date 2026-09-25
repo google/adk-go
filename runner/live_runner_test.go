@@ -15,9 +15,11 @@
 package runner
 
 import (
+	"context"
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -39,6 +41,79 @@ type dummyLiveSession struct{}
 
 func (d *dummyLiveSession) Send(req agent.LiveRequest) error { return nil }
 func (d *dummyLiveSession) Close() error                     { return nil }
+
+func TestRunner_RunLive_NilEventYieldedTerminatesRun(t *testing.T) {
+	ctx := context.Background()
+	appName, userID, sessionID := "testApp", "testUser", "testSessionNilFlood"
+
+	sessionService := session.InMemoryService()
+	_, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := must(agent.New(agent.Config{Name: "nil_flood"}))
+	mockLive := &mockLiveAgent{
+		Agent: testAgent,
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+				for {
+					if !yield(nil, nil) {
+						return
+					}
+				}
+			}, nil
+		},
+	}
+
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          mockLive,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	type result struct {
+		err        error
+		iterations int
+	}
+	done := make(chan result, 1)
+	go func() {
+		got := result{}
+		for _, err := range iter {
+			got.err = err
+			got.iterations++
+			break
+		}
+		done <- got
+	}()
+
+	select {
+	case got := <-done:
+		if got.iterations != 1 {
+			t.Fatalf("RunLive() iterations = %d, want 1", got.iterations)
+		}
+		if got.err == nil {
+			t.Fatal("RunLive() yielded no error for a nil event")
+		}
+		if !strings.Contains(got.err.Error(), "nil_flood") {
+			t.Fatalf("RunLive() error = %v, want the agent name", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunLive() did not terminate after a nil event")
+	}
+}
 
 func TestRunner_RunLive_Callbacks(t *testing.T) {
 	ctx := t.Context()

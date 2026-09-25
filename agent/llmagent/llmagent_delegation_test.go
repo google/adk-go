@@ -22,9 +22,14 @@
 // changing an Instruction, tool declaration, or agent shape, delete
 // the corresponding .httprr file and run:
 //
-//	GEMINI_API_KEY=... go test ./agent/llmagent/ -httprecord=TestDelegation_NN
+//	GEMINI_API_KEY=... go test ./agent/llmagent/ -run TestDelegation_NN \
+//	    -httprecord='TestDelegation_NN.*\.httprr$'
 //
-// To re-record everything: -httprecord=TestDelegation.
+// -httprecord is a regexp matched against the cassette's file path, not a
+// test-name filter, so keep it as narrow as the set of cassettes you mean to
+// replace. The go:generate directive below re-records every delegation
+// cassette and nothing else; `go generate ./agent/llmagent/...` also runs the
+// directive in llmagent_test.go, so it re-records the whole package.
 //
 // The tests generate *.events.yaml file to visualize delegation and overall
 // flow of execution.
@@ -63,7 +68,7 @@ import (
 
 const delegationModelName = "gemini-3.5-flash"
 
-//go:generate go test -httprecord=TestDelegation
+//go:generate go test -httprecord=^testdata[/\\]TestDelegation_.*\.httprr$
 
 // newDelegationModel returns a Gemini model whose HTTP transport is
 // the httprr record/replay wrapper, scoped to a trace file derived
@@ -835,8 +840,8 @@ always contains everything needed for both steps.`,
 // TestDelegation_03_ChatToSingleTurn covers the SingleTurnTool path:
 // the coordinator emits an FC for the sub-agent, the standard tool-
 // execution pipeline runs it through an AgentNode in a sub-branch,
-// the sub-agent runs exactly ONE LLM round with IncludeContents="none"
-// (so it doesn't see the coordinator's conversation), and its
+// the sub-agent runs exactly ONE LLM round with its history scoped to
+// that turn (so it doesn't see the coordinator's conversation), and its
 // structured reply is returned to the coordinator as a regular FR.
 //
 // Unlike task mode, single_turn does NOT install a finish_task tool;
@@ -930,7 +935,7 @@ the sub-agent more than once. Do NOT ask the user follow-up questions.`,
 	// Verifies single_turn sub-agents are re-invocable across user
 	// turns: the coordinator re-dispatches `translator` for a new
 	// language. The previous translation should NOT leak into the
-	// new sub-branch (single_turn agents see IncludeContents="none"),
+	// new sub-branch (a single_turn placement scopes history to the turn),
 	// but the coordinator's own history still includes both
 	// translator FRs across turns.
 	events2 := dr.turn("Now translate the same word to French.")

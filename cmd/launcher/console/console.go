@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/internal/cli/util"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // consoleConfig contains command-line params for console launcher
@@ -109,6 +110,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
 		PluginConfig:    config.PluginConfig,
+		Compaction:      config.Compaction,
 		MemoryService:   config.MemoryService,
 	})
 	if err != nil {
@@ -210,6 +212,16 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 				StreamingMode: streamingMode,
 			}) {
 				if err != nil {
+					// A compaction failure is not this turn's failure. It runs
+					// after the agent has answered and after the answer's events
+					// are stored, so all it costs is a larger prompt next time.
+					// Printing AGENT_ERROR under an answer the user has already
+					// read says the turn failed when it did not. The other
+					// surfaces make the same distinction.
+					if errors.Is(err, compaction.ErrCompaction) {
+						log.Printf("adk: context compaction failed: %v", err)
+						continue
+					}
 					fmt.Printf("\nAGENT_ERROR: %v\n", err)
 				} else {
 					collectedEvents = append(collectedEvents, event)
@@ -318,6 +330,9 @@ func (l *consoleLauncher) SimpleDescription() string {
 
 // Execute implements launcher.Launcher. It parses arguments and runs the launcher.
 func (l *consoleLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)

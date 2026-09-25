@@ -137,6 +137,13 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
+		// The deprecated package predates AllowTransferToAgent's introduction
+		// (v2 defaults it to false, secure by default, for new callers). This
+		// wrapper sets it to true to preserve this package's pre-existing
+		// behavior for callers who have not migrated to v2 -- changing it out
+		// from under them here would be a silent, breaking behavior change,
+		// not a new default for new code.
+		AllowTransferToAgent: true,
 		ClientProvider: func(ctx context.Context, card *a2av2.AgentCard) (v2.A2AClient, error) {
 			if cfg.ClientFactory == nil {
 				factory := a2aclientv2.NewFactory(

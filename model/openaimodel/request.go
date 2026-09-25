@@ -15,10 +15,14 @@
 package openaimodel
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
@@ -44,11 +48,19 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	}
 
 	// We convert the generic content parts into OpenAI's input format.
-	input, err := convertContents(req.Contents)
+	input, droppedReasoning, err := convertContents(req.Contents)
 	if err != nil {
 		return responses.ResponseNewParams{}, err
 	}
 	if len(input) == 0 {
+		if droppedReasoning {
+			// The drop is what emptied the request; don't report it as a
+			// caller who sent nothing. Gated on a part actually having been
+			// dropped, so a request that was empty on arrival still returns
+			// the bare sentinel a caller may compare against directly.
+			return responses.ResponseNewParams{}, fmt.Errorf(
+				"%w: every part was dropped as replayed reasoning", ErrNoContents)
+		}
 		return responses.ResponseNewParams{}, ErrNoContents
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{
@@ -83,24 +95,36 @@ func buildOpenAIParams(modelName string, req *model.LLMRequest) (responses.Respo
 	return params, nil
 }
 
-func convertContents(contents []*genai.Content) (responses.ResponseInputParam, error) {
+// convertContents converts contents into Responses API input items, reporting
+// separately whether any part was dropped as replayed reasoning. The caller
+// needs that to tell a request the drop emptied from one that arrived empty.
+func convertContents(contents []*genai.Content) (responses.ResponseInputParam, bool, error) {
 	var (
-		items     responses.ResponseInputParam
-		tracker   callTracker
-		textParts []string
-		curRole   genai.Role = genai.RoleUser
+		items            responses.ResponseInputParam
+		tracker          callTracker
+		textParts        []string
+		droppedReasoning bool
+		curRole          genai.Role = genai.RoleUser
 		// flushText is a helper function that takes any accumulated text parts
 		// and converts them into a message, then appends it to our items.
 		flushText = func() error {
 			if len(textParts) == 0 {
 				return nil
 			}
-			msg, err := newMessage(curRole, textParts)
+			msgRole, err := normalizeRole(curRole)
 			if err != nil {
 				return err
 			}
-			if msg != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+			// The Responses API rejects "input_text" for the assistant role, so
+			// a replayed assistant turn goes out as an output message instead.
+			if msgRole == responses.EasyInputMessageRoleAssistant {
+				if msg := newOutputMessage(textParts); msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
+				}
+			} else {
+				if msg := newMessage(msgRole, textParts); msg != nil {
+					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+				}
 			}
 			textParts = textParts[:0]
 			return nil
@@ -113,51 +137,132 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, e
 		}
 		curRole = genai.Role(content.Role)
 		for _, part := range content.Parts {
-			switch {
-			case part == nil:
+			if part == nil {
 				continue
-			case part.Text != "":
+			}
+			// Reported before anything is emitted, so that a field this
+			// package cannot send is named even when text or a call rides on
+			// the same part and would otherwise have carried it out unnoticed.
+			if field := unsupportedPayload(part); field != "" {
+				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
+			}
+			// Text is read independently of a call or a response because one
+			// part can carry both. A call and a response on the same part are
+			// still alternatives, and the response is dropped, as on main.
+			sendText := part.Text != "" && !part.Thought
+			switch {
+			case sendText:
 				textParts = append(textParts, part.Text)
+			case part.Text != "" || replayedReasoning(part):
+				// Dropping reasoning must not hide a bad role, so the check
+				// still runs. The drop counts toward the emptied-request
+				// report only when it suppressed text the model would
+				// otherwise have seen, blank text being skipped either way.
+				if strings.TrimSpace(part.Text) != "" {
+					droppedReasoning = true
+				}
+				if _, err := normalizeRole(curRole); err != nil {
+					return nil, false, err
+				}
+			}
+			switch {
 			case part.FunctionCall != nil:
-				// If we encounter a function call, we first flush any accumulated text.
+				// Flush first so buffered text keeps its place ahead of the call.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				callParam, err := tracker.newFunctionCall(part.FunctionCall)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
 				// Similarly, for a function response, we flush text before adding the response.
 				if err := flushText(); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				respParam, err := tracker.newFunctionResponse(part.FunctionResponse)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			default:
-				return nil, fmt.Errorf("openai: unsupported content part %T", part)
+			case !sendText && !replayedReasoning(part):
+				// Nothing in the part reaches the request. It keeps the
+				// unsupported-content-part prefix the single message used
+				// before, so a caller matching on that still matches here.
+				return nil, false, errors.New("openai: unsupported content part: carries nothing to send")
 			}
 		}
 		// After processing all parts in a content block, we flush any remaining text.
 		if err := flushText(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
-	return items, nil
+	return items, droppedReasoning, nil
 }
 
-func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessageParam, error) {
-	if len(texts) == 0 {
-		return nil, nil
+// replayedReasoning reports whether part is reasoning carried over from an
+// earlier turn that carries nothing else, so dropping it loses nothing: the
+// Responses API accepts reasoning back only as an input item referencing the
+// id that produced it, an id ADK does not carry, so sent as assistant text it
+// would read as words the model never said.
+//
+// Whether to send a part's text is decided by part.Thought alone, because a
+// part can carry both reasoning text and a call, and the call must survive.
+func replayedReasoning(part *genai.Part) bool {
+	if part == nil {
+		return false
 	}
-	msgRole, err := normalizeRole(role)
-	if err != nil {
-		return nil, err
+	// A signature can arrive on a part of its own with the marker unset; there
+	// is nowhere to put it in a Responses request either way.
+	if !part.Thought && len(part.ThoughtSignature) == 0 {
+		return false
+	}
+	// Text on a part not marked as a thought is an answer, signature or not.
+	if part.Text != "" && !part.Thought {
+		return false
+	}
+	// Marking a call or anything else as a thought must not make it vanish.
+	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		unsupportedPayload(part) == ""
+}
+
+// unsupportedPayload names the first field on part that this package has no way
+// to send, or "" when the part holds nothing beyond what convertContents
+// accounts for.
+//
+// The test is stated as the absence of anything unaccounted for rather than as
+// a list of the fields that disqualify a part, so that a field added to
+// genai.Part by a later release is reported here by default instead of leaving
+// the request unnoticed.
+func unsupportedPayload(part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
+	rest := *part
+	rest.Text = ""              // sent, or dropped when it is reasoning
+	rest.Thought = false        // the marker deciding which
+	rest.ThoughtSignature = nil // no Responses input item can carry one
+	rest.FunctionCall = nil     // sent as a function_call item
+	rest.FunctionResponse = nil // sent as a function_call_output item
+	rest.VideoMetadata = nil    // qualifies media carried in another field
+	rest.MediaResolution = nil  // likewise
+	rest.PartMetadata = nil     // caller bookkeeping, never content
+
+	v := reflect.ValueOf(rest)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return v.Type().Field(i).Name
+		}
+	}
+	return ""
+}
+
+// newMessage builds an easy input message for an already-normalized role.
+func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
+	if len(texts) == 0 {
+		return nil
 	}
 	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
 	for _, txt := range texts {
@@ -173,7 +278,7 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		})
 	}
 	if len(contentList) == 0 {
-		return nil, nil
+		return nil
 	}
 	return &responses.EasyInputMessageParam{
 		Role: msgRole,
@@ -181,7 +286,35 @@ func newMessage(role genai.Role, texts []string) (*responses.EasyInputMessagePar
 		Content: responses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
-	}, nil
+	}
+}
+
+// newOutputMessage builds an assistant output message whose content uses the
+// "output_text" type, as required when replaying a prior assistant turn to the
+// OpenAI Responses API.
+func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
+	if len(texts) == 0 {
+		return nil
+	}
+	contentList := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
+	for _, txt := range texts {
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		contentList = append(contentList, responses.ResponseOutputMessageContentUnionParam{
+			OfOutputText: &responses.ResponseOutputTextParam{
+				Text: txt,
+				Type: constant.OutputText("output_text"),
+			},
+		})
+	}
+	if len(contentList) == 0 {
+		return nil
+	}
+	return &responses.ResponseOutputMessageParam{
+		Content: contentList,
+		Status:  responses.ResponseOutputMessageStatusCompleted,
+	}
 }
 
 func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
@@ -266,7 +399,7 @@ func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*response
 		return nil, fmt.Errorf("openai: marshal function response: %w", err)
 	}
 	return &responses.ResponseInputItemFunctionCallOutputParam{
-		CallID: callID,
+		CallID: param.NewOpt(callID),
 		Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 			OfString: param.NewOpt(string(payload)),
 		},
@@ -349,6 +482,235 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	if cfg.SafetySettings != nil {
 		return ErrSafetySettingsNotSupported
 	}
+	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
+		return err
+	}
+	if cfg.ServiceTier != "" {
+		tier, ok := serviceTiers[cfg.ServiceTier]
+		if !ok {
+			return fmt.Errorf("%w: ServiceTier %q", ErrUnsupportedConfigField, cfg.ServiceTier)
+		}
+		params.ServiceTier = tier
+	}
+	if err := rejectUntranslatableValues(cfg); err != nil {
+		return err
+	}
+	// Last, so the named errors above win when a caller sets both.
+	return rejectUnsupportedConfigFields(cfg)
+}
+
+// serviceTiers maps genai's processing tiers onto the Responses equivalents.
+// "Unspecified" joins "standard" on default rather than auto, because genai
+// documents it as "Default service tier, which is standard".
+var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
+	genai.ServiceTierUnspecified: responses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierStandard:    responses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierFlex:        responses.ResponseNewParamsServiceTierFlex,
+	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
+}
+
+// requestTimeout reports the bound the caller asked for, or zero for none; the
+// caller applies it to the context, which bounds retries as openai-go's own
+// per-request option would not, and on a streamed turn spans the consumer's
+// time in the range body.
+//
+// Non-positive is treated as unset here rather than trusted to
+// applyGenerationConfig having rejected it, since openai-go reads zero as no
+// deadline at all.
+func requestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
+	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
+		return 0
+	}
+	if *cfg.HTTPOptions.Timeout <= 0 {
+		return 0
+	}
+	return *cfg.HTTPOptions.Timeout
+}
+
+// ignoredHTTPOptionFields names the HTTPOptions fields this package neither
+// translates nor rejects: forwarding a header would let a caller's
+// Authorization displace the configured API key and carry a Gemini credential
+// to OpenAI, while refusing one would break the configs model/gemini fills in
+// itself.
+//
+// Headers meant for OpenAI belong on ClientConfig.Options, which is scoped to
+// the one backend that sees them.
+var ignoredHTTPOptionFields = []string{"Headers"}
+
+// unsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
+// Gemini wire format rather than transport, and so cannot cross to Responses.
+// Unlike ignoredHTTPOptionFields these have never been accepted here, so naming
+// them costs no compatibility.
+var unsupportedHTTPOptionFields = []struct {
+	name  string
+	isSet func(*genai.HTTPOptions) bool
+}{
+	// The endpoint belongs to ClientConfig, which is also the only place it can
+	// be set coherently alongside the API key that authenticates against it.
+	{"BaseURL", func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
+	{"BaseURLResourceScope", func(o *genai.HTTPOptions) bool { return o.BaseURLResourceScope != "" }},
+	{"APIVersion", func(o *genai.HTTPOptions) bool { return o.APIVersion != "" }},
+	// Both shape a Gemini request body, which is not the body being sent.
+	{"ExtraBody", func(o *genai.HTTPOptions) bool { return o.ExtraBody != nil }},
+	{"ExtrasRequestProvider", func(o *genai.HTTPOptions) bool { return o.ExtrasRequestProvider != nil }},
+	// openai-go retries too, but on its own schedule; honoring only the retry
+	// count would quietly discard the backoff the caller asked for.
+	{"RetryOptions", func(o *genai.HTTPOptions) bool { return o.RetryOptions != nil }},
+}
+
+// reasoningEfforts maps every genai thinking level onto a Responses reasoning
+// effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
+// still asks the model to think, so it resolves to medium as adk-python does —
+// unlike a dynamic budget, which has no such precedent and defers to the model.
+var reasoningEfforts = map[genai.ThinkingLevel]shared.ReasoningEffort{
+	genai.ThinkingLevelUnspecified: shared.ReasoningEffortMedium,
+	genai.ThinkingLevelMinimal:     shared.ReasoningEffortMinimal,
+	genai.ThinkingLevelLow:         shared.ReasoningEffortLow,
+	genai.ThinkingLevelMedium:      shared.ReasoningEffortMedium,
+	genai.ThinkingLevelHigh:        shared.ReasoningEffortHigh,
+}
+
+// dynamicThinkingBudget is genai's "let the model size its own thinking".
+const dynamicThinkingBudget = -1
+
+// applyThinkingConfig maps genai's thinking config onto effort-based reasoning,
+// a budget surviving only as the distinction between none, some, and the
+// model's own choice, since Responses has no token-budget knob.
+//
+// Summary rides on IncludeThoughts because summaries need a verified OpenAI
+// organization, so requesting one unprompted would fail an unverified org's
+// every reasoning call.
+func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget < dynamicThinkingBudget {
+		// Rejected up here rather than in the branch that reads the budget,
+		// because a level set alongside it wins and would otherwise carry the
+		// request through with the nonsense value unmentioned.
+		return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
+	}
+	// A level outranks a budget, but only when it names one: UNSPECIFIED is the
+	// caller declining to choose, so a budget they did set is the more specific
+	// instruction and takes over.
+	level := cfg.ThinkingLevel
+	if level == genai.ThinkingLevelUnspecified && cfg.ThinkingBudget != nil {
+		level = ""
+	}
+
+	var reasoning shared.ReasoningParam
+	switch {
+	case level != "":
+		effort, ok := reasoningEfforts[level]
+		if !ok {
+			// A level genai grew after this map was written: better an error
+			// naming it than an effort string the API will reject obscurely.
+			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
+		}
+		reasoning.Effort = effort
+	case cfg.ThinkingBudget != nil:
+		// Anything below dynamicThinkingBudget was rejected above, so what is
+		// left is none of it, the model's choice, or some positive amount.
+		switch *cfg.ThinkingBudget {
+		case 0:
+			// "Do not think" is what the none effort says. Not minimal: minimal
+			// is the least thinking rather than none of it, and models are
+			// dropping it — gpt-5.4-nano rejects minimal while accepting none.
+			reasoning.Effort = shared.ReasoningEffortNone
+		case dynamicThinkingBudget:
+			// The caller asked the model to decide, so no effort is sent and it
+			// does. Pinning a number here would be us deciding instead.
+		default:
+			reasoning.Effort = shared.ReasoningEffortMedium
+		}
+	case !cfg.IncludeThoughts:
+		// Nothing on the struct is set, so nothing was asked for and nothing is
+		// dropped by sending no reasoning block. IncludeThoughts false is a
+		// request this package satisfies rather than one it cannot honor.
+		return nil
+	}
+	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
+	// asks only for the summaries that response.go surfaces as thought parts.
+	if cfg.IncludeThoughts {
+		reasoning.Summary = shared.ReasoningSummaryAuto
+	}
+	params.Reasoning = reasoning
+	return nil
+}
+
+// rejectUntranslatableValues catches the settings whose field is translated but
+// whose particular value would vanish, which the presence check below cannot
+// see; a value that instead reaches the wire and draws a named 400, as an
+// out-of-range Logprobs does, is already diagnosable and is left to the API.
+//
+// It runs after every named error so that a caller who set one of those too
+// gets the error they have always got, rather than this sentinel jumping the
+// queue and breaking their errors.Is.
+func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
+	switch {
+	case cfg.Logprobs != nil && !cfg.ResponseLogprobs:
+		// Logprobs only sizes the list ResponseLogprobs asks for, so alone it
+		// reaches neither params nor the wire.
+		return fmt.Errorf("%w: Logprobs without ResponseLogprobs", ErrUnsupportedConfigField)
+	case cfg.MaxOutputTokens < 0:
+		// Only a positive cap is translated. A negative one is neither a cap
+		// nor the absence of one, so it would otherwise vanish.
+		return fmt.Errorf("%w: negative MaxOutputTokens", ErrUnsupportedConfigField)
+	case cfg.CandidateCount < 0:
+		// Above one is ErrMultipleCandidatesNotSupported; zero and one both mean
+		// the single candidate Responses returns. Below zero means nothing.
+		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
+	}
+	// HTTPOptions is taken field by field rather than whole. Timeout is
+	// extracted by requestTimeout, Headers is deliberately ignored for the
+	// compatibility reason in ignoredHTTPOptionFields, and what is left
+	// describes the Gemini wire format and is named here.
+	if cfg.HTTPOptions != nil {
+		for _, field := range unsupportedHTTPOptionFields {
+			if field.isSet(cfg.HTTPOptions) {
+				return fmt.Errorf("%w: HTTPOptions.%s", ErrUnsupportedConfigField, field.name)
+			}
+		}
+		// openai-go treats a zero timeout as "no deadline", so forwarding a
+		// non-positive one would lift the caller's bound rather than apply it —
+		// the inverse of what they asked for, and worse than not asking.
+		if cfg.HTTPOptions.Timeout != nil && *cfg.HTTPOptions.Timeout <= 0 {
+			return fmt.Errorf("%w: non-positive HTTPOptions.Timeout %v", ErrUnsupportedConfigField, *cfg.HTTPOptions.Timeout)
+		}
+	}
+	return nil
+}
+
+// unsupportedConfigFields lists the GenerateContentConfig fields this package
+// cannot translate, each with a predicate reporting whether the caller set it.
+// Presence, not value: setting a knob at all means the caller expected an effect.
+var unsupportedConfigFields = []struct {
+	name  string
+	isSet func(*genai.GenerateContentConfig) bool
+}{
+	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
+	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
+	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
+	{"CachedContent", func(c *genai.GenerateContentConfig) bool { return c.CachedContent != "" }},
+	{"ResponseModalities", func(c *genai.GenerateContentConfig) bool { return c.ResponseModalities != nil }},
+	{"MediaResolution", func(c *genai.GenerateContentConfig) bool { return c.MediaResolution != "" }},
+	{"SpeechConfig", func(c *genai.GenerateContentConfig) bool { return c.SpeechConfig != nil }},
+	{"AudioTimestamp", func(c *genai.GenerateContentConfig) bool { return c.AudioTimestamp }},
+	{"ImageConfig", func(c *genai.GenerateContentConfig) bool { return c.ImageConfig != nil }},
+	{"EnableEnhancedCivicAnswers", func(c *genai.GenerateContentConfig) bool {
+		return c.EnableEnhancedCivicAnswers != nil
+	}},
+	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
+	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+}
+
+// rejectUnsupportedConfigFields reports the first unsupported field the caller set.
+func rejectUnsupportedConfigFields(cfg *genai.GenerateContentConfig) error {
+	for _, field := range unsupportedConfigFields {
+		if field.isSet(cfg) {
+			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.name)
+		}
+	}
 	return nil
 }
 
@@ -405,28 +767,56 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseF
 }
 
 func normalizeSchema(schema any) (map[string]any, error) {
-	switch s := schema.(type) {
-	case map[string]any:
-		return s, nil
-	case nil:
+	if schema == nil {
 		return nil, ErrEmptyJSONSchema
-	default:
-		bytes, err := json.Marshal(s)
-		if err != nil {
-			return nil, fmt.Errorf("openai: marshal json schema: %w", err)
-		}
-		var result map[string]any
-		if err := json.Unmarshal(bytes, &result); err != nil {
-			return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
-		}
-		return result, nil
 	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal json schema: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var result map[string]any
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
+	}
+	preserveSchemaNumbers(result)
+	return result, nil
+}
+
+// preserveSchemaNumbers keeps numeric constraints as raw JSON. The OpenAI SDK
+// otherwise serializes json.Number values as strings.
+func preserveSchemaNumbers(val any) any {
+	switch v := val.(type) {
+	case json.Number:
+		return json.RawMessage(v.String())
+	case map[string]any:
+		for key, child := range v {
+			v[key] = preserveSchemaNumbers(child)
+		}
+	case []any:
+		for i, child := range v {
+			v[i] = preserveSchemaNumbers(child)
+		}
+	}
+	return val
 }
 
 // enforceStrictOpenAISchema recursively walks the schema and enforces the rules
-// required by OpenAI's structured outputs with strict=true. Specifically, it
-// sets additionalProperties=false on all object types, and ensures that all
-// properties are listed in the required array.
+// required by OpenAI's structured outputs with strict=true: every object type
+// carries properties, additionalProperties=false and a required array naming
+// every property, and a $ref keeps no siblings. An object that declares no
+// properties is given an empty properties map and an empty required array
+// alongside additionalProperties=false, because the API rejects the whole
+// request when any object in the schema omits one of the three. Any
+// additionalProperties the caller wrote is replaced: strict mode accepts only
+// false, so a schema spelling a map as additionalProperties={"type":"string"}
+// becomes an empty object rather than the 400 it would otherwise draw.
+//
+// Treating a property-less object that way diverges from adk-python
+// deliberately. Its _enforce_strict_openai_schema rewrites an object only when
+// the schema already carries a properties key, which leaves one without to fail
+// the same request.
 func enforceStrictOpenAISchema(val any) {
 	schema, ok := val.(map[string]any)
 	if !ok {
@@ -444,18 +834,20 @@ func enforceStrictOpenAISchema(val any) {
 
 	t, hasType := schema["type"]
 	isObj := hasType && t == "object"
-	propsVal, hasProps := schema["properties"]
+	propsMap, _ := schema["properties"].(map[string]any)
 
-	if isObj && hasProps {
-		schema["additionalProperties"] = false
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			req := make([]string, 0, len(propsMap))
-			for k := range propsMap {
-				req = append(req, k)
-			}
-			sort.Strings(req)
-			schema["required"] = req
+	if isObj {
+		if propsMap == nil {
+			propsMap = map[string]any{}
+			schema["properties"] = propsMap
 		}
+		schema["additionalProperties"] = false
+		req := make([]string, 0, len(propsMap))
+		for k := range propsMap {
+			req = append(req, k)
+		}
+		sort.Strings(req)
+		schema["required"] = req
 	}
 
 	if defsVal, ok := schema["$defs"]; ok {
@@ -466,12 +858,8 @@ func enforceStrictOpenAISchema(val any) {
 		}
 	}
 
-	if hasProps {
-		if propsMap, ok := propsVal.(map[string]any); ok {
-			for _, prop := range propsMap {
-				enforceStrictOpenAISchema(prop)
-			}
-		}
+	for _, prop := range propsMap {
+		enforceStrictOpenAISchema(prop)
 	}
 
 	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
