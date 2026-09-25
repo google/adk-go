@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -83,8 +84,8 @@ func New(cfg Config) (agent.Agent, error) {
 			Model:                    cfg.Model,
 			Mode:                     cfg.Mode,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
-			Tools:                    cfg.Tools,
-			Toolsets:                 cfg.Toolsets,
+			Tools:                    slices.Clone(cfg.Tools),
+			Toolsets:                 slices.Clone(cfg.Toolsets),
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
