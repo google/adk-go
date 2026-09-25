@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // TestResolveClientBuildsDefaultClient drives the lazy ADC path end to end:
@@ -469,10 +473,15 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 //
 // Go picks uniformly among ready select arms, so an implementation that races
 // the two fails about half the time — undetectable in one pass, which is why
-// this loops. It pins the pair of re-checks rather than either alone: the two
-// are mutually redundant, so deleting one leaves the other to answer and the
-// test stays green, and deleting both turns it red. That is the honest scope.
-// Either one surviving is enough for the caller, who only ever sees the result.
+// this loops.
+//
+// It reaches one case only: a result that landed before the caller arrived,
+// which the pre-check answers. Either check alone keeps that green, so deleting
+// one leaves this test passing — which is not a licence to delete the
+// timer-arm one. That is the only cover for the case this test cannot arrange,
+// a result landing after the pre-check has fallen through while the caller sits
+// in the two-arm select with an expired timer. Nothing pins that, so removing
+// it loses the window silently.
 func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
 	// 200 trials puts the odds of an unguarded implementation passing at 2^-200.
@@ -491,4 +500,59 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 			t.Fatalf("trial %d: resolveClient() = %v, %v; want the landed client, because a result that is already there beats a bound that has already passed", i, got, err)
 		}
 	}
+}
+
+// TestDefaultBuilderPassesTheWiringContextToNewClient pins that the builder
+// NewProvider installs hands its argument to NewClient rather than a context of
+// its own.
+//
+// The wiring tests above stub newClient, so they cover initCtx and stop short of
+// the one closure that consumes it. That leaves the real builder unpinned:
+// replacing its ctx with context.Background() keeps the whole package green
+// while silently dropping an oauth2.HTTPClient a caller put on the wiring
+// context, which is the documented way to give the token exchange its own
+// transport.
+//
+// Observed through oauth2.NewClient, which takes the base client from the
+// context, so the sentinel transport reaching the built client is the proof the
+// context arrived. Discovery reads an authorized_user file, which needs no key
+// parsing and no network, and the token source is lazy so nothing is fetched.
+func TestDefaultBuilderPassesTheWiringContextToNewClient(t *testing.T) {
+	credsPath := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(credsPath, []byte(`{
+		"type": "authorized_user",
+		"client_id": "id.apps.googleusercontent.com",
+		"client_secret": "secret",
+		"refresh_token": "refresh"
+	}`), 0o600); err != nil {
+		t.Fatalf("writing the credentials file: %v", err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsPath)
+
+	sentinel := &http.Client{Transport: &markerTransport{}}
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, sentinel)
+
+	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	// The real builder, not a stub: that is the point of this test.
+	got, err := p.(*provider).resolveClient(t.Context())
+	if err != nil {
+		t.Fatalf("resolveClient() error = %v", err)
+	}
+	oauthTransport, ok := got.httpClient.Transport.(*oauth2.Transport)
+	if !ok {
+		t.Fatalf("built client Transport = %T, want *oauth2.Transport", got.httpClient.Transport)
+	}
+	if _, ok := oauthTransport.Base.(*markerTransport); !ok {
+		t.Errorf("built client base Transport = %T, want the transport from the wiring context: the builder must pass its context to NewClient", oauthTransport.Base)
+	}
+}
+
+// markerTransport is recognised by type and never used to send anything.
+type markerTransport struct{}
+
+func (*markerTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("markerTransport must not be used to send a request")
 }
