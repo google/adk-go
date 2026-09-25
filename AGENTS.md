@@ -165,7 +165,7 @@ Every diagnostic ADK emits through `log/slog` uses the levels below. `TRACE` is
 | `DEBUG` | Per-invocation detail: a tool selected, a session resumed, a fallback taken. |
 | `INFO`  | Lifecycle of a process ADK owns, such as a server binding a port. Never per invocation. |
 | `WARN`  | Unexpected, but the operation survived: a method called where it is unsupported, a failed cleanup, an event ADK cannot attribute. |
-| `ERROR` | The operation did not happen, and the caller has no other way to see the error. |
+| `ERROR` | The operation the caller asked for did not happen, and the caller has no other way to see the error. |
 
 - `INFO` is process-scoped. adk-python logs each model request at `INFO`
   (`models/google_llm.py`), but one record per run at a hundred requests a
@@ -174,7 +174,8 @@ Every diagnostic ADK emits through `log/slog` uses the levels below. `TRACE` is
 - Never log an error you also return. The caller decides whether it deserves a
   line, and logging it here as well records it twice. adk-python logs and
   re-raises in places (`runners.py`); ADK Go does not. `ERROR` is for errors ADK
-  swallows: deferred cleanup, background goroutines, transport boundaries.
+  swallows in background goroutines and at transport boundaries. A failed
+  cleanup is `WARN`, even when ADK swallows its error.
 - Messages are constant strings. Put every variable value in an attribute, so a
   backend can group records by message:
   `logger.WarnContext(ctx, "function call from an unknown agent", "author", ev.Author, "event_id", ev.ID)`.
