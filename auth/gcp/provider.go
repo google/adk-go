@@ -78,10 +78,13 @@ type ProviderConfig struct {
 // goroutine. Build one per request and the cost is per request.
 var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
-// ErrNoActingUser means the provider could not determine the acting end user,
-// either because the context is not an ADK context or because the invocation
-// carries no user. Unlike adk-python, which degrades such a turn into an auth
-// request, the Go provider fails the request: no user, no credential.
+// ErrNoActingUser means the provider could not determine the acting end user:
+// either no identity was recoverable from the context, or one was and its
+// session carries no user. The first is not a single condition —
+// [agent.IdentityFromContext] reports it without saying why, and its doc says
+// the reasons are not a closed set. Unlike adk-python, which degrades such a
+// turn into an auth request, the Go provider fails the request: no user, no
+// credential.
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
@@ -123,12 +126,12 @@ const defaultInitTimeout = 30 * time.Second
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
 //
-// Nothing is cached. Every call reaches the credential service, and
-// [auth.Transport] calls Credential once per outbound request, so a tool that
-// makes n requests costs n retrievals plus any pending poll they incur. That is
-// deliberate for this change rather than an oversight — a cache is the whole of
-// the follow-up, and it is where cross-user leaks live, so it wants its own
-// review of what the key must cover.
+// No credential is cached — the default client is, once built, but every
+// Credential call reaches the credential service. [auth.Transport] calls it
+// once per outbound request, so a tool that makes n requests costs n retrievals
+// plus any pending poll they incur. That is deliberate for this change rather
+// than an oversight: a credential cache is where cross-user leaks live, so it
+// wants its own review of what the key must cover.
 //
 // ctx is used only to build the default client, and only for its values. Its
 // cancellation is not honored, because that client outlives any one request.
