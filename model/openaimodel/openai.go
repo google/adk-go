@@ -34,6 +34,20 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// API selects the OpenAI HTTP API a model talks to. The zero value selects
+// [APIResponses].
+type API string
+
+const (
+	// APIResponses is OpenAI's Responses API, POST /v1/responses.
+	APIResponses API = "responses"
+
+	// APIChatCompletions is OpenAI's Chat Completions API, POST
+	// /v1/chat/completions, which is the surface most OpenAI-compatible
+	// third-party providers implement.
+	APIChatCompletions API = "chat_completions"
+)
+
 // ClientConfig configures the OpenAI client. Mirrors model/gemini, which takes
 // *genai.ClientConfig. Empty APIKey/BaseURL fall back to the OPENAI_API_KEY /
 // OPENAI_BASE_URL env vars (handled by openai-go's default options).
@@ -45,6 +59,11 @@ type ClientConfig struct {
 	// Options is an escape hatch for advanced openai-go request options,
 	// appended after the options derived from the fields above.
 	Options []option.RequestOption
+
+	// API selects which OpenAI HTTP API to talk to. The zero value is
+	// [APIResponses], so a configuration written before this field existed
+	// keeps the endpoint it already used.
+	API API
 }
 
 type openAIModel struct {
@@ -52,7 +71,7 @@ type openAIModel struct {
 	name   string
 }
 
-// NewModel constructs a new openAIModel.
+// NewModel constructs a model talking to the API named by cfg.
 // The context is unused but kept for signature parity with other model constructors (e.g., gemini.NewModel).
 func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM, error) {
 	if modelName == "" {
@@ -73,7 +92,14 @@ func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM
 	}
 	opts = append(opts, cfg.Options...)
 	client := openai.NewClient(opts...)
-	return &openAIModel{client: &client, name: modelName}, nil
+	switch cfg.API {
+	case "", APIResponses:
+		return &openAIModel{client: &client, name: modelName}, nil
+	case APIChatCompletions:
+		return &chatModel{client: &client, name: modelName}, nil
+	default:
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAPI, cfg.API)
+	}
 }
 
 func (m *openAIModel) Name() string { return m.name }
@@ -286,7 +312,8 @@ func carriesResponse(resp *responses.Response) bool {
 // isEmptyOutput reports whether a conversion failed for want of anything to
 // convert, as against something unusable.
 func isEmptyOutput(err error) bool {
-	return errors.Is(err, ErrNoOutputItems) || errors.Is(err, ErrNoTextOrToolContent)
+	return errors.Is(err, ErrNoOutputItems) || errors.Is(err, ErrNoTextOrToolContent) ||
+		errors.Is(err, ErrNoChoices)
 }
 
 // carriesContent reports whether a response holds anything a caller can read.

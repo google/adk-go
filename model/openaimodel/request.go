@@ -347,24 +347,15 @@ func (t *callTracker) newFunctionCall(fc *genai.FunctionCall) (*responses.Respon
 	if fc.Name == "" {
 		return nil, ErrFunctionCallMissingName
 	}
-	callID := fc.ID
-	if callID == "" {
-		callID = fmt.Sprintf("adk-openai-call-%d", t.nextID)
-		t.nextID++
-	}
-	t.pending = append(t.pending, callID)
-	argsValue := fc.Args
-	if argsValue == nil {
-		argsValue = map[string]any{}
-	}
-	args, err := json.Marshal(argsValue)
+	callID := t.takeCallID(fc)
+	args, err := marshalFunctionArgs(fc.Args)
 	if err != nil {
-		return nil, fmt.Errorf("openai: marshal function args: %w", err)
+		return nil, err
 	}
 	return &responses.ResponseFunctionToolCallParam{
 		Name:      fc.Name,
 		CallID:    callID,
-		Arguments: string(args),
+		Arguments: args,
 		Type:      constant.FunctionCall("function_call"),
 	}, nil
 }
@@ -374,25 +365,9 @@ func (t *callTracker) newFunctionCall(fc *genai.FunctionCall) (*responses.Respon
 // function call. If an explicit callID is provided, we find and remove it from our
 // pending list. Otherwise, we assume it corresponds to the oldest pending call.
 func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*responses.ResponseInputItemFunctionCallOutputParam, error) {
-	callID := fr.ID
-	if callID == "" {
-		if len(t.pending) == 0 {
-			return nil, fmt.Errorf("openai: response for %q missing call id", fr.Name)
-		}
-		callID = t.pending[0]
-		t.pending = t.pending[1:]
-	} else {
-		found := false
-		for i, pending := range t.pending {
-			if pending == callID {
-				t.pending = append(t.pending[:i], t.pending[i+1:]...)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("openai: received function response for unknown or already completed call id %q", callID)
-		}
+	callID, err := t.resolveResponseID(fr)
+	if err != nil {
+		return nil, err
 	}
 	payload, err := json.Marshal(fr.Response)
 	if err != nil {
@@ -405,6 +380,52 @@ func (t *callTracker) newFunctionResponse(fr *genai.FunctionResponse) (*response
 		},
 		Type: constant.FunctionCallOutput("function_call_output"),
 	}, nil
+}
+
+// resolveResponseID reports the call ID a function response answers, consuming
+// it from the pending list. An unset ID pairs with the oldest outstanding call,
+// which is the only pairing available when the caller did not supply one.
+func (t *callTracker) resolveResponseID(fr *genai.FunctionResponse) (string, error) {
+	if fr.ID == "" {
+		if len(t.pending) == 0 {
+			return "", fmt.Errorf("openai: response for %q missing call id", fr.Name)
+		}
+		callID := t.pending[0]
+		t.pending = t.pending[1:]
+		return callID, nil
+	}
+	for i, pending := range t.pending {
+		if pending == fr.ID {
+			t.pending = append(t.pending[:i], t.pending[i+1:]...)
+			return fr.ID, nil
+		}
+	}
+	return "", fmt.Errorf("openai: received function response for unknown or already completed call id %q", fr.ID)
+}
+
+// takeCallID reports the ID to send for a function call, minting one when the
+// caller left it unset so the matching response can still be paired.
+func (t *callTracker) takeCallID(fc *genai.FunctionCall) string {
+	callID := fc.ID
+	if callID == "" {
+		callID = fmt.Sprintf("adk-openai-call-%d", t.nextID)
+		t.nextID++
+	}
+	t.pending = append(t.pending, callID)
+	return callID
+}
+
+// marshalFunctionArgs encodes a call's arguments, reading a nil map as a call
+// that takes none rather than as JSON null.
+func marshalFunctionArgs(args map[string]any) (string, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "", fmt.Errorf("openai: marshal function args: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // applyGenerationConfig translates our generic generation configuration into
@@ -573,9 +594,7 @@ var reasoningEfforts = map[genai.ThinkingLevel]shared.ReasoningEffort{
 // dynamicThinkingBudget is genai's "let the model size its own thinking".
 const dynamicThinkingBudget = -1
 
-// applyThinkingConfig maps genai's thinking config onto effort-based reasoning,
-// a budget surviving only as the distinction between none, some, and the
-// model's own choice, since Responses has no token-budget knob.
+// applyThinkingConfig maps genai's thinking config onto effort-based reasoning.
 //
 // Summary rides on IncludeThoughts because summaries need a verified OpenAI
 // organization, so requesting one unprompted would fail an unverified org's
@@ -584,11 +603,31 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 	if cfg == nil {
 		return nil
 	}
+	effort, err := reasoningEffortFor(cfg)
+	if err != nil {
+		return err
+	}
+	// A block holding neither an effort nor a summary is the zero value, which
+	// omitzero leaves off the wire, so an empty config still sends nothing.
+	params.Reasoning = shared.ReasoningParam{Effort: effort}
+	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
+	// asks only for the summaries that response.go surfaces as thought parts.
+	if cfg.IncludeThoughts {
+		params.Reasoning.Summary = shared.ReasoningSummaryAuto
+	}
+	return nil
+}
+
+// reasoningEffortFor resolves a thinking config to the effort both APIs take,
+// a budget surviving only as the distinction between none, some, and the
+// model's own choice, since neither has a token-budget knob. An empty effort
+// means none is sent and the model chooses.
+func reasoningEffortFor(cfg *genai.ThinkingConfig) (shared.ReasoningEffort, error) {
 	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget < dynamicThinkingBudget {
 		// Rejected up here rather than in the branch that reads the budget,
 		// because a level set alongside it wins and would otherwise carry the
 		// request through with the nonsense value unmentioned.
-		return fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
+		return "", fmt.Errorf("%w: ThinkingConfig.ThinkingBudget %d", ErrUnsupportedConfigField, *cfg.ThinkingBudget)
 	}
 	// A level outranks a budget, but only when it names one: UNSPECIFIED is the
 	// caller declining to choose, so a budget they did set is the more specific
@@ -597,17 +636,15 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 	if level == genai.ThinkingLevelUnspecified && cfg.ThinkingBudget != nil {
 		level = ""
 	}
-
-	var reasoning shared.ReasoningParam
 	switch {
 	case level != "":
 		effort, ok := reasoningEfforts[level]
 		if !ok {
 			// A level genai grew after this map was written: better an error
 			// naming it than an effort string the API will reject obscurely.
-			return fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
+			return "", fmt.Errorf("%w: ThinkingConfig.ThinkingLevel %q", ErrUnsupportedConfigField, level)
 		}
-		reasoning.Effort = effort
+		return effort, nil
 	case cfg.ThinkingBudget != nil:
 		// Anything below dynamicThinkingBudget was rejected above, so what is
 		// left is none of it, the model's choice, or some positive amount.
@@ -616,26 +653,16 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 			// "Do not think" is what the none effort says. Not minimal: minimal
 			// is the least thinking rather than none of it, and models are
 			// dropping it — gpt-5.4-nano rejects minimal while accepting none.
-			reasoning.Effort = shared.ReasoningEffortNone
+			return shared.ReasoningEffortNone, nil
 		case dynamicThinkingBudget:
 			// The caller asked the model to decide, so no effort is sent and it
 			// does. Pinning a number here would be us deciding instead.
+			return "", nil
 		default:
-			reasoning.Effort = shared.ReasoningEffortMedium
+			return shared.ReasoningEffortMedium, nil
 		}
-	case !cfg.IncludeThoughts:
-		// Nothing on the struct is set, so nothing was asked for and nothing is
-		// dropped by sending no reasoning block. IncludeThoughts false is a
-		// request this package satisfies rather than one it cannot honor.
-		return nil
 	}
-	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
-	// asks only for the summaries that response.go surfaces as thought parts.
-	if cfg.IncludeThoughts {
-		reasoning.Summary = shared.ReasoningSummaryAuto
-	}
-	params.Reasoning = reasoning
-	return nil
+	return "", nil
 }
 
 // rejectUntranslatableValues catches the settings whose field is translated but
@@ -684,10 +711,7 @@ func rejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 // unsupportedConfigFields lists the GenerateContentConfig fields this package
 // cannot translate, each with a predicate reporting whether the caller set it.
 // Presence, not value: setting a knob at all means the caller expected an effect.
-var unsupportedConfigFields = []struct {
-	name  string
-	isSet func(*genai.GenerateContentConfig) bool
-}{
+var unsupportedConfigFields = []configField{
 	{"Seed", func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
 	{"RoutingConfig", func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
 	{"ModelSelectionConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
@@ -702,6 +726,13 @@ var unsupportedConfigFields = []struct {
 	}},
 	{"ModelArmorConfig", func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
 	{"AudioTranscriptionConfig", func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+}
+
+// configField names a GenerateContentConfig field alongside a predicate
+// reporting whether the caller set it.
+type configField struct {
+	name  string
+	isSet func(*genai.GenerateContentConfig) bool
 }
 
 // rejectUnsupportedConfigFields reports the first unsupported field the caller set.
