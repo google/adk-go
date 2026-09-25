@@ -1337,3 +1337,19 @@ func TestStreamedArgumentUnsupportedPathsDropped(t *testing.T) {
 		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
 	}
 }
+
+// An index too large to allocate, or too large to fit in an int, is dropped.
+// The bound that rejects it is all that keeps an overflowed, negative index
+// from reaching the slice it would be used on.
+func TestStreamedArgumentOutOfRangeIndexDropped(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: "$.data[65537]", StringValue: "too large"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[9999999999999999999]", StringValue: "overflows int"}},
+		[]*genai.PartialArg{{JsonPath: "$.title", StringValue: "kept"}},
+	)
+
+	want := `{"title":"kept"}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}

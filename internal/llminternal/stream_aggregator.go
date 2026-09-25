@@ -214,9 +214,12 @@ type pathSegment struct {
 	isIndex bool
 }
 
-// maxPathIndex bounds the array an index segment is allowed to grow, so a
-// malformed path cannot ask for an arbitrarily large allocation. No function
-// call argument list comes close to it.
+// maxPathIndex is the largest array index a path may address.
+// parseBracketSegment checks it after every digit, and that check is what keeps
+// the index from overflowing int: without it "$.a[9999999999999999999]" wraps
+// to a negative index and setInto, which trusts the index it is given, panics.
+// It also bounds the slice a single index can grow; no function call argument
+// list comes close to it.
 const maxPathIndex = 1 << 16
 
 // parseJSONPath splits the RFC 9535 JSON Path that addresses a streamed
