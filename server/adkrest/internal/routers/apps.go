@@ -41,3 +41,26 @@ func (r *AppsAPIRouter) Routes() Routes {
 		},
 	}
 }
+
+// AppInfoAPIRouter defines the route for the app-info API. It is a router of
+// its own so that the server can leave it unmounted, which it does by default.
+type AppInfoAPIRouter struct {
+	appsController *controllers.AppsAPIController
+}
+
+// NewAppInfoAPIRouter creates a new AppInfoAPIRouter.
+func NewAppInfoAPIRouter(controller *controllers.AppsAPIController) *AppInfoAPIRouter {
+	return &AppInfoAPIRouter{appsController: controller}
+}
+
+// Routes returns the routes for the app-info API.
+func (r *AppInfoAPIRouter) Routes() Routes {
+	return Routes{
+		Route{
+			Name:        "AppInfo",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/app-info",
+			HandlerFunc: r.appsController.AppInfoHandler,
+		},
+	}
+}

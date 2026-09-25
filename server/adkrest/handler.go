@@ -95,6 +95,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	artifactsController := controllers.NewArtifactsAPIController(cfg.ArtifactService)
 	artifactsController.WithAuthorizer(authorizer)
 
+	appsController := controllers.NewAppsAPIController(cfg.AgentLoader)
+
 	subrouters := []routers.Router{
 		routers.NewSessionsAPIRouter(sessionsController),
 		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithConfig(controllers.RuntimeAPIControllerConfig{
@@ -112,7 +114,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			// with one rule.
 			CheckOrigin: policy.CheckOrigin,
 		})),
-		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
+		routers.NewAppsAPIRouter(appsController),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
 		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
@@ -123,6 +125,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
 		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+	}
+	if cfg.AppInfoAPIConfig.IncludeAppInfoAPI {
+		subrouters = append(subrouters, routers.NewAppInfoAPIRouter(appsController))
 	}
 
 	authenticator := cfg.Authenticator
@@ -147,14 +152,15 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 
 // ServerConfig contains parameters for the ADK REST API server.
 type ServerConfig struct {
-	SessionService  session.Service
-	MemoryService   memory.Service
-	AgentLoader     agent.Loader
-	ArtifactService artifact.Service
-	SSEWriteTimeout time.Duration
-	PluginConfig    runner.PluginConfig
-	DebugConfig     DebugTelemetryConfig
-	DebugAPIConfig  DebugAPIConfig
+	SessionService   session.Service
+	MemoryService    memory.Service
+	AgentLoader      agent.Loader
+	ArtifactService  artifact.Service
+	SSEWriteTimeout  time.Duration
+	PluginConfig     runner.PluginConfig
+	DebugConfig      DebugTelemetryConfig
+	DebugAPIConfig   DebugAPIConfig
+	AppInfoAPIConfig AppInfoAPIConfig
 
 	// Authenticator authenticates inbound requests to every endpoint except the
 	// public ones (/health and /version): a request without valid credentials
@@ -256,6 +262,17 @@ type DebugAPIConfig struct {
 	// Controls if [routers.NewDebugAPIRouter] is included
 	// WARNING: do not use debug api on PROD environment
 	IncludeDebugAPI bool
+}
+
+// AppInfoAPIConfig contains parameters for the app-info API.
+type AppInfoAPIConfig struct {
+	// IncludeAppInfoAPI mounts GET /apps/{app_name}/app-info.
+	//
+	// Off by default, as the Agents CLI wire contract requires: the endpoint
+	// reports each agent's system instruction and tool declarations, which is
+	// what an evaluation harness needs and more than a deployed server should
+	// hand out. Turn it on for evaluation, leave it off in production.
+	IncludeAppInfoAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.
