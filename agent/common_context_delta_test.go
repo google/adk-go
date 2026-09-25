@@ -20,6 +20,10 @@ import (
 	"testing"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/adkcontext"
+
+	"google.golang.org/adk/v2/session"
 )
 
 // nilDeltaInvocation returns nil from WithICDelta rather than a derived
@@ -27,9 +31,25 @@ import (
 // takes. Nothing in the repository does it, which is why the fixture has to.
 type nilDeltaInvocation struct {
 	InvocationContext
+	own session.Session
 }
 
+func (d nilDeltaInvocation) Session() session.Session                            { return d.own }
 func (nilDeltaInvocation) WithICDelta(*InvocationContextDelta) InvocationContext { return nil }
+
+// markedNilDeltaInvocation is the same shape carrying the identity marker, which
+// the exported InvocationContext interface permits and which ADK's own wrappers
+// are. The marker is what keeps the two guards below reachable: withICDelta skips
+// the call entirely for a zero delta on an UNMARKED invocation, so after that
+// shortcut landed neither guard was entered by any test and both could be deleted
+// with the suite staying green. A marked receiver is still asked, so it still
+// returns nil, and the report path still runs.
+type markedNilDeltaInvocation struct {
+	InvocationContext
+	adkcontext.Marker
+}
+
+func (markedNilDeltaInvocation) WithICDelta(*InvocationContextDelta) InvocationContext { return nil }
 
 // freshReports makes the once-per-type report available again. The set has
 // process lifetime, so without this a test that asserts on the report passes
@@ -49,8 +69,9 @@ func TestDeltaOnInvocationThatReturnsNil(t *testing.T) {
 		Context: t.Context(),
 		agent:   &agent{name: "parent"},
 		branch:  "parent-branch",
+		session: matrixOwner("enclosing"),
 	}
-	ic := nilDeltaInvocation{InvocationContext: enclosing}
+	ic := nilDeltaInvocation{InvocationContext: enclosing, own: matrixOwner("u")}
 
 	var child Agent = &agent{name: "child"}
 	branch := "child-branch"
@@ -85,6 +106,12 @@ func TestDeltaOnInvocationThatReturnsNil(t *testing.T) {
 			}
 			if got := c.Branch(); got != "parent-branch" {
 				t.Errorf("Branch() = %q, want the previous invocation's branch %q", got, "parent-branch")
+			}
+			// Keeping the invocation must not fail open either. A commonContext that
+			// lost its invocation reports no identity, but one that silently adopted
+			// the enclosing invocation would report a user who made no such call.
+			if id, ok := IdentityFromContext(c); !ok || id.UserID != "u" {
+				t.Errorf("IdentityFromContext() = %+v, %v; want the invocation's own user %q", id, ok, "u")
 			}
 		})
 	}
@@ -238,10 +265,12 @@ func TestDiscardRepeatDoesNotAllocate(t *testing.T) {
 func TestDiscardWithNothingToReport(t *testing.T) {
 	freshReports(t)
 	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
-	ic := nilDeltaInvocation{InvocationContext: enclosing}
-
+	// Marked, so the empty-delta shortcut does not fire and the fields == 0 guard
+	// is actually entered. With an unmarked fixture the call never happens and
+	// deleting that guard leaves this test green.
+	marked := markedNilDeltaInvocation{InvocationContext: enclosing}
 	empty := captureLog(t, func() {
-		_ = PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{}})
+		_ = PromoteWithDelta(marked, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{}})
 	})
 	if empty != "" {
 		t.Errorf("a delta that asked for nothing logged %q, want silence", empty)
@@ -249,7 +278,7 @@ func TestDiscardWithNothingToReport(t *testing.T) {
 
 	branch := "child-branch"
 	real := captureLog(t, func() {
-		_ = PromoteWithDelta(ic, &CommonContextDelta{
+		_ = PromoteWithDelta(marked, &CommonContextDelta{
 			InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
 		})
 	})
@@ -279,33 +308,51 @@ func TestNilDeltaStillReachesTheInvocation(t *testing.T) {
 	}
 }
 
-// TestDeltaReachesTheInvocation pins that the guard above does not cost a
-// working invocation its delta. A guard that kept the original unconditionally
-// would pass every assertion in the test above.
+// TestDeltaReachesTheInvocation pins that a delta actually lands on the
+// invocation, for a decorated one as much as an ADK one, and that accepting it
+// stays silent. A guard that kept the original unconditionally would pass every
+// assertion in the test above.
+//
+// It also exists because an attempt to stop a delta dropping an out-of-module
+// decorator did stop it — by discarding the delta wholesale, so agent.Run read
+// Agent, Branch and IsolationScope from the enclosing invocation and nil-panicked
+// where there was no enclosing agent. The identity tests could not see that: they
+// assert who the context speaks for, never what the delta was for. Any future
+// attempt on that problem has to keep this green.
 func TestDeltaReachesTheInvocation(t *testing.T) {
-	ic := &invocationContext{
+	enclosing := &invocationContext{
 		Context: t.Context(),
+		session: matrixOwner("enclosing"),
 		agent:   &agent{name: "parent"},
 		branch:  "parent-branch",
 	}
 	var child Agent = &agent{name: "child"}
 	branch := "child-branch"
-
-	var c Context
-	// Silence matters as much as the values: a helper that reported on every
-	// derivation, not only on a discard, would satisfy every other assertion here.
-	if out := captureLog(t, func() {
-		c = PromoteWithDelta(ic, &CommonContextDelta{
-			InvocationContextDelta: &InvocationContextDelta{Agent: &child, Branch: &branch},
+	delta := func() *CommonContextDelta {
+		return &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Agent: &child, Branch: &branch}}
+	}
+	for _, tc := range []struct {
+		name string
+		ic   InvocationContext
+	}{
+		{"an ADK invocation", &invocationContext{Context: enclosing, session: matrixOwner("u"), agent: &agent{name: "parent"}}},
+		{"one decorated outside the module", decoratedInvocationValue{InvocationContext: enclosing, own: matrixOwner("u")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			freshReports(t)
+			var c Context
+			// Silence matters as much as the values: a helper that reported on every
+			// derivation, not only on a discard, would satisfy every other assertion here.
+			if out := captureLog(t, func() { c = PromoteWithDelta(tc.ic, delta()) }); out != "" {
+				t.Errorf("a delta the invocation accepted logged %q, want silence", out)
+			}
+			if got := c.(InvocationContext).Agent(); got == nil || got.Name() != "child" {
+				t.Errorf("Agent() = %v, want the agent the delta named", got)
+			}
+			if got := c.Branch(); got != branch {
+				t.Errorf("Branch() = %q, want %q", got, branch)
+			}
 		})
-	}); out != "" {
-		t.Errorf("a delta the invocation accepted logged %q, want silence", out)
-	}
-	if got := c.(InvocationContext).Agent(); got == nil || got.Name() != "child" {
-		t.Errorf("Agent() = %v, want the agent the delta named", got)
-	}
-	if got := c.Branch(); got != branch {
-		t.Errorf("Branch() = %q, want %q", got, branch)
 	}
 }
 
@@ -393,9 +440,11 @@ func TestDiscardWithNoInvocationDelta(t *testing.T) {
 	enclosing := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
 	runID := "run-7"
 
+	// Marked for the same reason as the test above: the shortcut would otherwise
+	// return before withICDelta ever reaches the nil guard this test is named for.
 	var c Context
 	got := captureLog(t, func() {
-		c = PromoteWithDelta(nilDeltaInvocation{InvocationContext: enclosing},
+		c = PromoteWithDelta(markedNilDeltaInvocation{InvocationContext: enclosing},
 			&CommonContextDelta{RunID: &runID})
 	})
 	if got != "" {

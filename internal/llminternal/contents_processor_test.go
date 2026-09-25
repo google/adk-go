@@ -1289,9 +1289,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			// the async call and its completion — including the user asking
 			// "What is the status?" — are dropped by
 			// rearrangeEventsForLatestFunctionResponse, whose preservation loop
-			// keeps only events carrying calls or responses. That is
-			// pre-existing behavior, identical on main, and not what this row
-			// is testing.
+			// keeps events carrying calls or responses and orphan remnants.
+			// Filtering ordinary text is pre-existing behavior and not what
+			// this row is testing.
 			want: []*genai.Content{
 				genai.NewContentFromText("Plan how to add feature Q", "user"),
 				NewContentFromFunctionCall(fcAsyncStatus, "model"),
@@ -1566,9 +1566,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Rearrangement preserves separate text beside an orphaned response",
 			events: []*session.Event{
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
-				// The same text without an orphaned response still follows the
+				// Ordinary text without an orphaned response still follows the
 				// existing intermediate-event filtering rule.
-				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("note", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("plain note", "user")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
 					{Text: "note"}, {FunctionResponse: frOrphaned},
 				}}}},

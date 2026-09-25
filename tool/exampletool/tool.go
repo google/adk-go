@@ -60,8 +60,12 @@ func (s exampleTool) Description() string {
 
 // ProcessRequest adds the exampleTool examples to the LLM request.
 func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	parts := ctx.UserContent().Parts
-	if len(parts) == 0 || parts[0].Text == "" {
+	userContent := ctx.UserContent()
+	if userContent == nil {
+		return nil
+	}
+	parts := userContent.Parts
+	if len(parts) == 0 || parts[0] == nil || parts[0].Text == "" {
 		return nil
 	}
 
