@@ -1,0 +1,36 @@
+{
+  "root_span": {
+    "name": "invoke_workflow my_workflow",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "my_workflow"
+    },
+    "status": "ERROR",
+    "children": [
+      {
+        "name": "invoke_node static_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "static_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "UNSET",
+        "children": [],
+        "logs": []
+      },
+      {
+        "name": "invoke_node router_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "router_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "ERROR",
+        "children": [],
+        "logs": []
+      }
+    ],
+    "logs": []
+  }
+}

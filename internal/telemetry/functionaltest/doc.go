@@ -12,27 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package functionaltest contains hermetic functional tests for ADK
-// telemetry: each Test* function builds a real ADK agent
-// (llmagent, workflowagent, ...) backed by a hermetic
-// [google.golang.org/adk/v2/internal/testutil.MockModel], drives it
-// through a real Runner, and asserts the emitted span tree + log
-// records against the expected shape declared in the
-// telemetrytestcase package.
+// Package functionaltest holds the record/replay telemetry tests, the Go
+// counterpart of adk-python's tests/unittests/telemetry/test_functional.py.
 //
-// Layout:
+// Each case drives a real agent, backed by a hermetic
+// [google.golang.org/adk/v2/internal/testutil.MockModel], through a real
+// Runner under one telemetry configuration, and compares the spans and log
+// records it emits with testdata/<test_id>.json. After an intentional
+// telemetry change, re-record every golden with go generate, and review the
+// diff, which is the change users will see:
 //
-//   - The expected shapes (SpanDigest + LogDigest literals) live in
-//     internal/telemetry/telemetrytestcase, one file per scenario.
-//   - The helpers used to build the digests, install the
-//     in-memory tracer/logger, and stand in for the LLM live in
-//     internal/telemetry/telemetrytest.
-//   - This package only holds the runners: scenario setup +
-//     comparison code, so failures in this package always indicate
-//     either a regression in the production code or a stale
-//     expectation in telemetrytestcase.
+//	go generate ./internal/telemetry/functionaltest
 //
-// The package lives outside internal/telemetry to avoid import
-// cycles (the runners pull in agent/llmagent, agent/workflowagent,
-// runner, etc., which transitively import internal/telemetry).
+// The cases live under scenarios:
+//
+//   - scenarios/testcasedata: the data. One package per scenario, each with its
+//     own Scenario type and a Matrix of every variant under every telemetry
+//     configuration.
+//   - scenarios/testcaseimpl: turns a Scenario into the agents, models and
+//     tools it drives, runs it, and lists the cases to record.
+//
+// The package lives outside internal/telemetry to avoid an import cycle: the
+// scenarios import agents and the runner, which import internal/telemetry.
 package functionaltest
+
+//go:generate go test . -update
