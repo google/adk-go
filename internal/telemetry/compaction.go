@@ -250,7 +250,7 @@ func recordCompactionUsage(span trace.Span, u *genai.GenerateContentResponseUsag
 	if u.PromptTokenCount > 0 {
 		span.SetAttributes(genAICompactionInputTokens.Int(int(u.PromptTokenCount)))
 	}
-	// Candidates plus thoughts, matching TraceGenerateContentResult in this
+	// Candidates plus thoughts, matching traceGenerateContentResult in this
 	// package and the semconv note it cites. Counting candidates alone made
 	// two spans in one trace mean different things by the same key, and
 	// under-reported what a thinking model charged for the summary.

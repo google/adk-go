@@ -291,7 +291,7 @@ func TestLogRequest(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
 			ApplyEnv()
 
-			LogRequest(ctx, tc.req, tc.backend)
+			logRequest(ctx, tc.req, tc.backend)
 
 			if len(exporter.records) != len(tc.wantEvents) {
 				var records strings.Builder
@@ -506,7 +506,7 @@ func TestLogResponse(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
 			ApplyEnv()
 
-			LogResponse(t.Context(), tc.resp, tc.backend)
+			logResponse(t.Context(), tc.resp, tc.backend)
 
 			if len(exporter.records) != 1 {
 				var records strings.Builder
@@ -563,8 +563,8 @@ func TestSpanIDPropagation(t *testing.T) {
 		},
 	}
 
-	LogRequest(ctx, req, genai.BackendVertexAI)
-	LogResponse(ctx, &model.LLMResponse{}, genai.BackendVertexAI)
+	logRequest(ctx, req, genai.BackendVertexAI)
+	logResponse(ctx, &model.LLMResponse{}, genai.BackendVertexAI)
 
 	if len(exporter.records) != 3 {
 		t.Fatalf("expected 3 records, got %d", len(exporter.records))
@@ -578,6 +578,8 @@ func TestSpanIDPropagation(t *testing.T) {
 	}
 }
 
+// setup installs an in-memory logger under the legacy schema, the only one
+// [logRequest] and [logResponse] emit under.
 func setup(t *testing.T, capture bool) *inMemoryExporter {
 	exporter := &inMemoryExporter{}
 	provider := sdklog.NewLoggerProvider(
@@ -589,11 +591,11 @@ func setup(t *testing.T, capture bool) *inMemoryExporter {
 		otelLogger = originalLogger
 	})
 
+	capturing := ""
 	if capture {
-		t.Setenv(captureMessageContentEnvVar, "true")
-	} else {
-		t.Setenv(captureMessageContentEnvVar, "")
+		capturing = "true"
 	}
+	setEnvForTesting(t, map[string]string{captureMessageContentEnvVar: capturing, adkTelemetrySchemaVersionOptIn: otelSemconv136})
 
 	return exporter
 }
@@ -660,4 +662,61 @@ func toGoKeyValues(kvs []attribute.KeyValue) []goKeyValue {
 		values = append(values, goKeyValue{Key: string(kv.Key), Value: toGoValue(kv.Value)})
 	}
 	return values
+}
+
+// TestLogInferenceOperationDetails_ProviderName covers what the functional
+// goldens cannot: their mock model has no Google backend to name.
+func TestLogInferenceOperationDetails_ProviderName(t *testing.T) {
+	for _, tc := range []struct {
+		backend genai.Backend
+		want    any
+	}{
+		{genai.BackendVertexAI, "gcp.vertex_ai"},
+		{genai.BackendGeminiAPI, "gcp.gemini"},
+		{genai.BackendUnspecified, nil},
+	} {
+		t.Run(tc.backend.String(), func(t *testing.T) {
+			exporter := &inMemoryExporter{}
+			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter))))
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44"})
+
+			logInferenceOperationDetails(t.Context(), GenerateContentParams{Backend: tc.backend}, generateContentResult{})
+
+			if len(exporter.records) != 1 {
+				t.Fatalf("expected 1 record, got %d", len(exporter.records))
+			}
+			var got any
+			exporter.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+				if kv.Key == genAIProviderName {
+					got = kv.Value.AsString()
+				}
+				return true
+			})
+			if got != tc.want {
+				t.Errorf("gen_ai.provider.name = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUseLegacySchema(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"otel_semconv_1_36", true},
+		{"OTel_Semconv_1_36", true},
+		{" 1\n", true},
+		{"otel_semconv_1_44", false},
+		{"2", false},
+		{"", false},
+		{"true", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(adkTelemetrySchemaVersionOptIn, tc.value)
+			if got := useLegacySchema(); got != tc.want {
+				t.Errorf("useLegacySchema() = %t, want %t", got, tc.want)
+			}
+		})
+	}
 }

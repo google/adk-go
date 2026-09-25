@@ -1034,52 +1034,23 @@ type responseWithEventID struct {
 // generateContent wraps the LLM call with tracing and logging.
 // The generate_content span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*responseWithEventID, error] {
-	return func(yield func(*responseWithEventID, error) bool) {
-		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName:    m.Name(),
-			InvocationID: ctx.InvocationID(),
-			Request:      req,
-		})
-		ctx = ctx.WithContext(spanCtx)
-		backend := googlellm.GetGoogleLLMVariant(m)
-		// Log request before calling the model.
-		telemetry.LogRequest(ctx, req, backend)
-
-		var lastResponse responseWithEventID
-		var lastErr error
-		spanEnded := false
-		endSpanAndTrackResult := func() {
-			if spanEnded {
-				// Return to avoid spamming the logs with "span already ended" errors.
-				return
-			}
-			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
-				Response: lastResponse.LLMResponse,
-				EventID:  lastResponse.eventID,
-				Error:    lastErr,
-			})
-			span.End()
-			spanEnded = true
-		}
-		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
-		defer endSpanAndTrackResult()
-		for resp, err := range m.GenerateContent(ctx, req, useStream) {
-			response := newResponseWithEventID(ctx, resp)
-			lastResponse = *response
-			lastErr = err
-			// Complete the span immediately to avoid capturing the upstream yield processing time.
-			if err != nil {
-				endSpanAndTrackResult()
-			} else if !resp.Partial {
-				// Log only final responses.
-				telemetry.LogResponse(ctx, resp, backend)
-				endSpanAndTrackResult()
-			}
-			if !yield(response, err) {
-				return
-			}
-		}
+	params := telemetry.GenerateContentParams{
+		ModelName:    m.Name(),
+		InvocationID: ctx.InvocationID(),
+		Request:      req,
+		Backend:      googlellm.GetGoogleLLMVariant(m),
 	}
+	response := func(r *responseWithEventID) (*model.LLMResponse, string) { return r.LLMResponse, r.eventID }
+	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
+		ctx := ctx.WithContext(spanCtx)
+		return func(yield func(*responseWithEventID, error) bool) {
+			for resp, err := range m.GenerateContent(ctx, req, useStream) {
+				if !yield(newResponseWithEventID(ctx, resp), err) {
+					return
+				}
+			}
+		}
+	})
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {

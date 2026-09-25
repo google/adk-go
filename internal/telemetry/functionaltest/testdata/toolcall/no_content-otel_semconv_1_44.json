@@ -1,0 +1,99 @@
+{
+  "root_span": {
+    "name": "invoke_workflow some_root_agent",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "some_root_agent"
+    },
+    "status": "UNSET",
+    "children": [
+      {
+        "name": "invoke_agent some_root_agent",
+        "attributes": {
+          "gcp.vertex.agent.invocation_id": "PRESENT",
+          "gen_ai.agent.description": "A sample root agent.",
+          "gen_ai.agent.name": "some_root_agent",
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.operation.name": "invoke_agent"
+        },
+        "status": "UNSET",
+        "children": [
+          {
+            "name": "generate_content mock",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.operation.name": "generate_content",
+              "gen_ai.request.model": "mock",
+              "gen_ai.response.finish_reasons": [
+                "tool_call"
+              ]
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": [
+              {
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "tool_call"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "execute_tool some_tool",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.call.id": "PRESENT",
+              "gen_ai.tool.description": "A sample tool.",
+              "gen_ai.tool.name": "some_tool"
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": []
+          },
+          {
+            "name": "generate_content mock",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.operation.name": "generate_content",
+              "gen_ai.request.model": "mock",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": [
+              {
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "stop"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "logs": []
+      }
+    ],
+    "logs": []
+  }
+}

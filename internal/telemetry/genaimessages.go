@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -54,14 +55,17 @@ const (
 	finishError         = "error"
 )
 
-// maxContentAttributeBytes bounds each content attribute.
+// maxContentAttributeBytes bounds each content attribute on a span, measured
+// as JSON.
 //
 // A request carries the whole conversation, rebuilt on every model call, so an
 // attribute grows with the session and would eventually exceed what a backend
-// accepts — Cloud Trace discards an attribute value over 64 KiB in full, and
-// silently. Rather than trim, an attribute that does not fit is left unset:
-// losing one span's content is recoverable, and a partial value that claims to
-// be the whole conversation is not. Trimming to fit is worth adding later.
+// accepts. telemetry.googleapis.com, where ADK exports spans to Cloud Trace,
+// rejects a whole export request carrying a span attribute over 64 KiB, and
+// measures a structured value by its encoding. Rather than trim, an attribute
+// that does not fit is left unset: losing one span's content is recoverable,
+// and a partial value that claims to be the whole conversation is not.
+// Trimming to fit is worth adding later.
 const maxContentAttributeBytes = 60 << 10
 
 // unserializablePlaceholder stands in for a tool payload encoding/json rejects.
@@ -117,22 +121,28 @@ type toolResponsePart struct {
 	Response json.RawMessage `json:"response"`
 }
 
-// requestContentAttributes returns the gen_ai.system_instructions and
-// gen_ai.input.messages attributes for req, or nil when content capture is off
-// or req carries nothing to record.
+// contentAttr is one content attribute before encoding. See
+// [contentAttributes] for how it is encoded.
+type contentAttr struct {
+	key   attribute.Key
+	value any
+}
+
+// requestContent returns the gen_ai.system_instructions and
+// gen_ai.input.messages values for req, or nil when req carries nothing to
+// record.
 //
 // Content is sensitive and often large, so the semantic conventions require
-// instrumentations not to capture it by default. This is gated on
-// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT, the same flag that
-// governs content in log records.
-func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
-	if req == nil || !captureContentOnSpans() {
+// instrumentations not to capture it by default: callers gate this on
+// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
+func requestContent(req *model.LLMRequest) []contentAttr {
+	if req == nil {
 		return nil
 	}
-	var attrs []attribute.KeyValue
+	var content []contentAttr
 	if req.Config != nil && req.Config.SystemInstruction != nil {
 		if parts := semconvParts(req.Config.SystemInstruction.Parts); len(parts) > 0 {
-			attrs = appendJSON(attrs, genAISystemInstructions, parts)
+			content = append(content, contentAttr{genAISystemInstructions, parts})
 		}
 	}
 	if len(req.Contents) > 0 {
@@ -147,18 +157,18 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 			}
 			msgs = append(msgs, chatMessage{Role: schemaRole(c), Parts: semconvParts(c.Parts)})
 		}
-		attrs = appendJSON(attrs, genAIInputMessages, msgs)
+		content = append(content, contentAttr{genAIInputMessages, msgs})
 	}
-	return attrs
+	return content
 }
 
-// responseContentAttributes returns the gen_ai.output.messages attribute for
-// resp, gated exactly as [requestContentAttributes] is.
+// responseContent returns the gen_ai.output.messages value for resp. Callers
+// gate it exactly as [requestContent].
 //
 // Partial responses are skipped. Each streamed chunk would otherwise overwrite
 // the attribute, leaving the span holding a fragment rather than the answer.
-func responseContentAttributes(resp *model.LLMResponse, err error) []attribute.KeyValue {
-	if resp == nil || resp.Partial || !captureContentOnSpans() {
+func responseContent(resp *model.LLMResponse, err error) []contentAttr {
+	if resp == nil || resp.Partial {
 		return nil
 	}
 	// A candidate suppressed by a safety filter has a finish reason and no
@@ -171,11 +181,70 @@ func responseContentAttributes(resp *model.LLMResponse, err error) []attribute.K
 	} else {
 		parts = []any{}
 	}
-	return appendJSON(nil, genAIOutputMessages, []chatMessage{{
+	return []contentAttr{{genAIOutputMessages, []chatMessage{{
 		Role:         roleAssistant,
 		Parts:        parts,
 		FinishReason: schemaFinishReason(resp, err),
-	}})
+	}}}}
+}
+
+// spanContentAttributes encodes content for a span, leaving out an attribute
+// whose JSON encoding exceeds [maxContentAttributeBytes].
+//
+// Each is a structured value, as the conventions ask of an SDK that supports
+// them on spans. adk-python records a JSON string instead
+// (_experimental_semconv.py), as its OpenTelemetry API has no structured span
+// attributes; so does the legacy schema.
+func spanContentAttributes(content []contentAttr) []attribute.KeyValue {
+	legacy := useLegacySchema()
+	var attrs []attribute.KeyValue
+	for _, c := range content {
+		encoded, err := json.Marshal(c.value)
+		// err is unreachable: tool payloads are pre-encoded by toolPayload and
+		// everything else is a string or a slice of them.
+		if err != nil || len(encoded) > maxContentAttributeBytes {
+			continue
+		}
+		if legacy {
+			attrs = append(attrs, c.key.String(string(encoded)))
+		} else if v, ok := decodeJSON(encoded); ok {
+			attrs = append(attrs, attribute.KeyValue{Key: c.key, Value: v})
+		}
+	}
+	return attrs
+}
+
+// eventContentAttributes encodes content for an event, as structured values.
+// ADK does not bound their size, beyond cutting inline payloads at
+// [maxInlineDataBytes]: the log SDK's attribute value length limit applies to
+// each string inside them, and is unlimited unless configured.
+func eventContentAttributes(content []contentAttr) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	for _, c := range content {
+		encoded, err := json.Marshal(c.value)
+		if err != nil {
+			// Unreachable, as in spanContentAttributes.
+			continue
+		}
+		if v, ok := decodeJSON(encoded); ok {
+			attrs = append(attrs, attribute.KeyValue{Key: c.key, Value: v})
+		}
+	}
+	return attrs
+}
+
+// decodeJSON decodes a JSON document to an attribute value. Going through
+// encoding/json makes field names and omitted fields match the JSON schemas
+// the conventions define.
+func decodeJSON(encoded []byte) (attribute.Value, bool) {
+	// UseNumber keeps an integer tool argument an integer.
+	dec := json.NewDecoder(bytes.NewReader(encoded))
+	dec.UseNumber()
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
+		return attribute.Value{}, false
+	}
+	return toLogValue(decoded), true
 }
 
 // semconvParts converts genai parts, skipping those with no mapping. Never
@@ -378,20 +447,4 @@ func schemaFinishReason(resp *model.LLMResponse, err error) string {
 	default:
 		return strings.ToLower(string(resp.FinishReason))
 	}
-}
-
-// appendJSON encodes value and appends it to attrs under key, unless it does
-// not fit. See [maxContentAttributeBytes] for why an oversized attribute is
-// dropped rather than trimmed.
-func appendJSON(attrs []attribute.KeyValue, key attribute.Key, value any) []attribute.KeyValue {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		// Unreachable: tool payloads are pre-encoded by toolPayload and
-		// everything else is a string or a slice of them.
-		return attrs
-	}
-	if len(encoded) > maxContentAttributeBytes {
-		return attrs
-	}
-	return append(attrs, key.String(string(encoded)))
 }

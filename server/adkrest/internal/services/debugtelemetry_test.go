@@ -17,6 +17,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"math"
 	"strings"
 	"testing"
@@ -30,6 +31,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/model"
 )
 
 func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
@@ -63,6 +68,10 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				rootLog.SetBody(attribute.StringValue("root-log-body"))
 				rootLog.SetEventName("root-log-event")
 				rootLog.SetTimestamp(time.Now())
+				rootLog.AddAttributes(attribute.KeyValue{
+					Key:   "gen_ai.input.messages",
+					Value: attribute.SliceValue(attribute.MapValue(attribute.String("role", "user"))),
+				})
 				logger.Emit(rootCtx, rootLog)
 			},
 			querySessionID: "session-1",
@@ -75,8 +84,9 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 					},
 					Logs: []DebugLog{
 						{
-							Body:      "root-log-body",
-							EventName: "root-log-event",
+							Body:       "root-log-body",
+							Attributes: map[string]any{"gen_ai.input.messages": []any{map[string]any{"role": "user"}}},
+							EventName:  "root-log-event",
 						},
 					},
 				},
@@ -738,4 +748,99 @@ func TestConvertRecordsSynthesizesEventIDForFailedGenerateContent(t *testing.T) 
 			t.Errorf("invoke_agent gained %s; the UI only requires it on generate_content", eventIDAttribute)
 		}
 	})
+}
+
+// TestInferenceDetailsPartsMatchWebUI emits a real
+// gen_ai.client.inference.operation.details event carrying every part the
+// semantic conventions define, and checks each reaches the web UI in a shape
+// its schema accepts; one it rejects blanks the whole Traces panel.
+func TestInferenceDetailsPartsMatchWebUI(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	t.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "EVENT_ONLY")
+	telemetry.ApplyEnv()
+	const sessionID = "session-1"
+	debugTelemetry, tp, lp := setup(t)
+	telemetry.OverrideLoggerForTesting(t, lp)
+
+	telemetry.OverrideTracerForTesting(t, tp)
+	params := telemetry.GenerateContentParams{Request: &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{SystemInstruction: &genai.Content{Parts: []*genai.Part{
+			{FileData: &genai.FileData{FileURI: "gs://b/rules", MIMEType: "text/plain"}},
+		}}},
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+			{InlineData: &genai.Blob{Data: []byte("x")}},
+			{FileData: &genai.FileData{FileURI: "gs://b/o", MIMEType: "image/png"}},
+		}}, {Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"nan": math.NaN()}}},
+		}}},
+	}}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{Text: "thinking", Thought: true},
+		{FunctionCall: &genai.FunctionCall{Name: "f", Args: map[string]any{"nan": math.NaN()}}},
+		{FunctionCall: &genai.FunctionCall{Name: "g"}},
+	}}}
+
+	ctx, span := tp.Tracer("test").Start(t.Context(), "invoke_agent", trace.WithAttributes(semconv.GenAIConversationID(sessionID)))
+	call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) { yield(resp, nil) }
+	}
+	for range telemetry.InstrumentGenerateContent(ctx, params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	}
+	span.End()
+
+	var logs []DebugLog
+	for _, s := range debugTelemetry.GetSpansBySessionID(sessionID) {
+		if strings.HasPrefix(s.Name, "generate_content") {
+			logs = s.Logs
+		}
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(logs))
+	}
+	want := map[string]any{
+		"gen_ai.system_instructions": []any{
+			map[string]any{"type": "file_data", "mime_type": "text/plain", "uri": "gs://b/rules"},
+		},
+		"gen_ai.input.messages": []any{map[string]any{"role": "user", "parts": []any{
+			map[string]any{"type": "blob", "mime_type": "", "data": "eA=="},
+			map[string]any{"type": "file_data", "mime_type": "image/png", "uri": "gs://b/o"},
+		}}, map[string]any{"role": "tool", "parts": []any{
+			map[string]any{"type": "tool_call_response", "name": "f", "response": map[string]any{"value": "<unserializable>"}},
+		}}},
+		"gen_ai.output.messages": []any{map[string]any{"role": "assistant", "finish_reason": "tool_call", "parts": []any{
+			map[string]any{"type": "text", "content": "thinking"},
+			map[string]any{"type": "tool_call", "name": "f", "arguments": map[string]any{"value": "<unserializable>"}},
+			map[string]any{"type": "tool_call", "name": "g", "arguments": nil},
+		}}},
+	}
+	got := map[string]any{}
+	for k := range want {
+		got[k] = logs[0].Attributes[k]
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("message attributes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestUnrepresentableLogAttributesAreDropped: like a body, an attribute
+// encoding/json refuses would truncate the response for every span, so the
+// record's attributes are dropped instead.
+func TestUnrepresentableLogAttributesAreDropped(t *testing.T) {
+	const sessionID = "session-1"
+	debugTelemetry, tp, lp := setup(t)
+	ctx, span := tp.Tracer("test").Start(t.Context(), "span", trace.WithAttributes(semconv.GenAIConversationID(sessionID)))
+	var r log.Record
+	r.SetEventName("some.event")
+	r.AddAttributes(attribute.Float64("nan", math.NaN()))
+	lp.Logger("test").Emit(ctx, r)
+	span.End()
+
+	spans := debugTelemetry.GetSpansBySessionID(sessionID)
+	if _, err := json.Marshal(spans); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := spans[0].Logs[0].Attributes; got != nil {
+		t.Errorf("attributes = %v, want none", got)
+	}
 }

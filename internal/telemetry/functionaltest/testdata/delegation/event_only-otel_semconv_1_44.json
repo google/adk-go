@@ -1,0 +1,270 @@
+{
+  "root_span": {
+    "name": "invoke_workflow some_delegating_agent",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "some_delegating_agent"
+    },
+    "status": "UNSET",
+    "children": [
+      {
+        "name": "invoke_agent some_delegating_agent",
+        "attributes": {
+          "gcp.vertex.agent.invocation_id": "PRESENT",
+          "gen_ai.agent.description": "A delegating agent.",
+          "gen_ai.agent.name": "some_delegating_agent",
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.operation.name": "invoke_agent"
+        },
+        "status": "UNSET",
+        "children": [
+          {
+            "name": "generate_content mock",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.operation.name": "generate_content",
+              "gen_ai.request.model": "mock",
+              "gen_ai.response.finish_reasons": [
+                "tool_call"
+              ]
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": [
+              {
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.input.messages": [
+                    {
+                      "parts": [
+                        {
+                          "content": "hello",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "user"
+                    }
+                  ],
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.output.messages": [
+                    {
+                      "finish_reason": "tool_call",
+                      "parts": [
+                        {
+                          "arguments": {
+                            "request": "delegate this"
+                          },
+                          "name": "some_delegate_agent",
+                          "type": "tool_call"
+                        }
+                      ],
+                      "role": "assistant"
+                    }
+                  ],
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "tool_call"
+                  ],
+                  "gen_ai.system_instructions": [
+                    {
+                      "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegating_agent\". The description about you is \"A delegating agent.\".",
+                      "type": "text"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "execute_tool some_delegate_agent",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.call.id": "PRESENT",
+              "gen_ai.tool.description": "A delegate agent.",
+              "gen_ai.tool.name": "some_delegate_agent"
+            },
+            "status": "UNSET",
+            "children": [
+              {
+                "name": "invoke_workflow some_delegate_agent",
+                "attributes": {
+                  "gen_ai.conversation.id": "PRESENT",
+                  "gen_ai.operation.name": "invoke_workflow",
+                  "gen_ai.workflow.name": "some_delegate_agent",
+                  "gen_ai.workflow.nested": true
+                },
+                "status": "UNSET",
+                "children": [
+                  {
+                    "name": "invoke_agent some_delegate_agent",
+                    "attributes": {
+                      "gcp.vertex.agent.invocation_id": "PRESENT",
+                      "gen_ai.agent.description": "A delegate agent.",
+                      "gen_ai.agent.name": "some_delegate_agent",
+                      "gen_ai.conversation.id": "PRESENT",
+                      "gen_ai.operation.name": "invoke_agent"
+                    },
+                    "status": "UNSET",
+                    "children": [
+                      {
+                        "name": "generate_content mock",
+                        "attributes": {
+                          "gcp.vertex.agent.event_id": "PRESENT",
+                          "gcp.vertex.agent.invocation_id": "PRESENT",
+                          "gen_ai.operation.name": "generate_content",
+                          "gen_ai.request.model": "mock",
+                          "gen_ai.response.finish_reasons": [
+                            "stop"
+                          ]
+                        },
+                        "status": "UNSET",
+                        "children": [],
+                        "logs": [
+                          {
+                            "event_name": "gen_ai.client.inference.operation.details",
+                            "body": null,
+                            "attributes": {
+                              "gcp.vertex.agent.event_id": "PRESENT",
+                              "gcp.vertex.agent.invocation_id": "PRESENT",
+                              "gen_ai.input.messages": [
+                                {
+                                  "parts": [
+                                    {
+                                      "content": "delegate this",
+                                      "type": "text"
+                                    }
+                                  ],
+                                  "role": "user"
+                                }
+                              ],
+                              "gen_ai.operation.name": "generate_content",
+                              "gen_ai.output.messages": [
+                                {
+                                  "finish_reason": "stop",
+                                  "parts": [
+                                    {
+                                      "content": "delegate response",
+                                      "type": "text"
+                                    }
+                                  ],
+                                  "role": "assistant"
+                                }
+                              ],
+                              "gen_ai.request.model": "mock",
+                              "gen_ai.response.finish_reasons": [
+                                "stop"
+                              ],
+                              "gen_ai.system_instructions": [
+                                {
+                                  "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegate_agent\". The description about you is \"A delegate agent.\".",
+                                  "type": "text"
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "logs": []
+                  }
+                ],
+                "logs": []
+              }
+            ],
+            "logs": []
+          },
+          {
+            "name": "generate_content mock",
+            "attributes": {
+              "gcp.vertex.agent.event_id": "PRESENT",
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.operation.name": "generate_content",
+              "gen_ai.request.model": "mock",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": [
+              {
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.input.messages": [
+                    {
+                      "parts": [
+                        {
+                          "content": "hello",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    {
+                      "parts": [
+                        {
+                          "arguments": {
+                            "request": "delegate this"
+                          },
+                          "name": "some_delegate_agent",
+                          "type": "tool_call"
+                        }
+                      ],
+                      "role": "assistant"
+                    },
+                    {
+                      "parts": [
+                        {
+                          "name": "some_delegate_agent",
+                          "response": {
+                            "result": "delegate response"
+                          },
+                          "type": "tool_call_response"
+                        }
+                      ],
+                      "role": "tool"
+                    }
+                  ],
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.output.messages": [
+                    {
+                      "finish_reason": "stop",
+                      "parts": [
+                        {
+                          "content": "text response",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "assistant"
+                    }
+                  ],
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "stop"
+                  ],
+                  "gen_ai.system_instructions": [
+                    {
+                      "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegating_agent\". The description about you is \"A delegating agent.\".",
+                      "type": "text"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "logs": []
+      }
+    ],
+    "logs": []
+  }
+}
