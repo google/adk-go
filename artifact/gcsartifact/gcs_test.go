@@ -564,6 +564,51 @@ func (i *fakeObjectIterator) next() (*storage.ObjectAttrs, error) {
 	return a, nil
 }
 
+// TestGCSArtifactService_SaveHonorVersion pins that a positive SaveRequest.Version
+// is honored by the GCS backend: the artifact is written to that exact version
+// slot instead of the auto-assigned next one, as SaveRequest.Version documents.
+func TestGCSArtifactService_SaveHonorVersion(t *testing.T) {
+	ctx := t.Context()
+	s := newGCSServiceForTesting("honor-version")
+
+	const appName, userID, sessionID, fileName = "app", "user", "sess", "file1"
+
+	for _, data := range []string{"auto-1", "auto-2"} {
+		got, err := s.Save(ctx, &artifact.SaveRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
+			Part: genai.NewPartFromBytes([]byte(data), "text/plain"),
+		})
+		if err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+		if got.Version == 0 {
+			t.Fatal("Save() returned a zero version")
+		}
+	}
+
+	got, err := s.Save(ctx, &artifact.SaveRequest{
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
+		Version: 2,
+		Part:    genai.NewPartFromBytes([]byte("explicit-2"), "text/plain"),
+	})
+	if err != nil {
+		t.Fatalf("Save() with explicit version error = %v", err)
+	}
+	if got.Version != 2 {
+		t.Fatalf("Save() with Version:2 returned version %d, want 2", got.Version)
+	}
+
+	loaded, err := s.Load(ctx, &artifact.LoadRequest{
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 2,
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded == nil || loaded.Part == nil || loaded.Part.InlineData == nil || string(loaded.Part.InlineData.Data) != "explicit-2" {
+		t.Fatalf("Load(v=2) = %v, want inline content \"explicit-2\"", loaded)
+	}
+}
+
 var (
 	_ gcsClient         = (*fakeClient)(nil)
 	_ gcsBucket         = (*fakeBucket)(nil)
