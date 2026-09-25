@@ -17,8 +17,11 @@ package services
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +39,43 @@ import (
 const (
 	defaultTraceCapacity = 10_000
 	eventIDKey           = "gcp.vertex.agent.event_id"
+)
+
+// Event names whose log body the ADK web UI validates as a structured message:
+// body.content has to be an object holding a "parts" array. Every other event
+// name is validated loosely, and gen_ai.system.message wants a plain string, so
+// only these two are reshaped.
+const (
+	userMessageEventName = "gen_ai.user.message"
+	choiceEventName      = "gen_ai.choice"
+)
+
+// Body field names shared with the web UI schema.
+const (
+	contentKey = "content"
+	partsKey   = "parts"
+	textKey    = "text"
+	roleKey    = "role"
+)
+
+// Default roles for a message whose own role did not survive elision.
+//
+// The web UI's message schema pipes the body through a transform and then
+// requires content.role, so a body without one is rejected and the whole
+// Traces panel is discarded. These are the roles the corresponding events
+// carry when content capture is on.
+const (
+	userRole  = "user"
+	modelRole = "model"
+)
+
+// unrepresentableContent replaces a body that cannot be turned into JSON.
+const unrepresentableContent = "<unrepresentable>"
+
+// Span identity the web UI's schema depends on.
+const (
+	generateContentSpanPrefix = "generate_content"
+	eventIDAttribute          = "gcp.vertex.agent.event_id"
 )
 
 // DebugTelemetry stores the in memory spans and logs, grouped by session and event.
@@ -93,6 +133,9 @@ func convertAttrs(in []attribute.KeyValue) map[string]string {
 }
 
 // DebugSpan represents a span in the trace.
+//
+// Attributes and Logs are never nil in a span returned by [DebugTelemetry], so
+// they marshal as {} and [] instead of JSON null.
 type DebugSpan struct {
 	Name         string            `json:"name"`
 	StartTime    int64             `json:"start_time"`
@@ -105,12 +148,101 @@ type DebugSpan struct {
 }
 
 // DebugLog represents a log in the span.
+//
+// Body is normalised by [normalizeLogBody] when the record is stored, so it
+// always marshals and always carries the shape the ADK web UI expects for the
+// event name.
 type DebugLog struct {
 	Body              any    `json:"body"`
 	ObservedTimestamp string `json:"observed_timestamp"`
 	TraceID           string `json:"trace_id"`
 	SpanID            string `json:"span_id"`
 	EventName         string `json:"event_name"`
+}
+
+// normalizeLogBody returns a log body the ADK web UI can validate, staying as
+// close to the original as it can.
+//
+// The UI validates the whole span array in one pass and discards all of it if
+// any record fails, so a single odd body empties the Traces panel rather than
+// its own row. Two bodies do that:
+//
+//   - A message whose content was elided. With content capture off — the
+//     default — the server records body.content as the string "<elided>",
+//     while the UI requires an object with a "parts" array for user messages
+//     and choices. The elision moves inside the structure instead.
+//   - A body that cannot be marshalled at all, a NaN float for example. The
+//     handler encodes every span in one call, so one of those truncates the
+//     response.
+func normalizeLogBody(eventName string, body any) any {
+	normalized := normalizeMessageShape(eventName, body)
+	if _, err := json.Marshal(normalized); err != nil {
+		return normalizeMessageShape(eventName, map[string]any{contentKey: unrepresentableContent})
+	}
+	return normalized
+}
+
+// normalizeMessageShape rewrites body.content into a message object for the
+// event names the web UI validates as structured messages. Other event names
+// are returned untouched.
+func normalizeMessageShape(eventName string, body any) any {
+	if eventName != userMessageEventName && eventName != choiceEventName {
+		return body
+	}
+	fields, ok := body.(map[string]any)
+	if !ok {
+		return map[string]any{contentKey: messageContent(body, defaultRole(eventName), nil)}
+	}
+	out := maps.Clone(fields)
+	out[contentKey] = messageContent(fields[contentKey], defaultRole(eventName), fields[roleKey])
+	return out
+}
+
+// defaultRole is the role to assume for an event whose message lost its own.
+func defaultRole(eventName string) string {
+	if eventName == choiceEventName {
+		return modelRole
+	}
+	return userRole
+}
+
+// messageContent coerces v into the {"parts": [...], "role": …} object the web
+// UI's message schema requires, keeping any other fields v already has.
+//
+// outerRole is the role from the enclosing body, which the UI would otherwise
+// hoist itself; it wins over fallback but not over a role already on the
+// content.
+func messageContent(v any, fallbackRole string, outerRole any) map[string]any {
+	content, ok := v.(map[string]any)
+	if !ok {
+		content = map[string]any{partsKey: textParts(v)}
+	} else {
+		content = maps.Clone(content)
+		if _, ok := content[partsKey].([]any); !ok {
+			content[partsKey] = textParts(content[partsKey])
+		}
+	}
+	if role, ok := content[roleKey].(string); !ok || role == "" {
+		if role, ok := outerRole.(string); ok && role != "" {
+			content[roleKey] = role
+		} else {
+			content[roleKey] = fallbackRole
+		}
+	}
+	return content
+}
+
+// textParts renders v as a parts array: nothing at all for a missing value, one
+// text part otherwise.
+func textParts(v any) []any {
+	if v == nil {
+		return []any{}
+	}
+	text, ok := v.(string)
+	if !ok {
+		text = fmt.Sprint(v)
+	}
+	return []any{map[string]any{textKey: text}}
 }
 
 // spanRecord stores a span and its associated logs.
@@ -193,6 +325,14 @@ func convertRecords(records []*spanRecord) []DebugSpan {
 	for i, r := range records {
 		// Clone the logs to avoid race conditions.
 		logs := slices.Clone(r.Logs)
+		// Build empty containers rather than nil ones: a nil slice marshals to
+		// JSON null, and the ADK web UI validates these fields against array and
+		// object schemas that a null fails, which makes it discard the whole
+		// response and render an empty Traces panel.
+		if logs == nil {
+			logs = []DebugLog{}
+		}
+		attributes := eventIDAttributes(r)
 		debugSpans[i] = DebugSpan{
 			Name:         r.Name,
 			StartTime:    r.StartTime.UnixNano(),
@@ -200,11 +340,43 @@ func convertRecords(records []*spanRecord) []DebugSpan {
 			SpanID:       r.Context.SpanID().String(),
 			TraceID:      r.Context.TraceID().String(),
 			ParentSpanID: r.ParentSpanID.String(),
-			Attributes:   r.Attributes,
+			Attributes:   attributes,
 			Logs:         logs,
 		}
 	}
 	return debugSpans
+}
+
+// eventIDAttributes returns the span's attributes for the response, giving a
+// generate_content span an event id when it has none so the web UI will render
+// it.
+//
+// The UI validates the whole span array in one pass and discards all of it if
+// any span fails, and its schema requires gcp.vertex.agent.event_id on a
+// generate_content span. That attribute is only recorded once the model
+// returns: TraceGenerateContentResult returns early when the call errored, so
+// a failed turn produces a span without one and the entire Traces panel goes
+// blank — exactly when a developer opens it to find out why the call failed.
+//
+// Dropping the span would satisfy the schema but lose the one span worth
+// looking at, so the span id stands in. Every consumer of the attribute in the
+// UI is a lookup that tolerates a miss — isEventRow, getUiEvent and the span
+// filters all fall back to "no linked event" — so the span renders and is
+// simply not tied to a session event, which is the truth: the call produced no
+// event to tie it to.
+//
+// The result is always a fresh map. The records are shared with the store, so
+// writing the attribute into r.Attributes would both race with a concurrent
+// reader and leave the synthesized value behind in stored telemetry.
+func eventIDAttributes(r *spanRecord) map[string]string {
+	// Empty rather than nil: a nil map marshals to JSON null, which the UI's
+	// object schema rejects.
+	attributes := make(map[string]string, len(r.Attributes)+1)
+	maps.Copy(attributes, r.Attributes)
+	if _, ok := attributes[eventIDAttribute]; !ok && strings.HasPrefix(r.Name, generateContentSpanPrefix) {
+		attributes[eventIDAttribute] = r.Context.SpanID().String()
+	}
+	return attributes
 }
 
 func filterUnclosedAndSort(records []*spanRecord) []*spanRecord {
@@ -235,7 +407,7 @@ func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) erro
 			s.recordsBySpanID[spanID] = record
 		}
 		record.Logs = append(record.Logs, DebugLog{
-			Body:              telemetry.FromLogValue(log.Body()),
+			Body:              normalizeLogBody(log.EventName(), telemetry.FromLogValue(log.Body())),
 			ObservedTimestamp: log.ObservedTimestamp().Format(time.RFC3339Nano),
 			TraceID:           log.TraceID().String(),
 			SpanID:            log.SpanID().String(),

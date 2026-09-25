@@ -29,11 +29,15 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
@@ -76,16 +80,17 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			controller := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{
-				Plugins: tt.plugins,
-			}, false)
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SSETimeout:   10 * time.Second,
+				PluginConfig: runner.PluginConfig{Plugins: tt.plugins},
+			})
 
 			if controller == nil {
 				t.Fatal("NewRuntimeAPIController returned nil")
 			}
 
 			if got := len(controller.pluginConfig.Plugins); got != tt.wantPlugins {
-				t.Errorf("NewRuntimeAPIController() plugins count = %v, want %v", got, tt.wantPlugins)
+				t.Errorf("NewRuntimeAPIControllerWithConfig() plugins count = %v, want %v", got, tt.wantPlugins)
 			}
 		})
 	}
@@ -135,10 +140,11 @@ func TestRunSSEHandler(t *testing.T) {
 		{
 			name: "success case",
 			results: []testAgentResult{
-				{event: makeEvent("invocation-1", "testApp", "Hello from agent"), err: nil},
+				// Non-ASCII text: the stream must carry it through as UTF-8.
+				{event: makeEvent("invocation-1", "testApp", "Hello from agent: 72°F"), err: nil},
 			},
 			wantStatus: http.StatusOK,
-			wantBody:   []string{"data: {", "Hello from agent"},
+			wantBody:   []string{"data: {", "Hello from agent: 72°F"},
 		},
 		{
 			name: "error case",
@@ -195,15 +201,11 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 
 			// Setup controller
-			controller := NewRuntimeAPIController(
-				&sessionService,
-				nil,
-				agent.NewSingleLoader(fakeAgent),
-				nil,
-				10*time.Second,
-				runner.PluginConfig{},
-				false,
-			)
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: &sessionService,
+				AgentLoader:    agent.NewSingleLoader(fakeAgent),
+				SSETimeout:     10 * time.Second,
+			})
 
 			// Create request
 			reqObj := models.RunAgentRequest{
@@ -217,6 +219,7 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 			reqBytes, _ := json.Marshal(reqObj)
 			req := httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: reqObj.UserId}))
 
 			// Record response
 			rr := httptest.NewRecorder()
@@ -228,6 +231,12 @@ func TestRunSSEHandler(t *testing.T) {
 			// Verify response
 			if rr.Code != tt.wantStatus {
 				t.Errorf("expected status %d, got %d", tt.wantStatus, rr.Code)
+			}
+
+			// Without the charset, clients that apply the legacy ISO-8859-1
+			// default for text/* mojibake every non-ASCII rune in the stream.
+			if got, want := rr.Header().Get("Content-Type"), "text/event-stream; charset=UTF-8"; got != want {
+				t.Errorf("Content-Type = %q, want %q", got, want)
 			}
 
 			body := rr.Body.String()
@@ -271,5 +280,72 @@ func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
 
 	if _, err := decodeRequestBody(req); err == nil {
 		t.Errorf("decodeRequestBody: expected error for unknown field, got nil")
+	}
+}
+
+// TestNewRuntimeAPIController_BackwardCompatible pins that the constructor
+// keeps the signature it was released with, and that the options live on a
+// sibling rather than on a trailing variadic parameter grown onto it.
+//
+// The assertion is the declared type of runtimeCtor below, not anything in the
+// body. A call expression cannot do this job: it keeps compiling when the
+// function it calls gains a trailing variadic, which is exactly the change that
+// breaks a caller using the identifier as a value.
+func TestNewRuntimeAPIController_BackwardCompatible(t *testing.T) {
+	c := runtimeCtor(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false)
+	if c == nil {
+		t.Fatal("NewRuntimeAPIController() returned nil")
+	}
+	if c.eventsCompactionConfig != nil {
+		t.Errorf("eventsCompactionConfig = %v, want nil when no option is supplied", c.eventsCompactionConfig)
+	}
+}
+
+// runtimeCtor fails to compile if [NewRuntimeAPIController] changes shape.
+var runtimeCtor NewRuntimeAPIControllerFunc = NewRuntimeAPIController
+
+// NewRuntimeAPIControllerFunc is the released signature of
+// [NewRuntimeAPIController].
+type NewRuntimeAPIControllerFunc = func(session.Service, memory.Service, agent.Loader, artifact.Service, time.Duration, runner.PluginConfig, bool) *RuntimeAPIController
+
+func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
+	cfg := &compaction.Config{CompactionInterval: 2}
+	c := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SSETimeout: 10 * time.Second,
+		Compaction: cfg,
+	})
+	if c.eventsCompactionConfig != cfg {
+		t.Errorf("eventsCompactionConfig = %v, want the config passed in", c.eventsCompactionConfig)
+	}
+}
+
+// TestRunLiveHandlerUsesConfiguredCheckOrigin pins that the configured hook
+// replaces gorilla/websocket's default same-origin check, which would reject an
+// Origin the operator allowed.
+func TestRunLiveHandlerUsesConfiguredCheckOrigin(t *testing.T) {
+	var got *http.Request
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: session.InMemoryService(),
+		AgentLoader:    agent.NewSingleLoader(nil),
+		CheckOrigin: func(r *http.Request) bool {
+			got = r
+			return false
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/run_live?appName=a&userId=u&sessionId=s", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-Websocket-Version", "13")
+	req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Origin", "http://localhost:4200")
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunLiveHandler)(rr, req)
+
+	if got == nil {
+		t.Fatal("CheckOrigin was not called, want the upgrader to use it")
+	}
+	if want := http.StatusForbidden; rr.Code != want {
+		t.Errorf("status = %d, want %d (body %q)", rr.Code, want, rr.Body.String())
 	}
 }

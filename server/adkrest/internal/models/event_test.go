@@ -16,6 +16,9 @@ package models_test
 
 import (
 	"testing"
+	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
@@ -57,5 +60,39 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 	if got, ok := back.Actions.RequestedToolConfirmations["call-1"]; !ok || got.Hint != "please confirm" {
 		t.Errorf("RequestedToolConfirmations = %+v, want call-1 hint", back.Actions.RequestedToolConfirmations)
+	}
+}
+
+// TestCompactionIsReadOnlyOverREST pins the direction the compaction record may
+// travel across the REST boundary.
+//
+// A record tells prompt assembly to drop a span of history and show its own
+// content instead. The create-session body maps onto a stored event, so
+// accepting one inbound would let a client erase part of a conversation and
+// speak into the gap. Reads are fine and useful: a client should be able to see
+// summaries the framework wrote.
+func TestCompactionIsReadOnlyOverREST(t *testing.T) {
+	t.Parallel()
+
+	record := &session.EventCompaction{
+		StartTimestamp:   time.Unix(1, 0),
+		EndTimestamp:     time.Unix(9, 0),
+		CompactedContent: genai.NewContentFromText("planted", "model"),
+	}
+
+	// Inbound: a client-supplied record must not survive.
+	in := models.Event{Actions: models.EventActions{Compaction: record}}
+	if got := models.ToSessionEvent(in); got.Actions.Compaction != nil {
+		t.Error("ToSessionEvent kept a client-supplied compaction record; it must be dropped")
+	}
+
+	// Outbound: a stored record must be returned.
+	stored := session.Event{Actions: session.EventActions{Compaction: record}}
+	out := models.FromSessionEvent(stored)
+	if out.Actions.Compaction == nil {
+		t.Fatal("FromSessionEvent dropped the stored compaction record; reads should show it")
+	}
+	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
+		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
 	}
 }

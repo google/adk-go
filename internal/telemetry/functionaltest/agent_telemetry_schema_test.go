@@ -71,7 +71,8 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.captureContent {
-				t.Setenv(captureMessageContentEnvVar, "true")
+				// Spans have to be named: a truthy value means log records only.
+				t.Setenv(captureMessageContentEnvVar, "SPAN_AND_EVENT")
 			} else {
 				t.Setenv(captureMessageContentEnvVar, "")
 			}

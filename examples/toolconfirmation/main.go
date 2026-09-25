@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package provides an example console app for tool confirmation.
-// The example shows requestVacationDays func which requires user confirmation. It uses ctx.ToolConfirmation() and ctx.RequestConfirmation() to define the confimation process.
+// The example shows requestVacationDays func which requires user confirmation. It uses ctx.ToolConfirmation() and ctx.RequestConfirmation() to define the confirmation process.
 // This is the example for most advanced scenario which gives the full control how to define confirmation flow.
 // For simpler setup use `RequireConfirmation` or `RequireConfirmationProvider` in [functiontool.Config].
 package main

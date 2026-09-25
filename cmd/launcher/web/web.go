@@ -17,26 +17,39 @@ package web
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+)
+
+const (
+	logStartingWebServer = "Starting the web server: %+v"
+	logWebServerStartsOn = "Web servers starts on %s"
+
+	// defaultHost keeps the server off the network unless the caller opts in
+	// with -host. See bindHost and the -host flag.
+	defaultHost = "127.0.0.1"
 )
 
 // webConfig contains parameters for launching web server
 type webConfig struct {
 	port            int
+	host            string
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
 	idleTimeout     time.Duration
@@ -56,6 +69,9 @@ type webLauncher struct {
 
 // Execute implements launcher.Launcher.
 func (w *webLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	remainingArgs, err := w.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)
@@ -148,13 +164,42 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+// applyServiceDefaults fills in in-memory services the caller left unset.
+//
+// Neither adkrest.NewServer nor runner.New defaults them; only
+// runner.NewInMemory does, and the web launcher does not use it. A nil session
+// or memory service reaches the request path and panics, which drops the
+// connection without sending any HTTP response. The artifact handlers answer
+// 503 instead, so defaulting that one replaces a clear diagnostic with a server
+// that works until it restarts and then has lost everything. It is logged for
+// that reason: cmd/launcher/prod runs through this same path, so a deployment
+// that forgot to configure a service still says so on startup.
+func applyServiceDefaults(config *launcher.Config) {
+	var defaulted []string
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
+		defaulted = append(defaulted, "session")
 	}
+	if config.ArtifactService == nil {
+		config.ArtifactService = artifact.InMemoryService()
+		defaulted = append(defaulted, "artifact")
+	}
+	if config.MemoryService == nil {
+		config.MemoryService = memory.InMemoryService()
+		defaulted = append(defaulted, "memory")
+	}
+	for _, name := range defaulted {
+		log.Printf("No %s service configured. Using an in-memory one, so whatever it holds is lost when the process exits.", name)
+	}
+}
+
+// Run implements launcher.SubLauncher. It takes ownership of the telemetry
+// providers initialized for execution and shuts them down on exit.
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	applyServiceDefaults(config)
 
 	router := BuildBaseRouter()
+	registerHealthRoute(router)
 
 	// check if there are any active sublaunchers
 	if len(w.activeSublaunchers) == 0 {
@@ -165,6 +210,10 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
+	// Sublaunchers that build a server need the resolved bind address rather
+	// than the raw flag, so an empty -host arms the same checks the default does.
+	config.BindHost = w.bindHost()
+
 	// Setup subrouters
 	for _, l := range w.sublaunchers {
 		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
@@ -174,10 +223,22 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		}
 	}
 
-	log.Printf("Starting the web server: %+v", w.config)
+	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
+	if err != nil {
+		return fmt.Errorf("telemetry initialization failed: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
+		defer cancel()
+		if err := telemetryService.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown failed: %v", err)
+		}
+	}()
+
+	log.Printf(logStartingWebServer, w.config)
 	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
-	log.Printf("Web servers starts on %s", webUrl)
+	webUrl := w.webURL()
+	log.Printf(logWebServerStartsOn, webUrl)
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
 	}
@@ -193,19 +254,12 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		close(errChan)
 	}()
 
-	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
-	if err != nil {
-		return fmt.Errorf("telemetry initialization failed: %v", err)
-	}
-
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down the web server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
 		defer cancel()
-		serverErr := srv.Shutdown(shutdownCtx)
-		telemetryErr := telemetryService.Shutdown(shutdownCtx)
-		return errors.Join(serverErr, telemetryErr)
+		return srv.Shutdown(shutdownCtx)
 	case err, ok := <-errChan:
 		if !ok {
 			return nil
@@ -214,9 +268,46 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 }
 
+// webURL returns the user-facing URL for the configured host and port so the
+// startup message reflects the actual bind address (including bracketed IPv6
+// hosts such as "::1").
+//
+// The loopback hosts 127.0.0.1, ::1, 0.0.0.0 and :: are normalized to
+// "localhost" in the URL shown/opened to the user. The ADK Web UI is served
+// from http://localhost:8080/api, so presenting the server as
+// http://127.0.0.1:8080 would be a different browser origin and fail CORS.
+// This changes only the displayed URL - it does not change the server bind
+// address, which is controlled by the -host flag and used by buildHTTPServer.
+func (w *webLauncher) webURL() string {
+	host := displayHost(w.bindHost())
+	return fmt.Sprintf("http://%s", net.JoinHostPort(host, strconv.Itoa(w.config.port)))
+}
+
+// bindHost returns the host the server listens on. An empty -host is treated
+// as the default. net.JoinHostPort("", port) yields ":port", which binds every
+// interface, so leaving an empty value unresolved would reintroduce exactly the
+// exposure this launcher refuses to default to.
+func (w *webLauncher) bindHost() string {
+	if w.config.host == "" {
+		return defaultHost
+	}
+	return w.config.host
+}
+
+// displayHost maps loopback-ish listen hosts to "localhost" for the URL shown
+// to the user, and otherwise returns the host unchanged. See webURL.
+func displayHost(host string) string {
+	switch host {
+	case "127.0.0.1", "::1", "0.0.0.0", "::":
+		return "localhost"
+	default:
+		return host
+	}
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		Addr:         net.JoinHostPort(w.bindHost(), strconv.Itoa(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -248,7 +339,8 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.StringVar(&config.host, "host", defaultHost, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
+	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
@@ -280,8 +372,32 @@ func logger(inner http.Handler) http.Handler {
 }
 
 // BuildBaseRouter returns the main router, which can be extended by sub-routers.
+//
+// It deliberately registers no routes of its own. mux serves the first route
+// that matches, so anything registered here would silently shadow the same path
+// registered by a caller afterwards.
 func BuildBaseRouter() *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 	router.Use(logger)
 	return router
+}
+
+// registerHealthRoute serves health at the root as well as under the API
+// prefix. Load balancers and container probes are configured with a fixed path
+// and cannot be expected to know which sublaunchers happen to be enabled.
+//
+// Run calls this rather than BuildBaseRouter doing it, so that an embedder
+// building its own server keeps /health for itself.
+func registerHealthRoute(router *mux.Router) {
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
+}
+
+// healthHandler reports that the web server is up. It says nothing about the
+// health of the agent or its downstream models. The body and Content-Type match
+// adkrest's /api/health, so a probe can be pointed at either one.
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
+		log.Printf("failed to write health response: %v", err)
+	}
 }

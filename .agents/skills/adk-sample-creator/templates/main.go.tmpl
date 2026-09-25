@@ -1,0 +1,45 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package main <what this demonstrates, in one sentence>.
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
+)
+
+func main() {
+	ctx := context.Background()
+	// Only when the output is meant to be read as a session.
+	log.SetFlags(0)
+
+	// workflowagent.New for a graph, agent.New for a hand-written Run.
+	root, err := llmagent.New(llmagent.Config{ /* ... */ })
+	if err != nil {
+		log.Fatalf("Failed to create the agent: %v", err)
+	}
+
+	config := &launcher.Config{AgentLoader: agent.NewSingleLoader(root)}
+	l := full.NewLauncher()
+	if err := l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	}
+}

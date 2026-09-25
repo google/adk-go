@@ -40,6 +40,12 @@ type Service interface {
 	// session via AddSessionToMemory. Implementations should treat Events
 	// as an incremental update and must not assume it represents the full
 	// session.
+	//
+	// The direction is not symmetric: AddSessionToMemory replaces the stored
+	// events for a session wholesale, so a later full-session call for the
+	// same session overwrites any events that were added incrementally and
+	// are absent from that call's session. Incremental and full-session
+	// ingestion of the same session are therefore not safely mixable.
 	AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error
 	// SearchMemory returns memory entries relevant to the given query.
 	// Empty slice is returned if there are no matches.
@@ -54,8 +60,12 @@ type AddEventsToMemoryRequest struct {
 
 	// Below are optional fields.
 
-	// SessionID scopes the events to a session. Implementations may ignore
-	// it if not applicable.
+	// SessionID scopes the events to a session for the purpose of
+	// deduplication: only the identity of the events a later call may reuse
+	// is per-session. It is not an isolation boundary — SearchMemory returns
+	// entries for an (app, user) pair irrespective of SessionID, so events
+	// stored under one SessionID surface in searches for any other session of
+	// the same user. Implementations may ignore it if not applicable.
 	SessionID string
 	// CustomMetadata is optional, implementation-defined metadata for
 	// memory generation (e.g. TTL).

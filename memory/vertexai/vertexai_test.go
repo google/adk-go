@@ -15,6 +15,7 @@
 package vertexai
 
 import (
+	"errors"
 	"testing"
 
 	"google.golang.org/adk/v2/memory"
@@ -23,7 +24,7 @@ import (
 func TestVertexAIService_AddEventsToMemory_NotSupported(t *testing.T) {
 	v := &vertexAIService{}
 	err := v.AddEventsToMemory(t.Context(), &memory.AddEventsToMemoryRequest{AppName: "app", UserID: "user"})
-	if err == nil {
-		t.Error("AddEventsToMemory() error = nil, want non-nil: vertexAIService does not support AddEventsToMemory")
+	if !errors.Is(err, ErrAddEventsToMemoryUnsupported) {
+		t.Errorf("AddEventsToMemory() error = %v, want ErrAddEventsToMemoryUnsupported", err)
 	}
 }

@@ -86,17 +86,31 @@ type StartGenerateContentSpanParams struct {
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
+	// Request is the request about to be sent to the model. It is used only
+	// to record the opt-in gen_ai.input.messages and
+	// gen_ai.system_instructions attributes, and may be nil.
+	Request *model.LLMRequest
 }
 
 // StartGenerateContentSpan starts a new semconv generate_content span.
 func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
 		gcpVertexAgentInvocationID.String(params.InvocationID),
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
-	))
+	}
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
+	// After the sampling decision, not before: converting a whole conversation
+	// costs milliseconds, and on a span the sampler drops it buys nothing. The
+	// conventions list the attributes worth having at span creation for
+	// sampling, and content is not among them. Still before the model call, so
+	// the prompt is on the span even when the call fails and no response is
+	// ever traced.
+	if span.IsRecording() {
+		span.SetAttributes(requestContentAttributes(params.Request)...)
+	}
 	return spanCtx, span
 }
 
@@ -109,16 +123,23 @@ type TraceGenerateContentResultParams struct {
 // TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
+	// Record a finish reason when the call produced a response or an error; a
+	// nil response and nil error means there is no result to describe.
+	if params.Response != nil || params.Error != nil {
+		span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
+	}
 	if params.Response == nil {
 		return
 	}
-	span.SetAttributes(
-		gcpVertexAgentEventID.String(params.EventID),
-		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
-	)
+	span.SetAttributes(gcpVertexAgentEventID.String(params.EventID))
+	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
+			// Tool-use prompt tokens are reported separately from PromptTokenCount and
+			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
+			// matches the semantic-conventions reference implementation for google-genai:
+			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
+			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.

@@ -234,8 +234,16 @@ func validateChatModeWiring(edges []Edge) error {
 	return nil
 }
 
-// agentNodeMode returns the LlmAgent mode of node, or ok=false when node
-// is not an AgentNode wrapping an LlmAgent.
+// agentNodeMode returns the mode the LlmAgent wrapped by node runs under
+// as a graph node, or ok=false when node is not an AgentNode wrapping an
+// LlmAgent.
+//
+// Resolving rather than reading the declaration makes no difference to either
+// caller today: both compare against task and chat, and resolving only ever
+// turns unset into single_turn. It is written this way because the answer this
+// returns is what the agent runs under at that placement, which is the whole
+// point of the change around it, and because a caller added later that compares
+// against single_turn would otherwise be silently wrong for an undeclared agent.
 func agentNodeMode(node Node) (llminternal.Mode, bool) {
 	agentNode, ok := node.(*AgentNode)
 	if !ok {
@@ -245,7 +253,7 @@ func agentNodeMode(node Node) (llminternal.Mode, bool) {
 	if !ok || llmA == nil {
 		return llminternal.ModeUnset, false
 	}
-	return llminternal.Reveal(llmA).Mode, true
+	return llminternal.ResolveMode(llminternal.Reveal(llmA).Mode, llminternal.ModeSingleTurn), true
 }
 
 // validateUniqueEdges checks that there are no duplicate edges in the workflow.
