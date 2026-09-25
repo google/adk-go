@@ -113,7 +113,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		}
 		if compactioninternal.RangeRacedSince(latest, before, summary) {
 			finish(nil, "another compaction covering the same events landed while summarizing")
-			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing")
+			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -132,7 +132,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// exported surface at compaction.Config.TokenThreshold.
 		if !compactioninternal.SanitizeSummary(summary) {
 			finish(nil, "the summary held nothing usable")
-			log.Printf("adk: discarding a tail-retention summary because it held no usable content")
+			log.Printf("adk: discarding a tail-retention summary because it held no usable content") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -164,12 +164,12 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		repairCtx, cancelRepair := compactioninternal.RepairContext(ctx)
 		defer cancelRepair()
 		if latest, err := compactioninternal.ReloadSession(repairCtx, rt.SessionService(), sess); err != nil {
-			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err)
+			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err) //nolint:forbidigo // pre-slog call site
 		} else if repair := compactioninternal.RepairAfterAppend(summary, before, latest); repair != nil {
 			if err := rt.SessionService().AppendEvent(repairCtx, sess, repair); err != nil {
-				log.Printf("adk: could not store a corrected compaction record: %v", err)
+				log.Printf("adk: could not store a corrected compaction record: %v", err) //nolint:forbidigo // pre-slog call site
 			} else {
-				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize",
+				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize", //nolint:forbidigo // pre-slog call site
 					len(repair.Actions.Compaction.ExcludedEvents)-len(summary.Actions.Compaction.ExcludedEvents))
 			}
 		}
@@ -196,7 +196,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 // rather than only in an aborted turn. The post-invocation pass still surfaces
 // its own failures to the caller, since nothing is mid-flight there.
 func degrade(ctx context.Context, stage string, err error) {
-	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err))
+	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err)) //nolint:forbidigo // pre-slog call site
 }
 
 // compactionFailure marks err as a compaction failure at the named stage.

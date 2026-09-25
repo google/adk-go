@@ -15,10 +15,35 @@ formatters:
 
 linters:
   enable:
+    - forbidigo
     - goheader
     - revive
 
   settings:
+
+    # Library code must not write diagnostics to a process-wide sink: an
+    # application embedding ADK cannot silence, route or filter them. See
+    # "Logging and error messages" in AGENTS.md for what to do instead.
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^log\.((Print|Fatal|Panic)(f|ln)?|Output|Default|Writer|Set(Output|Flags|Prefix))$
+          pkg: ^log$
+          msg: library code must not use the standard log package's logger; see "Logging and error messages" in AGENTS.md
+        - pattern: ^slog\.((Debug|Info|Warn|Error)(Context)?|Log|LogAttrs|With|Default|SetDefault|SetLogLoggerLevel)$
+          pkg: ^log/slog$
+          msg: library code must not use the process-wide slog logger; see "Logging and error messages" in AGENTS.md
+        - pattern: ^os\.(Stdout|Stderr)$
+          pkg: ^os$
+          msg: library code must not write to stdout or stderr; see "Logging and error messages" in AGENTS.md
+        - pattern: ^fmt\.Print(f|ln)?$
+          pkg: ^fmt$
+          msg: library code must not write to stdout; see "Logging and error messages" in AGENTS.md
+        # An empty pkg matches only the builtins, not a local func or variable
+        # that happens to be called print.
+        - pattern: ^print(ln)?$
+          pkg: ^$
+          msg: library code must not write to stderr; see "Logging and error messages" in AGENTS.md
 
     revive:
       rules:
@@ -78,3 +103,15 @@ linters:
         linters:
           - revive
         text: '^(exported|package-comments):'
+      # Binaries, examples and tests own their process, so writing to the
+      # terminal is theirs to decide. loggingplugin exists to print a
+      # human-readable trace to the terminal.
+      - path: '_test\.go$'
+        linters:
+          - forbidigo
+      - path: '(^|/)(cmd|examples)/'
+        linters:
+          - forbidigo
+      - path: '^plugin/loggingplugin/'
+        linters:
+          - forbidigo

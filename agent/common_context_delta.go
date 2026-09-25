@@ -282,7 +282,7 @@ func reportDiscardedDelta(ic InvocationContext, d *InvocationContextDelta) {
 	// WithDelta installs d.Context on the latter afterwards, so saying the delta
 	// was "discarded" would be read as covering both. These fields did not reach
 	// the invocation, which is true on either entry point.
-	log.Printf("agent: %T.WithICDelta returned nil, so the previous invocation is kept and "+
+	log.Printf("agent: %T.WithICDelta returned nil, so the previous invocation is kept and "+ //nolint:forbidigo // pre-slog call site
 		"these delta fields did not reach it: %s. Further occurrences of this loss from "+
 		"this type are not reported", ic, strings.Join(lost, ", "))
 }
