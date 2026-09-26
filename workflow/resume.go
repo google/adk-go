@@ -165,24 +165,37 @@ func (w *Workflow) Resume(
 				if ns.ResumedInputs == nil {
 					ns.ResumedInputs = map[string]any{}
 				}
-				for id, resp := range freshMatched {
-					ns.ResumedInputs[id] = resp
-				}
+				mergeResumed(ns, freshMatched)
 				ns.Status = NodePending
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
 				scheduled++
 			} else if remaining := unansweredInterrupts(ns, freshMatched); len(remaining) > 0 {
 				// Handoff, but the node raised interrupts nobody has
-				// answered yet. It is still waiting: completing it here
-				// would drop the unanswered ones and hand successors an
-				// output standing in for a decision that was never made
-				// — for a rejected confirmation, one gating the very
-				// work it rejected. Mirrors adk-python's replay
-				// interceptor, which keeps such a node waiting and
-				// re-bubbles the unresolved IDs.
+				// answered yet. It stays in NodeWaiting: completing it
+				// here would drop the unanswered ones and hand
+				// successors an output standing in for a decision that
+				// was never made — for a rejected confirmation, one
+				// gating the very work it rejected. Same call as
+				// adk-python's replay interceptor, which leaves such a
+				// node waiting on the unresolved IDs.
+				//
+				// This turn emits nothing of its own, because the node
+				// did not run. The requests still open are the ones the
+				// engine already wrote to session history when the node
+				// paused, so a client reads the outstanding set from
+				// there rather than from a fresh event.
+				//
+				// Record the answer that did arrive against the node and
+				// narrow its open set, so a caller driving
+				// ReconstructRunState and Resume across two calls with
+				// answers not yet in history accumulates them instead of
+				// losing the first batch. Across turns the accumulation
+				// comes from history instead: rehydration rebuilds
+				// RunState from scratch every turn.
+				mergeResumed(ns, freshMatched)
 				ns.Interrupts = remaining
-				// The answer that did arrive is recorded, so the turn is
-				// not the empty no-op ErrNothingToResume reports.
+				// An answer did land, so the turn is not the empty no-op
+				// ErrNothingToResume reports.
 				if ns.answeredThisTurn || len(freshMatched) > 0 {
 					scheduled++
 				}
@@ -191,7 +204,11 @@ func (w *Workflow) Resume(
 				// successors; the asker does not re-run.
 				out := ns.Output
 				if len(freshMatched) > 0 {
-					out = resumeOutput(freshMatched)
+					// Every answer the node has, not just this call's:
+					// the others may have come from history, or from an
+					// earlier Resume on this same RunState.
+					mergeResumed(ns, freshMatched)
+					out = resumeOutput(ns.ResumedInputs)
 				}
 				ns.Status = NodeCompleted
 				ns.Output = out
@@ -281,6 +298,22 @@ func validateResumeResponse(resp any, schema *jsonschema.Schema) (any, error) {
 		return nil, fmt.Errorf("resolve schema: %w", err)
 	}
 	return typeutil.ConvertToWithJSONSchema[any, any](resp, resolved)
+}
+
+// mergeResumed folds the answers matched in this Resume call into the ones the
+// node already holds from history or from an earlier call on the same RunState.
+// A no-op when there is nothing to fold, so a node that resolved entirely from
+// history keeps its nil ResumedInputs.
+func mergeResumed(ns *NodeState, freshMatched map[string]any) {
+	if len(freshMatched) == 0 {
+		return
+	}
+	if ns.ResumedInputs == nil {
+		ns.ResumedInputs = make(map[string]any, len(freshMatched))
+	}
+	for id, resp := range freshMatched {
+		ns.ResumedInputs[id] = resp
+	}
 }
 
 // unansweredInterrupts returns the interrupts a node raised that still have no
