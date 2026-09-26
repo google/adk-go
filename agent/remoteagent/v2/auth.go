@@ -47,6 +47,10 @@ import (
 //
 // The parts are percent-encoded and joined with "/". A provider that wants them
 // back splits on "/" and calls [url.QueryUnescape] on each.
+//
+// s must be non-nil; a nil session panics. There is no safe value to return
+// instead, because every scope built without an identity is the same scope, and
+// two identities sharing one key is what this function exists to prevent.
 func CredentialScope(s session.Session, agentName string) a2aclient.SessionID {
 	return iremoteagent.CredentialScope(s.AppName(), s.UserID(), s.ID(), agentName)
 }
@@ -149,12 +153,21 @@ type credentialsService struct {
 	// nothing keeps not fitting, so warning every time would bury the operator
 	// in duplicates of one fact.
 	warnMismatch *sync.Once
+	// mints collapses concurrent OAuth2 token mints for one scope.
+	mints *mintGroup
 }
 
 var _ a2aclient.CredentialsService = credentialsService{}
 
+// newCredentialsService builds the adapter with the state its methods assume is
+// present. Tests construct it through here too, so no test exercises a shape
+// NewA2A cannot produce.
+func newCredentialsService(p auth.CredentialProvider) credentialsService {
+	return credentialsService{provider: p, warnMismatch: &sync.Once{}, mints: newMintGroup()}
+}
+
 // Get implements [a2aclient.CredentialsService].
-func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, scheme a2a.SecuritySchemeName) (a2aclient.AuthCredential, error) {
+func (s credentialsService) Get(ctx context.Context, sid a2aclient.SessionID, scheme a2a.SecuritySchemeName) (a2aclient.AuthCredential, error) {
 	if s.provider == nil {
 		return "", errors.New("remoteagent: a2a auth has no credential provider")
 	}
@@ -176,7 +189,7 @@ func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, sche
 		// when another scheme can carry the credential — a card may offer
 		// alternatives. When none can, the request goes out unauthenticated
 		// with nothing said, and this is the only place that can see why.
-		if !cardAccepts(card, place) && s.warnMismatch != nil {
+		if !cardAccepts(card, place) {
 			s.warnMismatch.Do(func() {
 				log.Warn(ctx, "a2a auth: no security scheme the agent card declares can carry the resolved credential, so the request will go out unauthenticated",
 					"credential", fmt.Sprintf("%T", cred))
@@ -184,7 +197,7 @@ func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, sche
 		}
 		return "", a2aclient.ErrCredentialNotFound
 	}
-	value, err := credentialValue(ctx, cred)
+	value, err := s.credentialValue(ctx, sid, cred)
 	if err != nil {
 		return "", err
 	}
@@ -248,6 +261,31 @@ func schemeAccepts(card *a2a.AgentCard, name a2a.SecuritySchemeName, p placement
 	}
 }
 
+// cardNamesNoScheme reports whether the card gives the a2a AuthInterceptor
+// nothing to ask about, so it never calls Get and the request leaves with no
+// credential and nothing logged.
+//
+// The interceptor iterates the requirement objects and then the scheme names
+// inside each, so an empty requirement list, an empty scheme map and a
+// requirement object naming nothing all reach the wire the same way. The last
+// is the one a real card carries: security: [{}] is how OpenAPI spells
+// "authentication optional".
+//
+// A name the card does not declare is a different case and is not this
+// function's: there Get is called, finds no scheme that can carry the
+// credential, and warns.
+func cardNamesNoScheme(card *a2a.AgentCard) bool {
+	if card == nil || len(card.SecuritySchemes) == 0 {
+		return true
+	}
+	for _, requirement := range card.SecurityRequirements {
+		if len(requirement) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // cardAccepts reports whether any scheme the card requires can carry a
 // credential written as p.
 func cardAccepts(card *a2a.AgentCard, p placement) bool {
@@ -288,7 +326,7 @@ func derefCredential(c auth.Credential) auth.Credential {
 
 // credentialValue returns the raw secret the a2a AuthInterceptor transmits: the
 // API-key value, the bearer token, or a freshly minted OAuth2 access token.
-func credentialValue(ctx context.Context, c auth.Credential) (string, error) {
+func (s credentialsService) credentialValue(ctx context.Context, sid a2aclient.SessionID, c auth.Credential) (string, error) {
 	switch v := c.(type) {
 	case auth.APIKeyCredential:
 		if v.Value == "" {
@@ -301,7 +339,7 @@ func credentialValue(ctx context.Context, c auth.Credential) (string, error) {
 		}
 		return v.Token, nil
 	case auth.OAuth2Credential:
-		return mintAccessToken(ctx, v.TokenSource)
+		return s.mints.token(ctx, sid, v.TokenSource)
 	default:
 		return "", errUntransmittable(c)
 	}
@@ -313,53 +351,101 @@ func credentialValue(ctx context.Context, c auth.Credential) (string, error) {
 // auth package's own initTimeout, and is a var so tests need not wait it out.
 var mintTimeout = 30 * time.Second
 
-// mintAccessToken returns a fresh access token, bounded by ctx and by
-// mintTimeout. [oauth2.TokenSource.Token] takes no context, and real sources —
-// the JWT and ADC sources behind auth.ServiceAccount and auth.ADC — post to a
-// token endpoint through http.DefaultClient, which has no timeout.
-// Interceptors run before the transport call, so nothing else bounds the mint:
-// without this it can outlive the invocation and hold the run loop's deferred
-// cleanup past the budget that cleanup set for itself.
+// mintGroup runs at most one token mint per credential scope at a time and
+// hands the result to everyone waiting on it.
 //
-// Only the wait is bounded. Token() cannot be interrupted, so a mint against a
-// black-holed endpoint leaves its goroutine parked until the source gives up —
-// no worse than the synchronous call it replaces, which parked the caller's own
-// goroutine instead, but not something this function can cancel.
-func mintAccessToken(ctx context.Context, ts oauth2.TokenSource) (string, error) {
+// The mint has to run in its own goroutine, because [oauth2.TokenSource.Token]
+// takes no context and so cannot be interrupted: only the caller's wait can be
+// bounded. Releasing the caller is what makes the single-flight necessary.
+// Without it, every request arriving while a token endpoint hangs starts
+// another mint and parks another goroutine, and neither ever ends.
+//
+// The scope is the key because it is already the per-identity credential key:
+// a provider resolves one token source for one scope, so two mints under the
+// same scope are the same mint. A provider that returns a different source per
+// call for one scope would see the first source's token answer both.
+type mintGroup struct {
+	mu       sync.Mutex
+	inFlight map[a2aclient.SessionID]*mintCall
+}
+
+// mintCall is one in-flight mint. token and err are written once, before done
+// closes, and read only after it.
+type mintCall struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
+func newMintGroup() *mintGroup {
+	return &mintGroup{inFlight: map[a2aclient.SessionID]*mintCall{}}
+}
+
+// token returns a fresh access token for scope, bounded by ctx and by
+// mintTimeout. Real sources — the JWT and ADC sources behind
+// auth.ServiceAccount and auth.ADC — post to a token endpoint through
+// http.DefaultClient, which has no timeout, and interceptors run before the
+// transport call, so nothing else bounds the mint: without mintTimeout it can
+// outlive the invocation and hold the run loop's deferred cleanup past the
+// budget that cleanup set for itself.
+func (g *mintGroup) token(ctx context.Context, scope a2aclient.SessionID, ts oauth2.TokenSource) (string, error) {
 	if ts == nil {
 		return "", errors.New("remoteagent: oauth2 credential has no token source")
 	}
+
+	g.mu.Lock()
+	call, joined := g.inFlight[scope]
+	if !joined {
+		call = &mintCall{done: make(chan struct{})}
+		g.inFlight[scope] = call
+		go g.run(scope, call, ts)
+	}
+	g.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(ctx, mintTimeout)
 	defer cancel()
-
-	type result struct {
-		tok *oauth2.Token
-		err error
-	}
-	// Buffered, so a mint nobody is waiting for can still complete and let its
-	// goroutine exit rather than blocking forever on the send.
-	done := make(chan result, 1)
-	go func() {
-		tok, err := ts.Token()
-		done <- result{tok, err}
-	}()
-
 	select {
 	case <-ctx.Done():
 		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.Cause(ctx))
-	case r := <-done:
-		if r.err != nil {
-			return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", redactTokenError(r.err))
-		}
-		if r.tok == nil || r.tok.AccessToken == "" {
-			return "", errors.New("remoteagent: oauth2 token source returned an empty access token")
-		}
-		// a2a always writes "Bearer", so any other type would go out mislabeled.
-		if t := r.tok.Type(); !strings.EqualFold(t, "bearer") {
-			return "", fmt.Errorf("remoteagent: oauth2 token type %q cannot be sent over a2a, which always writes a bearer token", t)
-		}
-		return r.tok.AccessToken, nil
+	case <-call.done:
+		return call.token, call.err
 	}
+}
+
+// run performs one mint and publishes its outcome. The entry is removed and
+// done closed under the lock, so a caller either joins this call and is woken
+// by it or finds no entry and starts a fresh one — a failed mint is never
+// replayed to a later request.
+func (g *mintGroup) run(scope a2aclient.SessionID, call *mintCall, ts oauth2.TokenSource) {
+	defer func() {
+		// Token() is third-party code on a goroutine of our own, where a panic
+		// is fatal rather than something the runner's recover can turn into an
+		// error. auth/gcp's provider guards its own callback the same way.
+		if r := recover(); r != nil {
+			call.err = fmt.Errorf("remoteagent: mint oauth2 token: token source panicked: %v", r)
+		}
+		g.mu.Lock()
+		delete(g.inFlight, scope)
+		close(call.done)
+		g.mu.Unlock()
+	}()
+	call.token, call.err = mintAccessToken(ts)
+}
+
+// mintAccessToken reads one access token from ts and checks it can be sent.
+func mintAccessToken(ts oauth2.TokenSource) (string, error) {
+	tok, err := ts.Token()
+	if err != nil {
+		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", redactTokenError(err))
+	}
+	if tok == nil || tok.AccessToken == "" {
+		return "", errors.New("remoteagent: oauth2 token source returned an empty access token")
+	}
+	// a2a always writes "Bearer", so any other type would go out mislabeled.
+	if t := tok.Type(); !strings.EqualFold(t, "bearer") {
+		return "", fmt.Errorf("remoteagent: oauth2 token type %q cannot be sent over a2a, which always writes a bearer token", t)
+	}
+	return tok.AccessToken, nil
 }
 
 // a2aRequestTimeout restates the a2a client's own default. Auth has to build an
@@ -468,9 +554,12 @@ func (e *redactedError) Unwrap() error { return e.cause }
 //
 // Only the branch that carries the body is rewritten: RetrieveError.Error()
 // prints the body exactly when the response was not a well-formed OAuth2 error,
-// which is also when its content is least predictable. A response that did
-// name an error code already prints only that, and is left alone. The status
-// and the error chain survive either way.
+// which is also when its content is least predictable. A response that did name
+// an error code takes the other branch, which prints the code, the endpoint's
+// error_description and its error_uri — free text, but three fields the
+// endpoint chose for a client to display, rather than whatever it happened to
+// write in the body. That branch is left alone. The status and the error chain
+// survive either way.
 func redactTokenError(err error) error {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) || re.ErrorCode != "" || re.Response == nil {
@@ -482,12 +571,16 @@ func redactTokenError(err error) error {
 	}
 }
 
-// isTypedNil reports whether v is a nil pointer, func or map held in a non-nil
+// isTypedNil reports whether v is a nil func or a nil pointer held in a non-nil
 // interface — auth.ProviderFunc(nil), say. Such a value passes an ordinary
 // != nil check and then panics on the first call.
+//
+// Only those two kinds. A method with a value receiver on a nil named map,
+// slice or channel is callable and reads the nil fine, so rejecting one would
+// turn a working provider into a constructor error.
 func isTypedNil(v any) bool {
 	switch rv := reflect.ValueOf(v); rv.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+	case reflect.Func, reflect.Pointer:
 		return rv.IsNil()
 	default:
 		return false

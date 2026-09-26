@@ -60,6 +60,23 @@ func (cancelOnlyExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.ExecutorCon
 func (cancelOnlyExecutor) Cleanup(context.Context, *a2asrv.ExecutorContext, a2a.SendMessageResult, error) {
 }
 
+// cardScopedCredentials resolves a credential the way this SDK's own adapter
+// does: only for one scope, and only when the resolved agent card is on the
+// context. Production reads the card to decide whether a scheme name can carry
+// what the provider returned, so a cancel issued without it goes out
+// unauthenticated and leaves the remote task running.
+type cardScopedCredentials struct {
+	scope a2aclient.SessionID
+	token string
+}
+
+func (c cardScopedCredentials) Get(ctx context.Context, sid a2aclient.SessionID, scheme a2a.SecuritySchemeName) (a2aclient.AuthCredential, error) {
+	if iremoteagent.AgentCardFrom(ctx) == nil || sid != c.scope || scheme != "bearer" {
+		return "", a2aclient.ErrCredentialNotFound
+	}
+	return a2aclient.AuthCredential(c.token), nil
+}
+
 // TestCancelChildInputRequiredTasksAuthenticatesCancel covers the second place
 // a CancelTask is issued against a remote subagent. The subagent's client can
 // carry the a2a auth interceptor that remoteagent.NewA2A installs for
@@ -96,12 +113,18 @@ func TestCancelChildInputRequiredTasksAuthenticatesCancel(t *testing.T) {
 		SecurityRequirements: a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}},
 	}
 
-	// Holds the credential under the scope the run loop would use, so the
-	// cancel is authenticated only if the executor attaches the same one.
-	store := a2aclient.NewInMemoryCredentialsStore()
-	store.Set(iremoteagent.CredentialScope(appName, userID, sessionID, agentName), "bearer", token)
-	factory := a2aclient.NewFactory(a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{Service: store}))
+	// Answers only for the scope the run loop would use and only with the card
+	// on the context, the way the adapter remoteagent.NewA2A installs does. The
+	// in-memory store a2aclient ships resolves on (scope, scheme name) alone
+	// and so cannot tell whether the executor re-attached the card.
+	creds := cardScopedCredentials{
+		scope: iremoteagent.CredentialScope(appName, userID, sessionID, agentName),
+		token: token,
+	}
+	factory := a2aclient.NewFactory(a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{Service: creds}))
 
+	// Stands in for the provider NewA2A builds for itself when Auth is set,
+	// which is the only way OwnsAuthScope is ever true in production.
 	remoteCfg := &iremoteagent.A2AServerConfig{
 		AgentCard:     card,
 		OwnsAuthScope: true,

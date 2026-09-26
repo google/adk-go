@@ -312,10 +312,11 @@ type A2AConfig struct {
 
 	// ClientProvider can be used to provide a custom implementation of A2A message sending.
 	//
-	// The context it receives, and the one its client receives per call, carry
-	// the credential scope (a2aclient.SessionIDFrom) and remain an
-	// agent.InvocationContext. They are a wrapper, though, so an assertion to a
-	// type outside that interface no longer succeeds.
+	// It cannot be combined with Auth, so nothing this package attaches for
+	// auth reaches it: neither the context it receives nor the one its client
+	// receives per call carries a credential scope. A provider doing its own
+	// auth attaches one itself, and CredentialScope builds the key this package
+	// would have used.
 	ClientProvider A2AClientProvider
 
 	// Auth, when set, resolves an end-user credential per request and attaches
@@ -381,6 +382,9 @@ type A2AConfig struct {
 	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 	// If Run exited due to an error including context cancellation it will be passed as cause.
 	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
+	// With Auth set it is additionally wrapped so it is still an
+	// agent.InvocationContext and still carries the credential scope, which is
+	// what lets a cancel this callback issues be authenticated.
 	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
@@ -405,7 +409,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 				a2aclient.WithJSONRPCTransport(httpClient),
 				a2aclient.WithRESTTransport(httpClient),
 				a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{
-					Service: credentialsService{provider: cfg.Auth, warnMismatch: &sync.Once{}},
+					Service: newCredentialsService(cfg.Auth),
 				}),
 			)
 		}
@@ -463,14 +467,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		// the a2a auth interceptor can resolve a credential for it: the message
 		// send below, and the cleanup CancelTask the deferred cleanup issues.
 		sendCtx := authSendContext(ctx, cfg, card)
-		if cfg.Auth != nil && (len(card.SecurityRequirements) == 0 || len(card.SecuritySchemes) == 0) {
+		if cfg.Auth != nil && cardNamesNoScheme(card) {
 			// The interceptor does not even ask for a credential in this case,
 			// so the request goes out unauthenticated and nothing else says so:
 			// a card that forgot its requirement looks exactly like one that
 			// needs no auth. Once per agent — the card is usually static, and
 			// the operator needs the fact, not a copy of it per request.
 			a.warnNoRequirement.Do(func() {
-				log.Warn(ctx, "a2a auth: A2AConfig.Auth is set but the agent card declares no security requirement and scheme pair, so no credential will be attached",
+				log.Warn(ctx, "a2a auth: A2AConfig.Auth is set but the agent card names no security scheme to satisfy, so no credential will be attached",
 					"agent", cfg.Name)
 			})
 		}
@@ -623,9 +627,16 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 
 	// WithoutCancel returns its own type, which is no longer an
-	// agent.InvocationContext; re-wrap so a credential provider can still
-	// recover the ADK context here, exactly as it can on the send path.
-	ctx = reattachInvocation(ctx, context.WithoutCancel(ctx))
+	// agent.InvocationContext; with Auth set, re-wrap so a credential provider
+	// can still recover the ADK context here, exactly as it can on the send
+	// path. Only with Auth set: nothing else reads the context back, and a
+	// caller who never opted in keeps the plain context.WithoutCancel that
+	// RemoteTaskCleanupCallback's doc promises.
+	detached := context.WithoutCancel(ctx)
+	if cfg.Auth != nil {
+		detached = reattachInvocation(ctx, detached)
+	}
+	ctx = detached
 
 	if cfg.RemoteTaskCleanupCallback != nil {
 		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
@@ -637,7 +648,11 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 	cancelCtx, cancelTimeout := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancelTimeout()
-	_, err := client.CancelTask(reattachInvocation(ctx, cancelCtx), &a2a.CancelTaskRequest{ID: taskID})
+	callCtx := context.Context(cancelCtx)
+	if cfg.Auth != nil {
+		callCtx = reattachInvocation(ctx, cancelCtx)
+	}
+	_, err := client.CancelTask(callCtx, &a2a.CancelTaskRequest{ID: taskID})
 	if err != nil {
 		log.Warn(ctx, "failed to cancel task", "task_id", taskID, "error", err)
 	}

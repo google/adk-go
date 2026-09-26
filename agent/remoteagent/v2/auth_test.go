@@ -41,6 +41,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/session"
@@ -208,7 +209,7 @@ func TestCredentialsServiceGet(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := credentialsService{provider: tc.provider}
+			svc := newCredentialsService(tc.provider)
 			// Every row supplies a card naming both placements, so the table
 			// exercises credential handling rather than scheme selection.
 			ctx := iremoteagent.WithAgentCard(t.Context(), anyPlacementCard)
@@ -279,10 +280,23 @@ func TestCredentialScope(t *testing.T) {
 	}
 }
 
+// TestCredentialScopeExported pins the exported wrapper against a literal, with
+// all four parts distinct. Anything computed from the wrapper agrees with it by
+// construction, so only a literal can catch the two mutations that matter: a
+// swap between the user and session arguments desynchronizes this path from the
+// scope server/adka2a/v2 builds from the internal function, and dropping the
+// agent name reinstates the cross-agent token leak it is there to prevent.
+func TestCredentialScopeExported(t *testing.T) {
+	ictx := newInvocationContextFor(t, "shop", "alice", "s1")
+	if got, want := CredentialScope(ictx.Session(), "crm"), a2aclient.SessionID("shop/alice/s1/crm"); got != want {
+		t.Errorf("CredentialScope() = %q, want %q", got, want)
+	}
+}
+
 func TestCredentialsServiceGetWrapsProviderError(t *testing.T) {
-	svc := credentialsService{provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+	svc := newCredentialsService(auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return nil, errResolve
-	})}
+	}))
 	_, err := svc.Get(iremoteagent.WithAgentCard(t.Context(), anyPlacementCard), "sid", "bearer")
 	if !errors.Is(err, errResolve) {
 		t.Errorf("Get() error = %v, want it to wrap %v", err, errResolve)
@@ -310,9 +324,13 @@ func TestCredentialsServiceGetMatchesScheme(t *testing.T) {
 		name     string
 		provider auth.CredentialProvider
 		scheme   string
+		noCard   bool
 		want     a2aclient.AuthCredential
 		wantSkip bool
 	}{
+		// With no card the adapter cannot tell what the scheme name refers to,
+		// so it must not hand over the secret on the strength of the name.
+		{name: "bearer with no card on the context", provider: auth.StaticToken("tok"), scheme: "bearer", noCard: true, wantSkip: true},
 		{name: "api key on apiKey scheme", provider: auth.APIKey("ignored", "secret"), scheme: "apikey", want: "secret"},
 		{name: "api key on bearer scheme", provider: auth.APIKey("ignored", "secret"), scheme: "bearer", wantSkip: true},
 		{name: "bearer on bearer scheme", provider: auth.StaticToken("tok"), scheme: "bearer", want: "tok"},
@@ -329,8 +347,11 @@ func TestCredentialsServiceGetMatchesScheme(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := iremoteagent.WithAgentCard(t.Context(), card)
-			got, err := credentialsService{provider: tc.provider}.Get(ctx, "sid", a2a.SecuritySchemeName(tc.scheme))
+			ctx := t.Context()
+			if !tc.noCard {
+				ctx = iremoteagent.WithAgentCard(ctx, card)
+			}
+			got, err := newCredentialsService(tc.provider).Get(ctx, "sid", a2a.SecuritySchemeName(tc.scheme))
 			if tc.wantSkip {
 				if !errors.Is(err, a2aclient.ErrCredentialNotFound) {
 					t.Fatalf("Get() error = %v, want %v so the interceptor tries the next scheme", err, a2aclient.ErrCredentialNotFound)
@@ -363,17 +384,17 @@ func TestMintAccessTokenHonorsContext(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := mintAccessToken(ctx, blocked)
+		_, err := newMintGroup().token(ctx, "sid", blocked)
 		done <- err
 	}()
 
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("mintAccessToken() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
+			t.Errorf("mintGroup.token() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("mintAccessToken() did not return once the context expired")
+		t.Fatal("mintGroup.token() did not return once the context expired")
 	}
 }
 
@@ -1175,37 +1196,46 @@ func TestRedactTokenError(t *testing.T) {
 	tests := []struct {
 		name string
 		// errorCode empty is the branch where RetrieveError.Error() prints the
-		// body verbatim; a named code prints only the code.
-		errorCode string
-		wantKeep  []string
+		// body verbatim. A named code takes the other branch, which prints the
+		// code, the description and the URI, and never the body.
+		errorCode   string
+		description string
+		uri         string
+		wantKeep    []string
 	}{
 		{name: "malformed error response carries the body", errorCode: "", wantKeep: []string{"400 Bad Request"}},
-		{name: "well-formed error response names a code", errorCode: "invalid_grant", wantKeep: []string{"invalid_grant"}},
+		{
+			name: "well-formed error response names a code", errorCode: "invalid_grant",
+			description: "the refresh token is expired", uri: "https://idp.invalid/errors/1",
+			wantKeep: []string{"invalid_grant", "the refresh token is expired", "https://idp.invalid/errors/1"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			src := tokenSourceFunc(func() (*oauth2.Token, error) {
 				return nil, &oauth2.RetrieveError{
-					Response:  &http.Response{Status: "400 Bad Request", StatusCode: http.StatusBadRequest},
-					Body:      []byte(body),
-					ErrorCode: tc.errorCode,
+					Response:         &http.Response{Status: "400 Bad Request", StatusCode: http.StatusBadRequest},
+					Body:             []byte(body),
+					ErrorCode:        tc.errorCode,
+					ErrorDescription: tc.description,
+					ErrorURI:         tc.uri,
 				}
 			})
-			_, err := mintAccessToken(t.Context(), src)
+			_, err := newMintGroup().token(t.Context(), "sid", src)
 			if err == nil {
-				t.Fatal("mintAccessToken() = nil error, want the token source error")
+				t.Fatal("mintGroup.token() = nil error, want the token source error")
 			}
 			if strings.Contains(err.Error(), body) {
-				t.Errorf("mintAccessToken() error = %v, want the response body redacted", err)
+				t.Errorf("mintGroup.token() error = %v, want the response body redacted", err)
 			}
 			for _, want := range tc.wantKeep {
 				if !strings.Contains(err.Error(), want) {
-					t.Errorf("mintAccessToken() error = %v, want it to keep %q", err, want)
+					t.Errorf("mintGroup.token() error = %v, want it to keep %q", err, want)
 				}
 			}
 			var re *oauth2.RetrieveError
 			if !errors.As(err, &re) {
-				t.Errorf("mintAccessToken() error = %v, want errors.As to still find *oauth2.RetrieveError", err)
+				t.Errorf("mintGroup.token() error = %v, want errors.As to still find *oauth2.RetrieveError", err)
 			}
 		})
 	}
@@ -1228,16 +1258,16 @@ func TestMintAccessTokenHasItsOwnBudget(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := mintAccessToken(context.WithoutCancel(t.Context()), blocked)
+		_, err := newMintGroup().token(context.WithoutCancel(t.Context()), "sid", blocked)
 		done <- err
 	}()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("mintAccessToken() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
+			t.Errorf("mintGroup.token() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("mintAccessToken() did not return; a deadline-free caller context left the mint unbounded")
+		t.Fatal("mintGroup.token() did not return; a deadline-free caller context left the mint unbounded")
 	}
 }
 
@@ -1614,4 +1644,406 @@ func jsonRPCMethod(r *http.Request) string {
 	}
 	_ = json.Unmarshal(body, &rpc)
 	return rpc.Method
+}
+
+// TestRemoteAgent_AuthNoRequirementWarning covers the cards that give the a2a
+// interceptor nothing to ask about, so it never calls the adapter and the
+// request reaches the wire with no credential. The invariant is that every such
+// path says so exactly once: without the warning these are indistinguishable
+// from a remote that needs no auth.
+//
+// The empty requirement object is the case a real card carries — security: [{}]
+// is how OpenAPI spells "authentication optional" — and it is the one a length
+// check on the requirement list alone lets through.
+func TestRemoteAgent_AuthNoRequirementWarning(t *testing.T) {
+	bearerScheme := a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}}
+	bearerRequirement := a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}}
+
+	tests := []struct {
+		name     string
+		schemes  a2a.NamedSecuritySchemes
+		reqs     a2a.SecurityRequirementsOptions
+		wantAuth string
+		wantWarn int32
+	}{
+		{name: "no requirement at all", schemes: bearerScheme, reqs: nil, wantWarn: 1},
+		{name: "one empty requirement object", schemes: bearerScheme, reqs: a2a.SecurityRequirementsOptions{{}}, wantWarn: 1},
+		{name: "several empty requirement objects", schemes: bearerScheme, reqs: a2a.SecurityRequirementsOptions{{}, {}}, wantWarn: 1},
+		{name: "requirement but no scheme declared", schemes: nil, reqs: bearerRequirement, wantWarn: 1},
+		{name: "a scheme is named", schemes: bearerScheme, reqs: bearerRequirement, wantAuth: "Bearer secret-token", wantWarn: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var gotAuth string
+			srv := serveRecordingA2A(t, func(r *http.Request) {
+				mu.Lock()
+				gotAuth = r.Header.Get("Authorization")
+				mu.Unlock()
+			}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:      "a2a",
+				AgentCard: newSecureCard(srv.URL, tc.schemes, tc.reqs),
+				Auth:      auth.StaticToken("secret-token"),
+			})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			warns := &countingHandler{match: "names no security scheme to satisfy"}
+			// Three invocations: a per-invocation warning would show up as more
+			// than one line.
+			for range 3 {
+				ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+				scoped := ictx.WithContext(log.AttachLogger(ictx, slog.New(warns)))
+				if _, err := runAndCollect(scoped, remoteAgent); err != nil {
+					t.Fatalf("agent.Run() error = %v", err)
+				}
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if gotAuth != tc.wantAuth {
+				t.Errorf("server saw Authorization = %q, want %q", gotAuth, tc.wantAuth)
+			}
+			if got := warns.count.Load(); got != tc.wantWarn {
+				t.Errorf("warning logged %d times over 3 invocations, want %d", got, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestNewA2AOwnsAuthScope pins the one line joining the user-facing Auth field
+// to the server-side cancel path. server/adka2a/v2 reads OwnsAuthScope to
+// decide whether to scope the cancel it issues for an abandoned child task, and
+// it cannot call NewA2A to check the derivation — the import would cycle — so
+// nothing else asserts it. If it stopped tracking Auth, every Auth user's
+// adka2a-issued cancel would go out unauthenticated.
+func TestNewA2AOwnsAuthScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth auth.CredentialProvider
+		want bool
+	}{
+		{name: "auth set", auth: auth.StaticToken("tok"), want: true},
+		{name: "auth unset", auth: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard("http://example.invalid"), Auth: tc.auth})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+			internalAgent, ok := a.(agentinternal.Agent)
+			if !ok {
+				t.Fatalf("NewA2A() returned %T, want an agentinternal.Agent", a)
+			}
+			state, ok := agentinternal.Reveal(internalAgent).Config.(iremoteagent.RemoteAgentState)
+			if !ok {
+				t.Fatalf("agent state Config is %T, want iremoteagent.RemoteAgentState", agentinternal.Reveal(internalAgent).Config)
+			}
+			if got := state.A2A.OwnsAuthScope; got != tc.want {
+				t.Errorf("OwnsAuthScope = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMintGroupSingleFlight pins that a request arriving while a mint is in
+// flight joins it instead of starting another. Token() cannot be cancelled, so
+// a caller released by its own deadline leaves the mint running; without the
+// single-flight, every request arriving while a token endpoint hangs would
+// start another one and park another goroutine.
+//
+// The joining callers carry an already-cancelled context, which makes the test
+// deterministic: joining happens under the lock before the wait, so each one
+// returns at once and can be driven from the test goroutine with no window in
+// which it might have missed the in-flight call.
+func TestMintGroupSingleFlight(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	src := tokenSourceFunc(func() (*oauth2.Token, error) {
+		calls.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		return &oauth2.Token{AccessToken: "tok"}, nil
+	})
+
+	g := newMintGroup()
+	first := make(chan string, 1)
+	go func() {
+		tok, err := g.token(context.WithoutCancel(t.Context()), "scope-a", src)
+		if err != nil {
+			t.Errorf("mintGroup.token() error = %v", err)
+		}
+		first <- tok
+	}()
+	<-entered
+
+	g.mu.Lock()
+	inFlight := g.inFlight["scope-a"]
+	g.mu.Unlock()
+	if inFlight == nil {
+		t.Fatal("no mint recorded as in flight while the token source is blocked")
+	}
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	for range 3 {
+		if _, err := g.token(cancelled, "scope-a", src); !errors.Is(err, context.Canceled) {
+			t.Fatalf("mintGroup.token() error = %v, want %v from a joined call", err, context.Canceled)
+		}
+	}
+
+	// Checked here rather than through the call count, which a straggling
+	// goroutine may not have incremented yet: a caller that did not join left a
+	// different mint in the map, whatever its goroutine has got round to doing.
+	g.mu.Lock()
+	still, n := g.inFlight["scope-a"], len(g.inFlight)
+	g.mu.Unlock()
+	if still != inFlight {
+		t.Error("a second request for the same scope replaced the in-flight mint instead of joining it")
+	}
+	if n != 1 {
+		t.Errorf("mintGroup holds %d in-flight mints for one scope, want 1", n)
+	}
+
+	close(release)
+	if tok := <-first; tok != "tok" {
+		t.Errorf("mintGroup.token() = %q, want %q", tok, "tok")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("token source called %d times for 4 requests on one scope, want 1", got)
+	}
+}
+
+// TestMintGroupSeparatesScopes pins that the single-flight does not merge two
+// identities. Sharing one mint across scopes would hand one user's token to
+// another, which is the collision CredentialScope exists to prevent.
+func TestMintGroupSeparatesScopes(t *testing.T) {
+	var calls atomic.Int32
+	src := tokenSourceFunc(func() (*oauth2.Token, error) {
+		return &oauth2.Token{AccessToken: fmt.Sprintf("tok-%d", calls.Add(1))}, nil
+	})
+	g := newMintGroup()
+	first, err := g.token(t.Context(), "scope-a", src)
+	if err != nil {
+		t.Fatalf("mintGroup.token() error = %v", err)
+	}
+	second, err := g.token(t.Context(), "scope-b", src)
+	if err != nil {
+		t.Fatalf("mintGroup.token() error = %v", err)
+	}
+	if first == second {
+		t.Errorf("two scopes both got %q, want a mint each", first)
+	}
+}
+
+// TestMintGroupRetriesAfterFailure pins that a failed mint is not replayed to
+// the next request. The entry is dropped and the channel closed under one lock,
+// so a later caller either joins the call it can still be woken by or starts a
+// fresh one.
+func TestMintGroupRetriesAfterFailure(t *testing.T) {
+	var calls atomic.Int32
+	src := tokenSourceFunc(func() (*oauth2.Token, error) {
+		if calls.Add(1) == 1 {
+			return nil, errResolve
+		}
+		return &oauth2.Token{AccessToken: "tok"}, nil
+	})
+	g := newMintGroup()
+	if _, err := g.token(t.Context(), "scope-a", src); !errors.Is(err, errResolve) {
+		t.Fatalf("mintGroup.token() error = %v, want it to wrap %v", err, errResolve)
+	}
+	got, err := g.token(t.Context(), "scope-a", src)
+	if err != nil {
+		t.Fatalf("mintGroup.token() error = %v, want the retry to succeed", err)
+	}
+	if got != "tok" {
+		t.Errorf("mintGroup.token() = %q, want %q", got, "tok")
+	}
+}
+
+// TestMintGroupRecoversPanic pins that a panicking token source becomes an
+// error. The mint runs on a goroutine of ours, where a panic is fatal rather
+// than something the runner can turn into an error, and the source is
+// third-party code.
+func TestMintGroupRecoversPanic(t *testing.T) {
+	src := tokenSourceFunc(func() (*oauth2.Token, error) { panic("token source exploded") })
+	_, err := newMintGroup().token(t.Context(), "scope-a", src)
+	if err == nil {
+		t.Fatal("mintGroup.token() = nil error, want the panic reported as one")
+	}
+	if !strings.Contains(err.Error(), "token source exploded") {
+		t.Errorf("mintGroup.token() error = %v, want it to name the panic value", err)
+	}
+	// A panic must not leave the scope wedged for every later request.
+	if got, err := newMintGroup().token(t.Context(), "scope-a", tokenSourceFunc(func() (*oauth2.Token, error) {
+		return &oauth2.Token{AccessToken: "tok"}, nil
+	})); err != nil || got != "tok" {
+		t.Errorf("mintGroup.token() = %q, %v; want %q and no error after a panicking mint", got, err, "tok")
+	}
+}
+
+// nilMapProvider is a credential provider whose receiver is a map. A nil one is
+// callable and reads the nil map fine, which is why isTypedNil must not reject
+// it.
+type nilMapProvider map[string]string
+
+func (p nilMapProvider) Credential(context.Context) (auth.Credential, error) {
+	return auth.BearerCredential{Token: p["token"]}, nil
+}
+
+// nilPtrProvider is the shape isTypedNil exists for: a nil pointer whose method
+// dereferences it.
+type nilPtrProvider struct{ token string }
+
+func (p *nilPtrProvider) Credential(context.Context) (auth.Credential, error) {
+	return auth.BearerCredential{Token: p.token}, nil
+}
+
+func TestIsTypedNil(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider auth.CredentialProvider
+		want     bool
+	}{
+		{name: "nil func", provider: auth.ProviderFunc(nil), want: true},
+		{name: "nil pointer", provider: (*nilPtrProvider)(nil), want: true},
+		{name: "nil map with a value receiver is callable", provider: nilMapProvider(nil), want: false},
+		{name: "ordinary provider", provider: auth.StaticToken("tok"), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTypedNil(tc.provider); got != tc.want {
+				t.Errorf("isTypedNil(%T) = %v, want %v", tc.provider, got, tc.want)
+			}
+			_, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard("http://example.invalid"), Auth: tc.provider})
+			if gotErr := err != nil; gotErr != tc.want {
+				t.Errorf("NewA2A() error = %v, want an error: %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestRemoteAgent_CleanupContextTypeTracksAuth pins that the cleanup context is
+// re-wrapped only when Auth is set. The wrapper exists so a credential provider
+// can still recover the ADK context there; with Auth unset nothing reads it
+// back, and RemoteTaskCleanupCallback's doc promises the plain
+// context.WithoutCancel a caller had before this field existed.
+func TestRemoteAgent_CleanupContextTypeTracksAuth(t *testing.T) {
+	tests := []struct {
+		name string
+		auth auth.CredentialProvider
+		want bool
+	}{
+		{name: "auth set", auth: auth.StaticToken("tok"), want: true},
+		{name: "auth unset", auth: nil, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &mockA2AExecutor{
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+							return
+						}
+						if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewDataPart(map[string]any{"foo": "bar"})), nil) {
+							return
+						}
+						<-ctx.Done()
+					}
+				},
+			}
+			srv := httptest.NewServer(a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor)))
+			defer srv.Close()
+
+			var (
+				mu             sync.Mutex
+				called         bool
+				gotInvocation  bool
+				gotCancellable bool
+				gotScope       bool
+			)
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:      "a2a",
+				AgentCard: bearerCard(srv.URL),
+				Auth:      tc.auth,
+				RemoteTaskCleanupCallback: func(ctx context.Context, _ *a2a.AgentCard, _ A2AClient, _ a2a.TaskInfo, _ error) {
+					mu.Lock()
+					defer mu.Unlock()
+					called = true
+					_, gotInvocation = ctx.(agent.InvocationContext)
+					gotCancellable = ctx.Done() != nil
+					_, gotScope = a2aclient.SessionIDFrom(ctx)
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			for _, err := range remoteAgent.Run(newInvocationContextFor(t, t.Name(), "hana", "default")) {
+				if err != nil {
+					t.Fatalf("agent.Run() error = %v", err)
+				}
+				break
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !called {
+				t.Fatal("RemoteTaskCleanupCallback was not called")
+			}
+			if gotInvocation != tc.want {
+				t.Errorf("cleanup context is an agent.InvocationContext: %v, want %v", gotInvocation, tc.want)
+			}
+			// The ClientProvider doc promises an opted-out caller sees no scope
+			// anywhere, and this is the one context that is not the send one.
+			if gotScope != tc.want {
+				t.Errorf("cleanup context carries a credential scope: %v, want %v", gotScope, tc.want)
+			}
+			// Either way the cleanup context outlives the invocation: that is
+			// what context.WithoutCancel is for, and the wrapper must not
+			// reintroduce the cancellation it removed.
+			if gotCancellable {
+				t.Error("cleanup context is still cancellable; context.WithoutCancel was undone")
+			}
+		})
+	}
+}
+
+// TestCardNamesNoScheme covers the shapes that give the a2a interceptor nothing
+// to ask about at the unit level, including the nil card an AgentCardProvider
+// returning (nil, nil) would produce.
+func TestCardNamesNoScheme(t *testing.T) {
+	bearerScheme := a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}}
+	named := a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}}
+	tests := []struct {
+		name string
+		card *a2a.AgentCard
+		want bool
+	}{
+		{name: "nil card", card: nil, want: true},
+		{name: "no schemes", card: newSecureCard("http://x.invalid", nil, named), want: true},
+		{name: "no requirements", card: newSecureCard("http://x.invalid", bearerScheme, nil), want: true},
+		{name: "empty requirement object", card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{}}), want: true},
+		{name: "one empty and one naming a scheme", card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{}, named[0]}), want: false},
+		{name: "a scheme is named", card: newSecureCard("http://x.invalid", bearerScheme, named), want: false},
+		// A name the card does not declare is not this function's case: the
+		// interceptor does ask, and the adapter warns that nothing fits.
+		{
+			name: "requirement names an undeclared scheme",
+			card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("absent"): a2a.SecuritySchemeScopes{}}}),
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cardNamesNoScheme(tc.card); got != tc.want {
+				t.Errorf("cardNamesNoScheme() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
