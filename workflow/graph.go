@@ -14,12 +14,18 @@
 
 package workflow
 
+import (
+	"slices"
+	"strings"
+)
+
 // graph is the precomputed structural view of a workflow's edges.
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
 type graph struct {
 	successors    map[Node][]Edge
 	predecessors  map[Node][]Edge
+	sorted        []Node
 	isRootWrapper bool
 }
 
@@ -34,16 +40,31 @@ func newGraph(edges []Edge) *graph {
 		succ[edge.From] = append(succ[edge.From], edge)
 		pred[edge.To] = append(pred[edge.To], edge)
 	}
-	return &graph{successors: succ, predecessors: pred}
+	g := &graph{successors: succ, predecessors: pred}
+	// Clipped so cap == len: sortedNodes hands this slice out, and an
+	// append by a caller would otherwise write into the graph's array.
+	g.sorted = slices.Clip(g.allNodes())
+	slices.SortFunc(g.sorted, func(a, b Node) int { return strings.Compare(a.Name(), b.Name()) })
+	return g
 }
 
-// allEdges returns all edges in the graph.
+// allEdges returns all edges in the graph, grouped by source node in
+// name order.
 func (g *graph) allEdges() []Edge {
 	var edges []Edge
-	for _, succs := range g.successors {
-		edges = append(edges, succs...)
+	for _, n := range g.sortedNodes() {
+		edges = append(edges, g.successors[n]...)
 	}
 	return edges
+}
+
+// sortedNodes returns all nodes ordered by name, computed once in
+// newGraph. Callers that report findings to the user (graph validation)
+// use it so the output does not inherit Go's randomized map iteration
+// order. The returned slice is owned by the graph and must not be
+// mutated by callers.
+func (g *graph) sortedNodes() []Node {
+	return g.sorted
 }
 
 // successorsOf returns the outgoing edges for a node.

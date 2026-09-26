@@ -32,6 +32,12 @@ import (
 // Custom nodes typically embed BaseNode (constructed via NewBaseNode)
 // to inherit Name, Description, and Config implementations, and
 // supply only Run.
+//
+// An implementation must be comparable, because a workflow indexes its
+// edges by Node. A pointer type always is, and every node in this
+// package is one. A node used as a value must have only comparable
+// fields, so a map, slice or function field there panics at
+// construction. BaseNode and NodeConfig are comparable.
 type Node interface {
 	Name() string
 	Description() string
@@ -235,6 +241,21 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 //
 // Optional Option values configure engine behaviour
 // (concurrency cap, etc.); see WithMaxConcurrency.
+//
+// Validation runs in phases. Each phase reports every violation it
+// finds, so a caller can fix them all in one pass. Within one check,
+// violations that render identically are reported once.
+//
+// Several violations come back combined with errors.Join, one line
+// each. errors.Is still matches the individual sentinels
+// (ErrDuplicateNodeName, ErrMultipleDefaultRoutes, …), but a direct
+// comparison against a sentinel and errors.Unwrap do not. A graph with
+// exactly one thing wrong with it still returns that violation
+// unwrapped, as it did before validation started aggregating.
+//
+// A failing phase stops the rest, because later phases assume the
+// earlier ones hold — there is no point checking routing on a graph
+// whose node names collide.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
 		return nil, err

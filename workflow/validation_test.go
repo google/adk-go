@@ -16,12 +16,15 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/agent"
 )
 
 func TestUniqueNames(t *testing.T) {
@@ -436,6 +439,21 @@ func TestValidateFanIn(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			name: "duplicate edge is not fan-in",
+			edges: func() []Edge {
+				a, b := newDummyNode("A"), newDummyNode("B")
+				// B has two incoming edges but one predecessor. That is a
+				// duplicate edge, which validateUniqueEdges reports on
+				// its own. A JoinNode would not resolve it.
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b},
+					{From: a, To: b},
+				}
+			},
+			expectErr: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -448,6 +466,510 @@ func TestValidateFanIn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// violations flattens a validation error into the individual findings
+// it carries. A phase joins the results of its checks, each of which is
+// itself a join, so the tree has to be walked to the leaves — unwrapping
+// one level would count failing checks, not violations.
+func violations(err error) []error {
+	if err == nil {
+		return nil
+	}
+	multi, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return []error{err}
+	}
+	var leaves []error
+	for _, e := range multi.Unwrap() {
+		leaves = append(leaves, violations(e)...)
+	}
+	return leaves
+}
+
+func violationMessages(err error) []string {
+	var msgs []string
+	for _, e := range violations(err) {
+		msgs = append(msgs, e.Error())
+	}
+	return msgs
+}
+
+func TestValidateNodes_ReportsEveryViolation(t *testing.T) {
+	// Two pairs of same-named nodes and two edges back into Start:
+	// two checks, each with two findings, all from one call.
+	a1, a2 := newDummyNode("A"), newDummyNode("A")
+	b1, b2 := newDummyNode("B"), newDummyNode("B")
+	c, d := newDummyNode("C"), newDummyNode("D")
+	err := validateNodes([]Edge{
+		{From: Start, To: a1},
+		{From: a1, To: a2},
+		{From: a2, To: b1},
+		{From: b1, To: b2},
+		{From: c, To: Start},
+		{From: d, To: Start},
+	})
+	want := []string{
+		"duplicate node name: A",
+		"duplicate node name: B",
+		"node points to start node: C",
+		"node points to start node: D",
+	}
+	if diff := cmp.Diff(want, violationMessages(err)); diff != "" {
+		t.Errorf("validateNodes() violations mismatch (-want +got):\n%s", diff)
+	}
+	for _, sentinel := range []error{ErrDuplicateNodeName, ErrNodePointsToStart} {
+		if !errors.Is(err, sentinel) {
+			t.Errorf("validateNodes() = %v, want it to match %v", err, sentinel)
+		}
+	}
+}
+
+// A single violation must come back exactly as it did before validation
+// started aggregating. The message alone does not pin this: errors.Join
+// of one error renders identically, so identity is what has to be
+// asserted.
+func TestNew_SingleViolationUnchanged(t *testing.T) {
+	a, b := newDummyNode("A"), newDummyNode("B")
+	_, err := New("wf", []Edge{{From: a, To: b}})
+	//nolint:errorlint // pointer identity is the property under test
+	if err != ErrNoStartNode {
+		t.Errorf("New() = %#v, want the ErrNoStartNode value itself, unwrapped", err)
+	}
+	if _, joined := err.(interface{ Unwrap() []error }); joined { //nolint:errorlint // ditto
+		t.Errorf("New() = %v, want a lone violation not to be joined", err)
+	}
+	if got, want := err.Error(), ErrNoStartNode.Error(); got != want {
+		t.Errorf("New() error = %q, want %q", got, want)
+	}
+
+	// A wrapped lone violation keeps errors.Unwrap too.
+	c, d := newDummyNode("C"), newDummyNode("C")
+	_, err = New("wf", []Edge{{From: Start, To: c}, {From: c, To: d}})
+	if got := errors.Unwrap(err); got != ErrDuplicateNodeName {
+		t.Errorf("errors.Unwrap(New() error) = %v, want ErrDuplicateNodeName", got)
+	}
+}
+
+// Independent cycles are each reported, and a node that several
+// back-edges close on is reported once. Returning at the first cycle
+// found — as this check used to — would report exactly one of A and C,
+// so asserting both is what pins the change.
+func TestValidateCycles_OneFindingPerClosingNode(t *testing.T) {
+	a, b, c, d, e := newDummyNode("A"), newDummyNode("B"), newDummyNode("C"),
+		newDummyNode("D"), newDummyNode("E")
+	g := newGraph([]Edge{
+		{From: Start, To: a},
+		{From: a, To: b},
+		{From: b, To: a}, // one back-edge closes on A
+		{From: Start, To: c},
+		{From: c, To: d},
+		{From: d, To: c}, // two back-edges close on C
+		{From: c, To: e},
+		{From: e, To: c},
+	})
+	want := []string{
+		`unconditional cycle detected: "A"`,
+		`unconditional cycle detected: "C"`,
+	}
+	if diff := cmp.Diff(want, violationMessages(validateCycles(g))); diff != "" {
+		t.Errorf("validateCycles() violations mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A dense graph has O(edges) back-edges, but only n-1 nodes close a
+// cycle in this DFS, and joinViolations collapses the rest. The base
+// returned 1 finding for any cyclic graph, so the exact count is what
+// distinguishes them.
+func TestValidateCycles_FindingCountIsLinearInNodes(t *testing.T) {
+	// Complete graph: every node is on an unconditional cycle. The
+	// deepest node of the DFS closes nothing, so n-1 nodes are reported.
+	const n = 20
+	edges := completeGraphEdges(n)
+	if got, want := len(violations(validateCycles(newGraph(edges)))), n-1; got != want {
+		t.Errorf("validateCycles() reported %d findings for a %d-node complete graph (%d edges), want %d",
+			got, n, len(edges), want)
+	}
+}
+
+// joinViolations would collapse a per-back-edge report to the same
+// output, so the in-traversal dedup is invisible in the error and only
+// an allocation count can pin it. Measured on this 60-node graph: 229
+// allocations with the dedup, 5359 without.
+func TestValidateCycles_DoesNotAllocatePerBackEdge(t *testing.T) {
+	const n = 60
+	g := newGraph(completeGraphEdges(n))
+	const limit = 1000
+	if got := testing.AllocsPerRun(5, func() { _ = validateCycles(g) }); got > limit {
+		t.Errorf("validateCycles() on a %d-node complete graph allocated %.0f times, want <= %d",
+			n, got, limit)
+	}
+}
+
+// A node referencing several undeclared fields gets one finding, not
+// one per field: the declared-field list is identical for all of them,
+// and repeating it made a wide schema's error unreadable.
+func TestValidateStateSchemaConsistency_OneFindingPerNode(t *testing.T) {
+	schema, err := (&jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"Foo": {Type: "string"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving schema: %v", err)
+	}
+	node, err := NewFunctionNodeFromState("n", dummyFnTwoUndeclared, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewFunctionNodeFromState: %v", err)
+	}
+	g := newGraph([]Edge{{From: Start, To: node}})
+	want := []string{
+		`node "n" references state fields "bar", "baz" which are not declared in StateSchema (declared: [Foo])`,
+	}
+	got := violationMessages(validateStateSchemaConsistency(g, schema))
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("validateStateSchemaConsistency() violations mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type twoUndeclaredParams struct {
+	Bar string `state:"bar"`
+	Baz string `state:"baz"`
+}
+
+// dummyFnTwoUndeclared reads two state fields that no schema here declares.
+func dummyFnTwoUndeclared(ctx agent.InvocationContext, p twoUndeclaredParams) (string, error) {
+	return "ok", nil
+}
+
+// completeGraphEdges returns the edges of a complete graph on n nodes,
+// in which every node lies on an unconditional cycle.
+func completeGraphEdges(n int) []Edge {
+	nodes := make([]Node, n)
+	for i := range nodes {
+		nodes[i] = newDummyNode(fmt.Sprintf("N%03d", i))
+	}
+	var edges []Edge
+	for i, from := range nodes {
+		for j, to := range nodes {
+			if i != j {
+				edges = append(edges, Edge{From: from, To: to})
+			}
+		}
+	}
+	return edges
+}
+
+// joinViolations deduplicates by message, so a finding whose message
+// interpolates two names must quote them. Unquoted, these two edges
+// render identically and one real violation is dropped.
+func TestValidateStaticSchemas_NamesAreDelimited(t *testing.T) {
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving int schema: %v", err)
+	}
+	strSchema, err := (&jsonschema.Schema{Type: "string"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving string schema: %v", err)
+	}
+	out := func(name string) Node {
+		return &dummyNode{BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, intSchema)}
+	}
+	in := func(name string) Node {
+		return &dummyNode{BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, strSchema, nil)}
+	}
+	got := violationMessages(validateStaticSchemas(newGraph([]Edge{
+		{From: out("A"), To: in("B -> C")},
+		{From: out("A -> B"), To: in("C")},
+	})))
+	want := []string{
+		`graph validation failed: schema mismatch on edge "A" -> "B -> C"`,
+		`graph validation failed: schema mismatch on edge "A -> B" -> "C"`,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("validateStaticSchemas() violations mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A phase joins its checks without deduplicating: two checks never
+// render the same message, and asking would render each check's whole
+// joined text. Dropping the dedup here must not drop a finding.
+func TestJoinChecks_KeepsEveryCheck(t *testing.T) {
+	a, b := errors.New("same message"), errors.New("same message")
+	if got, want := len(violations(joinChecks(a, nil, b))), 2; got != want {
+		t.Errorf("joinChecks() kept %d errors, want %d", got, want)
+	}
+	if got := joinChecks(nil, nil); got != nil {
+		t.Errorf("joinChecks(nil, nil) = %v, want nil", got)
+	}
+	if got := joinChecks(nil, a); got != a { //nolint:errorlint // identity is the property
+		t.Errorf("joinChecks(nil, a) = %v, want a unwrapped", got)
+	}
+}
+
+// Two edges breaking one rule the same way read as one problem.
+func TestJoinViolations_DropsRepeatedMessages(t *testing.T) {
+	a, b := newDummyNode("A"), newDummyNode("B")
+	err := validateStartNodeNoIncoming([]Edge{
+		{From: a, To: Start},
+		{From: a, To: Start}, // same message as the edge above
+		{From: b, To: Start},
+	})
+	want := []string{
+		"node points to start node: A",
+		"node points to start node: B",
+	}
+	if diff := cmp.Diff(want, violationMessages(err)); diff != "" {
+		t.Errorf("validateStartNodeNoIncoming() violations mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestValidateWorkflow_ReportsEveryViolation(t *testing.T) {
+	a, b, c := newDummyNode("A"), newDummyNode("B"), newDummyNode("C")
+	d, e := newDummyNode("D"), newDummyNode("E")
+	g := newGraph([]Edge{
+		{From: Start, To: a},
+		{From: a, To: b, Route: Default},
+		{From: a, To: c, Route: Default}, // two default routes out of A
+		{From: d, To: e},                 // unreachable pair, unconditionally cyclic
+		{From: e, To: d},
+	})
+	err := validateWorkflow(g, nil)
+	for _, want := range []error{ErrMultipleDefaultRoutes, ErrNodesNotReachable, ErrUnconditionalCycle} {
+		if !errors.Is(err, want) {
+			t.Errorf("validateWorkflow() = %v, want it to match %v", err, want)
+		}
+	}
+	if got, want := len(violations(err)), 3; got != want {
+		t.Errorf("validateWorkflow() reported %d violations, want %d: %v", got, want, err)
+	}
+}
+
+// A check must not report a violation that exists only because of
+// another check's finding. Both cases are one mistake — a copy-pasted
+// edge, and a loop-back — and the second finding would point the caller
+// at a change that does not fix the graph.
+func TestValidateWorkflow_NoDerivativeFindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		edges   func() []Edge
+		want    []string
+		wantNot error
+	}{
+		{
+			name: "duplicated default edge is not multiple default routes",
+			edges: func() []Edge {
+				a, b := newDummyNode("A"), newDummyNode("B")
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b, Route: Default},
+					{From: a, To: b, Route: Default}, // the one mistake
+				}
+			},
+			want:    []string{`duplicate edge: from "A" to "B"`},
+			wantNot: ErrMultipleDefaultRoutes,
+		},
+		{
+			name: "unconditional self-loop is not fan-in",
+			edges: func() []Edge {
+				b := newDummyNode("B")
+				return []Edge{{From: Start, To: b}, {From: b, To: b}}
+			},
+			want:    []string{`unconditional cycle detected: "B"`},
+			wantNot: ErrUnsupportedFanIn,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateWorkflow(newGraph(tc.edges()), nil)
+			if diff := cmp.Diff(tc.want, violationMessages(err)); diff != "" {
+				t.Errorf("validateWorkflow() violations mismatch (-want +got):\n%s", diff)
+			}
+			if errors.Is(err, tc.wantNot) {
+				t.Errorf("validateWorkflow() = %v, want it not to match %v", err, tc.wantNot)
+			}
+		})
+	}
+}
+
+// Two default routes to different targets are still rejected: that is
+// the ambiguity the check exists for.
+func TestValidateDefaultRoute_DistinctTargetsStillRejected(t *testing.T) {
+	a, b, c := newDummyNode("A"), newDummyNode("B"), newDummyNode("C")
+	err := validateDefaultRoute(newGraph([]Edge{
+		{From: Start, To: a},
+		{From: a, To: b, Route: Default},
+		{From: a, To: c, Route: Default},
+	}))
+	if !errors.Is(err, ErrMultipleDefaultRoutes) {
+		t.Errorf("validateDefaultRoute() = %v, want ErrMultipleDefaultRoutes", err)
+	}
+}
+
+// A failing phase stops the next one: later phases assume the earlier
+// ones hold, so their findings would be noise.
+func TestNew_StopsAfterFailingPhase(t *testing.T) {
+	a1, a2, b := newDummyNode("A"), newDummyNode("A"), newDummyNode("B")
+	_, err := New("wf", []Edge{
+		{From: Start, To: a1},
+		{From: a1, To: a2},
+		{From: a1, To: b},
+		{From: a1, To: b}, // duplicate edge: a later-phase violation
+	})
+	if !errors.Is(err, ErrDuplicateNodeName) {
+		t.Fatalf("New() = %v, want it to match ErrDuplicateNodeName", err)
+	}
+	if errors.Is(err, ErrDuplicateEdge) {
+		t.Errorf("New() = %v, want no graph-phase findings while the node phase fails", err)
+	}
+}
+
+// Graph-level checks walk maps, so they sort by node name. Without
+// that the reported order — and for New, the error string — would vary
+// from run to run.
+// Every check that reaches the graph through sortedNodes or allEdges is
+// covered, so a single one reverting to direct map iteration fails here.
+func TestValidateWorkflow_StableViolationOrder(t *testing.T) {
+	// Declaration order is deliberately not alphabetical: it is what a
+	// findings list would inherit if a check walked the edge slice, and
+	// what the map-iteration order is seeded from.
+	const unsorted = "CAB"
+
+	stateSchema, err := (&jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"Foo": {Type: "string"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving state schema: %v", err)
+	}
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving int schema: %v", err)
+	}
+	strSchema, err := (&jsonschema.Schema{Type: "string"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolving string schema: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		edges []Edge
+		check func(*graph) error
+		want  []string
+	}{
+		{
+			name: "validateUniqueEdges",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				src, dst := newDummyNode(name), newDummyNode(name+"_t")
+				return []Edge{{From: src, To: dst}, {From: src, To: dst}}
+			}),
+			check: validateUniqueEdges,
+			want: []string{
+				`duplicate edge: from "A" to "A_t"`,
+				`duplicate edge: from "B" to "B_t"`,
+				`duplicate edge: from "C" to "C_t"`,
+			},
+		},
+		{
+			name: "validateDefaultRoute",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				src := newDummyNode(name)
+				return []Edge{
+					{From: src, To: newDummyNode(name + "1"), Route: Default},
+					{From: src, To: newDummyNode(name + "2"), Route: Default},
+				}
+			}),
+			check: validateDefaultRoute,
+			want: []string{
+				`node has more than one default route: "A"`,
+				`node has more than one default route: "B"`,
+				`node has more than one default route: "C"`,
+			},
+		},
+		{
+			name: "validateCycles",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				src, loop := newDummyNode(name), newDummyNode(name+"_loop")
+				return []Edge{{From: src, To: loop}, {From: loop, To: src}}
+			}),
+			check: validateCycles,
+			want: []string{
+				`unconditional cycle detected: "A"`,
+				`unconditional cycle detected: "B"`,
+				`unconditional cycle detected: "C"`,
+			},
+		},
+		{
+			name: "validateFanIn",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				dst := newDummyNode(name)
+				return []Edge{
+					{From: newDummyNode(name + "_p1"), To: dst},
+					{From: newDummyNode(name + "_p2"), To: dst},
+				}
+			}),
+			check: validateFanIn,
+			want: []string{
+				`non-JoinNode fan-in is not yet supported: node "A" has 2 unconditional predecessors; use a JoinNode to converge branches`,
+				`non-JoinNode fan-in is not yet supported: node "B" has 2 unconditional predecessors; use a JoinNode to converge branches`,
+				`non-JoinNode fan-in is not yet supported: node "C" has 2 unconditional predecessors; use a JoinNode to converge branches`,
+			},
+		},
+		{
+			name: "validateStaticSchemas",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				src := &dummyNode{BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, intSchema)}
+				dst := &dummyNode{BaseNode: NewBaseNodeWithSchemas(name+"_t", "", NodeConfig{}, strSchema, nil)}
+				return []Edge{{From: src, To: dst}}
+			}),
+			check: validateStaticSchemas,
+			want: []string{
+				`graph validation failed: schema mismatch on edge "A" -> "A_t"`,
+				`graph validation failed: schema mismatch on edge "B" -> "B_t"`,
+				`graph validation failed: schema mismatch on edge "C" -> "C_t"`,
+			},
+		},
+		{
+			name: "validateStateSchemaConsistency",
+			edges: edgesPerName(unsorted, func(name string) []Edge {
+				// dummyFnInvalid reads state field "foo", which the
+				// schema does not declare.
+				src, err := NewFunctionNodeFromState(name, dummyFnInvalid, NodeConfig{})
+				if err != nil {
+					t.Fatalf("NewFunctionNodeFromState(%q): %v", name, err)
+				}
+				return []Edge{{From: src, To: newDummyNode(name + "_t")}}
+			}),
+			check: func(g *graph) error { return validateStateSchemaConsistency(g, stateSchema) },
+			want: []string{
+				`node "A" references state field "foo" which is not declared in StateSchema (declared: [Foo])`,
+				`node "B" references state field "foo" which is not declared in StateSchema (declared: [Foo])`,
+				`node "C" references state field "foo" which is not declared in StateSchema (declared: [Foo])`,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Repeated: a check walking a map unsorted can still land on
+			// the right order by chance on any single run.
+			for range 50 {
+				got := violationMessages(tc.check(newGraph(tc.edges)))
+				if diff := cmp.Diff(tc.want, got); diff != "" {
+					t.Fatalf("violations mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+// edgesPerName builds the edges for one violation per name in names.
+func edgesPerName(names string, build func(name string) []Edge) []Edge {
+	var edges []Edge
+	for _, r := range names {
+		edges = append(edges, build(string(r))...)
+	}
+	return edges
 }
 
 // TestNew_NonJoinFanIn_Rejected confirms the fan-in check is wired into
@@ -500,14 +1022,24 @@ func TestValidateSubWorkflowNames(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateSubWorkflowNames(tc.parentName, tc.edges)
-			if tc.expectErrorMsg != "" {
-				if err == nil {
-					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
-				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
-					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+			if tc.expectErrorMsg == "" {
+				if err != nil {
+					t.Errorf("expected no error, got %v", err)
 				}
-			} else if err != nil {
-				t.Errorf("expected no error, got %v", err)
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error %q, got none", tc.expectErrorMsg)
+			}
+			// Exact, not a prefix. NewWorkflowNode gives a node and its
+			// sub-workflow the same name, so a collision through New
+			// means the node is named after the parent too and a
+			// per-node suffix would only repeat the name already here.
+			// A second colliding node is unreachable through New for
+			// the same reason: validateUniqueNames rejects the two
+			// same-named nodes a phase earlier.
+			if got := err.Error(); got != tc.expectErrorMsg {
+				t.Errorf("error = %q, want %q", got, tc.expectErrorMsg)
 			}
 		})
 	}
@@ -826,7 +1358,7 @@ func TestStaticSchemaValidation(t *testing.T) {
 					{From: nodeA, To: nodeB},
 				}
 			},
-			expectErrorMsg: "schema mismatch on edge A -> B",
+			expectErrorMsg: `schema mismatch on edge "A" -> "B"`,
 		},
 		{
 			name: "only one endpoint has schema -> success",
