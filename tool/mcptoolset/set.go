@@ -115,6 +115,12 @@ type Config struct {
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
 	// would fight over the same request.
+	//
+	// The field of the same name on remoteagent.A2AConfig is not equivalent:
+	// there the agent card dictates where the credential goes, so the supported
+	// set is narrower and a resolution failure sends the request
+	// unauthenticated. Here the credential applies itself and a failure fails
+	// the request.
 	Auth auth.CredentialProvider
 
 	// Deprecated: use tool.FilterToolset instead.
