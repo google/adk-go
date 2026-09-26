@@ -48,7 +48,9 @@ const redactedMarker = "[redacted]"
 // 4 KiB rather than something tighter because it has to clear every real
 // identifier by a wide margin: an address is at most 320 bytes and a redirect URI
 // is held under 2 KiB by what servers and browsers accept. At this bound the
-// worst case is milliseconds.
+// worst case is milliseconds. On the route that sends it, Request.PriorToken is
+// matched too, and a token longer than this withholds the whole diagnostic
+// rather than risk showing it.
 //
 // The bound is measured on the RAW value while matching runs on the lowered copy,
 // and the two differ: strings.ToLower expands a byte that is not valid UTF-8 into

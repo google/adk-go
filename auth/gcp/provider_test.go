@@ -633,8 +633,8 @@ func TestProviderRefreshForcesNewToken(t *testing.T) {
 				if tc.forced(body) {
 					tok = "tok2" // a forced refresh mints a new token
 				}
-				// Include an expiry so the credential is cached; Refresh reads the
-				// prior (cached) token from the store to send as forceRefreshToken.
+				// Include an expiry so the credential is cached, as a real one would
+				// be. The hint Refresh sends comes from the credential it is handed.
 				_, _ = io.WriteString(w, tc.success(tok))
 			}))
 			defer srv.Close()
@@ -1875,6 +1875,175 @@ func TestProviderRefreshCooldownSeparatesUsers(t *testing.T) {
 	}
 }
 
+// replacingServer answers like Agent Identity: it keeps returning the token it
+// already issued, and mints a replacement only when sent that token as the
+// force-refresh hint. hold, when set, blocks each forced retrieval until closed.
+func replacingServer(t *testing.T, hold <-chan struct{}) (*httptest.Server, func() (calls, forced int)) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls, forced int
+	current := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		calls++
+		isForced := body.ForceRefreshToken != "" && body.ForceRefreshToken == fmt.Sprintf("tok%d", current)
+		if isForced {
+			forced++
+			current++
+		}
+		tok := fmt.Sprintf("tok%d", current)
+		mu.Unlock()
+		if isForced && hold != nil {
+			<-hold
+		}
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":%q}}`,
+			tok, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() (int, int) { mu.Lock(); defer mu.Unlock(); return calls, forced }
+}
+
+func replacingProvider(t *testing.T, srv *httptest.Server, store auth.CredentialStore) (auth.RefreshingProvider, *gcp.Client) {
+	t.Helper()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	return p.(auth.RefreshingProvider), client
+}
+
+// pointerStore hands back what it stored as a pointer. CredentialStore does not
+// constrain the concrete type Get returns.
+type pointerStore struct{ auth.CredentialStore }
+
+func (s pointerStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	cred, ok, err := s.CredentialStore.Get(ctx, key)
+	if b, isBearer := cred.(auth.BearerCredential); isBearer {
+		return &b, ok, err
+	}
+	return cred, ok, err
+}
+
+// A rejected credential whose token cannot be read leaves Refresh no hint to
+// send and nothing to tell the cached credential from the rejected one, so an
+// unforced retrieval hands back exactly what was refused. Refresh must refuse
+// instead, and drop the entry rather than serve it again.
+func TestProviderRefreshFailsClosedOnAnUnreadableToken(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	store := pointerStore{auth.NewInMemoryCredentialStore()}
+	rp, client := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	if _, err := rp.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(*auth.BearerCredential); !ok {
+		t.Fatalf("Credential() = %T, want the store's *auth.BearerCredential", rejected)
+	}
+
+	if got, err := rp.Refresh(ctx, rejected); err == nil {
+		t.Errorf("Refresh() = %+v, nil error; want a refusal", got)
+	}
+	if calls, _ := seen(); calls != 1 {
+		t.Errorf("service calls = %d, want 1: an unforced retrieval cannot replace the rejected credential", calls)
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, "app", "user-1")
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached")
+	}
+}
+
+// A burst of requests rejected together must reach the service with one forced
+// refresh, not one per request. The winner is held at the service until every
+// other Refresh has returned, so all of them run before the replacement is
+// cached — which is the state that would otherwise let a second one through.
+// It is also the only test that calls allowRefresh from more than one
+// goroutine, which is what lets -race see its lock.
+func TestProviderRefreshConcurrentForcesOnce(t *testing.T) {
+	const n = 8
+	hold := make(chan struct{})
+	srv, seen := replacingServer(t, hold)
+	rp, _ := replacingProvider(t, srv, auth.NewInMemoryCredentialStore())
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	type result struct {
+		cred auth.Credential
+		err  error
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cred, err := rp.Refresh(ctx, rejected)
+			results <- result{cred, err}
+		}()
+	}
+	var got []result
+	timeout := time.After(5 * time.Second)
+	for len(got) < n-1 {
+		select {
+		case r := <-results:
+			got = append(got, r)
+		case <-timeout:
+			close(hold)
+			wg.Wait()
+			t.Fatalf("%d of %d refreshes returned while one was held at the service, so more than one reached it", len(got), n-1)
+		}
+	}
+	close(hold)
+	wg.Wait()
+	got = append(got, <-results)
+
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced retrievals = %d, want 1", forced)
+	}
+	var replaced int
+	for _, r := range got {
+		if r.err != nil {
+			continue
+		}
+		if r.cred != (auth.BearerCredential{Token: "tok2"}) {
+			t.Errorf("Refresh() = %+v, want the replacement tok2 or an error", r.cred)
+		}
+		replaced++
+	}
+	if replaced != 1 {
+		t.Errorf("%d refreshes returned the replacement, want exactly the one that fetched it", replaced)
+	}
+	// The losers' evictions ran before the replacement was written, so it stands.
+	before, _ := seen()
+	if cred, err := rp.Credential(ctx); err != nil || cred != (auth.BearerCredential{Token: "tok2"}) {
+		t.Errorf("Credential() = %+v, %v; want the cached replacement tok2", cred, err)
+	}
+	if after, _ := seen(); after != before {
+		t.Errorf("service calls went %d -> %d; the replacement should have been served from the cache", before, after)
+	}
+}
+
 // The end-to-end path nothing else drives: a downstream 401 reaching a real
 // provider through a real Transport, the rejected credential surviving the trip
 // in a form the provider can read a token out of, and the retry going out with
@@ -1951,5 +2120,92 @@ func TestTransportRefreshesThroughTheRealProvider(t *testing.T) {
 	// point of passing it through Transport rather than re-reading the cache.
 	if want := []string{"", "tok1"}; !slices.Equal(gotHints, want) {
 		t.Errorf("credential service saw forceRefreshToken %q, want %q", gotHints, want)
+	}
+}
+
+// ctxRecordingStore records whether the context each call was given had already
+// been canceled.
+type ctxRecordingStore struct {
+	auth.CredentialStore
+	mu             sync.Mutex
+	deleteCanceled bool
+	deletes        int
+}
+
+func (s *ctxRecordingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
+	s.mu.Lock()
+	s.deletes++
+	s.deleteCanceled = s.deleteCanceled || ctx.Err() != nil
+	s.mu.Unlock()
+	return s.CredentialStore.Delete(ctx, key)
+}
+
+func (s *ctxRecordingStore) seen() (deletes int, canceled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deletes, s.deleteCanceled
+}
+
+// Eviction runs on the paths where the fetch failed, and a caller's canceled
+// context is one reason it does. A store that honors cancellation would then
+// refuse the delete and keep serving a credential known to be refused, so the
+// eviction must not inherit the cancellation.
+func TestProviderRefreshEvictsOnADetachedContext(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := &ctxRecordingStore{CredentialStore: auth.NewInMemoryCredentialStore()}
+	rp, _ := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := rp.Refresh(canceled, rejected); err == nil {
+		t.Fatal("Refresh() on a canceled context = nil error, want the fetch failure")
+	}
+	deletes, onCanceledCtx := store.seen()
+	if deletes == 0 {
+		t.Fatal("the rejected credential was not evicted")
+	}
+	if onCanceledCtx {
+		t.Error("the eviction was made on the caller's canceled context")
+	}
+}
+
+// The refusal to refresh a credential whose token cannot be read drops the entry
+// itself, so it needs the detached context for the same reason.
+func TestProviderRefreshDropsAnUnreadableTokenOnADetachedContext(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := &ctxRecordingStore{CredentialStore: pointerStore{auth.NewInMemoryCredentialStore()}}
+	rp, _ := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	// The first call caches what the service returned; the second reads it back
+	// through the store, which is where the unreadable type comes from.
+	if _, err := rp.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(*auth.BearerCredential); !ok {
+		t.Fatalf("Credential() = %T, want the store's *auth.BearerCredential", rejected)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := rp.Refresh(canceled, rejected); err == nil {
+		t.Fatal("Refresh() with an unreadable token = nil error, want a refusal")
+	}
+	deletes, onCanceledCtx := store.seen()
+	if deletes == 0 {
+		t.Fatal("the rejected credential was not dropped")
+	}
+	if onCanceledCtx {
+		t.Error("the drop was made on the caller's canceled context")
 	}
 }

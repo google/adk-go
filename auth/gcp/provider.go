@@ -74,8 +74,11 @@ type ProviderConfig struct {
 	// otherwise. Building a Client per provider is therefore a way to get no
 	// sharing at all; see [Config.HTTPClient].
 	//
-	// The cost of caching is staleness. A credential revoked before it expires
-	// keeps being served until the cached entry does, which is the service's
+	// The cost of caching is staleness. A credential a downstream rejects with a
+	// 401 or 403 is replaced or dropped, when the request went through
+	// [auth.Transport] with a body it could replay (see
+	// [auth.RefreshingProvider]). A revocation that surfaces no other way keeps
+	// being served until the cached entry expires, which is the service's
 	// expiry or an hour, whichever comes first. To invalidate one sooner, pass
 	// [Client.CacheKey] to [auth.CredentialStore.Delete] — which needs a Client,
 	// so set one here rather than leaving it to the lazy default if you intend to
@@ -113,6 +116,12 @@ var ErrNoActingUser = errors.New("gcp: no acting user")
 // metadata.OnGCE(), neither of which observes cancellation — so the bound lives
 // on the waiting side.
 const defaultInitTimeout = 30 * time.Second
+
+// defaultEvictTimeout bounds a store delete that no longer has a caller waiting
+// on it — see [provider.dropEntry]. Generous, because the work is one key and
+// missing it costs a credential known to be refused staying cached, and short
+// enough that a store which never answers cannot pin the goroutine.
+const defaultEvictTimeout = 5 * time.Second
 
 // NewProvider returns an [auth.CredentialProvider] that resolves credentials for
 // cfg.Scheme via the Agent Identity / IAM Connector services.
@@ -180,11 +189,12 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 		store = auth.NewInMemoryCredentialStore()
 	}
 	p := &provider{
-		scheme:      cfg.Scheme,
-		client:      cfg.Client,
-		store:       store,
-		newClient:   func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
-		initTimeout: defaultInitTimeout,
+		scheme:       cfg.Scheme,
+		client:       cfg.Client,
+		store:        store,
+		newClient:    func(ctx context.Context) (*Client, error) { return NewClient(ctx, nil) },
+		initTimeout:  defaultInitTimeout,
+		evictTimeout: defaultEvictTimeout,
 	}
 	// The provider outlives this call and re-reads Scopes per request, so it must
 	// not alias a caller-mutable slice.
@@ -240,10 +250,12 @@ type provider struct {
 	// initCtx roots the lazily built default client, which is why NewProvider
 	// asks for a process-scoped context. Nil when a Client was supplied.
 	initCtx context.Context
-	// newClient and initTimeout are fields, not package constants, so tests can
-	// drive the failure and hang paths a real ADC lookup cannot be made to hit.
-	newClient   func(context.Context) (*Client, error)
-	initTimeout time.Duration
+	// newClient, initTimeout and evictTimeout are fields, not package constants,
+	// so tests can drive the failure and hang paths a real ADC lookup and a real
+	// store cannot be made to hit.
+	newClient    func(context.Context) (*Client, error)
+	initTimeout  time.Duration
+	evictTimeout time.Duration
 
 	mu      sync.Mutex
 	client  *Client
@@ -334,6 +346,14 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 		return nil, err
 	}
 	rejectedToken := credentialToken(rejected)
+	if rejectedToken == "" {
+		// A credential type this package did not mint, handed back by a
+		// third-party store. There is no hint to send and no telling the cached
+		// entry from the rejected one, so an unforced retrieval may return exactly
+		// what was refused. Drop the entry unread, the fail-safe direction.
+		p.dropEntry(ctx, key)
+		return nil, fmt.Errorf("gcp: resource %q: cannot read the rejected credential's token, so it cannot be force-refreshed", p.scheme.Name)
+	}
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
 		return cred, nil
 	}
@@ -349,7 +369,7 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 	case err != nil:
 		p.evictRejected(ctx, key, rejectedToken)
 		return nil, err
-	case rejectedToken != "" && credentialToken(cred) == rejectedToken:
+	case credentialToken(cred) == rejectedToken:
 		// The service handed back what it already had. It does that when the hint
 		// did not reach it, or when the credential was never the reason for the
 		// rejection — a 403 for a missing ACL, say, which no new token fixes.
@@ -376,10 +396,35 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 // costs is one spurious eviction — a cache miss and one extra retrieval on the
 // next request. It cannot serve a rejected credential or cross principals, which
 // is why it is left open rather than closed with an optional interface.
+//
+// The read stays on the caller's context: failing it reads as "cannot show the
+// entry was replaced", which falls through to the delete, and that is the side
+// to fail on. The delete does not — see [provider.dropEntry].
 func (p *provider) evictRejected(ctx context.Context, key auth.CredentialKey, rejectedToken string) {
 	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
 		return
 	}
+	p.dropEntry(ctx, key)
+}
+
+// dropEntry deletes key's entry on a context detached from the caller's, and
+// bounded by evictTimeout.
+//
+// Detached because a request whose context is already done is one of the ways a
+// refresh fails, and a store that honors cancellation would then refuse the
+// delete — leaving the credential the downstream refused to be served to the
+// next request for the rest of its cached life. Bounded because a store may be
+// out of process ([auth.CredentialStore.Set] says so), and a caller who has
+// given up must not be held by one that never answers.
+//
+// The error is dropped because nothing here can act on it: a store that will
+// not delete cannot be made to, and the two callers either return an error of
+// their own or are returning a credential the caller asked for. The cost of a
+// failed delete is the one this whole path exists to avoid, and it is the
+// store's to fix.
+func (p *provider) dropEntry(ctx context.Context, key auth.CredentialKey) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.evictTimeout)
+	defer cancel()
 	_ = p.store.Delete(ctx, key)
 }
 

@@ -116,13 +116,13 @@ type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
-	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
-	// THEM and replaced with "[redacted]", the text is lowercased wherever
-	// anything matched, and only the first kilobyte of the response is drawn on,
-	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
-	// on Body itself, which is not the same promise: one matched run becomes a
-	// ten-byte marker whatever it replaced, so bounding the source alone left the
-	// result several times larger.
+	// request's own UserID and ContinueURI, and its PriorToken on the route that
+	// sends it, are removed WHERE THE SCRUB CAN MATCH THEM and replaced with
+	// "[redacted]", the text is lowercased wherever anything matched, and only
+	// the first kilobyte of the response is drawn on, with "..." marking that the
+	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
+	// not the same promise: one matched run becomes a ten-byte marker whatever it
+	// replaced, so bounding the source alone left the result several times larger.
 	//
 	// Removal is best effort, and the guarantee is narrower than removal: no value
 	// this package was given is recoverable from Body by this package's own
@@ -456,7 +456,7 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrie
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI)
+			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI, req.PriorToken)
 			if err != nil {
 				return nil, err
 			}

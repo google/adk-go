@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/adk/v2/auth"
 )
 
 // TestResolveClientBuildsDefaultClient drives the lazy ADC path end to end:
@@ -605,5 +607,61 @@ func TestNewClientSlotsAreUniqueUnderConcurrency(t *testing.T) {
 			t.Fatalf("cache slot %q was handed to two Clients", s)
 		}
 		seen[s] = true
+	}
+}
+
+// The sweep is the only thing that removes entries from p.refreshed, and the
+// cooldown is a constant, so no test reaches it by waiting. It must drop a slot
+// whose cooldown has run out and keep one still inside it, or the cooldown stops
+// holding for that slot.
+func TestAllowRefreshSweepsOnlyExpiredSlots(t *testing.T) {
+	now := time.Now()
+	p := &provider{
+		refreshed: map[string]time.Time{
+			"expired": now.Add(-2 * refreshCooldown),
+			"live":    now.Add(-refreshCooldown / 2),
+		},
+		refreshSwept: now.Add(-2 * refreshCooldown),
+	}
+
+	if !p.allowRefresh("new") {
+		t.Fatal("allowRefresh() for a slot never refreshed = false, want true")
+	}
+	if _, ok := p.refreshed["expired"]; ok {
+		t.Error("a slot past its cooldown survived the sweep")
+	}
+	if p.allowRefresh("live") {
+		t.Error("allowRefresh() for a slot inside its cooldown = true after a sweep, want false")
+	}
+}
+
+// hangingStore never answers a Delete until its context is done.
+type hangingStore struct {
+	auth.CredentialStore
+	deleteCtxErr chan error
+}
+
+func (s *hangingStore) Delete(ctx context.Context, _ auth.CredentialKey) error {
+	<-ctx.Done()
+	s.deleteCtxErr <- ctx.Err()
+	return ctx.Err()
+}
+
+// The eviction runs detached, so nothing else bounds it. A store that never
+// answers must not hold the request that triggered the refresh.
+func TestDropEntryDoesNotWaitOnAStoreForever(t *testing.T) {
+	store := &hangingStore{CredentialStore: auth.NewInMemoryCredentialStore(), deleteCtxErr: make(chan error, 1)}
+	p := &provider{store: store, evictTimeout: 20 * time.Millisecond}
+
+	done := make(chan struct{})
+	go func() { defer close(done); p.dropEntry(t.Context(), auth.CredentialKey{}) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropEntry did not return; the detached delete is unbounded")
+	}
+	if err := <-store.deleteCtxErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the store's context ended with %v, want %v", err, context.DeadlineExceeded)
 	}
 }
