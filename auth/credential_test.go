@@ -136,3 +136,16 @@ type errTokenSource struct{}
 func (errTokenSource) Token() (*oauth2.Token, error) {
 	return nil, errors.New("token source failure")
 }
+
+// auth/gcp reads the token out of a wrapped credential through Unwrap, so the
+// promise in WithHeaders' doc is pinned here, in the package that makes it.
+func TestWithHeadersUnwrapsToInner(t *testing.T) {
+	inner := auth.BearerCredential{Token: "abc"}
+	u, ok := auth.WithHeaders(inner, map[string]string{"X-Extra": "1"}).(interface{ Unwrap() auth.Credential })
+	if !ok {
+		t.Fatal("WithHeaders() result has no Unwrap() Credential method")
+	}
+	if got := u.Unwrap(); got != auth.Credential(inner) {
+		t.Errorf("Unwrap() = %v, want %v", got, inner)
+	}
+}

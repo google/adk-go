@@ -113,6 +113,75 @@ func TestTransportClosesBodyOnError(t *testing.T) {
 	}
 }
 
+// RoundTrip disarms its deferred close before the first send, so a credential
+// whose Apply fails leaves applyAndSend as the only thing that closes the body —
+// on the first attempt, and on the retry's replayed body.
+func TestTransportClosesBodyWhenApplyFails(t *testing.T) {
+	t.Run("first attempt", func(t *testing.T) {
+		body := &closeTrackingBody{}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.test/", body)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext() error = %v", err)
+		}
+		base := &captureRT{}
+		tr := &auth.Transport{Provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+			return auth.BearerCredential{}, nil // no token, so Apply fails
+		}), Base: base}
+
+		if _, err := tr.RoundTrip(req); err == nil {
+			t.Fatal("RoundTrip() = nil error, want the Apply error")
+		}
+		if base.called {
+			t.Error("the request was sent although Apply failed")
+		}
+		if !body.closed {
+			t.Error("req.Body not closed after Apply failed")
+		}
+	})
+	t.Run("retry", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.test/", &closeTrackingBody{payload: "x"})
+		if err != nil {
+			t.Fatalf("NewRequestWithContext() error = %v", err)
+		}
+		var replay *closeTrackingBody
+		req.GetBody = func() (io.ReadCloser, error) {
+			replay = &closeTrackingBody{payload: "x"}
+			return replay, nil
+		}
+		base := &sequenceRT{statuses: []int{http.StatusUnauthorized}}
+		tr := &auth.Transport{Provider: &refreshProvider{
+			cred:  auth.BearerCredential{Token: "stale"},
+			fresh: auth.BearerCredential{}, // no token, so Apply fails
+		}, Base: base}
+
+		if _, err := tr.RoundTrip(req); err == nil {
+			t.Fatal("RoundTrip() = nil error, want the Apply error")
+		}
+		if base.calls != 1 {
+			t.Errorf("base calls = %d, want 1 (the retry must not be sent)", base.calls)
+		}
+		if replay == nil || !replay.closed {
+			t.Error("the replayed body was not closed after Apply failed")
+		}
+	})
+}
+
+// nilResponseRT breaks the RoundTripper contract by returning neither a
+// response nor an error.
+type nilResponseRT struct{}
+
+func (nilResponseRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, nil }
+
+// Reporting a Base that returns (nil, nil) is http.Client's job, as it was
+// before Transport looked at the response, so Transport passes it through.
+func TestTransportPassesThroughANilResponse(t *testing.T) {
+	tr := &auth.Transport{Provider: auth.StaticToken("x"), Base: nilResponseRT{}}
+	resp, err := tr.RoundTrip(newRequest(t))
+	if resp != nil || err != nil {
+		t.Errorf("RoundTrip() = (%v, %v), want (nil, nil) passed through", resp, err)
+	}
+}
+
 // captureRT is a stub http.RoundTripper that records the Authorization header
 // it received and whether it was invoked.
 type captureRT struct {

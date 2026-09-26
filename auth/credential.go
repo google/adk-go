@@ -95,7 +95,8 @@ func (c OAuth2Credential) Apply(h http.Header) error {
 }
 
 // WithHeaders wraps inner to also set headers verbatim (overriding inner on
-// conflict) — e.g. x-goog-user-project alongside an OAuth2 token.
+// conflict) — e.g. x-goog-user-project alongside an OAuth2 token. The result
+// has an Unwrap() Credential method that returns inner.
 func WithHeaders(inner Credential, headers map[string]string) Credential {
 	return withHeaders{inner: inner, headers: headers}
 }

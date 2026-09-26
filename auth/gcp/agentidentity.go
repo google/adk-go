@@ -70,7 +70,7 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcom
 	}
 
 	var out agentIdentityResponse
-	if err := c.doPost(ctx, url, body, &out, req.UserID, req.ContinueURI); err != nil {
+	if err := c.doPost(ctx, url, body, &out, req.UserID, req.ContinueURI, req.PriorToken); err != nil {
 		return nil, err
 	}
 	return out.result(req)

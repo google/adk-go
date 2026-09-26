@@ -33,7 +33,9 @@ import (
 //
 // When the provider implements [RefreshingProvider] and the base response is a
 // 401/403, Transport refreshes the credential and retries once — provided the
-// request body can be replayed.
+// request body can be replayed. The retry is not restricted by method, so a
+// server that acts on a request and only then answers 401 or 403 sees the same
+// body twice.
 type Transport struct {
 	// Provider resolves the credential to apply. Required.
 	Provider CredentialProvider
@@ -81,8 +83,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// One refresh-and-retry on a downstream auth rejection, when the provider
-	// supports refresh and the request body can be replayed.
-	if !isAuthRejected(resp.StatusCode) {
+	// supports refresh and the request body can be replayed. A Base returning no
+	// response and no error is passed through for http.Client to report.
+	if resp == nil || !isAuthRejected(resp.StatusCode) {
 		return resp, nil
 	}
 	rp, ok := t.Provider.(RefreshingProvider)
