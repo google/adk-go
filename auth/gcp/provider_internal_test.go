@@ -476,12 +476,14 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 // this loops.
 //
 // It reaches one case only: a result that landed before the caller arrived,
-// which the pre-check answers. Either check alone keeps that green, so deleting
-// one leaves this test passing — which is not a licence to delete the
-// timer-arm one. That is the only cover for the case this test cannot arrange,
-// a result landing after the pre-check has fallen through while the caller sits
-// in the two-arm select with an expired timer. Nothing pins that, so removing
-// it loses the window silently.
+// which the pre-check answers. Either that check or the timer arm's re-check
+// alone keeps this green, so deleting one leaves the test passing — which is
+// not a licence to delete the timer-arm one. It is the only cover for the case
+// this test cannot arrange, a result landing after the pre-check has fallen
+// through while the caller waits on the timer arm. Nothing pins that, so
+// removing it loses the window silently. The select's third arm carries a
+// re-check of its own for the same reason on the caller-cancelled path, which
+// this test does not reach.
 func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
 	// 200 trials puts the odds of an unguarded implementation passing at 2^-200.
@@ -502,22 +504,31 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	}
 }
 
-// TestDefaultBuilderPassesTheWiringContextToNewClient pins that the builder
-// NewProvider installs hands its argument to NewClient rather than a context of
-// its own.
+// TestDefaultBuilderPassesItsArgumentToNewClient pins two links in the chain
+// that carries the wiring context into the token exchange: runInit calls the
+// builder with initCtx, and the builder NewProvider installs hands that
+// argument to NewClient rather than a context of its own.
 //
-// The wiring tests above stub newClient, so they cover initCtx and stop short of
-// the one closure that consumes it. That leaves the real builder unpinned:
-// replacing its ctx with context.Background() keeps the whole package green
-// while silently dropping an oauth2.HTTPClient a caller put on the wiring
-// context, which is the documented way to give the token exchange its own
-// transport.
+// The wiring tests above stub newClient with a function that ignores its
+// argument, so nothing else drives the one closure that consumes initCtx.
+// Before this test, replacing that closure's ctx with context.Background() left
+// the whole package green while silently dropping an oauth2.HTTPClient a caller
+// put on the wiring context, which is the documented way to give the token
+// exchange its own transport.
+//
+// Two sentinels rather than one, because initCtx is derived from the context
+// NewProvider was handed: with the same marker on both, a builder that ignored
+// its parameter and closed over NewProvider's own ctx would deliver that marker
+// and pass. That version is not harmless — the closure is installed even when
+// cfg.Client is set, so it would keep the caller's context reachable for the
+// provider's whole lifetime, which is what NewProvider's comment on capturing
+// initCtx says the code avoids.
 //
 // Observed through oauth2.NewClient, which takes the base client from the
 // context, so the sentinel transport reaching the built client is the proof the
 // context arrived. Discovery reads an authorized_user file, which needs no key
 // parsing and no network, and the token source is lazy so nothing is fetched.
-func TestDefaultBuilderPassesTheWiringContextToNewClient(t *testing.T) {
+func TestDefaultBuilderPassesItsArgumentToNewClient(t *testing.T) {
 	credsPath := filepath.Join(t.TempDir(), "adc.json")
 	if err := os.WriteFile(credsPath, []byte(`{
 		"type": "authorized_user",
@@ -529,15 +540,21 @@ func TestDefaultBuilderPassesTheWiringContextToNewClient(t *testing.T) {
 	}
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsPath)
 
-	sentinel := &http.Client{Transport: &markerTransport{}}
-	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, sentinel)
+	captured := &markerTransport{name: "the context NewProvider was handed"}
+	argument := &markerTransport{name: "the builder's own argument"}
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, &http.Client{Transport: captured})
 
 	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
+	prov := p.(*provider)
+	// Shadows the value on initCtx alone, so the two contexts the builder could
+	// use no longer carry the same transport.
+	prov.initCtx = context.WithValue(prov.initCtx, oauth2.HTTPClient, &http.Client{Transport: argument})
+
 	// The real builder, not a stub: that is the point of this test.
-	got, err := p.(*provider).resolveClient(t.Context())
+	got, err := prov.resolveClient(t.Context())
 	if err != nil {
 		t.Fatalf("resolveClient() error = %v", err)
 	}
@@ -545,13 +562,17 @@ func TestDefaultBuilderPassesTheWiringContextToNewClient(t *testing.T) {
 	if !ok {
 		t.Fatalf("built client Transport = %T, want *oauth2.Transport", got.httpClient.Transport)
 	}
-	if _, ok := oauthTransport.Base.(*markerTransport); !ok {
-		t.Errorf("built client base Transport = %T, want the transport from the wiring context: the builder must pass its context to NewClient", oauthTransport.Base)
+	base, ok := oauthTransport.Base.(*markerTransport)
+	if !ok {
+		t.Fatalf("built client base Transport = %T, want %s: the builder must pass its context to NewClient", oauthTransport.Base, argument.name)
+	}
+	if base != argument {
+		t.Errorf("built client base Transport came from %s, want %s: the builder must pass its own argument to NewClient, not a context it closed over", base.name, argument.name)
 	}
 }
 
-// markerTransport is recognised by type and never used to send anything.
-type markerTransport struct{}
+// markerTransport is recognised by identity and never used to send anything.
+type markerTransport struct{ name string }
 
 func (*markerTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("markerTransport must not be used to send a request")

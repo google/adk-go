@@ -80,7 +80,9 @@ var ErrClientUnavailable = errors.New("gcp: default credentials client unavailab
 
 // ErrNoActingUser means the provider could not determine the acting end user:
 // either no identity was recoverable from the context, or one was and its
-// session carries no user. The first is not a single condition —
+// UserID is empty. The second does not imply a session: a decorator's Value can
+// answer with an [agent.Identity] it built directly, so this turns on the field
+// rather than on what lies behind it. The first is not a single condition —
 // [agent.IdentityFromContext] reports it without saying why, and its doc says
 // the reasons are not a closed set. Unlike adk-python, which degrades such a
 // turn into an auth request, the Go provider fails the request: no user, no
@@ -126,12 +128,13 @@ const defaultInitTimeout = 30 * time.Second
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
 //
-// No credential is cached — the default client is, once built, but every
-// Credential call reaches the credential service. [auth.Transport] calls it
-// once per outbound request, so a tool that makes n requests costs n retrievals
-// plus any pending poll they incur. That is deliberate for this change rather
-// than an oversight: a credential cache is where cross-user leaks live, so it
-// wants its own review of what the key must cover.
+// No credential is cached. The default client is, once built, but a Credential
+// call that gets past the acting-user check and has a client always issues a
+// fresh retrieval rather than answering from an earlier one. [auth.Transport]
+// calls Credential once per outbound request, so a tool that makes n requests
+// costs n retrievals plus any pending poll they incur. That is deliberate for
+// this change rather than an oversight: a credential cache is where cross-user
+// leaks live, so it wants its own review of what the key must cover.
 //
 // ctx is used only to build the default client, and only for its values. Its
 // cancellation is not honored, because that client outlives any one request.
@@ -228,7 +231,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if id.UserID == "" {
 		// No ids in the message: this text is fed to the model and persisted in
 		// the session, and every id here comes off the request.
-		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
+		return nil, fmt.Errorf("%w: the invocation identity carries no user", ErrNoActingUser)
 	}
 
 	client, err := p.resolveClient(ctx)
