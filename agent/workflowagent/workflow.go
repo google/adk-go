@@ -155,10 +155,19 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	// turn falls through to a fresh Run, as it did before ID-keyed matching —
 	// a turn may legitimately carry both text and an unrelated tool reply, and
 	// routing that to Resume would fail it with ErrNothingToResume and discard
-	// the text. Mirrors runner.buildResumeResponses, which filters the same way.
+	// the text.
 	//
-	// A wrong-but-deliberate answer (right name, unknown ID) still reaches
-	// Resume, so the caller keeps the ErrNothingToResume diagnostic.
+	// A wrong-but-deliberate answer (right name, unknown ID) reaches Resume
+	// only when the turn carries nothing else, so the caller keeps the
+	// ErrNothingToResume diagnostic for a bare mistargeted reply. Alongside
+	// user text or any other part the turn runs fresh instead, because failing
+	// it would discard that content too.
+	//
+	// runner.buildResumeResponses answers the same question for the runner's
+	// own workflow-node path, but it is NOT the same filter and a fix here does
+	// not carry over: it admits an ID by history (any long-running call still
+	// open) rather than by rehydrated run state, has no notion of an answer the
+	// run has already acted on, and has no fall-through to a fresh Run.
 	known := workflowstate.ActionableInterruptIDs(state)
 	responses := map[string]any{}
 	live := false
@@ -192,6 +201,12 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 // carriesOtherContent reports whether msg holds anything beyond the
 // FunctionResponses in matched — user text, a reply aimed elsewhere, an
 // attachment. Such a turn has work of its own, so it must run rather than fail.
+//
+// The test is inverted deliberately: only a matched FunctionResponse is
+// discounted, and every other part counts. An allow-list of the part kinds we
+// know about would read a kind it has not heard of — ExecutableCode, or
+// whatever genai.Part grows next — as "nothing else here", route the turn to
+// Resume, and drop that part when Resume fails with ErrNothingToResume.
 func carriesOtherContent(msg *genai.Content, matched map[string]any) bool {
 	if msg == nil {
 		return false
@@ -201,14 +216,11 @@ func carriesOtherContent(msg *genai.Content, matched map[string]any) bool {
 			continue
 		}
 		if fr := p.FunctionResponse; fr != nil {
-			if _, ok := matched[fr.ID]; !ok {
-				return true
+			if _, ok := matched[fr.ID]; ok {
+				continue
 			}
-			continue
 		}
-		if p.Text != "" || p.FunctionCall != nil || p.InlineData != nil || p.FileData != nil {
-			return true
-		}
+		return true
 	}
 	return false
 }

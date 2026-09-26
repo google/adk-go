@@ -17,6 +17,7 @@ package workflowagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"strings"
 	"sync"
@@ -999,6 +1000,59 @@ func TestWorkflowAgent_SettledReplyDoesNotDiscardNewText(t *testing.T) {
 	if got := runs.Load(); got == afterFirst {
 		t.Errorf("worker runs = %d, want more than %d; the turn was routed to "+
 			"Resume on a settled reply and the user's text was dropped", got, afterFirst)
+	}
+}
+
+// TestWorkflowAgent_SettledReplyDoesNotDiscardOtherParts is the non-text half
+// of the test above. carriesOtherContent must discount only a matched
+// FunctionResponse and count every other part, including a part kind it has
+// never heard of: an allow-list of known kinds reads an unknown one as "nothing
+// else in this message", routes the turn to Resume, and drops the part when
+// Resume fails with ErrNothingToResume. ExecutableCode stands in for whatever
+// genai.Part grows next.
+func TestWorkflowAgent_SettledReplyDoesNotDiscardOtherParts(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+	}{
+		{"inline data", &genai.Part{InlineData: &genai.Blob{MIMEType: "text/plain", Data: []byte("hi")}}},
+		{"file data", &genai.Part{FileData: &genai.FileData{MIMEType: "text/plain", FileURI: "gs://b/o"}}},
+		{"executable code", &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}}},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fcID := fmt.Sprintf("cred-other-%d", i)
+			var runs atomic.Int32
+			var gotInput atomic.Bool
+			worker, err := workflow.NewAgentNode(
+				newConsentAgent(t, "worker", fcID, &runs, &gotInput),
+				workflow.NodeConfig{RerunOnResume: ptrTrue()},
+			)
+			if err != nil {
+				t.Fatalf("NewAgentNode: %v", err)
+			}
+			a := makeAgent(t, workflow.Chain(workflow.Start, worker))
+			sess := newFakeSession()
+
+			runFreshTurn(t, sess, a, "start")
+			drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), nil)
+			afterFirst := runs.Load()
+
+			// The settled approval echoed back alongside the part under test.
+			msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+				tc.part,
+				{FunctionResponse: &genai.FunctionResponse{
+					ID: fcID, Name: "adk_request_credential",
+					Response: map[string]any{"status": "approved"},
+				}},
+			}}
+			drainAgent(t, sess, a.Run(newMockCtx(sess, a, msg)), nil)
+
+			if got := runs.Load(); got == afterFirst {
+				t.Errorf("worker runs = %d, want more than %d; the turn was routed to "+
+					"Resume on a settled reply and the %s part was dropped", got, afterFirst, tc.name)
+			}
+		})
 	}
 }
 
