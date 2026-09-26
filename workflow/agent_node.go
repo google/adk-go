@@ -114,11 +114,19 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 	return func(yield func(*session.Event, error) bool) {
 		// On resume, re-feeding the input would make a single_turn/task
 		// LlmAgent re-call the still-pending tool and pause again; drop it
-		// so the agent continues from history. Mirrors runner.runAgentNodeBody.
+		// so the agent continues from history. The runner's own agent-node
+		// body does the narrower thing for a non-LlmAgent — it passes the
+		// matched FunctionResponse parts through — so this is not the same
+		// rule, see runner.runAgentNodeBody.
+		//
+		// Written to a local rather than to the captured parameter, so
+		// ranging the returned iterator twice runs the agent with the
+		// caller's input both times.
+		effInput := input
 		if n.isResuming(ctx) {
-			input = nil
+			effInput = nil
 		}
-		userContent, err := nodeInputToContent(input)
+		userContent, err := nodeInputToContent(effInput)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -240,10 +248,17 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 // which the scheduler stamps on every event leaving a node. The path, not the
 // node name, is the identity that matters: an orchestrator delegating the same
 // child twice produces child@1 and child@2, and only the delegation that
-// paused may drop its input. A pause raised by a sub-agent the node's agent
-// delegated to carries the node's own path, so it still counts as this node's
-// — matching the engine, which parks and re-enters the node on exactly those
-// interrupts.
+// paused may drop its input.
+//
+// A pause raised by a sub-agent the node's agent transferred to counts as this
+// node's, because the scheduler stamps the node's own path on an event that
+// arrives without one — matching the engine, which parks and re-enters the
+// node on exactly those interrupts. That does NOT extend to a child dispatched
+// through workflow.RunNode: the sub-scheduler stamps it "<node>@1/<child>@N",
+// which this does not match, while rehydration's eventNodeName still
+// attributes it to <node>. Such a node is therefore re-entered WITH its input.
+// No in-tree agent delegates that way from inside an AgentNode, so the case is
+// unreached today rather than handled.
 func (n *AgentNode) isResuming(ctx agent.Context) bool {
 	ra, ok := ctx.(interface{ IsResumeActivation() bool })
 	if !ok || !ra.IsResumeActivation() {
@@ -298,6 +313,12 @@ func raisedInterrupt(sess session.Session, invocationID, nodePath, nodeName stri
 // ("wf@1/worker@1") while a later Resume rebuilds the node path without it
 // ("worker@1"), so exact equality would miss a node's own pause across the
 // turn boundary.
+//
+// This matches a node against its own events, NOT against a deeper
+// activation's. An event the scheduler stamped with a descendant path
+// ("worker@1/child@1") does not match "worker@1", even though rehydration
+// attributes that event to the worker — see ownActivation in persistence.go,
+// which draws the same line for the same reason.
 func samePathActivation(evPath, nodePath string) bool {
 	if evPath == nodePath {
 		return true

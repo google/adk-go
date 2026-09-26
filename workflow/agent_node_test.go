@@ -900,6 +900,14 @@ func answeredEvent(invocationID, id string) *session.Event {
 // TestAgentNode_LoopBackKeepsInput pins that only the resume activation drops
 // the node input: a node re-activated by a loop-back edge later in the same
 // invocation starts a fresh lifecycle and must still receive its input.
+//
+// It pins the per-activation FLAG, not the history scan. Every activation
+// under Workflow.Run is started with no resume inputs, so IsResumeActivation
+// reports false and isResuming short-circuits before it ever looks at history
+// — deleting that short-circuit is what turns this test red. The history below
+// is the shape a history-only rule would latch on; the scan itself is pinned
+// by TestAgentNode_FreshDynamicChildKeepsInput and
+// TestAgentNode_RedelegatedChildKeepsInput, which run under a real resume.
 func TestAgentNode_LoopBackKeepsInput(t *testing.T) {
 	const name = "looper"
 	probe := &resumeProbeAgent{routes: []string{"loop", "finish"}}
@@ -916,8 +924,9 @@ func TestAgentNode_LoopBackKeepsInput(t *testing.T) {
 		{From: node, To: finish, Route: StringRoute("finish")},
 	})
 
-	// An interrupt of this node's, answered in the current invocation: a
-	// history scan would latch on it and starve every later activation.
+	// An interrupt of this node's, answered in the current invocation: the
+	// shape a history-only rule would latch on, starving every later
+	// activation of its input.
 	ctx := newSeededMockCtx(t)
 	ctx.sess = &eventsSession{events: sliceEvents{
 		{InvocationID: "test-invocation-id", Author: name, LongRunningToolIDs: []string{"X"}},
