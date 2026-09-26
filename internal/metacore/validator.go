@@ -33,13 +33,13 @@ const (
 
 // InvariantErrors
 var (
-	ErrRCannotBlockOrModify = errors.New("Reasoning Engine (R) has no privilege to block or modify execution")
-	ErrECannotInitiate      = errors.New("Empathy Layer (E) has no privilege to initiate action")
-	ErrKCannotModify        = errors.New("Kill-Switch Layer (K) has no privilege to modify parameters")
-	ErrKAbsoluteBlock       = errors.New("Kill-Switch Layer (K) triggered absolute execution halt")
-	ErrNilDecisionPacket    = errors.New("Decision Packet (R) cannot be nil")
-	ErrInvalidConfidence    = errors.New("Confidence score must be a valid number between 0.0 and 1.0")
-	ErrInvalidVulnerability = errors.New("Vulnerability score must be a valid number between 0.0 and 1.0")
+	ErrRCannotBlockOrModify = errors.New("reasoning engine (R) has no privilege to block or modify execution")
+	ErrECannotInitiate      = errors.New("empathy layer (E) has no privilege to initiate action")
+	ErrKCannotModify        = errors.New("kill-switch layer (K) has no privilege to modify parameters")
+	ErrKAbsoluteBlock       = errors.New("kill-switch layer (K) triggered absolute execution halt")
+	ErrNilDecisionPacket    = errors.New("decision packet (R) cannot be nil")
+	ErrInvalidConfidence    = errors.New("confidence score must be a valid number between 0.0 and 1.0")
+	ErrInvalidVulnerability = errors.New("vulnerability score must be a valid number between 0.0 and 1.0")
 )
 
 // Validator implements the META-CORE (R-E-K) validation engine and pipeline.

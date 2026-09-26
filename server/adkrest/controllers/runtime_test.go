@@ -336,7 +336,7 @@ func TestRunLiveHandler_WebSocketReadLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Send message > 10MB to test read limit enforcement
 	largeMsg := bytes.Repeat([]byte("x"), 11*1024*1024)
@@ -386,7 +386,7 @@ func TestRunLiveHandler_SanitizedInternalErrorCloseReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, _, err = conn.ReadMessage()

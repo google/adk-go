@@ -234,26 +234,28 @@ func buildDescriptionFromInstructions(agent agent.Agent, llmState *llminternal.S
 	return description
 }
 
+type pronounSub struct {
+	re     *regexp.Regexp
+	target string
+}
+
+var pronounSubstitutions = []pronounSub{
+	// Keep sorted by len(original) DESC to ensure longer phrases are matched first
+	// which prevents "you" in "you are" from being replaced on its own.
+	{regexp.MustCompile(`(?i)\byou were\b`), "I was"},
+	{regexp.MustCompile(`(?i)\byou are\b`), "I am"},
+	{regexp.MustCompile(`(?i)\byou're\b`), "I am"},
+	{regexp.MustCompile(`(?i)\byou've\b`), "I have"},
+	{regexp.MustCompile(`(?i)\byours\b`), "mine"},
+	{regexp.MustCompile(`(?i)\byour\b`), "my"},
+	{regexp.MustCompile(`(?i)\byou\b`), "I"},
+}
+
 // Replaces pronouns and conjugate common verbs for agent description.
 // Examples: "You are" -> "I am", "your" -> "my"
 func replacePronouns(instruction string) string {
-	substitutions := []struct {
-		original string
-		target   string
-	}{
-		// Keep sorted by len(original) DESC to ensure longer phrases are matched first
-		// which prevents "you" in "you are" from being replaced on its own.
-		{"you were", "I was"},
-		{"you are", "I am"},
-		{"you're", "I am"},
-		{"you've", "I have"},
-		{"yours", "mine"},
-		{"your", "my"},
-		{"you", "I"},
-	}
-	for _, sub := range substitutions {
-		pattern := regexp.MustCompile(fmt.Sprintf(`(?i)\b%s\b`, sub.original))
-		instruction = pattern.ReplaceAllString(instruction, sub.target)
+	for _, sub := range pronounSubstitutions {
+		instruction = sub.re.ReplaceAllString(instruction, sub.target)
 	}
 	return instruction
 }

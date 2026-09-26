@@ -30,13 +30,6 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// TODO: Remove this once state keywords are implemented and replace with those consts
-const (
-	appPrefix  = "app:"
-	userPrefix = "user:"
-	tempPrefix = "temp:"
-)
-
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
 func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {

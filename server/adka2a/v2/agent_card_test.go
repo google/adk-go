@@ -395,3 +395,11 @@ func TestReplacePronouns(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkReplacePronouns(b *testing.B) {
+	b.ReportAllocs()
+	input := "You are a helpful assistant. You've been assigned your tasks. You should do your work and it will be yours."
+	for i := 0; i < b.N; i++ {
+		_ = replacePronouns(input)
+	}
+}

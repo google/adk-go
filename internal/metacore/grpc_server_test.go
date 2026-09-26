@@ -22,9 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/adk/v2/internal/metacore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"google.golang.org/adk/v2/internal/metacore"
 )
 
 func TestGRPCServer_Evaluations(t *testing.T) {

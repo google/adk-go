@@ -800,13 +800,16 @@ func (c *customFuncTool) Declaration() *genai.FunctionDeclaration { return c.dec
 func (c *customFuncTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return llminternal.ExportAppendTools(req, c)
 }
+
 func (c *customFuncTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return nil, nil
 }
 
-var _ tool.Tool = (*customFuncTool)(nil)
-var _ toolinternal.FunctionTool = (*customFuncTool)(nil)
-var _ toolinternal.RequestProcessor = (*customFuncTool)(nil)
+var (
+	_ tool.Tool                     = (*customFuncTool)(nil)
+	_ toolinternal.FunctionTool     = (*customFuncTool)(nil)
+	_ toolinternal.RequestProcessor = (*customFuncTool)(nil)
+)
 
 func stringify(v any) string {
 	s, _ := json.Marshal(v)
