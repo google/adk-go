@@ -335,9 +335,13 @@ func (p *provider) runInit(in *clientInit) {
 	// This runs on a goroutine the provider owns, so nothing above can recover a
 	// panic here and it would take the process down — where an eagerly built
 	// client would merely have panicked in the caller's own frame. Report it as
-	// this attempt's failure instead, panic value and all, and release the
-	// waiters: without this, an abrupt exit leaves pending set with its goroutine
-	// dead and every later caller waits out initTimeout forever.
+	// this attempt's failure instead, panic value and all.
+	//
+	// The second branch covers an abrupt exit that is not a panic, which the
+	// builder reaches through runtime.Goexit and which leaves the process alive.
+	// Without it that attempt stays pending with its goroutine gone and done
+	// never closed — the terminal state [ErrClientUnavailable] describes, since
+	// publish is the only thing that clears pending.
 	published := false
 	defer func() {
 		if published {
