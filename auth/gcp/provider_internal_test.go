@@ -495,7 +495,8 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	for i := range 200 {
 		p := newTestProvider(t)
 		// The attempt has already landed and its bound has already passed, so both
-		// select arms are ready the moment the caller reaches them.
+		// of the arms this arranges — in.done and the expired timer — are ready the
+		// moment the caller reaches them.
 		in := &clientInit{done: make(chan struct{}), client: built, deadline: time.Now().Add(-time.Hour)}
 		close(in.done)
 		p.pending = in
