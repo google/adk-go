@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // TestResolveClientBuildsDefaultClient drives the lazy ADC path end to end:
@@ -367,9 +369,14 @@ func TestNewProviderKeepsWiringContextValuesNotCancellation(t *testing.T) {
 	}
 }
 
-// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that a provider given a
-// Client does not pin its caller's context — and with it the caller's whole
-// session and event graph — for the life of the process.
+// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that initCtx — the field
+// that retains the caller's context, and with it the caller's whole session and
+// event graph — is left nil when a Client is supplied.
+//
+// That is narrower than "a provider given a Client retains nothing". The
+// builder closure is installed unconditionally, so one that closed over
+// NewProvider's ctx would retain the graph with this test still green;
+// TestDefaultBuilderPassesItsArgumentToNewClient is what covers that.
 func TestNewProviderKeepsWiringContextOnlyWhenLazy(t *testing.T) {
 	client, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
 	if err != nil {
@@ -469,10 +476,17 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 //
 // Go picks uniformly among ready select arms, so an implementation that races
 // the two fails about half the time — undetectable in one pass, which is why
-// this loops. It pins the pair of re-checks rather than either alone: the two
-// are mutually redundant, so deleting one leaves the other to answer and the
-// test stays green, and deleting both turns it red. That is the honest scope.
-// Either one surviving is enough for the caller, who only ever sees the result.
+// this loops.
+//
+// It reaches one case only: a result that landed before the caller arrived,
+// which the pre-check answers. Either that check or the timer arm's re-check
+// alone keeps this green, so deleting one leaves the test passing — which is
+// not a licence to delete the timer-arm one. It is the only cover for the case
+// this test cannot arrange, a result landing after the pre-check has fallen
+// through while the caller waits on the timer arm. Nothing pins that, so
+// removing it loses the window silently. The select's third arm carries a
+// re-check of its own for the same reason on the caller-cancelled path, which
+// this test does not reach.
 func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
 	// 200 trials puts the odds of an unguarded implementation passing at 2^-200.
@@ -491,4 +505,87 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 			t.Fatalf("trial %d: resolveClient() = %v, %v; want the landed client, because a result that is already there beats a bound that has already passed", i, got, err)
 		}
 	}
+}
+
+// TestDefaultBuilderPassesItsArgumentToNewClient pins two links in the chain
+// that carries the wiring context into the token exchange: runInit calls the
+// builder with initCtx, and the builder NewProvider installs hands that
+// argument to NewClient rather than a context of its own.
+//
+// The wiring tests above either stub newClient or never reach it, so nothing
+// else drives the one closure that consumes initCtx. Before this test,
+// replacing that closure's ctx with context.Background() left the whole package
+// green while silently dropping an oauth2.HTTPClient a caller put on the wiring
+// context, which is the documented way to give the token exchange its own
+// transport.
+//
+// Two sentinels rather than one, because initCtx is derived from the context
+// NewProvider was handed: with the same marker on both, a builder that ignored
+// its parameter and closed over NewProvider's own ctx would deliver that marker
+// and pass. That version is not harmless — the closure is installed even when
+// cfg.Client is set, so it would keep the caller's context reachable for the
+// provider's whole lifetime, which is what NewProvider's comment on capturing
+// initCtx says the code avoids.
+//
+// Observed through the transport oauth2.NewClient puts on the client it
+// returns, which names the context that reached it. That copy is an
+// implementation detail: NewClient's own doc says a context client is used
+// "only for token acquisition", while the code assigns it to Transport.Base. So
+// a failure here after an x/oauth2 bump is that bump, not the builder.
+//
+// fakeADC supplies an authorized_user file, which needs no key parsing and no
+// network, and points the token endpoint at a local server, so nothing here can
+// reach Google even if something later makes the lazy token source fetch.
+func TestDefaultBuilderPassesItsArgumentToNewClient(t *testing.T) {
+	fakeADC(t)
+
+	captured := &markerTransport{name: "the context NewProvider was handed"}
+	argument := &markerTransport{name: "the builder's own argument"}
+	// The assertion below compares pointers, so it is worth nothing unless the
+	// two markers differ. See markerTransport for what could make them not.
+	if captured == argument {
+		t.Fatal("the two markers compare equal, so the assertion below cannot fail")
+	}
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, &http.Client{Transport: captured})
+
+	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	prov := p.(*provider)
+	// Shadows the value on initCtx alone, so the two contexts the builder could
+	// use no longer carry the same transport.
+	prov.initCtx = context.WithValue(prov.initCtx, oauth2.HTTPClient, &http.Client{Transport: argument})
+
+	// The real builder, not a stub: that is the point of this test.
+	got, err := prov.resolveClient(t.Context())
+	if err != nil {
+		t.Fatalf("resolveClient() error = %v", err)
+	}
+	oauthTransport, ok := got.httpClient.Transport.(*oauth2.Transport)
+	if !ok {
+		t.Fatalf("built client Transport = %T, want *oauth2.Transport", got.httpClient.Transport)
+	}
+	base, ok := oauthTransport.Base.(*markerTransport)
+	if !ok {
+		t.Fatalf("built client base Transport = %T, want %s: the builder must pass its context to NewClient", oauthTransport.Base, argument.name)
+	}
+	if base != argument {
+		t.Errorf("built client base Transport came from %s, want %s: the builder must pass its own argument to NewClient, not a context it closed over", base.name, argument.name)
+	}
+}
+
+// markerTransport is recognised by pointer identity and never used to send
+// anything.
+//
+// The name field names the marker in a failure, and it is also what keeps the
+// type non-zero-size. Two pointers to distinct zero-size values are free to
+// share an address, and on this toolchain they do, so dropping the field would
+// leave every identity comparison on a marker unable to fail — measured: the
+// builder test goes green under a mutant it is there to catch. That is why the
+// caller checks rather than trusting this note.
+type markerTransport struct{ name string }
+
+func (*markerTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("markerTransport must not be used to send a request")
 }

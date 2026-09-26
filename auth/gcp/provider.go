@@ -78,10 +78,15 @@ type ProviderConfig struct {
 // goroutine. Build one per request and the cost is per request.
 var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
-// ErrNoActingUser means the provider could not determine the acting end user,
-// either because the context is not an ADK context or because the invocation
-// carries no user. Unlike adk-python, which degrades such a turn into an auth
-// request, the Go provider fails the request: no user, no credential.
+// ErrNoActingUser means the provider could not determine the acting end user:
+// either no identity was recoverable from the context, or one was and its
+// UserID is empty. The second does not imply a session: a decorator's Value can
+// answer with an [agent.Identity] it built directly, so this turns on the field
+// rather than on what lies behind it. The first is not a single condition —
+// [agent.IdentityFromContext] reports it without saying why, and its doc says
+// the reasons are not a closed set. Unlike adk-python, which degrades such a
+// turn into an auth request, the Go provider fails the request: no user, no
+// credential.
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
@@ -123,12 +128,13 @@ const defaultInitTimeout = 30 * time.Second
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
 //
-// Nothing is cached. Every call reaches the credential service, and
-// [auth.Transport] calls Credential once per outbound request, so a tool that
-// makes n requests costs n retrievals plus any pending poll they incur. That is
-// deliberate for this change rather than an oversight — a cache is the whole of
-// the follow-up, and it is where cross-user leaks live, so it wants its own
-// review of what the key must cover.
+// No credential is cached. The default client is, once built, but a Credential
+// call that gets past the acting-user check and has a client always issues a
+// fresh retrieval rather than answering from an earlier one. [auth.Transport]
+// calls Credential once per outbound request, so a tool that makes n requests
+// costs n retrievals plus any pending poll they incur. That is deliberate for
+// this change rather than an oversight: a credential cache is where cross-user
+// leaks live, so it wants its own review of what the key must cover.
 //
 // ctx is used only to build the default client, and only for its values. Its
 // cancellation is not honored, because that client outlives any one request.
@@ -225,7 +231,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if id.UserID == "" {
 		// No ids in the message: this text is fed to the model and persisted in
 		// the session, and every id here comes off the request.
-		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
+		return nil, fmt.Errorf("%w: the invocation identity carries no user", ErrNoActingUser)
 	}
 
 	client, err := p.resolveClient(ctx)
@@ -329,9 +335,13 @@ func (p *provider) runInit(in *clientInit) {
 	// This runs on a goroutine the provider owns, so nothing above can recover a
 	// panic here and it would take the process down — where an eagerly built
 	// client would merely have panicked in the caller's own frame. Report it as
-	// this attempt's failure instead, panic value and all, and release the
-	// waiters: without this, an abrupt exit leaves pending set with its goroutine
-	// dead and every later caller waits out initTimeout forever.
+	// this attempt's failure instead, panic value and all.
+	//
+	// The second branch covers an abrupt exit that is not a panic, which the
+	// builder reaches through runtime.Goexit and which leaves the process alive.
+	// Without it that attempt stays pending with its goroutine gone and done
+	// never closed — the terminal state [ErrClientUnavailable] describes, since
+	// publish is the only thing that clears pending.
 	published := false
 	defer func() {
 		if published {

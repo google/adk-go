@@ -417,13 +417,19 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 		cfg  gcp.ProviderConfig
 	}{
 		{"empty name", gcp.ProviderConfig{}},
-		// The next three are rejected by the two collection patterns alone, which
-		// anchor the whole name and allow no slash inside a segment. Worth a row
-		// each, since they are what a caller actually mistypes, but none of them
-		// reaches the character and segment validation, so none of them pins it.
+		// The next three are rejected by validateResource, which runs first and
+		// refuses an empty or relative path segment. They still do not pin it: the
+		// two collection patterns anchor the whole name and allow no slash inside a
+		// segment, so they reject all three as well, and deleting validateResource
+		// leaves them answering. Worth a row each as the shapes a caller mistypes.
 		{"extra segments where the provider id belongs", cfgFor("projects/p/locations/l/authProviders/../../secret")},
 		{"empty path segment", cfgFor("projects/p/locations/l/authProviders//ap")},
 		{"trailing slash routes differently after normalization", cfgFor("projects/p/locations/l/connectors/c/")},
+		// This row does pin it. A whole ".." where the provider id belongs is one
+		// segment with no slash in it, so authProviderResourceRE accepts the name
+		// and validateResource is the only thing that rejects it: drop its empty
+		// and relative segment check and this row alone turns red.
+		{"relative segment as the whole provider id", cfgFor("projects/p/locations/l/authProviders/..")},
 		{"not a resource name at all", cfgFor("Bearer")},
 		{"unknown collection", cfgFor("projects/p/locations/l/authProvidrs/ap")},
 		{"truncated", cfgFor("projects/p")},
@@ -461,14 +467,17 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 }
 
 // TestProviderErrorsStayClassifiableThroughCredential pins that the error types
-// a caller behind an http.RoundTripper classifies on survive the provider.
+// a caller behind an http.RoundTripper classifies on reach it through the
+// provider.
 //
-// Credential wraps what RetrieveCredential returns, and a caller cannot reach
-// past it: the tool layer decides whether to raise a human-in-the-loop consent
-// round-trip by finding *auth.ConsentRequiredError, and retry logic keys on the
-// sentinels. Each arm is reached through the exported Credential rather than
-// through the client, because it is the wrap that could break them and the
-// client's own tests cannot see it.
+// Credential returns the retrieval error as it stands, and this does not pin
+// that — a %w wrap added there keeps every arm green. What it pins is that the
+// error stays classifiable: the tool layer decides whether to raise a
+// human-in-the-loop consent round-trip by finding *auth.ConsentRequiredError,
+// and retry logic keys on the sentinels, so a wrap with %v rather than %w would
+// break both. Each arm goes through the exported Credential rather than through
+// the client, because the client's own tests cannot see what this layer does to
+// the error.
 func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -538,8 +547,9 @@ func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
 func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
 	// A wiring context that is already cancelled does not stop the build — that
 	// is the documented contract — so the failure is forced by pointing
-	// Application Default Credentials at a file that is not credentials.
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "not-credentials.json"))
+	// Application Default Credentials at a path that does not exist. The file is
+	// never created, so discovery fails on the open rather than on the contents.
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
 
 	p, err := gcp.NewProvider(t.Context(), cfgFor(testResource))
 	if err != nil {
