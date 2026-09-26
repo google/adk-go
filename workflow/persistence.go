@@ -15,13 +15,14 @@
 package workflow
 
 import (
-	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -40,10 +41,23 @@ type nodeScanState struct {
 	// duplicate resume replayed an already-consumed response. Lets
 	// Resume tell a genuine first resume from an idempotent no-op.
 	resolvedCount map[string]int
+	// consumed marks an interrupt whose answer the node has already
+	// acted on: it emitted an event after that answer first appeared.
+	// Counting responses cannot express this — a retry after a
+	// rejected payload and a duplicate replay both leave two responses
+	// in history, but only the replay follows a run of the node.
+	consumed map[string]bool
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
 	branch  string
+}
+
+// reopen drops an interrupt from the seen set so addInterrupt records it again
+// as a fresh, unanswered request.
+func (s *nodeScanState) reopen(id string) {
+	delete(s.seen, id)
+	s.interrupts = slices.DeleteFunc(s.interrupts, func(v string) bool { return v == id })
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -127,7 +141,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 	scanFor := func(name string) *nodeScanState {
 		s := scans[name]
 		if s == nil {
-			s = &nodeScanState{resolved: map[string]any{}, resolvedCount: map[string]int{}, schemas: map[string]*jsonschema.Schema{}}
+			s = &nodeScanState{resolved: map[string]any{}, resolvedCount: map[string]int{}, consumed: map[string]bool{}, schemas: map[string]*jsonschema.Schema{}}
 			scans[name] = s
 		}
 		return s
@@ -158,7 +172,13 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
+				// consumed is deliberately not reset here. An answer is
+				// consumed once the node settles on it, and a later
+				// answer to the same interrupt does not un-settle that —
+				// the node either acted after the first one or it did
+				// not. (Resetting would also be a no-op: consumed is
+				// written only for IDs already in resolved.)
+				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
 			continue
@@ -172,12 +192,56 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
+		// The node SETTLED on every answer already in history: it either
+		// produced its output or paused again on a new interrupt.
+		//
+		// Any other event is work in progress, and an activation that
+		// emitted one and then failed must stay resumable. History never
+		// un-answers an interrupt, so marking those answers consumed
+		// wedges the run for good — every later retry is skipped as a
+		// replay and the approved side effect never settles.
+		//
+		// Recorded per interrupt, not per node: a node that re-entered
+		// on one answer and paused again must still act on the answer to
+		// the new interrupt.
+		//
+		// Only the node's OWN activation settles it. eventNodeName folds
+		// a delegated child into its static ancestor, so without the
+		// settlesOwner test a child completing would read as the
+		// orchestrator completing — and an orchestrator that delegates
+		// successfully and then fails could never be retried.
+		if settlesOwner(ev, owner, nodesByName) && (ev.Output != nil || len(ev.LongRunningToolIDs) > 0) {
+			for id := range s.resolved {
+				s.consumed[id] = true
+			}
+		}
 		if ev.Output != nil {
 			s.branch = ev.Branch
 		}
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
 				continue
+			}
+			// Raising an ID the node has already been answered on re-opens
+			// it: the node looked at the answer and asked again, typically
+			// because it rejected the payload.
+			//
+			// Two things go wrong without it, one per node kind. A handoff
+			// node rehydrates NodeCompleted, because addInterrupt dedupes
+			// and the ID never returns to the unresolved set, and hands the
+			// rejected answer to its successors. A re-entry node is skipped
+			// as a replay instead, because the re-raise settles it and so
+			// marks the answer consumed. Either way the corrected answer can
+			// never reach the node.
+			//
+			// Whoever raised it. A delegated child re-asking under this node
+			// is the node asking again as far as the engine is concerned:
+			// that is the pause it parks and re-enters on.
+			if _, answered := s.resolved[id]; answered {
+				delete(s.resolved, id)
+				delete(s.resolvedCount, id)
+				delete(s.consumed, id)
+				s.reopen(id)
 			}
 			s.addInterrupt(id)
 			if s.branch == "" {
@@ -328,6 +392,26 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 
 	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
 
+	// A response seen for the first time this turn (count == 1) marks a
+	// genuine first resume; a duplicate turn replays an already-counted
+	// response (>= 2) and must stay a no-op. Every arm needs this, not just
+	// the completed one: a node left waiting on its other interrupts still
+	// took delivery of the answer that did arrive, so the turn is not the
+	// empty no-op ErrNothingToResume reports.
+	//
+	// Recorded per ID. Collapsed to one bool per node it read true for the
+	// rest of the session as soon as the node held a single never-replayed
+	// answer, so a replay of any of its OTHER answers counted as new work
+	// and re-triggered its successors.
+	for id := range resumed {
+		if scan.resolvedCount[id] == 1 {
+			if ns.freshAnswers == nil {
+				ns.freshAnswers = map[string]bool{}
+			}
+			ns.freshAnswers[id] = true
+		}
+	}
+
 	switch {
 	case len(unresolved) > 0 && reenter && len(resumed) > 0:
 		// Partial resume: re-run with resolved responses so the node
@@ -336,6 +420,10 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.ResumedInputs = resumed
 		ns.Interrupts = unresolved
 		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		// Same replay guard as the all-resolved arm below: a node still
+		// holding an open interrupt is no less exposed to a duplicate
+		// answer than one that has none.
+		ns.reentryConsumed = allConsumed(scan, resumed)
 	case len(unresolved) > 0:
 		// Still waiting for the remaining interrupts.
 		ns.Status = NodeWaiting
@@ -348,6 +436,10 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
 		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		// Unless the node already ran on every one of them, in which
+		// case this turn is a replay and re-running would re-do
+		// whatever the human approved.
+		ns.reentryConsumed = len(resumed) > 0 && allConsumed(scan, resumed)
 	default:
 		// All resolved, handoff: the node is done; its output is the
 		// response, which Resume forwards to successors. Keep the
@@ -356,17 +448,19 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodeCompleted
 		ns.Output = resumeOutput(resumed)
 		ns.ResumedInputs = resumed
-		// A response seen for the first time this turn (count == 1)
-		// marks a genuine first resume; a duplicate turn replays an
-		// already-counted response (>= 2) and must stay a no-op.
-		for id := range resumed {
-			if scan.resolvedCount[id] == 1 {
-				ns.answeredThisTurn = true
-				break
-			}
-		}
 	}
 	return ns, nil
+}
+
+// allConsumed reports whether the node has already acted on every one of the
+// given resolved interrupts.
+func allConsumed(scan *nodeScanState, resumed map[string]any) bool {
+	for id := range resumed {
+		if !scan.consumed[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // predecessorInput walks incoming edges backward to find a resuming
@@ -456,6 +550,74 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	return ev.Author
 }
 
+// settlesOwner reports whether ev shows owner's own activation finishing —
+// producing its output or parking on a new interrupt — as opposed to something
+// owner delegated to finishing under it. The distinction decides whether the
+// answers owner holds count as acted upon: a child completing while the
+// orchestrator goes on to fail must leave the orchestrator retryable.
+//
+// Two ways to qualify. The event came from owner's own activation, or its
+// Output is attributed to that activation through OutputFor — which is how a
+// WithUseAsOutput child's output becomes the orchestrator's, the orchestrator
+// then emitting no terminal event of its own.
+func settlesOwner(ev *session.Event, owner string, nodesByName map[string]Node) bool {
+	if ownActivation(ev, owner, nodesByName) {
+		return true
+	}
+	if ev.NodeInfo == nil {
+		return false
+	}
+	for _, p := range ev.NodeInfo.OutputFor {
+		if lastSegmentName(p) == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// ownActivation reports whether ev came from owner's own activation rather
+// than from something owner delegated to.
+//
+// eventNodeName attributes an event to the FIRST path segment naming a static
+// graph node, so a delegated child's events carry their ancestor's name. The
+// event is therefore the attributed node's own only when that first matching
+// segment is also the last one — nothing is nested below it. Comparing only
+// the last segment would get a self-recursive orchestrator ("orch@1/orch@2")
+// backwards, calling the child's events the ancestor's.
+//
+// When no segment names a graph node, eventNodeName fell back to Author, which
+// names a node and never a delegated child, so the event counts as the node's
+// own.
+func ownActivation(ev *session.Event, owner string, nodesByName map[string]Node) bool {
+	if ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
+		return true
+	}
+	segs := strings.Split(ev.NodeInfo.Path, "/")
+	for i, seg := range segs {
+		name := segmentName(seg)
+		if _, ok := nodesByName[name]; ok {
+			return i == len(segs)-1 && name == owner
+		}
+	}
+	return true
+}
+
+// segmentName strips the "@runID" suffix from one node-path segment.
+func segmentName(seg string) string {
+	if i := strings.IndexByte(seg, '@'); i >= 0 {
+		return seg[:i]
+	}
+	return seg
+}
+
+// lastSegmentName returns the node name of a path's deepest segment.
+func lastSegmentName(path string) string {
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		path = path[i+1:]
+	}
+	return segmentName(path)
+}
+
 // staticNodeName returns the static graph node owning a node path: the
 // first segment of a composite "parent/child@run" path.
 func staticNodeName(path string) string {
@@ -499,31 +661,4 @@ func schemaFromEvent(ev *session.Event, id string) *jsonschema.Schema {
 		}
 	}
 	return nil
-}
-
-// unwrapResponse extracts the original value from a FunctionResponse
-// payload. A sole single-key wrapper — {"result": v} (adk-python),
-// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with
-// string values JSON-parsed when possible; anything else passes
-// through. Mirrors adk-python _unwrap_response, extended with the
-// adk-go keys for cross-runtime sessions.
-func unwrapResponse(data map[string]any) any {
-	if len(data) != 1 {
-		return data
-	}
-	for _, key := range []string{"result", "response", "payload"} {
-		v, ok := data[key]
-		if !ok {
-			continue
-		}
-		if s, isStr := v.(string); isStr {
-			var parsed any
-			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-				return parsed
-			}
-			return s
-		}
-		return v
-	}
-	return data
 }

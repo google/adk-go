@@ -14,7 +14,11 @@
 
 package workflow
 
-import "github.com/google/jsonschema-go/jsonschema"
+import (
+	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/internal/workflowstate"
+)
 
 // NodeStatus is the lifecycle status of a node in the workflow graph.
 //
@@ -125,15 +129,27 @@ type NodeState struct {
 	// on NodeState). Consumed by Resume to validate the payload.
 	interruptSchemas map[string]*jsonschema.Schema
 
-	// answeredThisTurn is true when this node's interrupt was
-	// resolved by a user response that appeared in history for the
-	// first time on the current resume turn (resolvedCount == 1), as
-	// opposed to a duplicate resume that replays an already-consumed
-	// response. Not persisted; rebuilt each turn from event history.
-	// Lets Resume count a terminal handoff asker (no successors) as
-	// an effective resume on its first turn while staying a no-op on
-	// duplicates (idempotency).
-	answeredThisTurn bool
+	// freshAnswers holds the interrupt IDs whose user response appeared
+	// in history for the first time on this turn (resolvedCount == 1),
+	// as opposed to a duplicate turn replaying a response the run has
+	// already taken delivery of. Not persisted; rebuilt each turn from
+	// event history. Lets Resume count a terminal handoff asker (no
+	// successors) as an effective resume on its first turn while
+	// staying a no-op on duplicates (idempotency).
+	//
+	// Per ID, not per node: a node holding one never-replayed answer
+	// would otherwise report "answered this turn" on every later turn
+	// of the session, and a replay of one of its OTHER answers would
+	// ride on that and re-trigger its successors.
+	freshAnswers map[string]bool
+
+	// reentryConsumed is true when every response this node resumed on
+	// has already been acted on by a later activation of the node —
+	// i.e. the answers are replays, not new. Not persisted; rebuilt
+	// each turn from event history. Only meaningful for re-entry
+	// nodes, whose reschedule is otherwise driven by ResumedInputs,
+	// which history never un-answers.
+	reentryConsumed bool
 
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`
@@ -165,6 +181,83 @@ type RunState struct {
 	// and used by Resume to avoid re-triggering a handoff successor
 	// that already ran on a prior turn (idempotency). Not persisted.
 	completed map[string]bool
+}
+
+// actionableInterruptIDs returns the interrupt IDs this run recognises, mapped
+// to whether Resume can still do something with them.
+//
+// Live (true): an interrupt a node is still waiting for, and an answer that
+// first reached the run on this very turn. Spent (false): an answer delivered
+// on an earlier turn, whether or not the node re-ran on it. Resume gates every
+// arm on that same distinction, so a turn routed here on a spent answer alone
+// schedules nothing and fails with ErrNothingToResume — the right diagnostic
+// for a bare replay, and the wrong outcome for one echoed alongside the
+// human's next instruction. An ID absent from the map answers nothing here at
+// all: it replies to an interrupt this run has finished with, or was never
+// aimed at this run.
+//
+// Reachable from the packages that dispatch a turn through
+// internal/workflowstate rather than as public API, since "settled on this very
+// turn" is only observable on a state fresh from ReconstructRunState.
+//
+//nolint:unused // installed into internal/workflowstate by init below.
+func (s *RunState) actionableInterruptIDs() map[string]bool {
+	ids := map[string]bool{}
+	mark := func(id string, live bool) {
+		if id == "" {
+			return
+		}
+		// Two nodes can name one ID; live anywhere wins.
+		ids[id] = ids[id] || live
+	}
+	for _, ns := range s.Nodes {
+		if ns == nil {
+			continue
+		}
+		// Every node the rehydration reconstructed contributes, whatever
+		// its status. A settled node's answers are RECOGNISED but spent,
+		// which is not the same as unknown: leaving a completed handoff
+		// asker out altogether made a bare duplicate submit of its
+		// approval look like a turn aimed at nothing, so the dispatcher
+		// started a fresh Run and re-executed the whole graph.
+		for _, id := range ns.Interrupts {
+			// Still open, whatever became of this node's other answers.
+			mark(id, true)
+		}
+		// The two arms below mirror the two gates Resume applies, because
+		// this map exists to predict whether routing a turn to Resume would
+		// do anything. They are not the same gate, so one rule for both is
+		// wrong in one direction or the other.
+		if ns.Status == NodePending {
+			// A re-entry node about to be re-run. Resume skips it only when
+			// it has already acted on every answer, so an answer delivered
+			// on an earlier turn that the node never got to act on — the
+			// activation emitted an event and then failed — is still live,
+			// and the retry must reach Resume rather than start a fresh run
+			// that replays the whole graph.
+			for id := range ns.ResumedInputs {
+				mark(id, !ns.reentryConsumed)
+			}
+			continue
+		}
+		// A handoff node, waiting or completed. It does not re-run, so an
+		// answer already delivered on an earlier turn can produce nothing
+		// however it is re-sent.
+		for id := range ns.ResumedInputs {
+			mark(id, ns.freshAnswers[id])
+		}
+	}
+	return ids
+}
+
+func init() {
+	workflowstate.ActionableInterruptIDs = func(runState any) map[string]bool {
+		st, ok := runState.(*RunState)
+		if !ok || st == nil {
+			return nil
+		}
+		return st.actionableInterruptIDs()
+	}
 }
 
 // NewRunState returns an empty state with the Nodes map

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowstate"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -170,7 +173,7 @@ func TestWorkflowAgent(t *testing.T) {
 	}
 }
 
-func TestDecodeWorkflowInputResponse(t *testing.T) {
+func TestUnwrapResumeResponse(t *testing.T) {
 	tests := []struct {
 		name string
 		fr   *genai.FunctionResponse
@@ -219,14 +222,44 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 			want: map[string]any{"k": "v"},
 		},
 		{
-			name: "PriorityOrder_ResponseWinsOverPayload",
+			// A multi-key map is the caller's own shape, not a wrapper:
+			// unwrapping one key would drop the rest.
+			name: "MultiKey_ReturnsRawMap",
 			fr: &genai.FunctionResponse{
 				Response: map[string]any{
 					"response": `"from-response"`,
 					"payload":  "from-payload",
 				},
 			},
-			want: "from-response",
+			want: map[string]any{
+				"response": `"from-response"`,
+				"payload":  "from-payload",
+			},
+		},
+		{
+			// Tool confirmation's wire shape: unwrapping "payload" would
+			// drop the confirmed flag, making a rejection look like an
+			// approval to a handoff successor.
+			name: "ToolConfirmation_KeepsConfirmedFlag",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{
+					"confirmed": false,
+					"payload":   map[string]any{"daysApproved": float64(0)},
+				},
+			},
+			want: map[string]any{
+				"confirmed": false,
+				"payload":   map[string]any{"daysApproved": float64(0)},
+			},
+		},
+		{
+			// adk-python _wrap_response and the web frontend wrap a scalar
+			// reply as {"result": v}.
+			name: "ResultShape_PythonAndWebFrontend",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"result": "approve"},
+			},
+			want: "approve",
 		},
 		{
 			name: "Fallback_NeitherKey_ReturnsRawMap",
@@ -240,14 +273,80 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 			fr:   &genai.FunctionResponse{Response: map[string]any{}},
 			want: map[string]any{},
 		},
+		{
+			// The JSON parse now applies under every wrapper key, not only
+			// "response". Both inbound decoders this replaced returned a
+			// "payload" string verbatim, and the history decoder parsed it,
+			// so the same reply used to decode two ways depending on where
+			// it was read from. These three rows are what says which way
+			// the disagreement was settled — a client that sends a
+			// JSON-looking string under payload or result now gets the
+			// parsed value on every path.
+			name: "PayloadShape_JSONStringIsParsed",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"payload": "true"},
+			},
+			want: true,
+		},
+		{
+			name: "ResultShape_JSONStringIsParsed",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"result": "123"},
+			},
+			want: float64(123),
+		},
+		{
+			name: "PayloadShape_JSONNullBecomesNil",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"payload": "null"},
+			},
+			want: nil,
+		},
+		{
+			// A nil Response decodes to an untyped nil, not to a non-nil any
+			// holding a nil map. The engine tests "is there an output" with
+			// ev.Output != nil and ns.Output != nil, and the wrapped nil map
+			// passes both — so a bare acknowledgement used to read as a
+			// value on two of the three paths and as no value on the third.
+			name: "NilResponse_IsUntypedNil",
+			fr:   &genai.FunctionResponse{Response: nil},
+			want: nil,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeWorkflowInputResponse(tc.fr)
+			got := utils.UnwrapResponse(tc.fr.Response)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("decodeWorkflowInputResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
+				t.Errorf("UnwrapResponse(%+v) mismatch (-want +got):\n%s", tc.fr.Response, diff)
 			}
 		})
 	}
+}
+
+// TestDetectResume_UnrecognisedRunStillResumesWorkflowInputReply pins the
+// name-based admission that survives when the actionable-ID hook recognises
+// nothing: a reply named adk_request_input reaches Resume on its name alone,
+// so the caller still gets ErrNothingToResume rather than a silent fresh run.
+//
+// It does NOT pin the non-nil stand-in in internal/workflowstate — it installs
+// its own, and workflow's init has already run by then, so the stand-in could
+// be deleted with this green. The stand-in is there so a future internal
+// importer that does not transitively pull in workflow gets an empty map
+// instead of a nil-func panic, which nothing in this package can observe.
+func TestDetectResume_UnrecognisedRunStillResumesWorkflowInputReply(t *testing.T) {
+	// Reassigning a package-level var is safe only because no test in this
+	// package runs in parallel; keep it that way.
+	saved := workflowstate.ActionableInterruptIDs
+	t.Cleanup(func() { workflowstate.ActionableInterruptIDs = saved })
+	workflowstate.ActionableInterruptIDs = func(any) map[string]bool { return map[string]bool{} }
+
+	asker := newAskerNode("approve", "?", nil)
+	handler := newCountingHandlerNode("handler", new(atomic.Int32))
+	a := makeAgent(t, workflow.Chain(workflow.Start, asker, handler))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "x")
+
+	// With nothing recognised, a workflow input reply must still resume.
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
 }

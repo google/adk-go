@@ -356,3 +356,73 @@ func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
 		t.Error("downstream ran; a WaitForOutput pause must suspend the workflow, not complete the parent")
 	}
 }
+
+// TestResume_TwoCallsOnOneRunStateAccumulateAnswers drives the public pair
+// ReconstructRunState + Resume the way an out-of-tree caller may: two calls on
+// one RunState, each carrying an answer that is not yet in session history. The
+// in-tree dispatchers never produce this shape — both append the user message
+// to the session before rehydrating, so every answer arrives through history
+// and Resume's fresh-match path stays empty — which is exactly why the
+// accumulation needs pinning here.
+//
+// The first call must leave the node waiting on the still-unanswered interrupt
+// while keeping the answer it did get. The second must complete the node on
+// BOTH answers, not just its own.
+func TestResume_TwoCallsOnOneRunStateAccumulateAnswers(t *testing.T) {
+	const idA, idB = "confirm-a", "confirm-b"
+
+	asker := newDummyNode("asker")
+	var successorInput atomic.Value
+	successor := NewFunctionNode("successor", func(_ agent.Context, input any) (string, error) {
+		successorInput.Store(input)
+		return "done", nil
+	}, NodeConfig{})
+
+	wf, err := New("two-call-resume", []Edge{{From: Start, To: asker}, {From: asker, To: successor}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// History holds only the pause: the node raised both interrupts and
+	// nobody has answered either.
+	sess := fakeSession{events: sliceEvents{{
+		Author:             "asker",
+		InvocationID:       "inv1",
+		LongRunningToolIDs: []string{idA, idB},
+	}}}
+	state, err := wf.ReconstructRunState(sess, "inv1")
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	if ns := nodeState(t, state, "asker"); ns.Status != NodeWaiting || len(ns.Interrupts) != 2 {
+		t.Fatalf("asker = %+v, want NodeWaiting on two interrupts", ns)
+	}
+
+	ctx := agent.NewContext(newMockCtx(t))
+
+	// First answer: the node keeps waiting and the successor stays put.
+	drain(t, wf.Resume(ctx, state, map[string]any{idA: "yes-a"}))
+	if got := successorInput.Load(); got != nil {
+		t.Fatalf("successor ran with %#v after only one of two answers, want it not to run", got)
+	}
+	ns := nodeState(t, state, "asker")
+	if ns.Status != NodeWaiting {
+		t.Errorf("asker status = %v after a partial answer, want %v", ns.Status, NodeWaiting)
+	}
+	if len(ns.Interrupts) != 1 || ns.Interrupts[0] != idB {
+		t.Errorf("asker interrupts = %v, want only the unanswered %q", ns.Interrupts, idB)
+	}
+	if got, ok := ns.ResumedInputs[idA]; !ok || got != "yes-a" {
+		t.Errorf("asker ResumedInputs[%q] = %#v (present=%v), want %q; the first call's answer was dropped",
+			idA, got, ok, "yes-a")
+	}
+
+	// Second answer completes the node, and its handoff output must carry
+	// both decisions.
+	drain(t, wf.Resume(ctx, state, map[string]any{idB: "yes-b"}))
+	got, _ := successorInput.Load().(map[string]any)
+	want := map[string]any{idA: "yes-a", idB: "yes-b"}
+	if len(got) != len(want) || got[idA] != want[idA] || got[idB] != want[idB] {
+		t.Errorf("successor input = %#v, want %#v; the second call's output dropped the first answer", got, want)
+	}
+}

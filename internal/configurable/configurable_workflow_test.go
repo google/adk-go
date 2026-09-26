@@ -20,6 +20,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -587,3 +588,95 @@ edges:
 		t.Errorf("expected tool output result 'tool_output', got %v", toolOut["result"])
 	}
 }
+
+// TestLoadWorkflowAgentNodeRerunOnResume pins that an agent used as a workflow
+// node can opt out of the LlmAgent re-entry default from its own config file.
+// Before the key was plumbed, baseAgentConfig's extra-fields map swallowed it
+// and the author silently got the default.
+func TestLoadWorkflowAgentNodeRerunOnResume(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		want *bool
+	}{
+		{name: "explicit false is honoured", key: "rerun_on_resume: false\n", want: ptrTo(false)},
+		{name: "explicit true is honoured", key: "rerun_on_resume: true\n", want: ptrTo(true)},
+		{name: "absent leaves the node kind's default", key: "", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			agentYAML := "name: my_agent\nagent_class: LoopAgent\nmax_iterations: 1\n" + tc.key
+			agentPath := filepath.Join(tempDir, "my_agent.yaml")
+			if err := os.WriteFile(agentPath, []byte(agentYAML), 0o644); err != nil {
+				t.Fatalf("write agent yaml: %v", err)
+			}
+
+			// parentPath is the referencing file; only its directory is used.
+			parentPath := filepath.Join(tempDir, "wf.yaml")
+			node, err := resolveNodeFromYAML(t.Context(), parentPath, "my_agent.yaml", agentPath)
+			if err != nil {
+				t.Fatalf("resolveNodeFromYAML: %v", err)
+			}
+			got := node.Config().RerunOnResume
+			switch {
+			case tc.want == nil && got != nil:
+				t.Errorf("RerunOnResume = %v, want nil (no key in YAML)", *got)
+			case tc.want != nil && got == nil:
+				t.Errorf("RerunOnResume = nil, want %v", *tc.want)
+			case tc.want != nil && got != nil && *got != *tc.want:
+				t.Errorf("RerunOnResume = %v, want %v", *got, *tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadWorkflowAgentNodeRerunOnResumeViaLoader drives the same key through
+// the public loader, which the direct resolveNodeFromYAML calls above bypass
+// along with the per-config-path node cache. It also pins the malformed-value
+// case: a rerun_on_resume that is not a boolean must fail the load, as a
+// malformed FunctionNode or ToolNode config already does, rather than falling
+// back to the default this change exists to make explicit.
+func TestLoadWorkflowAgentNodeRerunOnResumeViaLoader(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{name: "explicit false loads", key: "rerun_on_resume: false\n"},
+		{name: "absent loads", key: ""},
+		{name: "non-boolean fails the load", key: "rerun_on_resume: sometimes\n", wantErr: true},
+		{name: "mapping fails the load", key: "rerun_on_resume:\n  when: later\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			agentYAML := "name: agent_loop\nagent_class: LoopAgent\nmax_iterations: 1\n" + tc.key
+			if err := os.WriteFile(filepath.Join(tempDir, "agent_loop.yaml"), []byte(agentYAML), 0o644); err != nil {
+				t.Fatalf("write agent yaml: %v", err)
+			}
+			workflowYAML := "name: rerun_wf\nagent_class: Workflow\nedges:\n  - - START\n    - agent_loop.yaml\n"
+			workflowPath := filepath.Join(tempDir, "workflow.yaml")
+			if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0o644); err != nil {
+				t.Fatalf("write workflow yaml: %v", err)
+			}
+
+			ag, err := FromConfig(t.Context(), workflowPath)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("FromConfig succeeded, want an error for %q", tc.key)
+				}
+				if !strings.Contains(err.Error(), "agent node config") {
+					t.Errorf("error = %v, want it to name the agent node config", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FromConfig: %v", err)
+			}
+			if ag.Name() != "rerun_wf" {
+				t.Errorf("workflow name = %q, want %q", ag.Name(), "rerun_wf")
+			}
+		})
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }

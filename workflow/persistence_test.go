@@ -260,3 +260,58 @@ func nodeState(t *testing.T, state *RunState, name string) *NodeState {
 	}
 	return ns
 }
+
+// TestReconstructRunState_ReRaisedInterruptIsUnresolvedAgain pins the handoff
+// half of the re-raise rule. A node that rejects a payload and asks again
+// under the same InterruptID must rehydrate as still waiting: addInterrupt
+// dedupes, so without re-opening the ID the earlier answer keeps the interrupt
+// resolved, the node rehydrates NodeCompleted, and Resume hands its successors
+// the very answer the node rejected.
+func TestReconstructRunState_ReRaisedInterruptIsUnresolvedAgain(t *testing.T) {
+	const inv, id = "inv1", "gate"
+	gate := newDummyNode("gate")
+	wf, err := New("reraise", []Edge{{From: Start, To: gate}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	raise := func() *session.Event {
+		return &session.Event{Author: "gate", InvocationID: inv, LongRunningToolIDs: []string{id}}
+	}
+	answer := func(v string) *session.Event {
+		ev := &session.Event{Author: "user", InvocationID: inv}
+		ev.Content = &genai.Content{Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{ID: id, Response: map[string]any{"payload": v}},
+		}}}
+		return ev
+	}
+
+	// Answered, then asked again: still waiting on the re-raised request.
+	sess := fakeSession{events: sliceEvents{raise(), answer("rejected"), raise()}}
+	state, err := wf.ReconstructRunState(sess, inv)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	ns := nodeState(t, state, "gate")
+	if ns.Status != NodeWaiting || len(ns.Interrupts) != 1 || ns.Interrupts[0] != id {
+		t.Errorf("after a re-raise gate = {status:%v interrupts:%v}, want NodeWaiting on [%q]",
+			ns.Status, ns.Interrupts, id)
+	}
+	if _, held := ns.ResumedInputs[id]; held {
+		t.Errorf("the rejected answer is still held as resolved: %#v", ns.ResumedInputs)
+	}
+
+	// Control: answering the re-raised request completes the node on the
+	// corrected value, so the re-open does not simply wedge it the other way.
+	sess = fakeSession{events: sliceEvents{raise(), answer("rejected"), raise(), answer("corrected")}}
+	state, err = wf.ReconstructRunState(sess, inv)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	ns = nodeState(t, state, "gate")
+	if ns.Status != NodeCompleted {
+		t.Errorf("after the corrected answer gate status = %v, want %v", ns.Status, NodeCompleted)
+	}
+	if got := ns.Output; got != "corrected" {
+		t.Errorf("gate output = %#v, want %q", got, "corrected")
+	}
+}
