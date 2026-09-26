@@ -116,13 +116,13 @@ type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
-	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
-	// THEM and replaced with "[redacted]", the text is lowercased wherever
-	// anything matched, and only the first kilobyte of the response is drawn on,
-	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
-	// on Body itself, which is not the same promise: one matched run becomes a
-	// ten-byte marker whatever it replaced, so bounding the source alone left the
-	// result several times larger.
+	// request's own UserID and ContinueURI, and its PriorToken on the route that
+	// sends it, are removed WHERE THE SCRUB CAN MATCH THEM and replaced with
+	// "[redacted]", the text is lowercased wherever anything matched, and only
+	// the first kilobyte of the response is drawn on, with "..." marking that the
+	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
+	// not the same promise: one matched run becomes a ten-byte marker whatever it
+	// replaced, so bounding the source alone left the result several times larger.
 	//
 	// Removal is best effort, and the guarantee is narrower than removal: no value
 	// this package was given is recoverable from Body by this package's own
@@ -363,6 +363,14 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// PriorToken is the previously issued, now rejected, token. Setting it asks
+	// the service to mint a fresh credential rather than return the one it
+	// already has. Empty on a normal fetch.
+	//
+	// The two services spell the ask differently on the wire and this one field
+	// covers both — Agent Identity is sent the token, the IAM Connector a
+	// boolean. See the request types below.
+	PriorToken string
 }
 
 // Retrieval is the result of [Client.RetrieveCredential].
@@ -448,7 +456,7 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrie
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI)
+			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI, req.PriorToken)
 			if err != nil {
 				return nil, err
 			}
@@ -556,13 +564,36 @@ func parseExpireTime(v lenientTime) time.Time {
 	return t
 }
 
-// retrieveRequest is the JSON body for both services' credentials:retrieve RPC
-// (the auth provider / connector is bound to the URL path, not the body).
-type retrieveRequest struct {
-	UserID      string   `json:"userId,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	ContinueURI string   `json:"continueUri,omitempty"`
-}
+// The two services agree on the retrieval body except for how a caller forces a
+// refresh, so that one field is all these types do not share.
+//
+// Agent Identity takes the rejected token itself, and documents that a caller
+// seeing a PERMISSION_DENIED should retry with it set
+// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+// RetrieveCredentialsRequest.forceRefreshToken). The IAM Connector takes a
+// boolean instead — it publishes no discovery document to anonymous callers, but
+// adk-python's generated client fills the field in, as force_refresh
+// (integrations/agent_identity/_iam_connector_credentials_provider.py). Sending
+// one service the other's field would leave the refresh unforced at best, and
+// rejected as an unknown field at worst.
+type (
+	// agentIdentityRequest is the JSON body for Agent Identity's
+	// credentials:retrieve (the auth provider is bound to the URL path, not the
+	// body).
+	agentIdentityRequest struct {
+		UserID            string   `json:"userId,omitempty"`
+		Scopes            []string `json:"scopes,omitempty"`
+		ContinueURI       string   `json:"continueUri,omitempty"`
+		ForceRefreshToken string   `json:"forceRefreshToken,omitempty"`
+	}
+	// connectorRequest is the same for the IAM Connector.
+	connectorRequest struct {
+		UserID       string   `json:"userId,omitempty"`
+		Scopes       []string `json:"scopes,omitempty"`
+		ContinueURI  string   `json:"continueUri,omitempty"`
+		ForceRefresh bool     `json:"forceRefresh,omitempty"`
+	}
+)
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential. Any other header
