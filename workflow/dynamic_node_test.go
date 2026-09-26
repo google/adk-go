@@ -15,13 +15,27 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 )
+
+type deadlineAfterYieldContext struct {
+	context.Context
+	expired atomic.Bool
+}
+
+func (c *deadlineAfterYieldContext) Err() error {
+	if c.expired.Load() {
+		return context.DeadlineExceeded
+	}
+	return c.Context.Err()
+}
 
 func TestNewDynamicNode_DefaultsRerunOnResume(t *testing.T) {
 	fn := func(agent.Context, string, func(*session.Event) error) (string, error) {
@@ -134,6 +148,152 @@ func TestDynamicNode_EmitMidBody(t *testing.T) {
 	}
 	if events[len(events)-1].Output != "done" {
 		t.Errorf("terminal Output = %v, want \"done\"", events[len(events)-1].Output)
+	}
+}
+
+func TestDynamicNode_StopsAfterConsumerExits(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   DynamicFn[string, string]
+	}{
+		{
+			name: "returns emit error",
+			fn: func(_ agent.Context, _ string, emit func(*session.Event) error) (string, error) {
+				if err := emit(&session.Event{}); err != nil {
+					return "", err
+				}
+				return "done", nil
+			},
+		},
+		{
+			name: "ignores emit error",
+			fn: func(_ agent.Context, _ string, emit func(*session.Event) error) (string, error) {
+				_ = emit(&session.Event{})
+				return "done", nil
+			},
+		},
+		{
+			name: "returns independent error",
+			fn: func(_ agent.Context, _ string, emit func(*session.Event) error) (string, error) {
+				_ = emit(&session.Event{})
+				return "", errors.New("body failed")
+			},
+		},
+		{
+			name: "returns wait for output",
+			fn: func(_ agent.Context, _ string, emit func(*session.Event) error) (string, error) {
+				_ = emit(&session.Event{})
+				return "", ErrNodeWaitingForOutput
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orchestrator := NewDynamicNode[string, string]("orch", test.fn, NodeConfig{})
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DynamicNode.Run panicked after consumer break: %v", r)
+				}
+			}()
+
+			count := 0
+			for _, err := range orchestrator.Run(agent.NewContext(newMockCtx(t)), "") {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				count++
+				break
+			}
+			if count != 1 {
+				t.Errorf("consumed %d events, want 1", count)
+			}
+		})
+	}
+}
+
+func TestMakeEmitStopsCallingYieldAfterConsumerExits(t *testing.T) {
+	yieldCalls := 0
+	emit, consumerGone := makeEmit(func(*session.Event, error) bool {
+		yieldCalls++
+		return false
+	}, agent.NewContext(newMockCtx(t)))
+
+	if err := emit(&session.Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first emit error = %v, want context.Canceled", err)
+	}
+	if err := emit(&session.Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second emit error = %v, want context.Canceled", err)
+	}
+	if yieldCalls != 1 {
+		t.Errorf("yield calls = %d, want 1", yieldCalls)
+	}
+	if !consumerGone() {
+		t.Error("consumerGone = false, want true")
+	}
+}
+
+func TestMakeEmitStopsConcurrentWaiterAfterConsumerExits(t *testing.T) {
+	firstYieldEntered := make(chan struct{})
+	releaseFirstYield := make(chan struct{})
+	var yieldCalls atomic.Int32
+	emit, consumerGone := makeEmit(func(*session.Event, error) bool {
+		if yieldCalls.Add(1) == 1 {
+			close(firstYieldEntered)
+			<-releaseFirstYield
+		}
+		return false
+	}, agent.NewContext(newMockCtx(t)))
+
+	emitErrors := make(chan error, 2)
+	go func() {
+		emitErrors <- emit(&session.Event{})
+	}()
+	<-firstYieldEntered
+
+	secondEmitStarted := make(chan struct{})
+	go func() {
+		close(secondEmitStarted)
+		emitErrors <- emit(&session.Event{})
+	}()
+	<-secondEmitStarted
+	close(releaseFirstYield)
+
+	for range 2 {
+		if err := <-emitErrors; !errors.Is(err, context.Canceled) {
+			t.Errorf("emit error = %v, want context.Canceled", err)
+		}
+	}
+	if got := yieldCalls.Load(); got != 1 {
+		t.Errorf("yield calls = %d, want 1", got)
+	}
+	if !consumerGone() {
+		t.Error("consumerGone = false, want true")
+	}
+}
+
+func TestMakeEmitPreservesContextErrorAfterConsumerExits(t *testing.T) {
+	dead := &deadlineAfterYieldContext{Context: t.Context()}
+	parent := agent.NewContext(&MockInvocationContext{Context: dead})
+
+	yieldCalls := 0
+	emit, consumerGone := makeEmit(func(*session.Event, error) bool {
+		yieldCalls++
+		dead.expired.Store(true)
+		return false
+	}, parent)
+
+	if err := emit(&session.Event{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first emit error = %v, want context.DeadlineExceeded", err)
+	}
+	if err := emit(&session.Event{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("second emit error = %v, want context.DeadlineExceeded", err)
+	}
+	if yieldCalls != 1 {
+		t.Errorf("yield calls = %d, want 1", yieldCalls)
+	}
+	if !consumerGone() {
+		t.Error("consumerGone = false, want true")
 	}
 }
 
