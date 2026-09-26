@@ -17,6 +17,7 @@ package openaimodel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -78,7 +79,7 @@ func TestStreamTranslator_EmptyRefusalDelta(t *testing.T) {
 
 func TestStreamTranslator_FunctionCall(t *testing.T) {
 	tr := newStreamTranslator()
-	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real"}}`)
+	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real","name":"lookup"}}`)
 	if _, err := tr.process(added); err != nil {
 		t.Fatalf("process(added) err = %v", err)
 	}
@@ -90,7 +91,7 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 	if _, err := tr.process(delta); err != nil {
 		t.Fatalf("process(delta) err = %v", err)
 	}
-	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","name":"lookup","arguments":""}`)
+	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`)
 	resp, err := tr.process(done)
 	if err != nil {
 		t.Fatalf("process(done) err = %v", err)
@@ -104,6 +105,27 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 	}
 	if part.FunctionCall.ID != "call_real" {
 		t.Fatalf("call ID mismatch, got %q, want %q", part.FunctionCall.ID, "call_real")
+	}
+}
+
+// TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent pins where the name may
+// come from. The OpenAI API does not put one on the done event, so the SDK no
+// longer decodes it and response.output_item.added is the only source. A
+// provider that sends the name only on the done event loses it, and a nameless
+// call is dropped rather than surfaced, so the loss is silent.
+func TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent(t *testing.T) {
+	tr := newStreamTranslator()
+	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","name":"lookup","arguments":"{}"}`)
+	resp, err := tr.process(done)
+	if err != nil {
+		t.Fatalf("process(done) err = %v", err)
+	}
+	part := resp.Candidates[0].Content.Parts[0]
+	if part.FunctionCall == nil {
+		t.Fatalf("no function call: %+v", part)
+	}
+	if part.FunctionCall.Name != "" {
+		t.Errorf("FunctionCall.Name = %q, want empty: the done event is not a name source", part.FunctionCall.Name)
 	}
 }
 
@@ -138,33 +160,51 @@ func TestStreamTranslator_WithAggregator(t *testing.T) {
 	}
 }
 
-func TestStreamTranslator_FunctionCall_MissingDoneName(t *testing.T) {
+func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	tr := newStreamTranslator()
-	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real","name":"lookup"}}`)
-	if _, err := tr.process(added); err != nil {
-		t.Fatalf("process(added) err = %v", err)
+	event := decodeEvent(t, `{"type":"response.failed","response":{"id":"resp_123","status":"failed","error":{"code":"server_error","message":"the model failed to generate a response"}}}`)
+	resp, err := tr.process(event)
+	if resp != nil {
+		t.Errorf("process() = %+v, want nil alongside the error", resp)
 	}
-	delta := decodeEvent(t, `{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":\""}`)
-	if _, err := tr.process(delta); err != nil {
-		t.Fatalf("process(delta) err = %v", err)
+	if !errors.Is(err, ErrResponseFailed) {
+		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
 	}
-	delta = decodeEvent(t, `{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"Paris\"}"}`)
-	if _, err := tr.process(delta); err != nil {
-		t.Fatalf("process(delta) err = %v", err)
+	if want := `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`; err.Error() != want {
+		t.Errorf("process() err = %q, want %q", err, want)
 	}
-	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`)
-	resp, err := tr.process(done)
-	if err != nil {
-		t.Fatalf("process(done) err = %v", err)
+}
+
+// TestStreamTranslator_ResponseFailed_PathsAgree pins that one server failure
+// reads the same on the blocking path and as a streamed "response.failed".
+// Comparing the two texts to each other, not to literals, is what stops them
+// drifting apart again.
+func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
+	tests := []struct {
+		name    string
+		errJSON string
+	}{
+		{name: "message and code", errJSON: `,"error":{"code":"server_error","message":"upstream exploded"}`},
+		{name: "message only", errJSON: `,"error":{"message":"upstream exploded"}`},
+		{name: "code only", errJSON: `,"error":{"code":"rate_limit_exceeded"}`},
+		{name: "no error object", errJSON: ``},
 	}
-	part := resp.Candidates[0].Content.Parts[0]
-	if part.FunctionCall == nil || part.FunctionCall.Name != "lookup" {
-		t.Fatalf("function call not translated: %+v", part)
-	}
-	if part.FunctionCall.Args["city"] != "Paris" {
-		t.Fatalf("args mismatch: %+v", part.FunctionCall.Args)
-	}
-	if part.FunctionCall.ID != "call_real" {
-		t.Fatalf("call ID mismatch, got %q, want %q", part.FunctionCall.ID, "call_real")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := decodeEvent(t, `{"type":"response.failed","response":{"status":"failed"`+tc.errJSON+`}}`)
+			failed := event.AsResponseFailed()
+
+			_, streamErr := newStreamTranslator().process(event)
+			_, blockErr := convertResponse(&failed.Response)
+
+			for path, err := range map[string]error{"stream": streamErr, "blocking": blockErr} {
+				if !errors.Is(err, ErrResponseFailed) {
+					t.Fatalf("%s path err = %v, want errors.Is(err, ErrResponseFailed)", path, err)
+				}
+			}
+			if streamErr.Error() != blockErr.Error() {
+				t.Errorf("paths disagree:\n stream   = %q\n blocking = %q", streamErr, blockErr)
+			}
+		})
 	}
 }
