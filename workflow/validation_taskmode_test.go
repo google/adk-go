@@ -15,6 +15,7 @@
 package workflow_test
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -208,5 +209,67 @@ func TestValidateChatModeWiring_UndeclaredSubAgentMayFollowANode(t *testing.T) {
 		{From: first, To: second},
 	}); err != nil {
 		t.Errorf("an undeclared sub-agent resolves single_turn at a node and may follow one; got %v", err)
+	}
+}
+
+// Both mode checks collect their findings rather than returning the
+// first, so a graph with two misplaced agents names both of them.
+func TestModeChecks_ReportEveryViolation(t *testing.T) {
+	t.Parallel()
+
+	newNode := func(t *testing.T, name string, mode llmagent.Mode) workflow.Node {
+		t.Helper()
+		a, err := llmagent.New(llmagent.Config{Name: name, Mode: mode})
+		if err != nil {
+			t.Fatalf("llmagent.New(%q, %q): %v", name, mode, err)
+		}
+		n, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(%q): %v", name, err)
+		}
+		return n
+	}
+
+	tests := []struct {
+		name  string
+		edges func(t *testing.T) []workflow.Edge
+		want  []string
+	}{
+		{
+			name: "two task-mode graph nodes",
+			edges: func(t *testing.T) []workflow.Edge {
+				first, second := newNode(t, "doer1", llmagent.ModeTask), newNode(t, "doer2", llmagent.ModeTask)
+				return []workflow.Edge{{From: workflow.Start, To: first}, {From: first, To: second}}
+			},
+			want: []string{`Agent "doer1" has mode='task'`, `Agent "doer2" has mode='task'`},
+		},
+		{
+			name: "two chat-mode agents fed from a predecessor",
+			edges: func(t *testing.T) []workflow.Edge {
+				head := newNode(t, "head", llmagent.ModeSingleTurn)
+				c1, c2 := newNode(t, "chat1", llmagent.ModeChat), newNode(t, "chat2", llmagent.ModeChat)
+				return []workflow.Edge{
+					{From: workflow.Start, To: head},
+					{From: head, To: c1},
+					{From: head, To: c2},
+				}
+			},
+			want: []string{`Agent "chat1" has mode='chat'`, `Agent "chat2" has mode='chat'`},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := workflow.New("wf", tc.edges(t))
+			if err == nil {
+				t.Fatal("New() = nil, want an error naming both agents")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("New() error = %q, want it to mention %s", err, want)
+				}
+			}
+		})
 	}
 }
