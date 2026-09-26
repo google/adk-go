@@ -425,6 +425,11 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 		{"extra segments where the provider id belongs", cfgFor("projects/p/locations/l/authProviders/../../secret")},
 		{"empty path segment", cfgFor("projects/p/locations/l/authProviders//ap")},
 		{"trailing slash routes differently after normalization", cfgFor("projects/p/locations/l/connectors/c/")},
+		// This row does pin it. A whole ".." where the provider id belongs is one
+		// segment with no slash in it, so authProviderResourceRE accepts the name
+		// and validateResource is the only thing that rejects it: drop its empty
+		// and relative segment check and this row alone turns red.
+		{"relative segment as the whole provider id", cfgFor("projects/p/locations/l/authProviders/..")},
 		{"not a resource name at all", cfgFor("Bearer")},
 		{"unknown collection", cfgFor("projects/p/locations/l/authProvidrs/ap")},
 		{"truncated", cfgFor("projects/p")},
@@ -465,13 +470,14 @@ func TestNewProviderValidatesScheme(t *testing.T) {
 // a caller behind an http.RoundTripper classifies on reach it through the
 // provider.
 //
-// Credential returns the retrieval error as it stands, and this pins that it
-// stays a pass-through: the tool layer decides whether to raise a
+// Credential returns the retrieval error as it stands, and this does not pin
+// that — a %w wrap added there keeps every arm green. What it pins is that the
+// error stays classifiable: the tool layer decides whether to raise a
 // human-in-the-loop consent round-trip by finding *auth.ConsentRequiredError,
-// and retry logic keys on the sentinels, so a wrap added here with %v rather
-// than %w would break both. Each arm goes through the exported Credential
-// rather than through the client, because the client's own tests cannot see
-// what this layer does to the error.
+// and retry logic keys on the sentinels, so a wrap with %v rather than %w would
+// break both. Each arm goes through the exported Credential rather than through
+// the client, because the client's own tests cannot see what this layer does to
+// the error.
 func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
