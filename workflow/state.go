@@ -129,15 +129,19 @@ type NodeState struct {
 	// on NodeState). Consumed by Resume to validate the payload.
 	interruptSchemas map[string]*jsonschema.Schema
 
-	// answeredThisTurn is true when this node's interrupt was
-	// resolved by a user response that appeared in history for the
-	// first time on the current resume turn (resolvedCount == 1), as
-	// opposed to a duplicate resume that replays an already-consumed
-	// response. Not persisted; rebuilt each turn from event history.
-	// Lets Resume count a terminal handoff asker (no successors) as
-	// an effective resume on its first turn while staying a no-op on
-	// duplicates (idempotency).
-	answeredThisTurn bool
+	// freshAnswers holds the interrupt IDs whose user response appeared
+	// in history for the first time on this turn (resolvedCount == 1),
+	// as opposed to a duplicate turn replaying a response the run has
+	// already taken delivery of. Not persisted; rebuilt each turn from
+	// event history. Lets Resume count a terminal handoff asker (no
+	// successors) as an effective resume on its first turn while
+	// staying a no-op on duplicates (idempotency).
+	//
+	// Per ID, not per node: a node holding one never-replayed answer
+	// would otherwise report "answered this turn" on every later turn
+	// of the session, and a replay of one of its OTHER answers would
+	// ride on that and re-trigger its successors.
+	freshAnswers map[string]bool
 
 	// reentryConsumed is true when every response this node resumed on
 	// has already been acted on by a later activation of the node —
@@ -180,14 +184,17 @@ type RunState struct {
 }
 
 // actionableInterruptIDs returns the interrupt IDs this run recognises, mapped
-// to whether Resume can still do something with them: those a node is waiting
-// for, those a re-entry node is about to be re-run with, and those a node
-// settled on this very turn are live (true). An answer a re-entry node has
-// already acted on is recognised but spent (false) — Resume will skip that node
-// rather than re-run it, so routing a turn there on its strength alone would
-// fail the turn with ErrNothingToResume. A FunctionResponse absent from the map
-// answers nothing here at all: it replies to an interrupt this run has finished
-// with, or was never aimed at this run.
+// to whether Resume can still do something with them.
+//
+// Live (true): an interrupt a node is still waiting for, and an answer that
+// first reached the run on this very turn. Spent (false): an answer delivered
+// on an earlier turn, whether or not the node re-ran on it. Resume gates every
+// arm on that same distinction, so a turn routed here on a spent answer alone
+// schedules nothing and fails with ErrNothingToResume — the right diagnostic
+// for a bare replay, and the wrong outcome for one echoed alongside the
+// human's next instruction. An ID absent from the map answers nothing here at
+// all: it replies to an interrupt this run has finished with, or was never
+// aimed at this run.
 //
 // Reachable from the packages that dispatch a turn through
 // internal/workflowstate rather than as public API, since "settled on this very
@@ -207,18 +214,22 @@ func (s *RunState) actionableInterruptIDs() map[string]bool {
 		if ns == nil {
 			continue
 		}
-		// A completed node still counts on the turn its answer arrived:
-		// a handoff asker resolves from history and rehydrates completed,
-		// so its genuine first resume looks settled already.
-		if ns.Status != NodeWaiting && ns.Status != NodePending && !ns.answeredThisTurn {
-			continue
-		}
+		// Every node the rehydration reconstructed contributes, whatever
+		// its status. A settled node's answers are RECOGNISED but spent,
+		// which is not the same as unknown: leaving a completed handoff
+		// asker out altogether made a bare duplicate submit of its
+		// approval look like a turn aimed at nothing, so the dispatcher
+		// started a fresh Run and re-executed the whole graph.
 		for _, id := range ns.Interrupts {
 			// Still open, whatever became of this node's other answers.
 			mark(id, true)
 		}
 		for id := range ns.ResumedInputs {
-			mark(id, !ns.reentryConsumed)
+			// An answer already delivered on an earlier turn is spent,
+			// whether or not the node re-ran on it. Resume gates every
+			// arm on the same per-ID freshness, so a turn routed here on
+			// a re-echoed answer alone schedules nothing and fails.
+			mark(id, ns.freshAnswers[id] && !ns.reentryConsumed)
 		}
 	}
 	return ids

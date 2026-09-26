@@ -16,6 +16,7 @@ package workflow
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -50,6 +51,13 @@ type nodeScanState struct {
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
 	branch  string
+}
+
+// reopen drops an interrupt from the seen set so addInterrupt records it again
+// as a fresh, unanswered request.
+func (s *nodeScanState) reopen(id string) {
+	delete(s.seen, id)
+	s.interrupts = slices.DeleteFunc(s.interrupts, func(v string) bool { return v == id })
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -164,13 +172,12 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				if _, first := sf.resolved[fr.ID]; !first {
-					// First answer for this interrupt: nothing has run
-					// on it yet. A later answer does not reset that —
-					// the node either acted after the first one or it
-					// did not.
-					sf.consumed[fr.ID] = false
-				}
+				// consumed is deliberately not reset here. An answer is
+				// consumed once the node settles on it, and a later
+				// answer to the same interrupt does not un-settle that —
+				// the node either acted after the first one or it did
+				// not. (Resetting would also be a no-op: consumed is
+				// written only for IDs already in resolved.)
 				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
@@ -197,7 +204,13 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		// Recorded per interrupt, not per node: a node that re-entered
 		// on one answer and paused again must still act on the answer to
 		// the new interrupt.
-		if ev.Output != nil || len(ev.LongRunningToolIDs) > 0 {
+		//
+		// Only the node's OWN activation settles it. eventNodeName folds
+		// a delegated child into its static ancestor, so without the
+		// ownActivation test a child completing would read as the
+		// orchestrator completing — and an orchestrator that delegates
+		// successfully and then fails could never be retried.
+		if ownActivation(ev, owner) && (ev.Output != nil || len(ev.LongRunningToolIDs) > 0) {
 			for id := range s.resolved {
 				s.consumed[id] = true
 			}
@@ -208,6 +221,18 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
 				continue
+			}
+			// Raising an ID the node has already been answered on re-opens
+			// it: the node looked at the answer and asked again, typically
+			// because it rejected the payload. Without this the earlier
+			// answer keeps the interrupt resolved for good — addInterrupt
+			// dedupes, so it never returns to the unresolved set — and the
+			// corrected answer can never reach the node.
+			if _, answered := s.resolved[id]; answered && ownActivation(ev, owner) {
+				delete(s.resolved, id)
+				delete(s.resolvedCount, id)
+				delete(s.consumed, id)
+				s.reopen(id)
 			}
 			s.addInterrupt(id)
 			if s.branch == "" {
@@ -364,10 +389,17 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 	// the completed one: a node left waiting on its other interrupts still
 	// took delivery of the answer that did arrive, so the turn is not the
 	// empty no-op ErrNothingToResume reports.
+	//
+	// Recorded per ID. Collapsed to one bool per node it read true for the
+	// rest of the session as soon as the node held a single never-replayed
+	// answer, so a replay of any of its OTHER answers counted as new work
+	// and re-triggered its successors.
 	for id := range resumed {
 		if scan.resolvedCount[id] == 1 {
-			ns.answeredThisTurn = true
-			break
+			if ns.freshAnswers == nil {
+				ns.freshAnswers = map[string]bool{}
+			}
+			ns.freshAnswers[id] = true
 		}
 	}
 
@@ -507,6 +539,29 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 		}
 	}
 	return ev.Author
+}
+
+// ownActivation reports whether ev came from owner's own activation rather
+// than from something owner delegated to. eventNodeName attributes an event to
+// the first path segment naming a static graph node, so a dynamic child's
+// events carry their ancestor's name; the deepest segment is what says who
+// actually emitted it.
+//
+// An event with no path is attributed by Author, which names a node and never
+// a delegated child, so it counts as the node's own.
+func ownActivation(ev *session.Event, owner string) bool {
+	if ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
+		return true
+	}
+	path := ev.NodeInfo.Path
+	last := path
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		last = path[i+1:]
+	}
+	if i := strings.IndexByte(last, '@'); i >= 0 {
+		last = last[:i]
+	}
+	return last == owner
 }
 
 // staticNodeName returns the static graph node owning a node path: the

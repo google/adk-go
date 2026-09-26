@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -107,12 +108,19 @@ func (w *Workflow) Resume(
 				continue
 			}
 
-			// Which of this node's interrupts were answered this turn?
-			answeredNow := false
+			// Which of this node's interrupts does this turn answer, and
+			// which of those answers had the run not already taken
+			// delivery of? The second question is what decides whether
+			// the turn did any work: an answer already in history from an
+			// earlier turn is a replay, however it is re-sent.
+			answeredNow, newlyAnswered := false, false
 			for id := range ns.ResumedInputs {
-				if _, ok := responses[id]; ok {
-					answeredNow = true
-					break
+				if _, ok := responses[id]; !ok {
+					continue
+				}
+				answeredNow = true
+				if ns.freshAnswers[id] {
+					newlyAnswered = true
 				}
 			}
 			// WAITING nodes whose response arrived this turn but is not
@@ -150,7 +158,11 @@ func (w *Workflow) Resume(
 			// them. Skipping keeps a re-entry node as idempotent as a
 			// handoff one — without it, ResumedInputs (which history
 			// never un-answers) re-fires the node on every later turn.
-			if ns.reentryConsumed && len(freshMatched) == 0 {
+			// reentryConsumed is set only on the two NodePending arms of
+			// inferNodeState and freshMatched is filled only for a
+			// NodeWaiting node, so the two are mutually exclusive and no
+			// second condition is needed here.
+			if ns.reentryConsumed {
 				continue
 			}
 
@@ -174,10 +186,16 @@ func (w *Workflow) Resume(
 				// answered yet. It stays in NodeWaiting: completing it
 				// here would drop the unanswered ones and hand
 				// successors an output standing in for a decision that
-				// was never made — for a rejected confirmation, one
-				// gating the very work it rejected. Same call as
-				// adk-python's replay interceptor, which leaves such a
-				// node waiting on the unresolved IDs.
+				// was never made. Same call as adk-python's replay
+				// interceptor, which leaves such a node waiting on the
+				// unresolved IDs.
+				//
+				// This defers the successors, it does not gate them on
+				// what the answers say. Handoff forwards the decision to
+				// the successor as data and the engine never reads it —
+				// a rejected confirmation still completes the node once
+				// every interrupt has some answer, and the successor is
+				// what has to act on the rejection.
 				//
 				// This turn emits nothing of its own, because the node
 				// did not run. The requests still open are the ones the
@@ -196,7 +214,7 @@ func (w *Workflow) Resume(
 				ns.Interrupts = remaining
 				// An answer did land, so the turn is not the empty no-op
 				// ErrNothingToResume reports.
-				if ns.answeredThisTurn || len(freshMatched) > 0 {
+				if newlyAnswered || len(freshMatched) > 0 {
 					scheduled++
 				}
 			} else {
@@ -219,12 +237,12 @@ func (w *Workflow) Resume(
 				// A matched asker is itself an effective resume even
 				// when terminal (no successors to count in Pass 2):
 				// without this a single-asker workflow would wrongly
-				// report ErrNothingToResume. answeredThisTurn gates on
-				// the response being new this turn (rehydration sets it
-				// from resolvedCount), so a duplicate resume stays a
-				// no-op. freshMatched covers the runner-direct path
-				// where the response is not yet in history.
-				if ns.answeredThisTurn || len(freshMatched) > 0 {
+				// report ErrNothingToResume. Gated on the answer being
+				// one the run had not already taken delivery of, so a
+				// duplicate submit stays a no-op. freshMatched covers
+				// the direct-call path where the response is not yet in
+				// history.
+				if newlyAnswered || len(freshMatched) > 0 {
 					scheduled++
 				}
 			}
@@ -254,6 +272,15 @@ func (w *Workflow) Resume(
 				if state.completed[succ.node.Name()] {
 					continue
 				}
+				// And one that ran on a prior turn and is now parked on
+				// an interrupt of its own. Rehydration drops a waiting
+				// node from completed — the pause is what it is waiting
+				// to be told about — so the guard above cannot see that
+				// it already ran, and re-triggering it would redo
+				// everything it did before it parked.
+				if sns := state.Nodes[succ.node.Name()]; sns != nil && sns.Status == NodeWaiting {
+					continue
+				}
 				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 				scheduled++
 			}
@@ -279,7 +306,13 @@ func resumeOutput(matched map[string]any) any {
 			return v
 		}
 	}
-	return matched
+	// Cloned because this value becomes the node's Output and then every
+	// successor's input, while the caller's map stays the engine's own record
+	// of the node's answers. Handing that record out would let a node that
+	// writes to its input rewrite the run's resume state, and would give two
+	// concurrently running successors one map between them. One level deep:
+	// the values are still the payloads the caller decoded.
+	return maps.Clone(matched)
 }
 
 // validateResumeResponse coerces resp into the type described by
