@@ -1329,6 +1329,11 @@ func newFailingResumeAgent(t *testing.T, name, fcID string, runs *atomic.Int32, 
 // and fails it with ErrNothingToResume, losing the text.
 func TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText(t *testing.T) {
 	const idA, idB = "confirm-echo-a", "confirm-echo-b"
+	var upstreamRuns atomic.Int32
+	upstream := workflow.NewFunctionNode("prepare", func(_ agent.Context, _ any) (string, error) {
+		upstreamRuns.Add(1)
+		return "prepared", nil
+	}, workflow.NodeConfig{})
 	worker, err := workflow.NewAgentNode(
 		newTwoConfirmAgent(t, "approve_payment", idA, idB),
 		workflow.NodeConfig{}, // handoff: the engine default for a non-LlmAgent
@@ -1336,7 +1341,7 @@ func TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText(t *testing
 	if err != nil {
 		t.Fatalf("NewAgentNode: %v", err)
 	}
-	a := makeAgent(t, workflow.Chain(workflow.Start, worker))
+	a := makeAgent(t, workflow.Chain(workflow.Start, upstream, worker))
 	sess := newFakeSession()
 	runFreshTurn(t, sess, a, "pay 500")
 
@@ -1347,6 +1352,7 @@ func TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText(t *testing
 		},
 	}}}
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, confirmA)), nil)
+	afterFirst := upstreamRuns.Load()
 
 	// The human's next instruction, with the settled first approval echoed.
 	echo := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
@@ -1356,7 +1362,22 @@ func TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText(t *testing
 			Response: map[string]any{"confirmed": true},
 		}},
 	}}
-	drainAgent(t, sess, a.Run(newMockCtx(sess, a, echo)), nil)
+	turn := drainAgent(t, sess, a.Run(newMockCtx(sess, a, echo)), nil)
+
+	// The turn ran rather than failing, and running means a fresh run: the
+	// graph restarts and both requests are put to the human again.
+	if got := upstreamRuns.Load(); got != afterFirst+1 {
+		t.Errorf("upstream runs = %d, want %d; the echo turn did not run", got, afterFirst+1)
+	}
+	raised := map[string]bool{}
+	for _, ev := range turn {
+		for _, id := range ev.LongRunningToolIDs {
+			raised[id] = true
+		}
+	}
+	if !raised[idA] || !raised[idB] {
+		t.Errorf("interrupts re-raised on the echo turn = %v, want both %q and %q", raised, idA, idB)
+	}
 }
 
 // TestWorkflowAgent_Resume_FailedDelegatingActivationStaysResumable is the
@@ -1644,6 +1665,14 @@ func TestWorkflowAgent_PoisonedHistoryDoesNotFailAnUnrelatedTurn(t *testing.T) {
 		t.Errorf("unrelated turn failed with %v; one bad answer in history must not "+
 			"fail a turn that answers nothing in this run and carries the user's text", err)
 	}
+	// Running means a FRESH run, so the graph restarts from Start: the asker
+	// re-asks and the handler, which never ran, still has not. Recorded here
+	// because it is the cost of the fall-through, not a detail — a poisoned
+	// answer makes every later content-bearing turn replay the graph.
+	if got := handlerRuns.Load(); got != 0 {
+		t.Errorf("handler runs = %d, want 0; the fall-through ran work past the "+
+			"unanswered interrupt", got)
+	}
 
 	// The bare retry must still surface the diagnostic rather than running fresh.
 	if _, err := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval2", "still not an object")))); !errors.Is(err, workflow.ErrInvalidResumeResponse) {
@@ -1711,5 +1740,115 @@ func TestWorkflowAgent_ReRaisedInterruptIDStaysAnswerable(t *testing.T) {
 	if got := activations.Load(); got != 3 {
 		t.Errorf("activations after the corrected answer = %d, want 3; the re-raised "+
 			"interrupt stayed resolved by the answer the node had already rejected", got)
+	}
+}
+
+// TestWorkflowAgent_Resume_FailedActivationRetryWithTextStillResumes is the
+// non-bare twin of TestWorkflowAgent_Resume_FailedActivationStaysResumable. A
+// human whose approved work failed mid-flight retries and says something while
+// doing it. The answer is a replay in history but the node never acted on it,
+// so the turn must still reach Resume and re-run only that node — routing it
+// to a fresh Run restarts the graph and re-executes every completed upstream
+// node.
+func TestWorkflowAgent_Resume_FailedActivationRetryWithTextStillResumes(t *testing.T) {
+	const fcID = "cred-retry-text"
+	var runs, upstreamRuns atomic.Int32
+	var failResume atomic.Bool
+	upstream := workflow.NewFunctionNode("charge", func(_ agent.Context, _ any) (string, error) {
+		upstreamRuns.Add(1)
+		return "charged", nil
+	}, workflow.NodeConfig{})
+	worker, err := workflow.NewAgentNode(
+		newFailingResumeAgent(t, "worker", fcID, &runs, &failResume),
+		workflow.NodeConfig{RerunOnResume: ptrTrue()},
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, upstream, worker))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "go")
+	afterFirst := upstreamRuns.Load()
+
+	// Approve; the tool result is persisted and then the activation fails.
+	failResume.Store(true)
+	_, _ = drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))))
+
+	// Retry, with the human saying something too.
+	failResume.Store(false)
+	retry := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "please try again"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: fcID, Name: "adk_request_credential",
+			Response: map[string]any{"status": "approved"},
+		}},
+	}}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, retry)), nil)
+
+	if got := upstreamRuns.Load(); got != afterFirst {
+		t.Errorf("upstream runs = %d, want %d; the retry started a fresh run and "+
+			"replayed the graph instead of resuming the node that failed", got, afterFirst)
+	}
+}
+
+// TestWorkflowAgent_UseAsOutputOrchestratorReplayIsANoOp covers a delegating
+// orchestrator that never emits an event of its own: a WithUseAsOutput child
+// carries the orchestrator's output, and dynamic_node suppresses the parent's
+// terminal event in that case. Attribution by path alone therefore sees no
+// settling event for the orchestrator at all, so its answer is never marked
+// consumed and a duplicate submit re-runs the body — redoing whatever the
+// human approved. The output attribution in NodeInfo.OutputFor is what says
+// the orchestrator settled.
+func TestWorkflowAgent_UseAsOutputOrchestratorReplayIsANoOp(t *testing.T) {
+	const interruptID = "uao-1"
+	var approvedWork atomic.Int32
+
+	asker := newHitlNode("uao_asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		if resp, ok := ctx.ResumedInput(interruptID); ok {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = resp
+			yield(ev, nil)
+			return
+		}
+		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: interruptID, Message: "approve?",
+		}), nil)
+	})
+	receipt := workflow.NewFunctionNode("uao_receipt", func(_ agent.Context, in any) (string, error) {
+		s, _ := in.(string)
+		return "receipt:" + s, nil
+	}, workflow.NodeConfig{})
+
+	orch := workflow.NewDynamicNode[string, any]("uao_orch",
+		func(nc agent.Context, _ string, _ func(*session.Event) error) (any, error) {
+			ans, err := workflow.RunNode[any](nc, asker, nil)
+			if err != nil {
+				return nil, err
+			}
+			// Stands in for the side effect the human approved.
+			approvedWork.Add(1)
+			if _, err := workflow.RunNode[any](nc, receipt, ans, workflow.WithUseAsOutput()); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}, workflow.NodeConfig{})
+
+	a := makeAgent(t, workflow.Chain(workflow.Start, orch))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "start")
+
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "yes"))), nil)
+	if got := approvedWork.Load(); got != 1 {
+		t.Fatalf("approved work after the answer = %d, want 1", got)
+	}
+
+	// The same answer again, on its own.
+	_, sawErr := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "yes"))))
+	if got := approvedWork.Load(); got != 1 {
+		t.Errorf("approved work after a duplicate submit = %d, want 1; the orchestrator "+
+			"re-ran because its own settling event was suppressed by the delegated output", got)
+	}
+	if !errors.Is(sawErr, workflow.ErrNothingToResume) {
+		t.Errorf("error = %v, want %v", sawErr, workflow.ErrNothingToResume)
 	}
 }

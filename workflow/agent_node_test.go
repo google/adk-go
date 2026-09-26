@@ -1192,3 +1192,112 @@ func (p *pausingProbeAgent) activation(t *testing.T, i int) *genai.Content {
 	}
 	return p.inputs[i]
 }
+
+// nodeRunnerProbeAgent is a resumeProbeAgent that also implements the
+// NodeRunner interface AgentNode.Run prefers. *llmagent.LlmAgent implements
+// it, so this is the branch the PR's headline case takes — and the one every
+// other resume fixture here misses, because agent.New does not implement it.
+type nodeRunnerProbeAgent struct {
+	agent.Agent
+	mu         sync.Mutex
+	nodeInputs []any
+	interrID   string
+	name       string
+}
+
+func newNodeRunnerProbeAgent(t *testing.T, name, interrID string) *nodeRunnerProbeAgent {
+	t.Helper()
+	p := &nodeRunnerProbeAgent{interrID: interrID, name: name}
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) { _ = ctx }
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	p.Agent = a
+	return p
+}
+
+func (p *nodeRunnerProbeAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		p.mu.Lock()
+		n := len(p.nodeInputs)
+		p.nodeInputs = append(p.nodeInputs, nodeInput)
+		p.mu.Unlock()
+
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Author = p.name
+		if n == 0 {
+			ev.LongRunningToolIDs = []string{p.interrID}
+		} else {
+			ev.Output = "done"
+		}
+		yield(ev, nil)
+	}
+}
+
+func (p *nodeRunnerProbeAgent) nodeInput(t *testing.T, i int) any {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i >= len(p.nodeInputs) {
+		t.Fatalf("activation %d missing; node ran %d time(s)", i+1, len(p.nodeInputs))
+	}
+	return p.nodeInputs[i]
+}
+
+// TestAgentNode_ResumeDropsInputOnTheNodeRunnerBranch pins the input drop on
+// the branch an LlmAgent actually takes. RunLLMAgentAsNode both turns the node
+// input into user content and seeds it as a synthetic turn, so re-feeding it
+// on a resume makes the model re-issue the long-running call it is already
+// waiting on — the loop the drop exists to prevent.
+func TestAgentNode_ResumeDropsInputOnTheNodeRunnerBranch(t *testing.T) {
+	const (
+		invocation  = "test-invocation-id"
+		interruptID = "nr-1"
+	)
+	probe := newNodeRunnerProbeAgent(t, "worker", interruptID)
+	rerun := true
+	node, err := NewAgentNode(probe, NodeConfig{RerunOnResume: &rerun})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	producer := newStubNode("producer", "task-input")
+	w := mustNew(t, []Edge{{From: Start, To: producer}, {From: producer, To: node}})
+
+	ctx1 := newSeededMockCtx(t)
+	ctx1.sess = &eventsSession{events: sliceEvents{}}
+	var history sliceEvents
+	for ev, err := range w.Run(ctx1) {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if ev.InvocationID == "" {
+			ev.InvocationID = invocation
+		}
+		history = append(history, ev)
+	}
+	if got := probe.nodeInput(t, 0); got == nil {
+		t.Fatal("first activation got no node input, want the producer's output")
+	}
+	history = append(history, answeredEvent(invocation, interruptID))
+
+	sess := &eventsSession{events: history}
+	state, err := w.ReconstructRunState(sess, invocation)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	ctx2 := newSeededMockCtx(t)
+	ctx2.sess = sess
+	for _, err := range w.Resume(agent.NewContext(ctx2), state, map[string]any{interruptID: "ok"}) {
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	if got := probe.nodeInput(t, 1); got != nil {
+		t.Errorf("resume activation got node input %#v, want nil (continue from history)", got)
+	}
+}

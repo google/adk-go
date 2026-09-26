@@ -194,7 +194,12 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 
 		var events iter.Seq2[*session.Event, error]
 		if runner, ok := n.agent.(NodeRunner); ok {
-			events = runner.RunNode(exCtx, input)
+			// effInput, not input: this is the branch an LlmAgent takes, so
+			// it is the one the resume drop exists for. RunLLMAgentAsNode
+			// turns the node input into user content AND seeds it as a
+			// synthetic turn, which on a resume makes the model re-issue the
+			// long-running call it is already waiting on.
+			events = runner.RunNode(exCtx, effInput)
 		} else {
 			events = n.agent.Run(exCtx)
 		}
@@ -257,8 +262,9 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 // through workflow.RunNode: the sub-scheduler stamps it "<node>@1/<child>@N",
 // which this does not match, while rehydration's eventNodeName still
 // attributes it to <node>. Such a node is therefore re-entered WITH its input.
-// No in-tree agent delegates that way from inside an AgentNode, so the case is
-// unreached today rather than handled.
+// An LlmAgent in chat mode reaches that shape — dispatchTaskFC builds an
+// AgentNode per task target and dispatches it through RunNode — so the case is
+// reachable by framework code and is not handled.
 func (n *AgentNode) isResuming(ctx agent.Context) bool {
 	ra, ok := ctx.(interface{ IsResumeActivation() bool })
 	if !ok || !ra.IsResumeActivation() {
@@ -314,11 +320,12 @@ func raisedInterrupt(sess session.Session, invocationID, nodePath, nodeName stri
 // ("worker@1"), so exact equality would miss a node's own pause across the
 // turn boundary.
 //
-// This matches a node against its own events, NOT against a deeper
-// activation's. An event the scheduler stamped with a descendant path
-// ("worker@1/child@1") does not match "worker@1", even though rehydration
-// attributes that event to the worker — see ownActivation in persistence.go,
-// which draws the same line for the same reason.
+// It matches a node against its own events rather than a descendant's, but
+// only by name: "orch@1/child@1" does not match "worker@1", while
+// "orch@1/worker@1" does, so in a graph holding both a static node and a
+// delegated child called "worker" a child's pause is read as the static
+// node's. ownActivation in persistence.go draws the line properly, by asking
+// which segment rehydration attributes the event to.
 func samePathActivation(evPath, nodePath string) bool {
 	if evPath == nodePath {
 		return true

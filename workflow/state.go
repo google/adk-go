@@ -224,12 +224,27 @@ func (s *RunState) actionableInterruptIDs() map[string]bool {
 			// Still open, whatever became of this node's other answers.
 			mark(id, true)
 		}
+		// The two arms below mirror the two gates Resume applies, because
+		// this map exists to predict whether routing a turn to Resume would
+		// do anything. They are not the same gate, so one rule for both is
+		// wrong in one direction or the other.
+		if ns.Status == NodePending {
+			// A re-entry node about to be re-run. Resume skips it only when
+			// it has already acted on every answer, so an answer delivered
+			// on an earlier turn that the node never got to act on — the
+			// activation emitted an event and then failed — is still live,
+			// and the retry must reach Resume rather than start a fresh run
+			// that replays the whole graph.
+			for id := range ns.ResumedInputs {
+				mark(id, !ns.reentryConsumed)
+			}
+			continue
+		}
+		// A handoff node, waiting or completed. It does not re-run, so an
+		// answer already delivered on an earlier turn can produce nothing
+		// however it is re-sent.
 		for id := range ns.ResumedInputs {
-			// An answer already delivered on an earlier turn is spent,
-			// whether or not the node re-ran on it. Resume gates every
-			// arm on the same per-ID freshness, so a turn routed here on
-			// a re-echoed answer alone schedules nothing and fails.
-			mark(id, ns.freshAnswers[id] && !ns.reentryConsumed)
+			mark(id, ns.freshAnswers[id])
 		}
 	}
 	return ids

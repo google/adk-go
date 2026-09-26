@@ -23,26 +23,28 @@
 package workflowstate
 
 // ActionableInterruptIDs reports the interrupt IDs a rehydrated run recognises,
-// mapped to whether Resume can still do something with them. Live (true): one a
-// node is waiting for, one a re-entry node is about to be re-run with, or one a
-// node settled on this very turn. Spent (false): an answer a re-entry node has
-// already acted on, which Resume skips. An ID absent from the map answers
-// nothing in that run.
+// mapped to whether Resume can still do something with them. An ID absent from
+// the map answers nothing in that run. The live/spent rule is the workflow
+// package's to state, not this one's — see RunState.actionableInterruptIDs,
+// which is the single definition; restating it here is how the two came to
+// disagree.
 //
 // The distinction matters to a caller deciding whether a turn is a resume. A
 // spent ID on its own is a replay, and routing the turn to Resume on its
 // strength alone would fail the whole turn with ErrNothingToResume.
 //
-// The argument is a *workflow.RunState; anything else yields an empty map,
-// which reads the same as "this run recognises nothing" and is the safe
-// reading, since a caller that recognises nothing starts a fresh run rather
-// than resuming on an ID it cannot vouch for.
+// The argument is a *workflow.RunState. For anything else the caller gets
+// nothing recognised, which is the safe reading: a caller that recognises
+// nothing starts a fresh run rather than resuming on an ID it cannot vouch
+// for. An empty map and a nil map read identically at the only call site,
+// which indexes it.
 //
 // It is a var so the workflow package can install the real implementation from
 // its own init without this package importing it. The stand-in below is what
 // makes the var safe to call unconditionally: a nil func here would be a panic
 // on a request path for any future importer that does not transitively pull in
-// workflow, with no compile-time signal. Nothing but that init may assign to
-// it — there is no synchronisation, and the sole write happens during package
-// initialisation, before any goroutine can read it.
+// workflow, with no compile-time signal. Only that init assigns to it in
+// production code — there is no synchronisation, and that write happens during
+// package initialisation, before any goroutine can read it. A test that
+// substitutes it must not run in parallel with another that reads it.
 var ActionableInterruptIDs = func(runState any) map[string]bool { return map[string]bool{} }

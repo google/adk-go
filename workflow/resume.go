@@ -278,7 +278,17 @@ func (w *Workflow) Resume(
 				// to be told about — so the guard above cannot see that
 				// it already ran, and re-triggering it would redo
 				// everything it did before it parked.
-				if sns := state.Nodes[succ.node.Name()]; sns != nil && sns.Status == NodeWaiting {
+				//
+				// An open interrupt is required, not merely NodeWaiting.
+				// A WaitForOutput barrier parks NodeWaiting with no
+				// interrupt, and that one exists precisely to be
+				// re-triggered when its predecessors settle. Unpinned:
+				// rehydration never reconstructs such a node (it has no
+				// interrupt history), so only a caller reusing one
+				// RunState across two Resume calls can reach it, and I
+				// could not build that case.
+				if sns := state.Nodes[succ.node.Name()]; sns != nil &&
+					sns.Status == NodeWaiting && len(sns.Interrupts) > 0 {
 					continue
 				}
 				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
@@ -310,8 +320,13 @@ func resumeOutput(matched map[string]any) any {
 	// successor's input, while the caller's map stays the engine's own record
 	// of the node's answers. Handing that record out would let a node that
 	// writes to its input rewrite the run's resume state, and would give two
-	// concurrently running successors one map between them. One level deep:
-	// the values are still the payloads the caller decoded.
+	// concurrently running successors one map between them.
+	//
+	// It protects the engine's record, not the payload. The clone is one level
+	// deep, and the single-answer case above returns the payload itself — so a
+	// tool confirmation's {"confirmed": …, "payload": …}, which UnwrapResponse
+	// passes through whole, is still one map shared by every successor. A node
+	// must treat its input as read-only.
 	return maps.Clone(matched)
 }
 

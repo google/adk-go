@@ -324,13 +324,19 @@ func TestUnwrapResumeResponse(t *testing.T) {
 	}
 }
 
-// TestDetectResume_HookStandInDoesNotPanic pins that the workflowstate hook is
-// callable without a nil check. It cannot be nil in a built binary — workflow's
-// init installs it, and anything reading it imports workflow — so a future
-// internal importer that does not is the case the stand-in exists for, and the
-// only way to reach it is to install a stand-in here. A workflow input reply
-// still resumes, because its function name admits it without the hook.
-func TestDetectResume_HookStandInDoesNotPanic(t *testing.T) {
+// TestDetectResume_UnrecognisedRunStillResumesWorkflowInputReply pins the
+// name-based admission that survives when the actionable-ID hook recognises
+// nothing: a reply named adk_request_input reaches Resume on its name alone,
+// so the caller still gets ErrNothingToResume rather than a silent fresh run.
+//
+// It does NOT pin the non-nil stand-in in internal/workflowstate — it installs
+// its own, and workflow's init has already run by then, so the stand-in could
+// be deleted with this green. The stand-in is there so a future internal
+// importer that does not transitively pull in workflow gets an empty map
+// instead of a nil-func panic, which nothing in this package can observe.
+func TestDetectResume_UnrecognisedRunStillResumesWorkflowInputReply(t *testing.T) {
+	// Reassigning a package-level var is safe only because no test in this
+	// package runs in parallel; keep it that way.
 	saved := workflowstate.ActionableInterruptIDs
 	t.Cleanup(func() { workflowstate.ActionableInterruptIDs = saved })
 	workflowstate.ActionableInterruptIDs = func(any) map[string]bool { return map[string]bool{} }
@@ -341,6 +347,6 @@ func TestDetectResume_HookStandInDoesNotPanic(t *testing.T) {
 	sess := newFakeSession()
 	runFreshTurn(t, sess, a, "x")
 
-	// With only the stand-in, a workflow input reply must still resume.
+	// With nothing recognised, a workflow input reply must still resume.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
 }

@@ -207,10 +207,10 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		//
 		// Only the node's OWN activation settles it. eventNodeName folds
 		// a delegated child into its static ancestor, so without the
-		// ownActivation test a child completing would read as the
+		// settlesOwner test a child completing would read as the
 		// orchestrator completing — and an orchestrator that delegates
 		// successfully and then fails could never be retried.
-		if ownActivation(ev, owner) && (ev.Output != nil || len(ev.LongRunningToolIDs) > 0) {
+		if settlesOwner(ev, owner, nodesByName) && (ev.Output != nil || len(ev.LongRunningToolIDs) > 0) {
 			for id := range s.resolved {
 				s.consumed[id] = true
 			}
@@ -224,11 +224,20 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			}
 			// Raising an ID the node has already been answered on re-opens
 			// it: the node looked at the answer and asked again, typically
-			// because it rejected the payload. Without this the earlier
-			// answer keeps the interrupt resolved for good — addInterrupt
-			// dedupes, so it never returns to the unresolved set — and the
-			// corrected answer can never reach the node.
-			if _, answered := s.resolved[id]; answered && ownActivation(ev, owner) {
+			// because it rejected the payload.
+			//
+			// Two things go wrong without it, one per node kind. A handoff
+			// node rehydrates NodeCompleted, because addInterrupt dedupes
+			// and the ID never returns to the unresolved set, and hands the
+			// rejected answer to its successors. A re-entry node is skipped
+			// as a replay instead, because the re-raise settles it and so
+			// marks the answer consumed. Either way the corrected answer can
+			// never reach the node.
+			//
+			// Whoever raised it. A delegated child re-asking under this node
+			// is the node asking again as far as the engine is concerned:
+			// that is the pause it parks and re-enters on.
+			if _, answered := s.resolved[id]; answered {
 				delete(s.resolved, id)
 				delete(s.resolvedCount, id)
 				delete(s.consumed, id)
@@ -541,27 +550,72 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	return ev.Author
 }
 
-// ownActivation reports whether ev came from owner's own activation rather
-// than from something owner delegated to. eventNodeName attributes an event to
-// the first path segment naming a static graph node, so a dynamic child's
-// events carry their ancestor's name; the deepest segment is what says who
-// actually emitted it.
+// settlesOwner reports whether ev shows owner's own activation finishing —
+// producing its output or parking on a new interrupt — as opposed to something
+// owner delegated to finishing under it. The distinction decides whether the
+// answers owner holds count as acted upon: a child completing while the
+// orchestrator goes on to fail must leave the orchestrator retryable.
 //
-// An event with no path is attributed by Author, which names a node and never
-// a delegated child, so it counts as the node's own.
-func ownActivation(ev *session.Event, owner string) bool {
+// Two ways to qualify. The event came from owner's own activation, or its
+// Output is attributed to that activation through OutputFor — which is how a
+// WithUseAsOutput child's output becomes the orchestrator's, the orchestrator
+// then emitting no terminal event of its own.
+func settlesOwner(ev *session.Event, owner string, nodesByName map[string]Node) bool {
+	if ownActivation(ev, owner, nodesByName) {
+		return true
+	}
+	if ev.NodeInfo == nil {
+		return false
+	}
+	for _, p := range ev.NodeInfo.OutputFor {
+		if lastSegmentName(p) == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// ownActivation reports whether ev came from owner's own activation rather
+// than from something owner delegated to.
+//
+// eventNodeName attributes an event to the FIRST path segment naming a static
+// graph node, so a delegated child's events carry their ancestor's name. The
+// event is therefore the attributed node's own only when that first matching
+// segment is also the last one — nothing is nested below it. Comparing only
+// the last segment would get a self-recursive orchestrator ("orch@1/orch@2")
+// backwards, calling the child's events the ancestor's.
+//
+// When no segment names a graph node, eventNodeName fell back to Author, which
+// names a node and never a delegated child, so the event counts as the node's
+// own.
+func ownActivation(ev *session.Event, owner string, nodesByName map[string]Node) bool {
 	if ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
 		return true
 	}
-	path := ev.NodeInfo.Path
-	last := path
+	segs := strings.Split(ev.NodeInfo.Path, "/")
+	for i, seg := range segs {
+		name := segmentName(seg)
+		if _, ok := nodesByName[name]; ok {
+			return i == len(segs)-1 && name == owner
+		}
+	}
+	return true
+}
+
+// segmentName strips the "@runID" suffix from one node-path segment.
+func segmentName(seg string) string {
+	if i := strings.IndexByte(seg, '@'); i >= 0 {
+		return seg[:i]
+	}
+	return seg
+}
+
+// lastSegmentName returns the node name of a path's deepest segment.
+func lastSegmentName(path string) string {
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		last = path[i+1:]
+		path = path[i+1:]
 	}
-	if i := strings.IndexByte(last, '@'); i >= 0 {
-		last = last[:i]
-	}
-	return last == owner
+	return segmentName(path)
 }
 
 // staticNodeName returns the static graph node owning a node path: the
