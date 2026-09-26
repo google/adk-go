@@ -33,7 +33,16 @@ package workflowstate
 // spent ID on its own is a replay, and routing the turn to Resume on its
 // strength alone would fail the whole turn with ErrNothingToResume.
 //
-// Installed by workflow.init; the argument is a *workflow.RunState. Returns nil
-// for anything else, which callers should read as "cannot tell" rather than
-// "nothing is actionable".
-var ActionableInterruptIDs func(runState any) map[string]bool
+// The argument is a *workflow.RunState; anything else yields an empty map,
+// which reads the same as "this run recognises nothing" and is the safe
+// reading, since a caller that recognises nothing starts a fresh run rather
+// than resuming on an ID it cannot vouch for.
+//
+// It is a var so the workflow package can install the real implementation from
+// its own init without this package importing it. The stand-in below is what
+// makes the var safe to call unconditionally: a nil func here would be a panic
+// on a request path for any future importer that does not transitively pull in
+// workflow, with no compile-time signal. Nothing but that init may assign to
+// it — there is no synchronisation, and the sole write happens during package
+// initialisation, before any goroutine can read it.
+var ActionableInterruptIDs = func(runState any) map[string]bool { return map[string]bool{} }

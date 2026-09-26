@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowstate"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -271,6 +273,45 @@ func TestUnwrapResumeResponse(t *testing.T) {
 			fr:   &genai.FunctionResponse{Response: map[string]any{}},
 			want: map[string]any{},
 		},
+		{
+			// The JSON parse now applies under every wrapper key, not only
+			// "response". Both inbound decoders this replaced returned a
+			// "payload" string verbatim, and the history decoder parsed it,
+			// so the same reply used to decode two ways depending on where
+			// it was read from. These three rows are what says which way
+			// the disagreement was settled — a client that sends a
+			// JSON-looking string under payload or result now gets the
+			// parsed value on every path.
+			name: "PayloadShape_JSONStringIsParsed",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"payload": "true"},
+			},
+			want: true,
+		},
+		{
+			name: "ResultShape_JSONStringIsParsed",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"result": "123"},
+			},
+			want: float64(123),
+		},
+		{
+			name: "PayloadShape_JSONNullBecomesNil",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"payload": "null"},
+			},
+			want: nil,
+		},
+		{
+			// A nil Response decodes to an untyped nil, not to a non-nil any
+			// holding a nil map. The engine tests "is there an output" with
+			// ev.Output != nil and ns.Output != nil, and the wrapped nil map
+			// passes both — so a bare acknowledgement used to read as a
+			// value on two of the three paths and as no value on the third.
+			name: "NilResponse_IsUntypedNil",
+			fr:   &genai.FunctionResponse{Response: nil},
+			want: nil,
+		},
 	}
 
 	for _, tc := range tests {
@@ -281,4 +322,25 @@ func TestUnwrapResumeResponse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDetectResume_HookStandInDoesNotPanic pins that the workflowstate hook is
+// callable without a nil check. It cannot be nil in a built binary — workflow's
+// init installs it, and anything reading it imports workflow — so a future
+// internal importer that does not is the case the stand-in exists for, and the
+// only way to reach it is to install a stand-in here. A workflow input reply
+// still resumes, because its function name admits it without the hook.
+func TestDetectResume_HookStandInDoesNotPanic(t *testing.T) {
+	saved := workflowstate.ActionableInterruptIDs
+	t.Cleanup(func() { workflowstate.ActionableInterruptIDs = saved })
+	workflowstate.ActionableInterruptIDs = func(any) map[string]bool { return map[string]bool{} }
+
+	asker := newAskerNode("approve", "?", nil)
+	handler := newCountingHandlerNode("handler", new(atomic.Int32))
+	a := makeAgent(t, workflow.Chain(workflow.Start, asker, handler))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "x")
+
+	// With only the stand-in, a workflow input reply must still resume.
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
 }

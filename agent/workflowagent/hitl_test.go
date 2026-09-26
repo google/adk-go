@@ -617,6 +617,26 @@ func drainAgent(t *testing.T, sess *fakeSession, seq iter.Seq2[*session.Event, e
 	return got
 }
 
+// drainAgentErr is drainAgent without the error assertion: it records events in
+// the session and returns the first error instead of failing on it, so a test
+// can check its side-effect assertions before the diagnostic.
+func drainAgentErr(t *testing.T, sess *fakeSession, seq iter.Seq2[*session.Event, error]) ([]*session.Event, error) {
+	t.Helper()
+	var got []*session.Event
+	var sawErr error
+	for ev, err := range seq {
+		if err != nil {
+			if sawErr == nil {
+				sawErr = err
+			}
+			continue
+		}
+		got = append(got, ev)
+		sess.appendEvent(ev)
+	}
+	return got, sawErr
+}
+
 // findRequest scans events for the first one carrying a
 // RequestedInput and returns the InterruptID it carried, or "" if
 // none was found.
@@ -1297,4 +1317,399 @@ func newFailingResumeAgent(t *testing.T, name, fcID string, runs *atomic.Int32, 
 		t.Fatalf("agent.New: %v", err)
 	}
 	return a
+}
+
+// TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText is the
+// partly-answered-handoff twin of
+// TestWorkflowAgent_SettledReplyDoesNotDiscardNewText. A handoff node answered
+// on one of two interrupts stays waiting, and its delivered answer stays in
+// ResumedInputs. A client that echoes that settled answer alongside the
+// human's next instruction must still get the instruction run: the answer
+// cannot be acted on again, so routing the turn to Resume schedules nothing
+// and fails it with ErrNothingToResume, losing the text.
+func TestWorkflowAgent_Handoff_PartialAnswerEchoDoesNotDiscardNewText(t *testing.T) {
+	const idA, idB = "confirm-echo-a", "confirm-echo-b"
+	worker, err := workflow.NewAgentNode(
+		newTwoConfirmAgent(t, "approve_payment", idA, idB),
+		workflow.NodeConfig{}, // handoff: the engine default for a non-LlmAgent
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, worker))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "pay 500")
+
+	confirmA := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{
+			ID: idA, Name: "adk_request_confirmation",
+			Response: map[string]any{"confirmed": true},
+		},
+	}}}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, confirmA)), nil)
+
+	// The human's next instruction, with the settled first approval echoed.
+	echo := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "cancel the rest"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: idA, Name: "adk_request_confirmation",
+			Response: map[string]any{"confirmed": true},
+		}},
+	}}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, echo)), nil)
+}
+
+// TestWorkflowAgent_Resume_FailedDelegatingActivationStaysResumable is the
+// delegating twin of TestWorkflowAgent_Resume_FailedActivationStaysResumable.
+// A re-entry orchestrator resumes, delegates to a child that completes with an
+// output, and only then fails. scanHistory attributes events by static node —
+// a dynamic child folds into its ancestor — so the child's output must not be
+// read as the ORCHESTRATOR settling on its answer. If it is, the answer is
+// marked consumed, every retry is skipped as a replay, and the run is wedged
+// for good: history never un-answers an interrupt.
+func TestWorkflowAgent_Resume_FailedDelegatingActivationStaysResumable(t *testing.T) {
+	const interruptID = "ask_deleg"
+	var failNext atomic.Bool
+	var completions, approvedWork atomic.Int32
+
+	asker := newHitlNode("ask_child", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		if resp, ok := ctx.ResumedInput(interruptID); ok {
+			// Stands in for the side effect the human approved.
+			approvedWork.Add(1)
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = resp
+			yield(ev, nil)
+			return
+		}
+		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: interruptID, Message: "name?",
+		}), nil)
+	})
+
+	orchestrator := workflow.NewDynamicNode[string, string]("deleg_orch",
+		func(nc agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			out, err := workflow.RunNode[any](nc, asker, nil)
+			if err != nil {
+				return "", err
+			}
+			// The child has completed and persisted its output. Now the
+			// orchestrator's own remaining work fails.
+			if failNext.Load() {
+				return "", errors.New("orchestrator step failed after the child completed")
+			}
+			completions.Add(1)
+			name, _ := out.(string)
+			return "Hello, " + name + "!", nil
+		},
+		workflow.NodeConfig{},
+	)
+
+	a := makeAgent(t, workflow.Chain(workflow.Start, orchestrator))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "start")
+
+	// Turn 2: the answer arrives, the child completes, the orchestrator fails.
+	failNext.Store(true)
+	for ev, err := range a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "Wolo"))) {
+		if err != nil {
+			continue // the deliberate failure
+		}
+		if ev != nil {
+			sess.appendEvent(ev)
+		}
+	}
+	if got := completions.Load(); got != 0 {
+		t.Fatalf("orchestrator completed %d time(s) on the failing turn, want 0", got)
+	}
+
+	// Turn 3: the human retries with the same answer. The approved work must
+	// still be able to settle.
+	failNext.Store(false)
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "Wolo"))), nil)
+	if got := completions.Load(); got != 1 {
+		t.Errorf("orchestrator completions after the retry = %d, want 1; the retry was "+
+			"skipped as a replay because the child's output marked the answer consumed", got)
+	}
+	// Retrying the orchestrator must not redo what the human already
+	// approved: the child completed on the failing turn, so the retry has to
+	// fast-forward it from history rather than run it again.
+	if got := approvedWork.Load(); got != 1 {
+		t.Errorf("approved child work ran %d time(s), want 1; retrying the orchestrator "+
+			"re-executed a child that had already completed", got)
+	}
+}
+
+// TestWorkflowAgent_Handoff_BareDuplicateSubmitDoesNotRestartTheGraph covers a
+// double-clicked approve button: the identical FunctionResponse posted a second
+// time, on its own. The node has settled on it, so there is nothing left to
+// resume and the right answer is ErrNothingToResume. Dropping a settled node
+// from the actionable-ID map instead makes the reply look like it answers
+// nothing in this run, and the turn starts a fresh Workflow.Run that replays
+// every completed upstream node.
+func TestWorkflowAgent_Handoff_BareDuplicateSubmitDoesNotRestartTheGraph(t *testing.T) {
+	const fcID = "confirm-dup"
+	var upstreamRuns, successorRuns atomic.Int32
+	upstream := workflow.NewFunctionNode("prepare",
+		func(_ agent.Context, _ any) (string, error) {
+			upstreamRuns.Add(1)
+			return "prepared", nil
+		}, workflow.NodeConfig{})
+	worker, err := workflow.NewAgentNode(
+		newOneConfirmAgent(t, "approve_payment", fcID),
+		workflow.NodeConfig{}, // handoff
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	successor := workflow.NewFunctionNode("execute",
+		func(_ agent.Context, _ any) (string, error) {
+			successorRuns.Add(1)
+			return "done", nil
+		}, workflow.NodeConfig{})
+	a := makeAgent(t, workflow.Chain(workflow.Start, upstream, worker, successor))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "pay")
+
+	approve := func() *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID: fcID, Name: "adk_request_confirmation",
+				Response: map[string]any{"confirmed": true},
+			},
+		}}}
+	}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, approve())), nil)
+	if got := successorRuns.Load(); got != 1 {
+		t.Fatalf("successor runs after the approval = %d, want 1", got)
+	}
+	afterFirst := upstreamRuns.Load()
+
+	// The same approval again, with nothing else in the message. Assert the
+	// side effects before the error, so a regression reports the re-run rather
+	// than only the missing diagnostic.
+	_, sawErr := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, approve())))
+
+	if got := upstreamRuns.Load(); got != afterFirst {
+		t.Errorf("upstream runs = %d, want %d; the duplicate submit restarted the graph", got, afterFirst)
+	}
+	if got := successorRuns.Load(); got != 1 {
+		t.Errorf("successor runs = %d, want 1; the duplicate submit re-ran approved work", got)
+	}
+	if !errors.Is(sawErr, workflow.ErrNothingToResume) {
+		t.Errorf("error = %v, want %v; a settled reply must be reported as a no-op, "+
+			"not silently started as a fresh run", sawErr, workflow.ErrNothingToResume)
+	}
+}
+
+// TestWorkflowAgent_Handoff_ReplayDoesNotReRunAParkedSuccessor covers the
+// second way a duplicate answer escapes the idempotency guard. The asker
+// raised two interrupts; one answer is a replay and the other is not, so the
+// node is legitimately acted on — but Pass 2 must still not re-trigger a
+// successor that already ran and is now parked on an interrupt of its own.
+// Rehydration drops a waiting node from state.completed, so the completed-set
+// guard cannot see it.
+func TestWorkflowAgent_Handoff_ReplayDoesNotReRunAParkedSuccessor(t *testing.T) {
+	const idA, idB, idS = "park-a", "park-b", "park-s"
+	var successorRuns atomic.Int32
+	worker, err := workflow.NewAgentNode(
+		newTwoConfirmAgent(t, "approve_payment", idA, idB),
+		workflow.NodeConfig{}, // handoff
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	// The successor does its work and then asks for a confirmation of its own.
+	guarded, err := workflow.NewAgentNode(
+		newSideEffectThenConfirmAgent(t, "execute_payment", idS, &successorRuns),
+		workflow.NodeConfig{},
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, worker, guarded))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "pay 500")
+
+	confirm := func(id string) *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID: id, Name: "adk_request_confirmation",
+				Response: map[string]any{"confirmed": true},
+			},
+		}}}
+	}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, confirm(idA))), nil)
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, confirm(idB))), nil)
+	if got := successorRuns.Load(); got != 1 {
+		t.Fatalf("successor runs after both answers = %d, want 1", got)
+	}
+
+	// Replay the first answer. The successor is parked on idS, not completed.
+	_, sawErr := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, confirm(idA))))
+	if got := successorRuns.Load(); got != 1 {
+		t.Errorf("successor runs after a replayed answer = %d, want 1; a parked "+
+			"successor was re-triggered and redid its side effect", got)
+	}
+	if !errors.Is(sawErr, workflow.ErrNothingToResume) {
+		t.Errorf("error = %v, want %v", sawErr, workflow.ErrNothingToResume)
+	}
+}
+
+// newOneConfirmAgent pauses once on a single confirmation request.
+func newOneConfirmAgent(t *testing.T, name, fcID string) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = name
+				ev.LongRunningToolIDs = []string{fcID}
+				ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: fcID, Name: "adk_request_confirmation",
+					}}},
+				}}
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	return a
+}
+
+// newSideEffectThenConfirmAgent records one side effect and then pauses on its
+// own confirmation request, so the node ends the turn parked rather than
+// completed.
+func newSideEffectThenConfirmAgent(t *testing.T, name, fcID string, runs *atomic.Int32) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				runs.Add(1)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = name
+				ev.LongRunningToolIDs = []string{fcID}
+				ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: fcID, Name: "adk_request_confirmation",
+					}}},
+				}}
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	return a
+}
+
+// TestWorkflowAgent_PoisonedHistoryDoesNotFailAnUnrelatedTurn covers what
+// rehydrating before filtering costs. A payload that fails its schema stays in
+// history for good, so every later ReconstructRunState fails — including on a
+// turn that answers nothing in this run. Such a turn has work of its own and
+// must run rather than inherit an earlier turn's fault.
+func TestWorkflowAgent_PoisonedHistoryDoesNotFailAnUnrelatedTurn(t *testing.T) {
+	var handlerRuns atomic.Int32
+	asker := newAskerNode("approval2", "decide", approvalSchema())
+	handler := newCountingHandlerNode("handler", &handlerRuns)
+	a := makeAgent(t, workflow.Chain(workflow.Start, asker, handler))
+	sess := newFakeSession()
+
+	runFreshTurn(t, sess, a, "x")
+	// Poison the run: a payload that can never validate.
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval2", "not an object"))),
+		workflow.ErrInvalidResumeResponse)
+
+	// A later turn with the human's own instruction and a tool reply aimed
+	// somewhere else entirely.
+	unrelated := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "forget it, start over"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: "some-other-tool-call", Name: "get_weather",
+			Response: map[string]any{"result": "sunny"},
+		}},
+	}}
+	drainAgentErrOnly := func() error {
+		_, err := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, unrelated)))
+		return err
+	}
+	if err := drainAgentErrOnly(); err != nil {
+		t.Errorf("unrelated turn failed with %v; one bad answer in history must not "+
+			"fail a turn that answers nothing in this run and carries the user's text", err)
+	}
+
+	// The bare retry must still surface the diagnostic rather than running fresh.
+	if _, err := drainAgentErr(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approval2", "still not an object")))); !errors.Is(err, workflow.ErrInvalidResumeResponse) {
+		t.Errorf("bare retry error = %v, want %v", err, workflow.ErrInvalidResumeResponse)
+	}
+}
+
+// TestWorkflowAgent_ReRaisedInterruptIDStaysAnswerable covers a node that
+// rejects a payload and asks again under the SAME interrupt ID —
+// session.RequestInput takes a caller-chosen, stable InterruptID, and
+// examples/workflow/hitl_rerun builds one per run, so this is a shape the API
+// invites. Rehydration dedupes the raise, so without re-opening the ID the
+// first answer keeps the interrupt resolved for good and the corrected answer
+// can never reach the node.
+func TestWorkflowAgent_ReRaisedInterruptIDStaysAnswerable(t *testing.T) {
+	const fcID = "revalidate-1"
+	var activations atomic.Int32
+	inner, err := agent.New(agent.Config{
+		Name: "revalidator",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				n := activations.Add(1)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "revalidator"
+				if n < 3 {
+					// Reject and re-prompt under the same ID.
+					ev.LongRunningToolIDs = []string{fcID}
+					ev.LLMResponse = model.LLMResponse{Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+							ID: fcID, Name: "adk_request_confirmation",
+						}}},
+					}}
+				} else {
+					ev.Output = "settled"
+				}
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(inner, workflow.NodeConfig{RerunOnResume: ptrTrue()})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, node))
+	sess := newFakeSession()
+	runFreshTurn(t, sess, a, "go")
+
+	reply := func(v string) *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID: fcID, Name: "adk_request_confirmation",
+				Response: map[string]any{"payload": v},
+			},
+		}}}
+	}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, reply("rejected-shape"))), nil)
+	if got := activations.Load(); got != 2 {
+		t.Fatalf("activations after the first answer = %d, want 2", got)
+	}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, reply("corrected"))), nil)
+	if got := activations.Load(); got != 3 {
+		t.Errorf("activations after the corrected answer = %d, want 3; the re-raised "+
+			"interrupt stayed resolved by the answer the node had already rejected", got)
+	}
 }

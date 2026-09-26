@@ -135,8 +135,22 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	// session does not leak in.
 	state, err := a.workflow.ReconstructRunState(ctx.Session(), ctx.InvocationID())
 	if err != nil {
-		// A bad resume (e.g. failed schema validation) must fail,
-		// not silently fall through to a fresh Run.
+		// A bad resume (e.g. failed schema validation) must fail, not
+		// silently fall through to a fresh Run: the caller needs the
+		// diagnostic in order to retry with a corrected payload.
+		//
+		// But rehydration reads the whole run, not just this turn, so a
+		// payload that can never validate poisons every later turn in the
+		// session. When this turn carries work of its own, failing it
+		// would discard that work too, for a fault it had no part in.
+		//
+		// Only non-response content counts here. Which FunctionResponses
+		// are aimed at this run is exactly what the failed rehydration
+		// would have told us, so a turn made only of replies keeps the
+		// error and the caller can retry with a corrected payload.
+		if carriesNonResponseContent(ctx.UserContent()) {
+			return nil, nil, false, nil
+		}
 		return nil, nil, false, err
 	}
 	if state == nil {
@@ -219,6 +233,23 @@ func carriesOtherContent(msg *genai.Content, matched map[string]any) bool {
 			if _, ok := matched[fr.ID]; ok {
 				continue
 			}
+		}
+		return true
+	}
+	return false
+}
+
+// carriesNonResponseContent reports whether msg holds any part that is not a
+// FunctionResponse — user text, an attachment, any other part kind. Used where
+// the run state is unavailable, so which replies are aimed at this run cannot
+// be decided and every reply is discounted.
+func carriesNonResponseContent(msg *genai.Content) bool {
+	if msg == nil {
+		return false
+	}
+	for _, p := range msg.Parts {
+		if p == nil || p.FunctionResponse != nil {
+			continue
 		}
 		return true
 	}
