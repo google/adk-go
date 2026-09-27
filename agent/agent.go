@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -239,6 +240,19 @@ func getAuthorForEvent(ctx Context, event *session.Event) string {
 	return ctx.Agent().Name()
 }
 
+// eventActionsFrom returns the actions a callback accumulated, less the fields
+// that are the framework's to write rather than a callback's.
+//
+// A callback is handed the live [session.EventActions] so it can request state
+// deltas, escalation and transfers, and the struct is then copied wholesale onto
+// the persisted event. Anything on it that changes how later prompts are built
+// has to be filtered out here, or the callback gets to set it.
+func eventActionsFrom(actions *session.EventActions) session.EventActions {
+	out := *actions
+	out.Compaction = nil
+	return out
+}
+
 // runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
 // then it skips agent run and returns callback result.
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
@@ -260,7 +274,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *actions
+			event.Actions = eventActionsFrom(actions)
 			ctx.EndInvocation()
 			return event, nil
 		}
@@ -281,7 +295,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		ctx.EndInvocation()
 		return event, nil
 	}
@@ -291,7 +305,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		return event, nil
 	}
 
@@ -319,7 +333,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *actions
+			event.Actions = eventActionsFrom(actions)
 			return event, nil
 		}
 	}
@@ -339,9 +353,13 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		event.Actions = eventActionsFrom(actions)
+		// Deliberately not ending the invocation here, which matches the Python
+		// ADK. Ended reports whether the invocation should stop early, and nothing
+		// reads it after this point: running the after-agent callbacks is the last
+		// step of the agent's Run loop. The flag is also local to this agent's
+		// context and never propagates to a parent, so setting it here would imply
+		// an effect it does not have.
 		return event, nil
 	}
 
@@ -350,7 +368,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *actions
+		event.Actions = eventActionsFrom(actions)
 		return event, nil
 	}
 	return nil, nil
@@ -358,6 +376,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 type invocationContext struct {
 	context.Context
+	adkcontext.Marker
 
 	agent     Agent
 	artifacts Artifacts
@@ -410,6 +429,26 @@ func (c *invocationContext) Memory() Memory {
 
 func (c *invocationContext) Session() session.Session {
 	return c.session
+}
+
+// Value implements context.Context, answering the ADK identity key like every
+// other invocation context so a promoted copy and this one cannot disagree. It
+// owns its session, so no session means no identity — never the enclosing
+// invocation's, whose user made no such call.
+func (c *invocationContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	if key == adkcontext.IdentityKey {
+		if id, ok := identityOf(func() session.Session { return c.session }); ok {
+			return id
+		}
+		return nil
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
 }
 
 func (c *invocationContext) InvocationID() string {

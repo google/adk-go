@@ -109,7 +109,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 
 	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("session %+v not found", req.SessionID)
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, req.SessionID)
 	}
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
@@ -204,6 +204,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, the same way a
+	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
+	// event built as a struct literal by an agent or a tool never goes through
+	// it, and anything that identifies events by ID cannot tell two ID-less
+	// events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	sess, ok := curSession.(*session)
 	if !ok {
@@ -215,14 +223,24 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	stored_session, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
-		return fmt.Errorf("session not found, cannot apply event")
+		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
+
+	// Trim here, before sess.appendEvent publishes its own trimmed event into
+	// the live session's event list: the map cloned below is then one no other
+	// goroutine can reach. The database backend trims twice for the same
+	// reason, once for the live session and once for what it persists.
+	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
 
 	// update the in-memory session
 	if err := sess.appendEvent(event); err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	// Only StateDelta comes from the trim above; every other field below is
+	// read off event. The canonical record is not a mirror of the one
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
+	// RequestedToolConfirmations where the local record aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -231,12 +249,13 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		Branch:         event.Branch,
 		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
-			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			StateDelta:                 trimmedDelta,
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
+			Compaction:                 event.Actions.Compaction.clone(),
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		Routes:             slices.Clone(event.Routes),
