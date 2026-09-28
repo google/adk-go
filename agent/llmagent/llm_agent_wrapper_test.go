@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -255,6 +256,17 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 	})
 
+	// The function is exported, and both things it does with ctx — resolving the
+	// mode, and reading InvocationID for the event — dereference it. Every other
+	// subtest supplies a real context, so without this one the guard never runs.
+	t.Run("nil ctx returns nil instead of panicking", func(t *testing.T) {
+		t.Parallel()
+		a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+		if got := llmagent.PrepareLLMAgentInput(a, nil, "some input"); got != nil {
+			t.Errorf("llmagent.PrepareLLMAgentInput with a nil ctx = %v, want nil", got)
+		}
+	})
+
 	t.Run("non-LlmAgent returns nil", func(t *testing.T) {
 		t.Parallel()
 		a, err := agent.New(agent.Config{Name: "plain"})
@@ -375,6 +387,42 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 		if got.IsolationScope != "" {
 			t.Errorf("IsolationScope = %q, want empty", got.IsolationScope)
+		}
+	})
+
+	// What this function's change actually did: it reads the resolved mode
+	// rather than the declaration, so an UNDECLARED agent seeds when a
+	// placement bound it single_turn and does not otherwise. Every row above
+	// declares a mode, so none of them can tell the two apart.
+	//
+	// Only the second row discriminates — the first passes on the merge base
+	// too, where an undeclared agent simply failed the declaration test. It is
+	// the control, and it is here because there was no unset-mode row at all.
+	t.Run("undeclared with no binding returns nil", func(t *testing.T) {
+		t.Parallel()
+		a := makeLLMAgent(t, "u")
+		ctx := newStubNodeContext(t, a, "")
+		if got := llmagent.PrepareLLMAgentInput(a, ctx, "hello"); got != nil {
+			t.Errorf("PrepareLLMAgentInput for an unplaced undeclared agent = %v, want nil", got)
+		}
+	})
+
+	t.Run("undeclared bound single_turn by a placement seeds", func(t *testing.T) {
+		t.Parallel()
+		a := makeLLMAgent(t, "u")
+		internalAgent, ok := a.(llminternal.Agent)
+		if !ok {
+			t.Fatal("agent is not an llminternal.Agent")
+		}
+		state := llminternal.Reveal(internalAgent)
+		bound := llminternal.WithBoundMode(t.Context(), a.Name(), state, llminternal.ModeSingleTurn)
+		ic := icontext.NewInvocationContext(bound, icontext.InvocationContextParams{
+			Agent:        a,
+			InvocationID: "inv-bound",
+		})
+		got := llmagent.PrepareLLMAgentInput(a, agent.NewContext(ic), "hello")
+		if got == nil {
+			t.Fatal("expected a seed event for an agent a placement bound single_turn; got nil")
 		}
 	})
 }
@@ -683,6 +731,115 @@ func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 		t.Errorf("err = %q, want it to enumerate the supported modes", gotErr.Error())
 	}
 }
+
+// Resolving the mode reads ctx, so an exported entry point has to reject a nil
+// one rather than dereference it. This agent declares single_turn, so on the
+// merge base it passed the mode check and then panicked at ctx.UserContent().
+// Erroring before any of that is better. (The bogus-mode test above is the case
+// where the base did error at the check.)
+func TestRunLLMAgentAsNode_NilContext_Errors(t *testing.T) {
+	t.Parallel()
+	a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+
+	var gotErr error
+	for _, err := range llmagent.RunLLMAgentAsNode(a, nil, nil) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error for a nil context; got nil")
+	}
+	if !strings.Contains(gotErr.Error(), "nil context") {
+		t.Errorf("err = %q, want it to mention a nil context", gotErr.Error())
+	}
+}
+
+// A declared single_turn agent can reach the wrapper with nothing bound for
+// it: runner.findAgentToRun picks such a sub-agent to handle the next turn,
+// and no graph node is involved. The wrapper binds the mode it resolved before
+// running the agent, so the request processors take the same branch it did.
+// Without that, the wrapper drives one turn while the contents processor still
+// assembles the whole conversation.
+func TestRunLLMAgentAsNode_DeclaredSingleTurn_BindsForTheRequestProcessors(t *testing.T) {
+	t.Parallel()
+
+	llm := &recordingLLM{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "worker",
+		Model: llm,
+		Mode:  llmagent.ModeSingleTurn,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	// The current user turn has to be in the session, as the runner puts it
+	// there before running the agent: the backward scan that isolates the
+	// current turn skips this agent's own events, so a history ending on one
+	// pivots at index 0 and returns everything either way.
+	prior := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")}},
+		{Author: "worker", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier answer", "model")}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("current question", "user")}},
+	}
+	for _, ev := range prior {
+		if err := svc.AppendEvent(t.Context(), resp.Session, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("current question", "user"),
+		InvocationID: "inv-declared-single-turn",
+	})
+	// nodeInput is nil, which is the resume shape of the runner path rather than
+	// every turn of it — a fresh turn passes the user text down. Nil is what
+	// this test wants either way: with nothing to seed, hiding history rests on
+	// the binding alone.
+	for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+
+	if llm.got == nil {
+		t.Fatal("model was never called")
+	}
+	for _, c := range llm.got.Contents {
+		for _, p := range c.Parts {
+			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
+				t.Errorf("declared single_turn agent saw conversation history; contents = %v", llm.got.Contents)
+			}
+		}
+	}
+}
+
+// recordingLLM keeps the first request it serves and always answers with text.
+type recordingLLM struct{ got *model.LLMRequest }
+
+func (*recordingLLM) Name() string { return "recording" }
+
+func (m *recordingLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if m.got == nil {
+		m.got = r
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "answer"}},
+		}}, nil)
+	}
+}
+
+var _ model.LLM = (*recordingLLM)(nil)
 
 // TestRunLLMAgentAsNode_Task_HappyPath drives a task-mode agent
 // end-to-end via the runner. The scripted LLM emits finish_task
@@ -1159,5 +1316,191 @@ func fcContent(id, name string, args map[string]any) *genai.Content {
 		Parts: []*genai.Part{{
 			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
 		}},
+	}
+}
+
+// RunLLMAgentAsNode is exported, and agent.Context.WithAgentContext returns nil
+// for the tool and callback wrappers rather than erroring, so routing the mode
+// binding back through it nils the context out. This pins that the single_turn
+// branch does not do that: it panics if the binding is routed back unguarded.
+//
+// It does not pin the binding itself — the agent declares single_turn, so
+// deleting the bind selects the same branch. Another test in this file covers
+// that.
+func TestRunLLMAgentAsNode_SingleTurnAcceptsAToolContext(t *testing.T) {
+	t.Parallel()
+
+	llm := &recordingLLM{}
+	a := makeLLMAgent(t, "worker", withMode(llmagent.ModeSingleTurn),
+		func(c *llmagent.Config) { c.Model = llm })
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-tool-ctx",
+	})
+	toolCtx := agent.NewToolContext(ic, "fc-1", &session.EventActions{}, nil)
+
+	for _, err := range llmagent.RunLLMAgentAsNode(a, toolCtx, nil) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+	// Not panicking is most of the point, but a branch that quietly stopped
+	// running the agent would satisfy that too. A tool context reports no
+	// session and no run config, so an early bail on either is the plausible
+	// regression, and only reaching the model rules it out.
+	if llm.got == nil {
+		t.Error("the model was never called; the single_turn branch did not run the agent")
+	}
+}
+
+// The regression this change came closest to shipping, and the one case where
+// the chat fallback is not free.
+//
+// An UNDECLARED agent driven from a tool or callback context worked on the merge
+// base: the wrapper stamped it single_turn, and that branch builds its own
+// InvocationContext, which a tool context survives. Resolving to chat instead
+// sends it to runChat, which hands the tool context to agent.Run, whose
+// ctx.WithContext returns nil for that wrapper — a nil dereference several
+// frames down. Measured both ways: the same call completes on the merge base
+// and panicked here until the chat branch started reporting it.
+//
+// So the mode flip is kept, deliberately and documented, and the failure it
+// exposes is made legible instead of fatal. A caller that needs this agent to
+// run over a tool context must declare single_turn or place it at a node.
+func TestRunLLMAgentAsNode_UndeclaredOverAToolContext_ErrorsRatherThanPanics(t *testing.T) {
+	t.Parallel()
+
+	a := makeLLMAgent(t, "worker") // undeclared: resolves to chat with nothing bound
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-undeclared-tool-ctx",
+	})
+	toolCtx := agent.NewToolContext(ic, "fc-1", &session.EventActions{}, nil)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("panicked instead of reporting the unusable context: %v", r)
+		}
+	}()
+
+	var gotErr error
+	for _, err := range llmagent.RunLLMAgentAsNode(a, toolCtx, nil) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error for a chat run over a tool context; got nil")
+	}
+	if !strings.Contains(gotErr.Error(), "tool or callback context") {
+		t.Errorf("err = %q, want it to name the unusable context", gotErr.Error())
+	}
+}
+
+// The wrapper's two removed writes are pinned from workflow_test, which leaves
+// `go test ./agent/llmagent/` — the loop someone editing this file runs — unable
+// to see one of them come back. The mode write needs no pin of its own:
+// restoring it fails TestCompactionE2E, TestAgentTransfer and
+// TestToolCallbacksAgent right here, because each drives an undeclared agent
+// whose system instruction changes once it is stamped single_turn. Restoring
+// the IncludeContents write in its guarded form fails nothing in this package
+// at all, hence this test.
+func TestRunLLMAgentAsNode_DoesNotMutateTheAgentsIncludeContents(t *testing.T) {
+	t.Parallel()
+
+	llm := &recordingLLM{}
+	a := makeLLMAgent(t, "worker", withMode(llmagent.ModeSingleTurn),
+		func(c *llmagent.Config) { c.Model = llm })
+
+	internalAgent, ok := a.(llminternal.Agent)
+	if !ok {
+		t.Fatal("agent is not an llminternal.Agent")
+	}
+	if got := llminternal.Reveal(internalAgent).IncludeContents; got != "" {
+		t.Fatalf("precondition: IncludeContents = %q, want empty", got)
+	}
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("hi", "user"),
+		InvocationID: "inv-ic",
+	})
+	for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), "go") {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+	if llm.got == nil {
+		t.Fatal("the model was never called, so the single_turn path was not exercised")
+	}
+
+	if got := llminternal.Reveal(internalAgent).IncludeContents; got != "" {
+		t.Errorf("IncludeContents after a single_turn run = %q, want empty (a run must not mutate the agent)", got)
+	}
+}
+
+// The third write this PR removes that lives in this package, and the third
+// pinned only from workflow_test. installTaskTools used to stamp chat onto an
+// undeclared sub-agent while building a coordinator's tool list, which is what
+// made a coordinator's view of a shared sub-agent depend on construction order.
+// `go test ./agent/llmagent/` was green with that write restored — the whole
+// suite catches it, but not from the package that owns it.
+func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
+	t.Parallel()
+
+	sub, err := llmagent.New(llmagent.Config{Name: "worker"})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+	internalSub, ok := sub.(llminternal.Agent)
+	if !ok {
+		t.Fatal("sub-agent is not an llminternal.Agent")
+	}
+	if got := llminternal.Reveal(internalSub).Mode; got != llminternal.ModeUnset {
+		t.Fatalf("precondition: declared mode = %q, want unset", got)
+	}
+
+	// A declared task sibling, so installTaskTools has something to install and
+	// the loop that used to carry the write actually runs over the undeclared one.
+	task, err := llmagent.New(llmagent.Config{Name: "tasker", Mode: llmagent.ModeTask})
+	if err != nil {
+		t.Fatalf("llmagent.New(tasker): %v", err)
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{sub, task},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+	if len(llminternal.Reveal(coord.(llminternal.Agent)).Tools) == 0 {
+		t.Fatal("the coordinator installed no tools, so installTaskTools did not run")
+	}
+
+	if got := llminternal.Reveal(internalSub).Mode; got != llminternal.ModeUnset {
+		t.Errorf("the undeclared sub-agent's mode after building a coordinator = %q, want unset", got)
 	}
 }

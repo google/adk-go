@@ -1,27 +1,48 @@
-# ADK GO samples
-This folder hosts examples to test different features. The examples are usually minimal and simplistic to test one or a few scenarios.
+# ADK Go samples
 
+This directory contains minimal examples that demonstrate one or a few ADK
+features.
 
-**Note**: This is different from the [google/adk-samples](https://github.com/google/adk-samples) repo, which hosts more complex e2e samples for customers to use or modify directly.
+These examples differ from the
+[google/adk-samples](https://github.com/google/adk-samples) repository, which
+contains more complete end-to-end samples for customers to use or modify.
 
+## Launcher
 
-# Launcher
-In many examples you can see such lines:
+Many examples use the full launcher:
+
 ```go
 l := full.NewLauncher()
-err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
-if err != nil {
-    log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
+if err := l.Execute(ctx, config, os.Args[1:]); err != nil {
+    log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 }
 ```
 
-it allows to decide, which launching options are supported in the run-time. 
-`full.NewLauncher()` includes all major ways you can run the example:
-* console
-* restapi
-* a2a
-* webui (it can run standalone or with restapi or a2a).
+The first argument selects a launcher. `console` is the default when no launcher
+is specified. `web` starts an HTTP server with one or more sublaunchers:
 
-Run `go run ./example/quickstart/main.go help` for details
+| Command | Description |
+|---|---|
+| `console` | Run the agent interactively in a terminal |
+| `web api` | Serve the ADK REST API |
+| `web a2a` | Serve the agent over A2A |
+| `web webui` | Serve the ADK web interface assets; combine it with `api` for a working UI |
+| `web pubsub` | Serve the Pub/Sub trigger endpoint |
+| `web eventarc` | Serve the Eventarc trigger endpoint |
 
-As an alternative, you may want to use `prod.NewLauncher()` which only builds-in restapi and a2a launchers.
+Run examples from the repository root. For example:
+
+```bash
+go run ./examples/quickstart console
+go run ./examples/quickstart web api
+```
+
+The `webui` sublauncher serves the frontend assets only. Combine it with `api`
+to provide the backend routes used by the UI:
+
+```bash
+go run ./examples/quickstart web api webui
+```
+
+For deployments that need fewer server modes, `prod.NewLauncher()` exposes only
+`web api` and `web a2a`.
