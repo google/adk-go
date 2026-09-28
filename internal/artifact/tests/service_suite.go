@@ -508,8 +508,40 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 			canonicalURIs[tc.wantVersion] = resp.ArtifactVersion.CanonicalURI
 		})
 	}
-	if canonicalURIs[2] == canonicalURIs[3] {
-		t.Errorf("versions 2 and 3 have the same CanonicalURI %q", canonicalURIs[2])
+	for version, uri := range canonicalURIs {
+		for otherVersion, otherURI := range canonicalURIs {
+			if version < otherVersion && uri == otherURI {
+				t.Errorf("versions %d and %d have the same CanonicalURI", version, otherVersion)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		fileName  string
+	}{
+		{name: "different session", sessionID: "another-session", fileName: fileName},
+		{name: "different file", sessionID: sessionID, fileName: "another-file"},
+	} {
+		t.Run(fmt.Sprintf("GetArtifactVersion_URI_%s_%s", tc.name, testSuffix), func(t *testing.T) {
+			if _, err := srv.Save(ctx, &artifact.SaveRequest{
+				AppName: appName, UserID: userID, SessionID: tc.sessionID, FileName: tc.fileName,
+				Part: genai.NewPartFromText("other"),
+			}); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+			resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+				AppName: appName, UserID: userID, SessionID: tc.sessionID, FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+			for version, uri := range canonicalURIs {
+				if got := resp.ArtifactVersion.CanonicalURI; got == uri {
+					t.Errorf("distinct artifact shares CanonicalURI with version %d", version)
+				}
+			}
+		})
 	}
 
 	t.Run(fmt.Sprintf("GetArtifactVersion_nonexistent-version_%s", testSuffix), func(t *testing.T) {

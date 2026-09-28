@@ -23,7 +23,6 @@ import (
 	"io/fs"
 	"maps"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -445,47 +444,48 @@ func TestGetArtifactVersionCanonicalURI(t *testing.T) {
 	}
 }
 
-func TestGetArtifactVersionCanonicalURIEscapesSegments(t *testing.T) {
+func TestGetArtifactVersionCanonicalURIIsStoredObjectName(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		fileName string
-		wantURI  string
+		name      string
+		appName   string
+		userID    string
+		sessionID string
+		fileName  string
 	}{
 		{
-			name:     "session scoped",
-			fileName: "report?old#draft",
-			wantURI:  "gs://demo-bucket/app%2Fone/user%2Ftwo/session%2Fthree/report%3Fold%23draft/1",
+			name:      "session scoped special characters",
+			appName:   "app one",
+			userID:    "user/é",
+			sessionID: "session%two",
+			fileName:  "report 100%.txt",
 		},
 		{
-			name:     "user scoped",
-			fileName: "user:report?old#draft",
-			wantURI:  "gs://demo-bucket/app%2Fone/user%2Ftwo/user/user:report%3Fold%23draft/1",
+			name:      "user scoped special characters",
+			appName:   "app/one",
+			userID:    "user two",
+			sessionID: "session three",
+			fileName:  "user:résumé %.txt",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newGCSServiceForTesting("demo-bucket")
-			if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
-				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+			saved, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: tc.appName, UserID: tc.userID, SessionID: tc.sessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromText("data"),
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatalf("Save() failed: %v", err)
 			}
 
 			resp, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
-				AppName: "app/one", UserID: "user/two", SessionID: "session/three", FileName: tc.fileName,
+				AppName: tc.appName, UserID: tc.userID, SessionID: tc.sessionID, FileName: tc.fileName,
 			})
 			if err != nil {
 				t.Fatalf("GetArtifactVersion() failed: %v", err)
 			}
-			if got := resp.ArtifactVersion.CanonicalURI; got != tc.wantURI {
-				t.Errorf("CanonicalURI = %q, want %q", got, tc.wantURI)
-			}
-			parsed, err := url.Parse(resp.ArtifactVersion.CanonicalURI)
-			if err != nil {
-				t.Fatalf("url.Parse(CanonicalURI) failed: %v", err)
-			}
-			if parsed.RawQuery != "" || parsed.Fragment != "" {
-				t.Errorf("CanonicalURI parsed with query %q and fragment %q, want neither", parsed.RawQuery, parsed.Fragment)
+			want := fmt.Sprintf("gs://demo-bucket/%s", buildBlobName(tc.appName, tc.userID, tc.sessionID, tc.fileName, saved.Version))
+			if got := resp.ArtifactVersion.CanonicalURI; got != want {
+				t.Error("CanonicalURI does not name the stored object")
 			}
 		})
 	}

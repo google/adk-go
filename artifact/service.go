@@ -282,8 +282,8 @@ type ArtifactVersion struct {
 	// is not necessarily a download endpoint or an authenticated HTTP URL.
 	CanonicalURI string
 
-	// CustomMetadata is non-nil and contains only string values. It is empty when
-	// no custom metadata was saved.
+	// Implementations must return a non-nil map containing only string values.
+	// It is empty when no custom metadata was saved.
 	CustomMetadata map[string]any
 
 	// CreateTime is when this artifact version was created.

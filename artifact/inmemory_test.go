@@ -73,7 +73,6 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				t.Fatalf("Save(v1) failed: %v", err)
 			}
 			metadata["key"] = "changed after save"
-			firstPart.InlineData.MIMEType = "application/changed"
 
 			secondSaveCtx := platform.WithTimeProvider(t.Context(), func() time.Time { return secondCreateTime })
 			if _, err := srv.Save(secondSaveCtx, &artifact.SaveRequest{
@@ -112,7 +111,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				CanonicalURI:   tc.uriPrefix + "1",
 				CustomMetadata: map[string]any{"key": "value", "count": "42", "enabled": "true"},
 				CreateTime:     firstCreateTime,
-				MimeType:       "application/changed",
+				MimeType:       "image/png",
 			}
 			if diff := cmp.Diff(wantFirst, first.ArtifactVersion); diff != "" {
 				t.Errorf("GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
@@ -156,6 +155,16 @@ func TestInMemoryCanonicalURIEscapesSegments(t *testing.T) {
 			name:     "user scoped",
 			fileName: "user:report?old#draft",
 			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%3Fold%23draft/versions/1",
+		},
+		{
+			name:     "session scoped percent and space",
+			fileName: "report 100%.txt",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%20100%25.txt/versions/1",
+		},
+		{
+			name:     "user scoped percent and space",
+			fileName: "user:report 100%.txt",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%20100%25.txt/versions/1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

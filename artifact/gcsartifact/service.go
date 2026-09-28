@@ -28,7 +28,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -489,19 +488,13 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
 	}
 
-	// Always the gs:// form, matching adk-python's GCS artifact service. The
+	// Always use the gs:// form, matching adk-python's GCS artifact service. The
 	// object's MediaLink is an authenticated JSON API download URL, which a
 	// consumer handed the URI cannot fetch: a model given it as the file_uri of
-	// a file_data part treats it as a web page and fails to read it.
-	escapedAppName := url.PathEscape(appName)
-	escapedUserID := url.PathEscape(userID)
-	escapedFileName := url.PathEscape(fileName)
-	var canonicalURI string
-	if fileHasUserNamespace(fileName) {
-		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/user/%s/%d", s.bucketName, escapedAppName, escapedUserID, escapedFileName, version)
-	} else {
-		canonicalURI = fmt.Sprintf("gs://%s/%s/%s/%s/%s/%d", s.bucketName, escapedAppName, escapedUserID, url.PathEscape(sessionID), escapedFileName, version)
-	}
+	// a file_data part treats it as a web page and fails to read it. Keep the
+	// object name literal so the URI names the object Save wrote, including any
+	// spaces or non-ASCII characters.
+	canonicalURI := fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
 
 	customMeta := make(map[string]any)
 	if attrs.Metadata != nil {
