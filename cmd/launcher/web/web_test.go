@@ -499,7 +499,7 @@ func (p *trackingSpanProcessor) Shutdown(context.Context) error {
 // when the HTTP server fails to start (e.g. port already bound),
 // Run must shut down the initialized OpenTelemetry providers.
 func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
-	ln, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen() failed: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestRunLogsWhenTelemetryShutdownFails(t *testing.T) {
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(orig) })
 
-	ln, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen() failed: %v", err)
 	}
@@ -641,7 +641,7 @@ func (s *optionAppendingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.
 // SetupSubrouters runs before telemetry initialization, so that subrouters can
 // append telemetry options (e.g. span processors) that are picked up by Run.
 func TestRunSetupSubroutersCanAppendTelemetryOptions(t *testing.T) {
-	ln, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen() failed: %v", err)
 	}
@@ -784,7 +784,7 @@ func TestRunPassesResolvedBindHostToSublaunchers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Occupy the port so Run fails at bind, after SetupSubrouters.
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			ln, err := net.Listen("tcp", net.JoinHostPort(tc.want, "0"))
 			if err != nil {
 				t.Fatalf("net.Listen() failed: %v", err)
 			}
