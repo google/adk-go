@@ -27,16 +27,46 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
+	"google.golang.org/adk/v2/internal/originguard"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/routers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
+
+// validateCompactionAgainstAgents reports whether the compaction config can
+// actually serve every app this server knows about.
+func validateCompactionAgainstAgents(cfg ServerConfig) error {
+	return compactionvalidate.AgainstAgents(cfg.Compaction, cfg.AgentLoader, runner.Config{
+		SessionService:  cfg.SessionService,
+		MemoryService:   cfg.MemoryService,
+		ArtifactService: cfg.ArtifactService,
+		PluginConfig:    cfg.PluginConfig,
+	})
+}
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
+	// Validated here rather than left to the first request. A compaction config
+	// is rejected inside runner.New, which this server calls per request, so an
+	// invalid one would otherwise start cleanly and then fail every request
+	// with a 500 that names nothing the operator can act on.
+	//
+	// Against the agents, not just the shape. Validate() only checks the config
+	// on its own, and the failure operators actually hit is a config with no
+	// Summarizer over a root agent that is not an LLM agent, which is perfectly
+	// well-shaped and 500s every request. Building a runner is the same code
+	// path the request takes, so this cannot drift from it.
+	if err := validateCompactionAgainstAgents(cfg); err != nil {
+		return nil, err
+	}
+
 	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
 		TraceCapacity: cfg.DebugConfig.TraceCapacity,
 	})
@@ -44,22 +74,70 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("failed to create debug telemetry service: %w", err)
 	}
 
+	policy := originguard.New(originguard.Config{
+		BindHost:       cfg.BindHost,
+		AllowedOrigins: cfg.AllowedOrigins,
+	})
+
 	router := mux.NewRouter().StrictSlash(true)
-	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
-	setupRouter(router,
-		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(cfg.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(cfg.SessionService, cfg.MemoryService, cfg.AgentLoader, cfg.ArtifactService, cfg.SSEWriteTimeout, cfg.PluginConfig, false)),
+
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+
+	sessionsController := controllers.NewSessionsAPIController(cfg.SessionService)
+	sessionsController.WithAuthorizer(authorizer)
+
+	artifactsController := controllers.NewArtifactsAPIController(cfg.ArtifactService)
+	artifactsController.WithAuthorizer(authorizer)
+
+	subrouters := []routers.Router{
+		routers.NewSessionsAPIRouter(sessionsController),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithConfig(controllers.RuntimeAPIControllerConfig{
+			SessionService:  cfg.SessionService,
+			MemoryService:   cfg.MemoryService,
+			AgentLoader:     cfg.AgentLoader,
+			ArtifactService: cfg.ArtifactService,
+			SSETimeout:      cfg.SSEWriteTimeout,
+			PluginConfig:    cfg.PluginConfig,
+			Compaction:      cfg.Compaction,
+			Authorizer:      authorizer,
+			// The middleware below already refuses a disallowed Origin, but the
+			// upgrader would then apply gorilla's default check on top and
+			// refuse an origin we just allowed. Giving it ours settles both
+			// with one rule.
+			CheckOrigin: policy.CheckOrigin,
+		})),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
-		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
-		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
+		routers.NewArtifactsAPIRouter(artifactsController),
+		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
+		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
-	)
-	return &Server{
+	}
+	if cfg.DebugAPIConfig.IncludeDebugAPI {
+		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
+		debugController.WithAuthorizer(authorizer)
+		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+	}
+
+	authenticator := cfg.Authenticator
+	if authenticator == nil {
+		authenticator = authn.NewNoop()
+	}
+
+	setupRouter(router, authenticator, subrouters...)
+	srv := &Server{
 		router:         router,
+		handler:        policy.Middleware(router),
 		telemetryStore: debugTelemetry,
-	}, nil
+	}
+
+	return srv, nil
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -76,6 +154,108 @@ type ServerConfig struct {
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
+	DebugAPIConfig  DebugAPIConfig
+
+	// Authenticator authenticates inbound requests to every endpoint except the
+	// public ones (/health and /version): a request without valid credentials
+	// is answered 401, and an authenticated request carries the caller's
+	// identity on its context. See the [authn] package for the built-in
+	// providers.
+	//
+	// When nil it defaults to [authn.Noop], which authenticates every request as
+	// an empty caller's identity — leaving every endpoint reachable without credentials.
+	// Setting an Authenticator without also setting an Authorizer authenticates
+	// callers but lets any authenticated caller act as any user; pair it with an
+	// Authorizer to restrict that.
+	Authenticator authn.Authenticator
+
+	// Authorizer decides whether the authenticated caller's identity may act as the user
+	// named in a request path (the {user_id} segment of the sessions, artifacts,
+	// runtime and debug routes); a failure is answered 403.
+	//
+	// When nil it defaults to [authz.Noop], which permits any identity to act as
+	// any user. Use [authz.Strict] to require the authenticated UserID to match
+	// the path — but only alongside an Authenticator that sets a non-empty
+	// UserID, since [authn.Noop]'s empty caller's identity would then be denied for every
+	// user.
+	Authorizer authz.Authorizer
+
+	// AllowedOrigins lists the web origins allowed to call this server from a
+	// browser, as scheme://host[:port]; a bare host or host:port is read as
+	// http. A request whose Origin is not listed is served only when that
+	// Origin is the request's own, so leaving this empty permits same-origin
+	// browsers and nothing else.
+	//
+	// One same-origin case is still refused: an Origin that is not a loopback
+	// address, on a server only this machine can reach. Such a server serves
+	// loopback pages, so a page claiming to be somewhere else got here by
+	// pointing its own DNS name at us. This is what stops a page reaching the
+	// server, and the WebSocket in particular, by DNS rebinding.
+	//
+	// Only on such a server. Where the request arrives over a network the
+	// reasoning does not hold, so neither this nor BindHost's check refuses a
+	// rebound page. That includes inside a container, where the connection
+	// arrives on a routable interface whatever address the port was published
+	// on. A server in that position needs an Authenticator.
+	//
+	// Listing an origin also vouches for its host, which BindHost's check
+	// consults. That check runs on requests with no Origin too, so on a server
+	// with a loopback BindHost this field decides those as well.
+	//
+	// A server behind a reverse proxy on the same machine needs the proxy's
+	// origin listed on both counts: it is not loopback, and the proxy puts its
+	// own hostname in Host.
+	//
+	// A single "*" entry turns every check here off, and BindHost's with them.
+	// It says the server is meant to be reachable from anywhere, so do not set
+	// it on a server reachable from an untrusted network: this API is
+	// unauthenticated, and its endpoints read and drive whole agent sessions.
+	AllowedOrigins []string
+
+	// BindHost is the address the caller will bind this server to.
+	//
+	// Naming a loopback address refuses any request whose Host is neither
+	// loopback nor the host of an AllowedOrigins entry. That is the only way to
+	// catch a rebound page's same-origin GET, on which a browser sends no
+	// Origin at all.
+	//
+	// Naming one routable address says the server is exposed on purpose, and
+	// turns off both that check and the loopback-Origin rule above: a server
+	// reachable over the network is legitimately reachable under whatever name
+	// resolves to it.
+	//
+	// A wildcard address ("", ":8080", "0.0.0.0", "[::]") names every
+	// interface, so it says neither. There, and when this is left empty, the
+	// address the connection was accepted on stands in for the loopback-Origin
+	// rule, and the Host check stays off. Naming a loopback address is what
+	// buys anything over saying nothing: the accepted address cannot tell a
+	// browser on this machine from a sidecar proxy or an nginx proxy_pass to
+	// 127.0.0.1.
+	BindHost string
+
+	// Compaction enables context compaction for the sessions the
+	// runners created here drive, replacing older events with summaries. Nil,
+	// the default, disables compaction.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and it only fires when
+	// more events accumulate between sliding-window compactions than
+	// EventRetentionSize holds back, so a short interval with a large retention
+	// size leaves it idle. See [compaction.Config].
+	//
+	// This setting is server-wide. One server can serve many applications
+	// through its agent loader, and they all get this config or none of them
+	// do, including the same Summarizer instance and so the same model. If
+	// different applications need different compaction, or must not share a
+	// summarizer, run them on separate servers.
+	Compaction *compaction.Config
+}
+
+// DebugAPIConfig contains parameters for the debug API.
+type DebugAPIConfig struct {
+	// Controls if [routers.NewDebugAPIRouter] is included
+	// WARNING: do not use debug api on PROD environment
+	IncludeDebugAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.
@@ -87,13 +267,19 @@ type DebugTelemetryConfig struct {
 
 // Server is an HTTP server that serves the ADK REST API.
 type Server struct {
-	router         *mux.Router
+	// router is the route table. It is what the server routes with; requests
+	// reach it only through handler.
+	router *mux.Router
+	// handler is the route table behind the origin and Host checks built from
+	// [ServerConfig.AllowedOrigins] and [ServerConfig.BindHost]. This is what
+	// [Server.ServeHTTP] serves, so no request skips those checks.
+	handler        http.Handler
 	telemetryStore *services.DebugTelemetry
 }
 
 // ServeHTTP makes [Server] implement [http.Handler] interface.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.router.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
 
 // SpanProcessor returns a processor that captures spans used for /debug/trace endpoint of the ADK REST API server.
@@ -108,7 +294,7 @@ func (s *Server) LogProcessor() sdklog.Processor {
 	return s.telemetryStore.LogProcessor()
 }
 
-func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
-	routers.SetupSubRouters(router, subrouters...)
+func setupRouter(router *mux.Router, authenticator authn.Authenticator, subrouters ...routers.Router) *mux.Router {
+	routers.SetupSubRouters(router, authenticator, subrouters...)
 	return router
 }

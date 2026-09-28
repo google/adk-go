@@ -254,6 +254,9 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			return nil, nil
 		},
 		AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
+			if res != nil && res.Partial {
+				return nil, nil
+			}
 			attrs := map[string]any{}
 			if res != nil && res.UsageMetadata != nil {
 				attrs["usage_metadata"] = res.UsageMetadata

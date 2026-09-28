@@ -26,6 +26,15 @@ import (
 )
 
 // ContextMock defines mocking logic (makes creating your own mocks easier if embedded)
+//
+// Two things to know once [IdentityFromContext] is in play, both of which apply
+// to a fake that embeds this type. Where the fake sits decides the first: passed
+// as the CONTEXT, Value returns nil for every key, so no identity is reported even
+// when the fake overrides Session; passed as the INVOCATION, to Promote or any of
+// the New*Context constructors, the procedure reads that override and reports the
+// fake's own user. And withICDelta skips WithICDelta entirely for a delta that
+// asks no change of the invocation, because this type carries no identity marker,
+// so a fake overriding that method to count or record calls is not invoked for one.
 type ContextMock struct{}
 
 // WithAgentCancel implements [Context].
@@ -206,19 +215,22 @@ func (c *ContextMock) WithContext(ctx context.Context) InvocationContext {
 	return nil
 }
 
-// WithContext implements [Context].
+// WithAgentContext implements [Context].
 func (c *ContextMock) WithAgentContext(ctx context.Context) Context {
 	return nil
 }
 
+// OutputForAncestors implements [Context].
 func (c *ContextMock) OutputForAncestors() []string {
 	return nil
 }
 
+// WithDelta implements [Context].
 func (c *ContextMock) WithDelta(d *CommonContextDelta) Context {
 	return c
 }
 
+// WithICDelta implements [InvocationContext].
 func (c *ContextMock) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	return c
 }

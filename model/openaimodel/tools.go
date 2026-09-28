@@ -67,6 +67,11 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // converts it into an OpenAI-specific responses.FunctionToolParam. We handle
 // the function's name, description, and importantly, convert its parameters
 // from a generic schema format to a map[string]any that the OpenAI API expects.
+//
+// Strict is pinned off rather than left unset: an absent flag lets the API pick
+// the mode from the schema shape and add the caller's optional arguments to
+// required. Pinning it on would do that permanently, so off is the only value
+// that keeps an optional argument optional; adk-python's Responses path agrees.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
@@ -97,6 +102,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		Name:       fn.Name,
 		Type:       constant.Function("function"),
 		Parameters: paramsMap,
+		Strict:     param.NewOpt(false),
 	}
 	if fn.Description != "" {
 		fnParam.Description = param.NewOpt(fn.Description)

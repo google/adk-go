@@ -77,6 +77,12 @@ func TestTransportConsentRequiredPropagates(t *testing.T) {
 	if base.called {
 		t.Error("base transport must not be called when consent is required")
 	}
+	// The wrap builds a new message, so keeping the URI out of Error() is not
+	// enough on its own. Asserted exactly rather than by absence of the URI: a
+	// negative check would go vacuous the moment the fixture above changes.
+	if got, want := err.Error(), "auth: resolve credential: auth: interactive consent required"; got != want {
+		t.Errorf("RoundTrip() error = %q, want %q", got, want)
+	}
 }
 
 func TestTransportNilProvider(t *testing.T) {

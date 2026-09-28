@@ -202,6 +202,103 @@ func TestSaveZeroByteArtifact(t *testing.T) {
 	}
 }
 
+// TestNotFoundIsWrappedSentinel checks that Load and GetArtifactVersion
+// recognize storage.ErrObjectNotExist even when the storage client wraps it,
+// which is how cloud.google.com/go/storage actually returns it in production
+// (see storage.formatObjectErr, which always wraps NotFound as
+// fmt.Errorf("%w: %w", ErrObjectNotExist, err)). A caller checking
+// errors.Is(err, fs.ErrNotExist) must still get a match.
+func TestNotFoundIsWrappedSentinel(t *testing.T) {
+	wrapped := fmt.Errorf("%w: %w", storage.ErrObjectNotExist, errors.New("googleapi: Error 404: Not Found"))
+
+	for _, tc := range []struct {
+		name string
+		call func(svc *gcsService) error
+	}{
+		{
+			name: "Load",
+			call: func(svc *gcsService) error {
+				_, err := svc.Load(t.Context(), &artifact.LoadRequest{
+					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+					Version: 1,
+				})
+				return err
+			},
+		},
+		{
+			name: "GetArtifactVersion",
+			call: func(svc *gcsService) error {
+				_, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+					Version: 1,
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("wrapped-not-exist")
+			fb := svc.bucket.(*fakeBucket)
+			fb.attrsErr = wrapped
+
+			err := tc.call(svc)
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("err = %v, want errors.Is(err, fs.ErrNotExist) = true", err)
+			}
+		})
+	}
+}
+
+// TestGetArtifactVersionCanonicalURI checks the URI handed to a consumer is the
+// gs:// form even though the object also has a MediaLink. MediaLink is an
+// authenticated JSON API download URL: a model given it as the file_uri of a
+// file_data part treats it as a web page and cannot read the object.
+func TestGetArtifactVersionCanonicalURI(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fileName string
+		wantPath string
+	}{
+		{name: "session scoped", fileName: "file", wantPath: "app/user/session/file"},
+		{name: "user namespaced", fileName: "user:file", wantPath: "app/user/user/user:file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("demo-bucket")
+			saved, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: tc.fileName,
+				Part: genai.NewPartFromBytes([]byte("data"), "text/plain"),
+			})
+			if err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+
+			// The assertion below only distinguishes the two forms while the
+			// stored object actually has a MediaLink to be preferred over, so
+			// pin that rather than leaving it to the fixture.
+			blobName := buildBlobName("app", "user", "session", tc.fileName, saved.Version)
+			attrs, err := svc.bucket.object(blobName).attrs(t.Context())
+			if err != nil {
+				t.Fatalf("attrs() failed: %v", err)
+			}
+			if attrs.MediaLink == "" {
+				t.Fatal("stored object has no MediaLink, so this test cannot detect a regression")
+			}
+
+			resp, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+
+			want := fmt.Sprintf("gs://demo-bucket/%s/%d", tc.wantPath, saved.Version)
+			if got := resp.ArtifactVersion.CanonicalURI; got != want {
+				t.Errorf("CanonicalURI = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestBackoffDelayBounds checks the jittered backoff stays within [0, saveRetryMaxDelay].
 func TestBackoffDelayBounds(t *testing.T) {
 	for attempt := range maxSaveAttempts {
@@ -290,6 +387,12 @@ type fakeBucket struct {
 	// return it (a simulated write failure); closeCalls counts Close calls.
 	closeErr   error
 	closeCalls int
+
+	// attrsErr, when set, is returned by every object's attrs() call in place
+	// of the default not-found/found behavior. Used to simulate the GCS
+	// client library's wrapped storage.ErrObjectNotExist (see
+	// TestNotFoundIsWrappedSentinel).
+	attrsErr error
 }
 
 // object returns a handle to the named blob, creating an empty backing store on
@@ -358,13 +461,28 @@ func (o *fakeObject) ifNotExist() gcsObject {
 
 // attrs returns fake attributes for the object.
 func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
+	if o.bucket != nil {
+		o.bucket.mu.Lock()
+		forced := o.bucket.attrsErr
+		o.bucket.mu.Unlock()
+		if forced != nil {
+			return nil, forced
+		}
+	}
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.exists {
 		return nil, storage.ErrObjectNotExist
 	}
-	return &storage.ObjectAttrs{Name: b.name, Created: time.Now(), ContentType: b.contentType}, nil
+	// MediaLink is populated on every object real GCS returns. The fake left it
+	// empty, which hid that CanonicalURI preferred it over the gs:// form.
+	return &storage.ObjectAttrs{
+		Name:        b.name,
+		Created:     time.Now(),
+		ContentType: b.contentType,
+		MediaLink:   "https://storage.googleapis.com/download/storage/v1/b/bucket/o/" + b.name + "?alt=media",
+	}, nil
 }
 
 // delete removes the object from the in-memory store.
