@@ -189,8 +189,10 @@ func TestResolveClientPublishesLateClient(t *testing.T) {
 
 // TestRunInitSurvivesAbruptBuilder pins that a builder which does not return
 // normally still releases the waiters and the in-flight slot. Without the
-// deferred publish, pending stays set with its goroutine dead and every later
-// caller waits out initTimeout, forever.
+// deferred publish, pending stays set with its goroutine dead and nothing ever
+// clears it, so every later call fails for the rest of the process — each
+// waiting out what is left of the attempt's bound, then failing on arrival once
+// that has passed.
 func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -233,7 +235,7 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 			pending := p.pending
 			p.mu.Unlock()
 			if pending != nil {
-				t.Error("provider kept the dead attempt; the next caller would wait on it forever")
+				t.Error("provider kept the dead attempt; every later call would fail on it instead of retrying")
 			}
 		})
 	}
@@ -374,9 +376,11 @@ func TestNewProviderKeepsWiringContextValuesNotCancellation(t *testing.T) {
 // event graph — is left nil when a Client is supplied.
 //
 // That is narrower than "a provider given a Client retains nothing". The
-// builder closure is installed unconditionally, so one that closed over
-// NewProvider's ctx would retain the graph with this test still green;
-// TestDefaultBuilderPassesItsArgumentToNewClient is what covers that.
+// builder closure is installed unconditionally, so one that also closed over
+// NewProvider's ctx would retain the graph with this test still green, and
+// nothing else pins it either. TestDefaultBuilderPassesItsArgumentToNewClient
+// catches a builder that uses that ctx in place of its argument, which is a
+// different thing from one that merely keeps it reachable.
 func TestNewProviderKeepsWiringContextOnlyWhenLazy(t *testing.T) {
 	client, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
 	if err != nil {
@@ -513,8 +517,10 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 // builder with initCtx, and the builder NewProvider installs hands that
 // argument to NewClient rather than a context of its own.
 //
-// The wiring tests above either stub newClient or never reach it, so nothing
-// else drives the one closure that consumes initCtx. Before this test,
+// TestResolveClientBuildsDefaultClient drives this closure too, and
+// TestNewProviderKeepsWiringContextValuesNotCancellation replaces it with a stub
+// to watch what runInit hands in. Neither looks at what the closure passes on.
+// Before this test,
 // replacing that closure's ctx with context.Background() left the whole package
 // green while silently dropping an oauth2.HTTPClient a caller put on the wiring
 // context, which is the documented way to give the token exchange its own

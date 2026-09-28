@@ -337,11 +337,11 @@ func (p *provider) runInit(in *clientInit) {
 	// client would merely have panicked in the caller's own frame. Report it as
 	// this attempt's failure instead, panic value and all.
 	//
-	// The second branch covers an abrupt exit that is not a panic, which the
-	// builder reaches through runtime.Goexit and which leaves the process alive.
-	// Without it that attempt stays pending with its goroutine gone and done
-	// never closed — the terminal state [ErrClientUnavailable] describes, since
-	// publish is the only thing that clears pending.
+	// The second arm catches an abrupt exit that is not a panic, which a builder
+	// reaches through runtime.Goexit. publish runs either way, so what that arm
+	// prevents is not a stuck attempt but a silent one: without it the Goexit is
+	// published as a successful build carrying no client, and every waiter gets a
+	// nil client with a nil error.
 	published := false
 	defer func() {
 		if published {
