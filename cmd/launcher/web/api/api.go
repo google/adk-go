@@ -16,10 +16,11 @@
 package api
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher"
 	weblauncher "google.golang.org/adk/v2/cmd/launcher/web"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/internal/originguard"
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/telemetry"
 )
@@ -72,37 +74,14 @@ func (a *apiLauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(a.flags)
 }
 
-// normalizeOrigin turns a -webui_address value into an RFC 6454 origin
-// (scheme://host[:port]), which is the only form a browser accepts in
-// Access-Control-Allow-Origin.
-//
-// A bare host or host:port gets http:// prepended. The flag names a local
-// development web UI, which is served over plain HTTP, so http is the only
-// useful default; pass a full https:// URL to override it. Any path, query or
-// trailing slash is dropped, because an origin has none. "*" and the empty
-// string pass through unchanged.
-func normalizeOrigin(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if addr == "" || addr == "*" {
-		return addr
-	}
-	if !strings.Contains(addr, "://") {
-		addr = "http://" + addr
-	}
-	u, err := url.Parse(addr)
-	if err != nil || u.Host == "" {
-		// Not something we can read as an origin. Pass it through rather than
-		// inventing a value: the operator sees their own input echoed back.
-		return addr
-	}
-	return u.Scheme + "://" + u.Host
-}
-
 // corsWithArgs adds CORS headers which allow calling ADK REST API from another
 // web app (like ADK WebUI). The configured address is normalised once, when the
 // middleware is built, rather than on every request.
 func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
-	origin := normalizeOrigin(frontendAddress)
+	// The same normalization the REST server's origin check applies, so that
+	// the origin this header advertises and the origin that check accepts
+	// cannot drift apart.
+	origin := originguard.NormalizeOrigin(frontendAddress)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if origin != "" {
@@ -215,6 +194,27 @@ func (w *redirectRewriter) Flush() {
 // handler needs for SetWriteDeadline.
 func (w *redirectRewriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// Hijack lets /run_live take over the connection for its WebSocket upgrade.
+//
+// gorilla/websocket type-asserts the ResponseWriter to http.Hijacker directly
+// and does not consult Unwrap, so a wrapper that omits this method turns every
+// upgrade into a 500. Only the prefixed mount wraps the writer, which is why
+// the failure shows on the default /api path and not on an empty prefix.
+//
+// Anything else that wraps a ResponseWriter here has to forward this too.
+func (w *redirectRewriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		// Wrapping the sentinel keeps errors.Is(err, http.ErrNotSupported)
+		// true. http.ResponseController finds this method before it follows
+		// Unwrap, so without the wrap this type would silently change that
+		// answer from true to false for everything underneath it.
+		return nil, nil, fmt.Errorf("redirectRewriter: underlying %T is not an http.Hijacker: %w",
+			w.ResponseWriter, http.ErrNotSupported)
+	}
+	return h.Hijack()
+}
+
 // rewriteRedirects re-adds pathPrefix to a redirect written below the mount.
 //
 // The handler under a mount is served a path with the prefix stripped, so any
@@ -279,7 +279,14 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		ArtifactService: config.ArtifactService,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 		PluginConfig:    config.PluginConfig,
+		Authenticator:   config.Authenticator,
+		Authorizer:      config.Authorizer,
 		Compaction:      config.Compaction,
+		BindHost:        config.BindHost,
+		// The same value the CORS header advertises. An origin whose script may
+		// read our responses is one we should accept requests from, and whose
+		// host is a legitimate way to reach us.
+		AllowedOrigins: []string{a.config.frontendAddress},
 		DebugConfig: adkrest.DebugTelemetryConfig{
 			TraceCapacity: a.config.traceCapacity,
 		},
@@ -331,11 +338,11 @@ func NewLauncher() weblauncher.Sublauncher {
 	config := &apiConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI origin as seen from the user browser. It's used to allow CORS requests. Accepts a full origin such as 'http://localhost:8080'; a bare hostname and optional port is read as http. '*' allows any origin.")
+	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI origin as seen from the user browser. It is sent as the CORS allowed origin and is accepted by the REST server's origin check; every other cross-origin browser request is refused with 403. Accepts a full origin such as 'http://localhost:8080'; a bare hostname and optional port is read as http. '*' allows any origin and turns the origin check off - do not use it on a server reachable from an untrusted network, since these endpoints are unauthenticated.")
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
-	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true.")
+	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true. !!! WARNING !!! : debug endpoints are not safe to be used in production environment, do not set them to true in production. ")
 
 	return &apiLauncher{
 		config: config,

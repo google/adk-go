@@ -17,11 +17,13 @@ package openaimodel
 const (
 	// Event types
 	responseOutputTextDelta            = "response.output_text.delta"
+	responseRefusalDelta               = "response.refusal.delta"
 	responseReasoningTextDelta         = "response.reasoning_text.delta"
 	responseReasoningSummaryTextDelta  = "response.reasoning_summary_text.delta"
 	responseFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
 	responseFunctionCallArgumentsDone  = "response.function_call_arguments.done"
 	responseOutputTextDone             = "response.output_text.done"
+	responseRefusalDone                = "response.refusal.done"
 	responseReasoningTextDone          = "response.reasoning_text.done"
 	responseReasoningSummaryTextDone   = "response.reasoning_summary_text.done"
 	responseCreated                    = "response.created"

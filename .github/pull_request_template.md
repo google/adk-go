@@ -1,13 +1,14 @@
-**Please ensure you have read the [contribution guide](./CONTRIBUTING.md) before creating a pull request.**
+**Please ensure you have read the [contribution guide](https://github.com/google/adk-go/blob/main/CONTRIBUTING.md) before creating a pull request.**
 
-### Link to Issue or Description of Change
+### Linked issue
 
-**1. Link to an existing issue (if applicable):**
+**1. Link the issue this change is for.** Required for everything except small
+documentation and typo fixes. If no issue exists yet, please open one first.
 
 - Closes: #_issue_number_
 - Related: #_issue_number_
 
-**2. Or, if no issue exists, describe the change:**
+**2. Describe the change:**
 
 _If applicable, please follow the issue templates to provide as much detail as
 possible._
@@ -50,7 +51,7 @@ reviewers better understand the fix._
 
 ### Checklist
 
-- [ ] I have read the [CONTRIBUTING.md](./CONTRIBUTING.md) document.
+- [ ] I have read the [CONTRIBUTING.md](https://github.com/google/adk-go/blob/main/CONTRIBUTING.md) document.
 - [ ] I have performed a self-review of my own code.
 - [ ] I have commented my code, particularly in hard-to-understand areas.
 - [ ] I have added tests that prove my fix is effective or that my feature works.
