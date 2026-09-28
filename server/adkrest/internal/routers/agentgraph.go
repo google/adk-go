@@ -21,7 +21,8 @@ import (
 )
 
 // AgentGraphAPIRouter defines the routes behind the web UI's agent-structure
-// panel and agent builder.
+// panel. They return the agent tree, and the DOT source names every tool the
+// agent can call, so they are registered only under IncludeDebugAPI.
 type AgentGraphAPIRouter struct {
 	graphController *controllers.AgentGraphAPIController
 }
@@ -31,15 +32,8 @@ func NewAgentGraphAPIRouter(controller *controllers.AgentGraphAPIController) *Ag
 	return &AgentGraphAPIRouter{graphController: controller}
 }
 
-const builderDetail = "ADK Go agents are defined in Go code, so there is no server-side agent configuration to edit."
-
-// Routes returns the routes for the agent graph and builder APIs.
-//
-// The two graph endpoints are implemented. The builder write endpoints are not:
-// they would edit an agent's stored configuration, and ADK Go has none.
+// Routes returns the two implemented agent-graph endpoints.
 func (r *AgentGraphAPIRouter) Routes() Routes {
-	notImplemented := controllers.NewNotImplementedHandler("the agent builder", builderDetail)
-
 	return Routes{
 		Route{
 			Name:        "GetAppInfo",
@@ -53,6 +47,26 @@ func (r *AgentGraphAPIRouter) Routes() Routes {
 			Pattern:     DevPrefix + "/build_graph_image",
 			HandlerFunc: r.graphController.BuildGraphImageHandler,
 		},
+	}
+}
+
+const builderDetail = "ADK Go agents are defined in Go code, so there is no server-side agent configuration to edit."
+
+// AgentBuilderAPIRouter defines the web UI's agent builder routes.
+//
+// These are registered unconditionally. They read no agent and disclose
+// nothing: the GET answers an empty 200, which is how the UI knows to disable
+// its builder toggle, and the writes answer 501.
+type AgentBuilderAPIRouter struct{}
+
+// Routes returns the routes for the agent builder API.
+//
+// The write endpoints are not implemented: they would edit an agent's stored
+// configuration, and ADK Go has none.
+func (r *AgentBuilderAPIRouter) Routes() Routes {
+	notImplemented := controllers.NewNotImplementedHandler("the agent builder", builderDetail)
+
+	return Routes{
 		Route{
 			Name:        "GetAgentBuilderConfig",
 			Methods:     []string{http.MethodGet},
