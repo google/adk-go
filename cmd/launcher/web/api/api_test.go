@@ -16,6 +16,7 @@ package api
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"iter"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -510,6 +512,44 @@ func TestWebSocketUpgradeThroughMount(t *testing.T) {
 	}
 }
 
+// TestUserMessageNamesWhatTheDebugFlagCosts covers the startup hint.
+//
+// The graph and trace routes are off by default because they expose tool-call
+// arguments, responses and tool names. That is the right default, but it leaves
+// two web UI panels answering 404, and until now the only signal was an error
+// in the browser console. The startup banner says it instead.
+func TestUserMessageNamesWhatTheDebugFlagCosts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantHint bool
+	}{
+		{"flag absent", nil, true},
+		{"flag set", []string{"--include_debug_api"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+
+			var lines []string
+			l.UserMessage("http://localhost:8080", func(v ...any) {
+				lines = append(lines, fmt.Sprint(v...))
+			})
+			out := strings.Join(lines, "\n")
+
+			got := strings.Contains(out, "-include_debug_api")
+			if got != tc.wantHint {
+				t.Errorf("hint present = %v, want %v; output:\n%s", got, tc.wantHint, out)
+			}
+			if tc.wantHint && !strings.Contains(out, "Traces") {
+				t.Errorf("hint does not name the panels it costs; output:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestHijackReportsNotSupported covers the branch taken when the writer
 // underneath the mount cannot be hijacked.
 //
@@ -701,5 +741,54 @@ func TestSetupSubroutersPassesBindHostToRESTServer(t *testing.T) {
 				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestAPIServerHonorsConfigMaxPayloadSize verifies that launcher.Config.
+// MaxPayloadSize is passed through to the ADK REST API server, so the API
+// server's body limit can be raised above its 10 MiB default.
+//
+// It fails without that plumbing: the API server would stay at
+// adkrest.DefaultMaxPayloadSize and reject the raised body below (between the
+// default and the configured limit) with 400.
+func TestAPIServerHonorsConfigMaxPayloadSize(t *testing.T) {
+	// 20 MiB - twice the adkrest default, clearly above the default limit.
+	const configuredMax = int64(20 << 20)
+
+	a := &apiLauncher{
+		flags:  flag.NewFlagSet("api", flag.ContinueOnError),
+		config: &apiConfig{frontendAddress: "localhost:8080"},
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := a.SetupSubrouters(router, &launcher.Config{
+		SessionService: session.InMemoryService(),
+		MaxPayloadSize: configuredMax,
+	}); err != nil {
+		t.Fatalf("SetupSubrouters: %v", err)
+	}
+
+	sessionsURL := "/apps/my-app/users/u1/sessions"
+	sendSessionBody := func(padding int) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"state": {"padding": %q}}`, strings.Repeat("a", padding))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, sessionsURL, strings.NewReader(body)))
+		return rec
+	}
+
+	// A body between the 10 MiB default and the configured 20 MiB limit. It is
+	// valid JSON, so it must succeed once the configured limit is honored; at
+	// the default it would be rejected.
+	raiseRec := sendSessionBody(int(adkrest.DefaultMaxPayloadSize) + 4096)
+	if raiseRec.Code != http.StatusOK {
+		t.Fatalf("raised-limit request: got status %d, want %d (%s)", raiseRec.Code, http.StatusOK, raiseRec.Body.String())
+	}
+
+	// The configured limit is still enforced above it.
+	overRec := sendSessionBody(int(configuredMax) + 4096)
+	if overRec.Code != http.StatusBadRequest {
+		t.Fatalf("over-configured request: got status %d, want %d (%s)", overRec.Code, http.StatusBadRequest, overRec.Body.String())
+	}
+	if !strings.Contains(overRec.Body.String(), "http: request body too large") {
+		t.Fatalf("over-configured request: got body %q, want mention of %q", overRec.Body.String(), "http: request body too large")
 	}
 }
