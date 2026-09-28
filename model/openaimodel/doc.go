@@ -43,6 +43,10 @@
 //	            HTTPOptions apart from Timeout and Headers
 //	Ignored     HTTPOptions.Headers
 //
+// Function tools are sent with strict parameter validation disabled, and that
+// is not configurable, so tool call arguments are best effort rather than
+// guaranteed to match the declared parameter schema.
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()

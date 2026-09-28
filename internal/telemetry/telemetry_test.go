@@ -276,6 +276,33 @@ func TestGenerateContent(t *testing.T) {
 			},
 		},
 		{
+			// Server-side tool use (e.g. Google Search grounding) feeds tokens back to
+			// the model as input and reports them outside PromptTokenCount, so
+			// input_tokens must be the sum of the two.
+			name: "ToolUsePromptTokensCountAsInput",
+			startParams: StartGenerateContentSpanParams{
+				ModelName:    "test-model",
+				InvocationID: invocationID,
+			},
+			resultParams: TraceGenerateContentResultParams{
+				Response: &model.LLMResponse{
+					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+						PromptTokenCount:        10,
+						ToolUsePromptTokenCount: 7,
+						CandidatesTokenCount:    20,
+						ThoughtsTokenCount:      15,
+					},
+					FinishReason: genai.FinishReasonStop,
+				},
+			},
+			wantName:   "generate_content test-model",
+			wantStatus: codes.Unset,
+			wantAttrs: map[attribute.Key]string{
+				semconv.GenAIUsageInputTokensKey:  "17",
+				semconv.GenAIUsageOutputTokensKey: "35",
+			},
+		},
+		{
 			name: "Error",
 			startParams: StartGenerateContentSpanParams{
 				ModelName:    "test-model",
