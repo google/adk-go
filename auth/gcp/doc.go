@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package gcp is a hand-rolled REST client for the Google Cloud Agent Identity
+// Package gcp resolves per-user Google Cloud credentials from the Agent Identity
 // and IAM Connector credential services. Given a resource name it retrieves an
 // end-user credential and maps it to an [auth.Credential], polling while the
 // service reports a non-interactive "pending" state and surfacing interactive
 // consent as an [auth.ConsentRequiredError].
+//
+// [NewProvider] is the entry point for an agent: it returns an
+// [auth.CredentialProvider] that takes the acting user from the invocation
+// context, so a tool's outbound requests are authenticated as the end user.
+// [NewClient] is the transport underneath, usable on its own where the caller
+// already knows the user.
 //
 // No generated Go client libraries exist for these (preview) services and their
 // surface is a single RPC, so the client is hand-rolled over net/http to keep
 // dependencies light. Calls to the credential services are authenticated with
 // Application Default Credentials (cloud-platform scope) unless a custom
 // *http.Client is supplied.
-//
-// This package holds only the transport-level client. The [auth.CredentialProvider]
-// that resolves the acting user from the invocation context is a separate,
-// higher layer.
 package gcp

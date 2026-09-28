@@ -79,7 +79,7 @@ func TestStreamTranslator_EmptyRefusalDelta(t *testing.T) {
 
 func TestStreamTranslator_FunctionCall(t *testing.T) {
 	tr := newStreamTranslator()
-	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real"}}`)
+	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real","name":"lookup"}}`)
 	if _, err := tr.process(added); err != nil {
 		t.Fatalf("process(added) err = %v", err)
 	}
@@ -91,7 +91,7 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 	if _, err := tr.process(delta); err != nil {
 		t.Fatalf("process(delta) err = %v", err)
 	}
-	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","name":"lookup","arguments":""}`)
+	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`)
 	resp, err := tr.process(done)
 	if err != nil {
 		t.Fatalf("process(done) err = %v", err)
@@ -105,6 +105,27 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 	}
 	if part.FunctionCall.ID != "call_real" {
 		t.Fatalf("call ID mismatch, got %q, want %q", part.FunctionCall.ID, "call_real")
+	}
+}
+
+// TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent pins where the name may
+// come from. The OpenAI API does not put one on the done event, so the SDK no
+// longer decodes it and response.output_item.added is the only source. A
+// provider that sends the name only on the done event loses it, and a nameless
+// call is dropped rather than surfaced, so the loss is silent.
+func TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent(t *testing.T) {
+	tr := newStreamTranslator()
+	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","name":"lookup","arguments":"{}"}`)
+	resp, err := tr.process(done)
+	if err != nil {
+		t.Fatalf("process(done) err = %v", err)
+	}
+	part := resp.Candidates[0].Content.Parts[0]
+	if part.FunctionCall == nil {
+		t.Fatalf("no function call: %+v", part)
+	}
+	if part.FunctionCall.Name != "" {
+		t.Errorf("FunctionCall.Name = %q, want empty: the done event is not a name source", part.FunctionCall.Name)
 	}
 }
 
@@ -136,37 +157,6 @@ func TestStreamTranslator_WithAggregator(t *testing.T) {
 	}
 	if finalText != "hello" {
 		t.Fatalf("aggregated text mismatch got=%q", finalText)
-	}
-}
-
-func TestStreamTranslator_FunctionCall_MissingDoneName(t *testing.T) {
-	tr := newStreamTranslator()
-	added := decodeEvent(t, `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_real","name":"lookup"}}`)
-	if _, err := tr.process(added); err != nil {
-		t.Fatalf("process(added) err = %v", err)
-	}
-	delta := decodeEvent(t, `{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":\""}`)
-	if _, err := tr.process(delta); err != nil {
-		t.Fatalf("process(delta) err = %v", err)
-	}
-	delta = decodeEvent(t, `{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"Paris\"}"}`)
-	if _, err := tr.process(delta); err != nil {
-		t.Fatalf("process(delta) err = %v", err)
-	}
-	done := decodeEvent(t, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`)
-	resp, err := tr.process(done)
-	if err != nil {
-		t.Fatalf("process(done) err = %v", err)
-	}
-	part := resp.Candidates[0].Content.Parts[0]
-	if part.FunctionCall == nil || part.FunctionCall.Name != "lookup" {
-		t.Fatalf("function call not translated: %+v", part)
-	}
-	if part.FunctionCall.Args["city"] != "Paris" {
-		t.Fatalf("args mismatch: %+v", part.FunctionCall.Args)
-	}
-	if part.FunctionCall.ID != "call_real" {
-		t.Fatalf("call ID mismatch, got %q, want %q", part.FunctionCall.ID, "call_real")
 	}
 }
 
