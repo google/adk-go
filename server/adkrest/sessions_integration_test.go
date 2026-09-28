@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/server/adkrest"
+	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -42,7 +43,7 @@ type createSessionResponse struct {
 }
 
 func TestCreateSessionPreservesChunkedBody(t *testing.T) {
-	testServer := newChunkedSessionServer(t)
+	testServer := newChunkedSessionServer(t, "test-user")
 	requestBody := unknownLengthReader{strings.NewReader(`{
 		"state":{"theme":"dark"},
 		"events":[{"id":"event-1","invocationId":"invocation-1","author":"user"}]
@@ -96,7 +97,7 @@ func TestCreateSessionPreservesChunkedBody(t *testing.T) {
 }
 
 func TestCreateSessionAllowsEmptyChunkedBody(t *testing.T) {
-	testServer := newChunkedSessionServer(t)
+	testServer := newChunkedSessionServer(t, "test-user")
 	req, err := http.NewRequestWithContext(
 		t.Context(),
 		http.MethodPost,
@@ -137,7 +138,7 @@ func TestCreateSessionAllowsEmptyChunkedBody(t *testing.T) {
 }
 
 func TestCreateSessionRejectsMalformedChunkedBody(t *testing.T) {
-	testServer := newChunkedSessionServer(t)
+	testServer := newChunkedSessionServer(t, "test-user")
 	req, err := http.NewRequestWithContext(
 		t.Context(),
 		http.MethodPost,
@@ -166,11 +167,14 @@ func TestCreateSessionRejectsMalformedChunkedBody(t *testing.T) {
 	}
 }
 
-func newChunkedSessionServer(t *testing.T) *httptest.Server {
+func newChunkedSessionServer(t *testing.T, authenticatedUserID string) *httptest.Server {
 	t.Helper()
 
 	server, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService: session.InMemoryService(),
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
+		}),
 	})
 	if err != nil {
 		t.Fatalf("adkrest.NewServer() failed: %v", err)

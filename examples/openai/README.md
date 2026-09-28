@@ -1,7 +1,7 @@
 # OpenAI model integration
 
 Runs an ordinary ADK `llmagent` — with a tool — on an **OpenAI** model instead
-of Gemini, using the `google.golang.org/adk/v2/model/openai` package (the
+of Gemini, using the `google.golang.org/adk/v2/model/openaimodel` package (the
 `openaimodel.NewModel` constructor). It talks to OpenAI's **Responses API**, so
 the same `model.LLM` also serves any endpoint that implements that API — recent
 **Ollama**, **LM Studio**, and **vLLM** builds — via a base URL. (Endpoints that

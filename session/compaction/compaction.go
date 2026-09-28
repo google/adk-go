@@ -32,6 +32,37 @@
 // previous one, so history stays as a single rolling summary plus a raw tail.
 // An agent that needs a genuine ceiling on prompt size should enable it.
 //
+// # What bounding costs
+//
+// Bounding the prompt and remembering everything are not both available, and
+// the difference between the two strategies above is exactly that trade. Tail
+// retention recompresses its own summary on every pass, so a value stated early
+// has to survive all of them. The sliding window never re-summarizes, so its
+// summaries do not decay -- and that is the same property that keeps it from
+// bounding.
+//
+// The loss, when it happens, is not gradual. Each pass either copies a value
+// forward or generalizes it to its label -- "the deployment region" in place of
+// "europe-west4" -- and a value replaced by its label cannot come back, because
+// the next pass sees only the previous summary and the retained tail. So recall
+// tends to be all or nothing rather than fading.
+//
+// The default summarizer prompt therefore requires concrete values to be
+// carried forward verbatim. Measured with eight arbitrary facts stated early
+// and probed after the events holding them had been summarized away, a prompt
+// without that instruction lost every one of them in five conversations out of
+// ten; the default lost none in nine. A custom PromptTemplate that drops the
+// instruction reintroduces the loss, and asking only for a "concise" summary is
+// enough to do it.
+//
+// Carrying values forward costs summarizer calls, because larger summaries
+// cross TokenThreshold sooner: about twice as many in the same measurement.
+// Where that matters, or where the detail absolutely cannot be lost, keep it
+// out of the summary altogether. Compaction does not touch session state, and
+// an Instruction referencing state with a {key} placeholder is re-templated on
+// every request, so a value held there reaches the model however many passes
+// have run.
+//
 // # Enabling both together
 //
 // Both strategies can be enabled at once, and they compose, but only when the
@@ -58,7 +89,8 @@
 // The rule of thumb is that EventRetentionSize has to be smaller than the
 // events one compaction interval produces. Tail retention alone is the
 // configuration that needs no arithmetic, and it is what an agent that wants a
-// ceiling should reach for first.
+// ceiling should reach for first -- bearing in mind what that ceiling costs in
+// recall.
 //
 // Compaction is enabled per runner, through the Compaction field on
 // runner.Config:

@@ -17,6 +17,7 @@
 package sessiontestsuite
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,6 +382,11 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 		})
 		if err == nil {
 			t.Errorf("Expected error when getting deleted session")
+		} else if !errors.Is(err, session.ErrNotFound) {
+			// A Service that reports a missing session as a plain error leaves
+			// callers unable to tell it from a storage failure, so the REST
+			// layer answers 500 where it owes the client a 404.
+			t.Errorf("Get(deleted session) error = %v, want an error wrapping session.ErrNotFound", err)
 		}
 
 		if opts.SupportsUserProvidedSessionID {
@@ -439,6 +445,41 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			err := s.AppendEvent(ctx, m, event)
 			if err == nil {
 				t.Errorf("AppendEvent() expected error for non-existent session, got nil")
+			}
+		})
+
+		t.Run("when_session_deleted_returns_ErrNotFound", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			if err := s.Delete(ctx, &session.DeleteRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			}); err != nil {
+				t.Fatalf("Setup: Delete failed: %v", err)
+			}
+
+			// Unlike the case above, this passes the service a session of its
+			// own type, so it reaches the storage lookup instead of stopping at
+			// a type check. A session can disappear between a caller reading it
+			// and appending to it — the REST UpdateSessionHandler does exactly
+			// that Get-then-append — and the handler owes the client a 404 for
+			// it, which it can only tell from a storage failure by the sentinel.
+			err = s.AppendEvent(ctx, created.Session, &session.Event{
+				ID:           "event1",
+				Author:       "user",
+				InvocationID: "inv1",
+			})
+			if err == nil {
+				t.Fatalf("AppendEvent(deleted session) error = nil, want an error wrapping session.ErrNotFound")
+			}
+			if !errors.Is(err, session.ErrNotFound) {
+				t.Errorf("AppendEvent(deleted session) error = %v, want an error wrapping session.ErrNotFound", err)
 			}
 		})
 
@@ -987,20 +1028,44 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 		t.Run("temp_state_is_not_persisted", func(t *testing.T) {
 			s := setup(t)
 			s1, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1"})
-			_ = s.AppendEvent(ctx, s1.Session, &session.Event{
+			if err := s.AppendEvent(ctx, s1.Session, &session.Event{
 				ID:           "event1",
 				Author:       "user",
 				InvocationID: "inv1",
 				Actions:      session.EventActions{StateDelta: map[string]any{"temp:k1": "v1", "sk": "v2"}},
-			})
+			}); err != nil {
+				t.Fatalf("AppendEvent failed: %v", err)
+			}
 
-			got, _ := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: s1.Session.ID()})
+			got, err := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: s1.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get failed: %v", err)
+			}
 			snap := Snapshot(got.Session)
 			if _, exists := snap.State["temp:k1"]; exists {
 				t.Errorf("Temp state leaked to persist step, got: %v", snap.State)
 			}
 			if snap.State["sk"] != "v2" {
 				t.Errorf("Standard state update missing: got %v", snap.State)
+			}
+
+			// Session state can never hold a temp: key (ExtractStateDeltas drops
+			// them before the merge), so the assertions above cannot fail on their
+			// own. The leak lives in the persisted event's Actions.StateDelta.
+			if len(snap.Events) != 1 {
+				t.Fatalf("read back %d events, want the 1 appended; the temp: assertions below need it", len(snap.Events))
+			}
+			stored := snap.Events[0]
+			if stored == nil {
+				t.Fatalf("stored event is nil")
+			}
+			for k := range stored.Actions.StateDelta {
+				if strings.HasPrefix(k, session.KeyPrefixTemp) {
+					t.Errorf("temp key leaked into the stored event delta: key %q, delta %v", k, stored.Actions.StateDelta)
+				}
+			}
+			if got := stored.Actions.StateDelta["sk"]; got != "v2" {
+				t.Errorf("non-temp key dropped from the stored event delta: got %v, want %q", stored.Actions.StateDelta, "v2")
 			}
 		})
 	})

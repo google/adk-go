@@ -36,6 +36,32 @@ import (
 const ConversationHistoryPlaceholder = "{conversation_history}"
 
 // defaultPromptTemplate is the prompt [LLMSummarizer] uses when none is given.
+//
+// Instruction 3 is what keeps tail retention usable. Under tail retention each
+// summary is seeded with the previous one, so a value stated early is
+// recompressed on every pass. Without an instruction to carry values forward,
+// a pass tends to keep the label and drop the value -- "the deployment region"
+// in place of "europe-west4" -- and once generalized it cannot come back,
+// because the next pass sees only the previous summary and the retained tail.
+// Measured over ten conversations that each ran ten or more passes, the prompt
+// without instruction 3 lost every early detail in five of them; with it, none
+// of nine lost any. See the package doc, "What bounding costs".
+//
+// It asks only for what the user stated, which is narrower than the problem.
+// Identifiers that arrive in a tool response decay the same way, and for a
+// tool-using agent that is where most of them come from. The boundary is
+// deliberate rather than considered sufficient: the measurement behind this
+// covers user-stated values, and tool output is already the bulkiest part of a
+// transcript, so instructing the model to carry it forward verbatim would
+// enlarge every subsequent summary by an amount nothing here has measured.
+// Widening it wants its own change and its own numbers.
+//
+// One consequence worth naming: the instruction argues against dropping
+// anything that looks like a durable fact, including text that arrived inside a
+// tool response. Content injected there used to decay out of a rolling summary
+// within a few passes and now has a prompt arguing for its retention. It cannot
+// forge a turn -- formatEvents escapes newlines, so a tool response cannot
+// impersonate a speaker -- but it can persist longer than it used to.
 const defaultPromptTemplate = "The following is a conversation history between a user and an AI agent." +
 	" It may or may not start from a compacted history. Please identify and" +
 	" reiterate the user request, summarize the context so far, focusing on" +
@@ -46,6 +72,13 @@ const defaultPromptTemplate = "The following is a conversation history between a
 	`at the top of your summary (e.g., "Conversation Language: English"). ` +
 	"2. If the agent called any tools, accurately list the exact tool names " +
 	"used to maintain tool grounding. " +
+	`3. Maintain a section titled "Durable facts" listing every concrete ` +
+	"detail the user has stated: identifiers, names, dates, numbers, chosen " +
+	"options and the reasons given for them. Copy each one verbatim. This " +
+	"history may already be a summary of a summary, so any durable fact " +
+	"present in the history MUST be carried forward unchanged, even if it is " +
+	"old and the recent turns are about something else. Never drop or " +
+	"generalize a durable fact to save space; drop narrative instead. " +
 	"The rest of the summary should be concise and capture the" +
 	" essence of the interaction.\n\n" + ConversationHistoryPlaceholder
 
