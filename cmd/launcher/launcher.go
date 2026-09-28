@@ -91,6 +91,15 @@ type Config struct {
 	// bearer token, ...); see the [authn] package. Nil, the default, uses [authn.NewNoop]
 	Authenticator authn.Authenticator
 
+	// BindHost is the address the server is bound to, as the web launcher
+	// resolved it from -host. A loopback value arms the Host check in
+	// [adkrest.ServerConfig.BindHost], which refuses a rebound page's
+	// same-origin GET: a browser sends no Origin on one, so Host is the only
+	// thing that gives it away.
+	//
+	// Empty means no bind was declared and that check stays off.
+	BindHost string
+
 	// Authorizer provides a way to check whether the calling user and user from payload match.
 	// You can leave nil if you accept any combination. You will get [authz.Noop] as a default.
 	// You can also use [authz.Strict] which will ensure that the calling user and the
