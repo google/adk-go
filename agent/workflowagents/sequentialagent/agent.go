@@ -77,6 +77,10 @@ type Config struct {
 
 type sequentialAgent struct{}
 
+type liveRunner interface {
+	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+}
+
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range ctx.Agent().SubAgents() {
@@ -146,31 +150,40 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 		return nil, nil, fmt.Errorf("failed to create task_completed tool: %w", err)
 	}
 
-	for _, subAgent := range subAgents {
-		if llmAgent, ok := subAgent.(llminternal.Agent); ok {
-			state := llminternal.Reveal(llmAgent)
-			hasTaskCompleted := false
-			for _, t := range state.Tools {
-				if t.Name() == "task_completed" {
-					hasTaskCompleted = true
-					break
-				}
+	visited := make(map[agent.Agent]bool)
+	var injectSubAgents func(agents []agent.Agent)
+	injectSubAgents = func(agents []agent.Agent) {
+		for _, subAgent := range agents {
+			if visited[subAgent] {
+				continue
 			}
-			if !hasTaskCompleted {
-				state.Tools = append(state.Tools, taskCompletedTool)
-				instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-				state.Instruction += instructionSuffix
+			visited[subAgent] = true
+			if llmAgent, ok := subAgent.(llminternal.Agent); ok {
+				state := llminternal.Reveal(llmAgent)
+				hasTaskCompleted := false
+				for _, t := range state.Tools {
+					if t.Name() == "task_completed" {
+						hasTaskCompleted = true
+						break
+					}
+				}
+				if !hasTaskCompleted {
+					state.Tools = append(state.Tools, taskCompletedTool)
+					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
+					state.Instruction += instructionSuffix
+				}
+			} else if _, live := subAgent.(liveRunner); live && len(subAgent.SubAgents()) > 0 {
+				injectSubAgents(subAgent.SubAgents())
 			}
 		}
 	}
+	injectSubAgents(subAgents)
 
 	seqSess := &sequentialLiveSession{}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
-			liveAgent, ok := subAgent.(interface {
-				RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
-			})
+			liveAgent, ok := subAgent.(liveRunner)
 			if !ok {
 				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
 					return
@@ -178,7 +191,8 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 				return
 			}
 
-			subSess, innerIter, err := liveAgent.RunLive(ctx)
+			subCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &subAgent})
+			subSess, innerIter, err := liveAgent.RunLive(subCtx)
 			if err != nil {
 				if !yield(nil, fmt.Errorf("sub-agent %s RunLive failed: %w", subAgent.Name(), err)) {
 					return

@@ -237,8 +237,8 @@ func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
 	s := memory.InMemoryService()
 	ctx := t.Context()
 
-	// Seed one session so the per-user map is non-empty while searchers iterate.
-	if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", "seed", nil)); err != nil {
+	// Seed a matching event so searchers also exercise scoring and sorting.
+	if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", "seed", []*session.Event{memoryTextEvent("seed", "x")})); err != nil {
 		t.Fatalf("AddSessionToMemory() error = %v", err)
 	}
 
@@ -250,7 +250,7 @@ func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				id := "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
-				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, nil)); err != nil {
+				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, []*session.Event{memoryTextEvent(id, "x")})); err != nil {
 					t.Errorf("AddSessionToMemory() error = %v", err)
 					return
 				}

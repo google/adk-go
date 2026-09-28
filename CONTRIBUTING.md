@@ -13,13 +13,17 @@ We'd love to accept your patches and contributions to this project.
 -   [Contribution workflow](#contribution-workflow)
     -   [Finding Issues to Work On](#finding-issues-to-work-on)
     -   [Requirement for PRs](#requirement-for-prs)
+    -   [Checks to run before you open a PR](#checks-to-run-before-you-open-a-pr)
     -   [Large or Complex Changes](#large-or-complex-changes)
     -   [Testing Requirements](#testing-requirements)
     -   [Unit Tests](#unit-tests)
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
+    -   [Stale pull requests](#stale-pull-requests)
+-   [AI-assisted development](#ai-assisted-development)
+-   [ADK Web](#adk-web)
+    -   [Refreshing the embedded web bundle](#refreshing-the-embedded-web-bundle)
     -   [Documentation](#documentation)
     -   [Alignment with adk-python](#alignment-with-adk-python)
--   [AI-assisted development](#ai-assisted-development)
 
 ## Branches
 
@@ -95,11 +99,12 @@ queued again, which is how you regenerate a backport that went stale. A branch
 left behind by a run that died does not suppress anything: the next run replays
 it.
 
-Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
-and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
-held**. A pull request opened by `github-actions[bot]` gets its workflows in an
-approval-required state, so open the backport PR and click **Approve workflows
-to run** in the merge box; anyone with write access can.
+Backport PRs get the usual CI, because `go.yml` runs on every pull request
+whatever its base branch, and `apidiff.yml` lists `v1` among the base branches
+it filters on — but **the runs start held**. A pull request opened by
+`github-actions[bot]` gets its workflows in an approval-required state, so open
+the backport PR and click **Approve workflows to run** in the merge box. Anyone
+with write access can.
 
 That is what running on the built-in `GITHUB_TOKEN` costs, and it is worth
 paying: no long-lived credential lives in the repository, and the click lands on
@@ -198,10 +203,11 @@ information on using pull requests.
 ### Requirement for PRs
 
 -   Code must follow [Google Go Style Guide](https://google.github.io/styleguide/go/index).
--   All PRs, other than small documentation or typo fixes, should have an Issue
-    associated. If a relevant issue doesn't exist, please create one first or
-    you may instead describe the bug or feature directly within the PR
-    description, following the structure of our issue templates.
+-   All PRs, other than small documentation or typo fixes, must have an Issue
+    associated. If a relevant issue doesn't exist, please create one first, then
+    reference it from the PR description with `Closes: #<number>` or
+    `Related: #<number>`. Describe the problem and the solution in the PR
+    description as well, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
 -   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
     `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
@@ -209,11 +215,52 @@ information on using pull requests.
     what lands instead. Release tooling reads the landed subject to pick the
     next version and build the release notes, and silently skips anything with
     no recognized type.
+-   If the change alters behavior for anyone already on the current release, say
+    so in the description: what differs, and who is affected. This includes bug
+    fixes, since a fix that alters an observable result is still a behavior
+    change. If nothing changes for existing users, say that instead.
 -   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
 -   Please include a `testing plan` section in your PR to talk about how you
     will test. This will save time for PR review. See `Testing Requirements`
     section for more details.
+
+### Checks to run before you open a PR
+
+Run the same checks CI runs, in every module. The repository is multi-module, so
+a run from the repository root covers only the root module.
+
+First install the `golangci-lint` version CI pins. A newer release reports
+findings CI does not, which reads as a failure you did not cause:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+```
+
+Then set up the Go workspace and run every module:
+
+```bash
+test -f go.work || go work init
+go work use -r .
+
+for m in $(find . -name go.mod -not -path './.git/*' -exec dirname {} \;); do
+  ( cd "$m" \
+    && go mod tidy -diff \
+    && go build -mod=readonly ./... \
+    && go test -race -mod=readonly -count=1 -shuffle=on ./... \
+    && golangci-lint run ) || echo "FAILED: $m"
+done
+```
+
+`golangci-lint run` reports formatting problems too, as `gofumpt` and
+`goimports` findings, but it does not fix them. Run `golangci-lint fmt` to
+rewrite the files, or `golangci-lint fmt --diff` to see what it would change
+without writing anything.
+
+Then confirm each new test fails when your source change is reverted, and work
+out what your change means for someone already on the current release. Both are
+described in the [Before you open a PR](AGENTS.md#before-you-open-a-pr) section
+of `AGENTS.md`, which applies to human contributors just as much as to agents.
 
 ### Large or Complex Changes
 
@@ -237,11 +284,15 @@ Requirements for unit tests:
 
 -   Cover new features, edge cases, error conditions, and typical
     use cases.
--   Fast and isolated.
--   Written clearly with descriptive names.
--   Free of external dependencies (use mocks or fixtures as needed).
--   Aim for high readability and maintainability; include comments for complex
-    scenarios.
+-   **Fail without your change.** Revert the source change, keep the test, and
+    run the package: it must go red. A test that passes either way is not
+    testing your change. Name the failing test in your testing plan.
+-   Free of external dependencies (use mocks or fixtures as needed). Tests run
+    offline — LLM traffic is replayed from `testdata/*.httprr` — so never add a
+    live model or network call.
+-   Named so that a failure message identifies what broke without opening the
+    file.
+-   Fast and isolated, with comments for complex scenarios.
 
 #### Manual End-to-End (E2E) Tests
 
@@ -264,12 +315,29 @@ Depending on your change:
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
 
+### Stale pull requests
+
+If your pull request is waiting on you, you have two weeks to respond. After
+that, a maintainer may take the change over and finish it. Waiting on you means
+review comments unanswered, CI red, or a question left hanging.
+
+The two weeks run from the last thing that needed an answer from you. Any reply
+stops the clock, and a comment saying you need another week counts. Come back
+after a takeover has started and the pull request goes back to you, unless a
+replacement has already merged.
+
+Your commits keep your name on them either way. The point is to get the change
+to users, not to take the work off you.
+
 ## AI-assisted development
 
 This repo ships skills for AI coding agents (Antigravity, Gemini CLI, Claude
 Code, and others) in `.agents/skills/`. Compatible tools load them on their own;
 otherwise read the relevant `SKILL.md` before starting that kind of work.
 
+-   **`adk-go-self-review`** — reviewing a change before opening a PR, or
+    before any later push that changes code: the fresh-context pass, the five
+    lenses, and the mutation check that proves your tests pin the change.
 -   **`adk-sample-creator`** — authoring or reworking a runnable example under
     `examples/`: directory layout, `main.go` anatomy, the README template with
     its diagram and transcript, and the checks to run before opening the PR.

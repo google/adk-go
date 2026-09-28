@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -34,6 +35,7 @@ type DebugAPIController struct {
 	sessionService session.Service
 	agentloader    agent.Loader
 	debugTelemetry *services.DebugTelemetry
+	authorizer     authz.Authorizer
 }
 
 // NewDebugAPIController creates the controller for the Debug API.
@@ -42,7 +44,14 @@ func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loa
 		sessionService: sessionService,
 		agentloader:    agentLoader,
 		debugTelemetry: spansExporter,
+		authorizer:     authz.NewNoop(),
 	}
+}
+
+// WithAuthorizer sets the authorizer for the controller. Provided in order not
+// to change NewDebugAPIController.
+func (c *DebugAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
 }
 
 // EventSpanHandler returns the debug span for the event.
@@ -101,6 +110,7 @@ func (c *DebugAPIController) SessionSpansHandler(rw http.ResponseWriter, req *ht
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+
 	spans := c.debugTelemetry.GetSpansBySessionID(sessionID)
 	EncodeJSONResponse(spans, http.StatusOK, rw)
 }
@@ -113,6 +123,17 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// This route is user-scoped (it carries a {user_id}), so it must enforce
+	// the same authorization as the sessions and artifacts controllers: an
+	// authenticated caller may only read their own session's event graph.
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	resp, err := c.sessionService.Get(req.Context(), &session.GetRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
