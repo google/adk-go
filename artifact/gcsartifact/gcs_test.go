@@ -249,6 +249,56 @@ func TestNotFoundIsWrappedSentinel(t *testing.T) {
 	}
 }
 
+// TestGetArtifactVersionCanonicalURI checks the URI handed to a consumer is the
+// gs:// form even though the object also has a MediaLink. MediaLink is an
+// authenticated JSON API download URL: a model given it as the file_uri of a
+// file_data part treats it as a web page and cannot read the object.
+func TestGetArtifactVersionCanonicalURI(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fileName string
+		wantPath string
+	}{
+		{name: "session scoped", fileName: "file", wantPath: "app/user/session/file"},
+		{name: "user namespaced", fileName: "user:file", wantPath: "app/user/user/user:file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("demo-bucket")
+			saved, err := svc.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: tc.fileName,
+				Part: genai.NewPartFromBytes([]byte("data"), "text/plain"),
+			})
+			if err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+
+			// The assertion below only distinguishes the two forms while the
+			// stored object actually has a MediaLink to be preferred over, so
+			// pin that rather than leaving it to the fixture.
+			blobName := buildBlobName("app", "user", "session", tc.fileName, saved.Version)
+			attrs, err := svc.bucket.object(blobName).attrs(t.Context())
+			if err != nil {
+				t.Fatalf("attrs() failed: %v", err)
+			}
+			if attrs.MediaLink == "" {
+				t.Fatal("stored object has no MediaLink, so this test cannot detect a regression")
+			}
+
+			resp, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: tc.fileName,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+
+			want := fmt.Sprintf("gs://demo-bucket/%s/%d", tc.wantPath, saved.Version)
+			if got := resp.ArtifactVersion.CanonicalURI; got != want {
+				t.Errorf("CanonicalURI = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestBackoffDelayBounds checks the jittered backoff stays within [0, saveRetryMaxDelay].
 func TestBackoffDelayBounds(t *testing.T) {
 	for attempt := range maxSaveAttempts {
@@ -425,7 +475,14 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	if !b.exists {
 		return nil, storage.ErrObjectNotExist
 	}
-	return &storage.ObjectAttrs{Name: b.name, Created: time.Now(), ContentType: b.contentType}, nil
+	// MediaLink is populated on every object real GCS returns. The fake left it
+	// empty, which hid that CanonicalURI preferred it over the gs:// form.
+	return &storage.ObjectAttrs{
+		Name:        b.name,
+		Created:     time.Now(),
+		ContentType: b.contentType,
+		MediaLink:   "https://storage.googleapis.com/download/storage/v1/b/bucket/o/" + b.name + "?alt=media",
+	}, nil
 }
 
 // delete removes the object from the in-memory store.

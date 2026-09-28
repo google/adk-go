@@ -268,8 +268,16 @@ type VersionsResponse struct {
 
 // ArtifactVersion contains metadata describing a specific version of an artifact.
 type ArtifactVersion struct {
-	Version        int64
-	CanonicalURI   string
+	Version int64
+
+	// CanonicalURI identifies the stored payload in the scheme native to the
+	// backing store, such as gs:// for Google Cloud Storage. It is an identity,
+	// not a download endpoint: it is what a consumer that understands the
+	// scheme resolves, including a model handed it as the FileURI of a
+	// [genai.Part] FileData. It is not an authenticated HTTP URL, and a service
+	// that has no such scheme may leave it empty.
+	CanonicalURI string
+
 	CustomMetadata map[string]any
 	CreateTime     time.Time
 	MimeType       string
