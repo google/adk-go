@@ -27,13 +27,17 @@ import (
 )
 
 // MetadataProvider supplies request-scoped metadata for MCP tool calls. The
-// returned map is sent as the `_meta` field of mcp.CallToolParams, letting an
-// agent forward values such as tracing IDs or tenant identifiers taken from the
-// incoming request down to the MCP server.
+// returned map is sent in the `_meta` field of mcp.CallToolParams, letting an
+// agent forward values such as tracing IDs or tenant identifiers from the
+// incoming request to the MCP server.
 //
-// It is called once per tool invocation, before the call is issued. Returning a
-// nil map attaches no metadata. Returning an error aborts the tool call, so use
-// one only when the metadata is required and could not be produced.
+// It is called before each tool call is sent; when a tool requires confirmation,
+// it runs only for the confirmed call, with the context of the request carrying
+// the confirmation. It may be called concurrently. The returned map, and
+// anything reachable from it, must not be modified after the provider returns.
+// Returning a nil map contributes no metadata, while returning an error or a
+// reserved MCP key ("progressToken" or any "io.modelcontextprotocol/*" key)
+// fails the tool call.
 type MetadataProvider func(ctx agent.Context) (map[string]any, error)
 
 // New returns MCP ToolSet.
@@ -151,8 +155,8 @@ type Config struct {
 	// Returning true means confirmation is required.
 	RequireConfirmationProvider tool.ConfirmationProvider
 
-	// MetadataProvider, when set, is called before each tool call to build the
-	// `_meta` field sent to the MCP server. If nil, no metadata is attached.
+	// MetadataProvider, when set, is called before each tool call is sent to
+	// build the request's `_meta` entries.
 	MetadataProvider MetadataProvider
 }
 

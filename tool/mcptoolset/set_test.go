@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/session"
@@ -916,10 +917,11 @@ func TestMCPTool_NonTextContentRoundTrip(t *testing.T) {
 	}
 }
 
-// metaCapture records the `_meta` an MCP server received on a tool call.
+// metaCapture records the `_meta` an MCP server received on tool calls.
 type metaCapture struct {
 	called bool
 	meta   map[string]any
+	metas  []map[string]any
 }
 
 // mcpClientMetaKeys are the `_meta` entries the MCP client puts on every
@@ -953,6 +955,7 @@ func startMetaEchoServer(t *testing.T, provider mcptoolset.MetadataProvider) (to
 		func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
 			got.called = true
 			got.meta = req.Params.Meta
+			got.metas = append(got.metas, req.Params.Meta)
 			return nil, Output{WeatherSummary: "sunny"}, nil
 		})
 	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
@@ -970,9 +973,9 @@ func startMetaEchoServer(t *testing.T, provider mcptoolset.MetadataProvider) (to
 }
 
 // runSingleTool invokes the toolset's only tool with a fixed argument.
-func runSingleTool(t *testing.T, ts tool.Toolset) (map[string]any, error) {
+func runSingleTool(t *testing.T, ctx context.Context, ts tool.Toolset) (agent.InvocationContext, error) {
 	t.Helper()
-	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{})
 	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
 	if err != nil {
 		t.Fatalf("Tools() err = %v", err)
@@ -984,7 +987,8 @@ func runSingleTool(t *testing.T, ts tool.Toolset) (map[string]any, error) {
 	if !ok {
 		t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
 	}
-	return fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"})
+	_, err = fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"})
+	return invCtx, err
 }
 
 func TestMetadataProvider(t *testing.T) {
@@ -1024,7 +1028,7 @@ func TestMetadataProvider(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, got := startMetaEchoServer(t, tc.provider)
-			if _, err := runSingleTool(t, ts); err != nil {
+			if _, err := runSingleTool(t, t.Context(), ts); err != nil {
 				t.Fatalf("Run() err = %v, want nil", err)
 			}
 			if !got.called {
@@ -1046,7 +1050,7 @@ func TestMetadataProviderError(t *testing.T) {
 		return nil, wantErr
 	})
 
-	_, err := runSingleTool(t, ts)
+	_, err := runSingleTool(t, t.Context(), ts)
 	if err == nil {
 		t.Fatal("Run() err = nil, want the provider error")
 	}
@@ -1061,19 +1065,68 @@ func TestMetadataProviderError(t *testing.T) {
 	}
 }
 
-// TestMetadataProviderKeepsClientMeta checks provider metadata is added to the
-// `_meta` the MCP client sets for itself, rather than replacing it.
+func TestMetadataProviderRejectsReservedKeys(t *testing.T) {
+	tests := []struct {
+		key string
+		val any
+	}{
+		{key: "progressToken", val: "spoofed"},
+		{key: mcp.MetaKeyProtocolVersion, val: "2025-06-18"},
+		{key: mcp.MetaKeyClientInfo, val: map[string]any{"name": "spoofed", "version": "0.0.1"}},
+		{key: mcp.MetaKeyClientCapabilities, val: map[string]any{}},
+		{key: "io.modelcontextprotocol/custom", val: "spoofed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{
+					"trace_id": "abc-123",
+					tc.key:     tc.val,
+				}, nil
+			})
+
+			_, err := runSingleTool(t, t.Context(), ts)
+			if err == nil {
+				t.Fatalf("Run() err = nil, want error for reserved key %q", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Run() err = %q, want it to name reserved key %q", err, tc.key)
+			}
+			if !strings.Contains(err.Error(), "get_weather") {
+				t.Errorf("Run() err = %q, want it to name the tool", err)
+			}
+			if got.called {
+				t.Error("the MCP tool ran despite the metadata provider returning a reserved key")
+			}
+		})
+	}
+}
+
+// TestMetadataProviderKeepsClientMeta checks that the server receives both the
+// provider's metadata and the `_meta` entries the MCP client sets for itself,
+// including the adk-mcp-client implementation info.
 func TestMetadataProviderKeepsClientMeta(t *testing.T) {
 	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
 		return map[string]any{"trace_id": "abc-123"}, nil
 	})
-	if _, err := runSingleTool(t, ts); err != nil {
+	if _, err := runSingleTool(t, t.Context(), ts); err != nil {
 		t.Fatalf("Run() err = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"trace_id": "abc-123"}, providerMeta(got.meta)); diff != "" {
+		t.Errorf("provider _meta mismatch (-want +got):\n%s", diff)
 	}
 	for _, key := range mcpClientMetaKeys {
 		if _, ok := got.meta[key]; !ok {
 			t.Errorf("received _meta is missing the client's own %q, got keys %v", key, slices.Sorted(maps.Keys(got.meta)))
 		}
+	}
+	wantClientInfo := map[string]any{
+		"name":    "adk-mcp-client",
+		"version": version.Version,
+	}
+	if diff := cmp.Diff(wantClientInfo, got.meta[mcp.MetaKeyClientInfo]); diff != "" {
+		t.Errorf("received _meta[%q] mismatch (-want +got):\n%s", mcp.MetaKeyClientInfo, diff)
 	}
 }
 
@@ -1084,7 +1137,7 @@ func TestMetadataProviderMapIsCopied(t *testing.T) {
 	ts, _ := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
 		return reused, nil
 	})
-	if _, err := runSingleTool(t, ts); err != nil {
+	if _, err := runSingleTool(t, t.Context(), ts); err != nil {
 		t.Fatalf("Run() err = %v", err)
 	}
 	if diff := cmp.Diff(map[string]any{"trace_id": "abc-123"}, reused); diff != "" {
@@ -1092,18 +1145,171 @@ func TestMetadataProviderMapIsCopied(t *testing.T) {
 	}
 }
 
-// TestMetadataProviderReceivesToolContext checks the provider is handed the
-// live invocation's context, which is what makes the metadata request-scoped.
-func TestMetadataProviderReceivesToolContext(t *testing.T) {
-	var gotInvocationID string
-	ts, _ := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
-		gotInvocationID = ctx.InvocationID()
-		return nil, nil
+func TestMetadataProviderPerCall(t *testing.T) {
+	calls := 0
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		calls++
+		return map[string]any{"trace_id": fmt.Sprintf("call-%d", calls)}, nil
 	})
-	if _, err := runSingleTool(t, ts); err != nil {
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools() err = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+	}
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+	}
+
+	for i := 1; i <= 2; i++ {
+		if _, err := fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"}); err != nil {
+			t.Fatalf("Run() call %d err = %v", i, err)
+		}
+	}
+
+	if calls != 2 {
+		t.Errorf("provider called %d times, want 2", calls)
+	}
+	if len(got.metas) != 2 {
+		t.Fatalf("server received %d calls, want 2", len(got.metas))
+	}
+	gotMetas := []map[string]any{
+		providerMeta(got.metas[0]),
+		providerMeta(got.metas[1]),
+	}
+	wantMetas := []map[string]any{
+		{"trace_id": "call-1"},
+		{"trace_id": "call-2"},
+	}
+	if diff := cmp.Diff(wantMetas, gotMetas); diff != "" {
+		t.Errorf("server-side _meta across calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestMetadataProviderReceivesToolContext checks the provider is handed the
+// live invocation's context, including values set on the request context.
+func TestMetadataProviderReceivesToolContext(t *testing.T) {
+	type traceKey struct{}
+	var gotInvocationID string
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		gotInvocationID = ctx.InvocationID()
+		traceID, _ := ctx.Value(traceKey{}).(string)
+		return map[string]any{"trace_id": traceID}, nil
+	})
+	reqCtx := context.WithValue(t.Context(), traceKey{}, "abc-123")
+	invCtx, err := runSingleTool(t, reqCtx, ts)
+	if err != nil {
 		t.Fatalf("Run() err = %v", err)
 	}
-	if gotInvocationID == "" {
-		t.Error("provider received a context with no invocation ID")
+	if gotInvocationID != invCtx.InvocationID() {
+		t.Errorf("provider got invocation ID %q, want %q", gotInvocationID, invCtx.InvocationID())
+	}
+	wantMeta := map[string]any{"trace_id": "abc-123"}
+	if diff := cmp.Diff(wantMeta, providerMeta(got.meta)); diff != "" {
+		t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMetadataProviderConfirmation(t *testing.T) {
+	tests := []struct {
+		name               string
+		confirmation       *toolconfirmation.ToolConfirmation
+		providerErr        error
+		wantErr            error
+		wantProviderCalled bool
+		wantServerCalled   bool
+		wantMeta           map[string]any
+	}{
+		{
+			name:               "no confirmation",
+			confirmation:       nil,
+			providerErr:        errors.New("provider ran before confirmation"),
+			wantErr:            tool.ErrConfirmationRequired,
+			wantProviderCalled: false,
+			wantServerCalled:   false,
+		},
+		{
+			name:               "rejected confirmation",
+			confirmation:       &toolconfirmation.ToolConfirmation{Confirmed: false},
+			providerErr:        errors.New("provider ran on rejected confirmation"),
+			wantErr:            tool.ErrConfirmationRejected,
+			wantProviderCalled: false,
+			wantServerCalled:   false,
+		},
+		{
+			name:               "approved confirmation",
+			confirmation:       &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantErr:            nil,
+			wantProviderCalled: true,
+			wantServerCalled:   true,
+			wantMeta:           map[string]any{"trace_id": "abc-123"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			got := &metaCapture{}
+			server := mcp.NewServer(&mcp.Implementation{Name: "meta_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server,
+				&mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"},
+				func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+					got.called = true
+					got.meta = req.Params.Meta
+					return nil, Output{WeatherSummary: "sunny"}, nil
+				})
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatalf("server.Connect() err = %v", err)
+			}
+
+			providerCalled := false
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport:           clientTransport,
+				RequireConfirmation: true,
+				MetadataProvider: func(ctx agent.Context) (map[string]any, error) {
+					providerCalled = true
+					if tc.providerErr != nil {
+						return nil, tc.providerErr
+					}
+					return map[string]any{"trace_id": "abc-123"}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() err = %v", err)
+			}
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+			if err != nil {
+				t.Fatalf("Tools() err = %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+			}
+			fnTool, ok := tools[0].(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+			}
+
+			_, err = fnTool.Run(agent.NewToolContext(invCtx, "", nil, tc.confirmation), map[string]any{"city": "Paris"})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Run() err = %v, want %v", err, tc.wantErr)
+			}
+			if providerCalled != tc.wantProviderCalled {
+				t.Errorf("providerCalled = %v, want %v", providerCalled, tc.wantProviderCalled)
+			}
+			if got.called != tc.wantServerCalled {
+				t.Errorf("server called = %v, want %v", got.called, tc.wantServerCalled)
+			}
+			if tc.wantServerCalled {
+				if diff := cmp.Diff(tc.wantMeta, providerMeta(got.meta)); diff != "" {
+					t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
 	}
 }

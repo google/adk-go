@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"maps"
 	"mime"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -132,10 +133,16 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("metadata provider for MCP tool %q failed: %w", t.name, err)
 		}
-		// The MCP client adds its own reserved keys to this map before sending
-		// the call, so pass a copy rather than a map the provider may reuse
-		// across invocations. A nil map is fine: Meta is `omitempty`, so no
-		// `_meta` is sent, and maps.Clone keeps nil nil.
+		for _, k := range slices.Sorted(maps.Keys(meta)) {
+			if k == "progressToken" || strings.HasPrefix(k, "io.modelcontextprotocol/") {
+				return nil, fmt.Errorf("metadata provider for MCP tool %q returned reserved _meta key %q", t.name, k)
+			}
+		}
+		// The MCP client writes its own reserved keys into params.Meta before
+		// sending the call, so pass a copy rather than a map the provider may
+		// reuse across invocations. maps.Clone keeps nil nil, so a nil provider
+		// map contributes nothing while the client still attaches its own
+		// reserved `_meta` entries.
 		params.Meta = maps.Clone(meta)
 	}
 
