@@ -76,6 +76,17 @@ type Service interface {
 	AppendEvent(context.Context, Session, *Event) error
 }
 
+// EventAppender provides an atomic append-if-absent operation for event
+// records. Implementations must return false when an event with the same ID
+// is already stored, without applying the event again.
+//
+// This is optional so existing Service implementations remain source
+// compatible. Callers that require a durable claim should use this interface
+// when it is available.
+type EventAppender interface {
+	AppendEventIfAbsent(context.Context, Session, *Event) (bool, error)
+}
+
 // InMemoryService returns an in-memory implementation of the session service.
 func InMemoryService() Service {
 	return &inMemoryService{

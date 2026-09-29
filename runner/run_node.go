@@ -301,13 +301,14 @@ func (r *Runner) newNodeInvocationContext(
 	}
 
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:    artifacts,
-		Memory:       memoryImpl,
-		Session:      storedSession,
-		Agent:        agentToRun,
-		UserContent:  msg,
-		RunConfig:    &cfg,
-		InvocationID: resolveInvocationID(storedSession, msg),
+		Artifacts:      artifacts,
+		Memory:         memoryImpl,
+		Session:        storedSession,
+		SessionService: r.sessionService,
+		Agent:          agentToRun,
+		UserContent:    msg,
+		RunConfig:      &cfg,
+		InvocationID:   resolveInvocationID(storedSession, msg),
 	})
 	resCtx := agent.NewContext(ic)
 	return resCtx
