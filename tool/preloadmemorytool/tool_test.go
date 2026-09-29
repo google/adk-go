@@ -105,6 +105,28 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			wantInstruction: false,
 		},
 		{
+			name:        "memories with nil and empty parts",
+			userContent: genai.NewContentFromText("test query", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author:    "user",
+					Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							nil,
+							{Text: "valid memory"},
+							nil,
+							{Text: ""},
+						},
+					},
+				},
+			},
+			wantInstruction: true,
+			wantTextContains: []string{
+				"user: valid memory",
+			},
+		},
+		{
 			name:        "single memory entry",
 			userContent: genai.NewContentFromText("test query", genai.RoleUser),
 			memories: []memory.Entry{

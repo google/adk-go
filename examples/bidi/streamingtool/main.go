@@ -110,7 +110,7 @@ func main() {
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "bidi-demo",
 		Model:       model,
-		Instruction: "You are a helpful assistant with a streaming tool 'count_to'. Always use it when asked to count. Wait for the tool results, and when you recieve them you should say the number, if it is divisible by 3 you should not say the number and instead say Fizz and if it is divisible by 5 you should say Buzz, if it is divisible by both 3 and 5 you should say FizzBuzz. Always use the check_divisible tool",
+		Instruction: "You are a helpful assistant with a streaming tool 'count_to'. Always use it when asked to count. Wait for the tool results, and when you receive them you should say the number, if it is divisible by 3 you should not say the number and instead say Fizz and if it is divisible by 5 you should say Buzz, if it is divisible by both 3 and 5 you should say FizzBuzz. Always use the check_divisible tool",
 		Tools:       []tool.Tool{counterTool, stopTool, checkDivisibleTool},
 	})
 	if err != nil {

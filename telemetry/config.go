@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetry implements the open telemetry in ADK.
 package telemetry
 
 import (

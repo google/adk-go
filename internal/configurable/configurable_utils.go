@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -219,11 +220,19 @@ func init() {
 		}
 		serverArgsStr := make([]string, len(serverArgs))
 		for i, arg := range serverArgs {
-			serverArgsStr[i] = arg.(string)
+			s, ok := arg.(string)
+			if !ok {
+				return nil, fmt.Errorf("server_params.args[%d]: expected string, got %T (%v)", i, arg, arg)
+			}
+			serverArgsStr[i] = s
 		}
 		toolFilterStr := make([]string, len(toolFilter))
 		for i, t := range toolFilter {
-			toolFilterStr[i] = t.(string)
+			s, ok := t.(string)
+			if !ok {
+				return nil, fmt.Errorf("tool_filter[%d]: expected string, got %T (%v)", i, t, t)
+			}
+			toolFilterStr[i] = s
 		}
 
 		mcpSet, err := mcptoolset.New(mcptoolset.Config{
@@ -370,15 +379,34 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 		return nil, fmt.Errorf("agent reference path cannot be empty")
 	}
 
-	targetPath := refPath
-	// Handle relative paths
-	if !filepath.IsAbs(refPath) {
-		targetPath = filepath.Join(filepath.Dir(parentPath), refPath)
+	if filepath.IsAbs(refPath) {
+		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
 	}
+
+	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
 
 	absPath, err := filepath.Abs(targetPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Prevent path traversal outside the parent agent's directory. Both sides are
+	// made absolute before comparing, and symlinks are resolved where the paths
+	// exist, so a symlink inside the agent directory cannot be used to escape it.
+	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
+		parentDir = resolved
+	}
+	checkPath := absPath
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		checkPath = resolved
+	}
+	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
+		return nil, fmt.Errorf(
+			"path traversal detected: config_path %q resolves outside agent directory", refPath)
 	}
 
 	registryMu.RLock()

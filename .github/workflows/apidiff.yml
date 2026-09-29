@@ -1,0 +1,55 @@
+# Guards the exported API of the module against accidental breaking changes.
+#
+# The build and the tests do not catch every break. Adding a trailing variadic
+# parameter to an exported function changes that function's type: every ordinary
+# call site still compiles, so nothing here went red, while any caller holding
+# the function as a value stops compiling. That reached a release once, which is
+# why this check exists.
+name: API diff
+
+on:
+  pull_request:
+    branches: [ "main", "v1" ]
+
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apidiff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # apidiff compares against the merge base, which needs the history
+          # rather than the single commit a default checkout fetches.
+          fetch-depth: 0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Initialize workspace
+        run: go work init && go work use -r .
+
+      - name: Install apidiff
+        run: go install golang.org/x/exp/cmd/apidiff@v0.0.0-20250911091902-df9299821621
+
+      - name: Compare the exported API against the base branch
+        # The ref goes through the environment rather than being interpolated
+        # into the command. A ${{ }} expansion inside run: is substituted into
+        # the shell text before the shell sees it, so anything controllable in
+        # the value becomes code; passing it as a quoted variable keeps it data.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # A pull request labelled breaking-change still gets compared, and
+          # still prints what changed, so the break is recorded rather than
+          # waved through invisibly. It just does not fail the check. Without
+          # an escape hatch the only way to land a deliberate break is to
+          # disable the check, which is how checks get removed entirely.
+          ALLOW_BREAKING: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}
+        run: .github/scripts/apidiff.sh "origin/$BASE_REF"

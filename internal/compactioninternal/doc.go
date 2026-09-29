@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package workflow hosts workflow definitions and primitives for building
-// multi-agent applications.
-package workflow
+// Package compactioninternal implements the context-compaction algorithms:
+// choosing which events to summarize, substituting summaries into a prompt, and
+// recovering function calls that a summary swallowed.
+//
+// These are mechanics rather than API. The user-facing surface is
+// [google.golang.org/adk/v2/session/compaction], which holds the configuration
+// and the Summarizer extension point. Keeping the algorithms here lets them
+// change without breaking anyone.
+package compactioninternal

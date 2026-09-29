@@ -53,6 +53,25 @@ func TestFileSystemSource_ListFrontmatters(t *testing.T) {
 			},
 		},
 		{
+			name: "Allowed tools formats",
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
+				"spec-skill/SKILL.md": &fstest.MapFile{
+					Data: []byte("---\nname: spec-skill\ndescription: test\nallowed-tools: Bash(git:*) Bash(jq:*) Read\n---\nInstructions."),
+				},
+				"list-skill/SKILL.md": &fstest.MapFile{
+					Data: []byte("---\nname: list-skill\ndescription: test\nallowed-tools:\n  - Bash(git:*)\n  - Bash(jq:*)\n  - Read\n---\nInstructions."),
+				},
+				"other-skill/SKILL.md": &fstest.MapFile{
+					Data: []byte("---\nname: other-skill\ndescription: test\n---\nInstructions."),
+				},
+			}}),
+			want: []*Frontmatter{
+				{Name: "spec-skill", Description: "test", AllowedTools: []string{"Bash(git:*)", "Bash(jq:*)", "Read"}},
+				{Name: "list-skill", Description: "test", AllowedTools: []string{"Bash(git:*)", "Bash(jq:*)", "Read"}},
+				{Name: "other-skill", Description: "test"},
+			},
+		},
+		{
 			name: "Name mismatch",
 			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: wrong-skill\ndescription: test\n---\n")},

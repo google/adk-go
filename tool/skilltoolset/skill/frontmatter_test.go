@@ -123,6 +123,26 @@ func TestParse_Valid(t *testing.T) {
 			wantInstruction: "Markdown Body",
 		},
 		{
+			name:  "allowed tools as specification scalar",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Bash(git:*) Bash(jq:*) Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Bash(git:*)", "Bash(jq:*)", "Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed tools comma-separated with spaces inside parentheses",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read, Bash(kubectl get:*)\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read", "Bash(kubectl get:*)"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
 			name: "valid full frontmatter",
 			input: `---
 name: my-cool-skill
@@ -184,8 +204,9 @@ Body
 
 func TestParse_InvalidFormat(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
+		name    string
+		input   string
+		wantErr string
 	}{
 		{
 			name:  "missing opening separator",
@@ -223,6 +244,21 @@ func TestParse_InvalidFormat(t *testing.T) {
 			name:  "unknown fields",
 			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
 		},
+		{
+			name:    "allowed tools with unexpected closing parenthesis",
+			input:   "---\nname: skill\ndescription: skill\nallowed-tools: Read) Bash\n---\n# Markdown\nBody",
+			wantErr: "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unexpected ')'",
+		},
+		{
+			name:    "allowed tools with unclosed opening parenthesis",
+			input:   "---\nname: skill\ndescription: skill\nallowed-tools: Bash(git:* Read\n---\n# Markdown\nBody",
+			wantErr: "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unclosed '('",
+		},
+		{
+			name:    "allowed tools with closing parenthesis before opening parenthesis",
+			input:   "---\nname: skill\ndescription: skill\nallowed-tools: Bash)(git:*)\n---\n# Markdown\nBody",
+			wantErr: "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unexpected ')'",
+		},
 	}
 	for _, testcase := range tests {
 		t.Run(testcase.name, func(t *testing.T) {
@@ -232,7 +268,10 @@ func TestParse_InvalidFormat(t *testing.T) {
 			_, err := Parse(reader)
 
 			if err == nil {
-				t.Errorf("expected error, got nil")
+				t.Fatal("expected error, got nil")
+			}
+			if testcase.wantErr != "" && !strings.Contains(err.Error(), testcase.wantErr) {
+				t.Errorf("error %q does not contain %q", err, testcase.wantErr)
 			}
 		})
 	}

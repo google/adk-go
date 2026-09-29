@@ -84,7 +84,7 @@ func run() error {
 	// Launcher automatically starts the telemetry.
 	l := full.NewLauncher()
 	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		return fmt.Errorf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+		return fmt.Errorf("run failed: %w\n\n%s", err, l.CommandLineSyntax())
 	}
 	return nil
 }

@@ -15,6 +15,8 @@
 package controllers
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
 	"strconv"
 
@@ -22,25 +24,69 @@ import (
 
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
 type ArtifactsAPIController struct {
 	artifactService artifact.Service
+	authorizer      authz.Authorizer
 }
 
+// NewArtifactsAPIController creates an ArtifactsAPIController backed by the given artifact service.
 func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
-	return &ArtifactsAPIController{artifactService: artifactService}
+	ac := &ArtifactsAPIController{
+		artifactService: artifactService,
+		authorizer:      authz.NewNoop(),
+	}
+	return ac
+}
+
+// WithAuthorizer sets the authorizer for the controller. Can be used as an option
+// in [NewArtifactsAPIController].
+func (c *ArtifactsAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
+// serviceUnavailable writes a 503 and reports true when no artifact service is
+// configured. Calling into a nil service panics, which drops the TCP connection
+// without sending any HTTP response at all, so every handler checks first.
+func (c *ArtifactsAPIController) serviceUnavailable(rw http.ResponseWriter) bool {
+	if c.artifactService == nil {
+		http.Error(rw, "artifact service is not configured", http.StatusServiceUnavailable)
+		return true
+	}
+	return false
+}
+
+// writeArtifactError maps an artifact service error onto an HTTP status.
+// Implementations report a missing artifact by wrapping [fs.ErrNotExist].
+func writeArtifactError(rw http.ResponseWriter, err error) {
+	if errors.Is(err, fs.ErrNotExist) {
+		http.Error(rw, err.Error(), http.StatusNotFound)
+		return
+	}
+	http.Error(rw, err.Error(), http.StatusInternalServerError)
 }
 
 // ListArtifactsHandler lists all the artifact filenames within a session.
 func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, req *http.Request) {
+	if c.serviceUnavailable(rw) {
+		return
+	}
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
@@ -63,6 +109,9 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 
 // LoadArtifactHandler gets an artifact from the artifact service storage.
 func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req *http.Request) {
+	if c.serviceUnavailable(rw) {
+		return
+	}
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
@@ -73,6 +122,13 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -98,7 +154,7 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		writeArtifactError(rw, err)
 		return
 	}
 	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
@@ -106,6 +162,9 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 
 // LoadArtifactVersionHandler gets an artifact from the artifact service storage with specified version.
 func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWriter, req *http.Request) {
+	if c.serviceUnavailable(rw) {
+		return
+	}
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
@@ -116,6 +175,13 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -144,7 +210,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		writeArtifactError(rw, err)
 		return
 	}
 	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
@@ -152,6 +218,9 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 
 // DeleteArtifactHandler handles deleting an artifact.
 func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, req *http.Request) {
+	if c.serviceUnavailable(rw) {
+		return
+	}
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
@@ -162,6 +231,13 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -174,7 +250,7 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		FileName:  artifactName,
 	})
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		writeArtifactError(rw, err)
 		return
 	}
 	EncodeJSONResponse(nil, http.StatusOK, rw)

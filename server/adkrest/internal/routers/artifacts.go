@@ -53,7 +53,7 @@ func (r *ArtifactsAPIRouter) Routes() Routes {
 		},
 		Route{
 			Name:        "DeleteArtifact",
-			Methods:     []string{http.MethodDelete, http.MethodOptions},
+			Methods:     []string{http.MethodDelete},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}",
 			HandlerFunc: r.artifactsController.DeleteArtifactHandler,
 		},
