@@ -69,9 +69,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
-			state.IncludeContents != includeContentsDefault
+			state.IncludeContents != IncludeContentsDefault
 		fn := buildContentsDefault // anything but "none", unless the placement hides it.
-		if state.IncludeContents == includeContentsNone || placementHidesHistory {
+		if state.IncludeContents == IncludeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		isSingleTurn := ModeFor(ctx, name, state) == ModeSingleTurn
