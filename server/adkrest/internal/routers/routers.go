@@ -16,13 +16,20 @@
 package routers
 
 import (
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/server/authn"
 )
+
+// experimentalWarning is the notice adk-python's experimental decorator
+// attaches to a feature (src/google/adk/utils/feature_decorator.py), so the two
+// runtimes warn in the same words.
+const experimentalWarning = "This feature is experimental and may change or be removed in future versions without notice. It may introduce breaking changes at any time."
 
 // DevPrefix is the path prefix ADK v2 clients use for developer-only
 // endpoints: evaluation, tracing, the agent builder and the tests tab.
@@ -47,6 +54,11 @@ type Route struct {
 	// route cannot accidentally ship unauthenticated; only endpoints that are
 	// safe without a caller identity (health, version) set it.
 	Public bool
+
+	// Experimental makes the route log a warning, once, the first time it
+	// serves a request, as adk-python does the first time an experimental
+	// feature is used.
+	Experimental bool
 }
 
 // Routes is a list of defined api endpoints
@@ -90,6 +102,9 @@ func SetupSubRouters(router *mux.Router, authenticator authn.Authenticator, subr
 	for _, api := range subrouters {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
+			if route.Experimental {
+				handler = warnOnce(route.Pattern, handler)
+			}
 			if authMiddleware != nil && !route.Public {
 				handler = authMiddleware(handler)
 			}
@@ -104,6 +119,19 @@ func SetupSubRouters(router *mux.Router, authenticator authn.Authenticator, subr
 	fallback := newFallbackHandler(router)
 	router.MethodNotAllowedHandler = fallback
 	router.NotFoundHandler = fallback
+}
+
+// warnOnce wraps next to log the experimental warning for the route at pattern
+// on its first request. It sits inside the authentication middleware, so a
+// request that is refused does not use up the warning.
+func warnOnce(pattern string, next http.Handler) http.Handler {
+	var once sync.Once
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() {
+			log.Printf("[EXPERIMENTAL] %s: %s", pattern, experimentalWarning)
+		})
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withHead adds HEAD wherever a route serves GET.
