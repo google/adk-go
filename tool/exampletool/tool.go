@@ -26,11 +26,13 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// Example is a single few-shot example, pairing an input with its expected output.
 type Example struct {
 	Input  *genai.Content   `json:"input"`
 	Output []*genai.Content `json:"output"`
 }
 
+// ExampleToolConfig configures an example tool with the few-shot examples to add.
 type ExampleToolConfig struct {
 	Examples []*Example
 }
@@ -40,6 +42,8 @@ type exampleTool struct {
 	examples []*Example
 }
 
+// New creates an example tool that adds the configured few-shot examples to the
+// LLM request.
 func New(config ExampleToolConfig) (*exampleTool, error) {
 	return &exampleTool{examples: config.Examples}, nil
 }
@@ -56,8 +60,12 @@ func (s exampleTool) Description() string {
 
 // ProcessRequest adds the exampleTool examples to the LLM request.
 func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	parts := ctx.UserContent().Parts
-	if len(parts) == 0 || parts[0].Text == "" {
+	userContent := ctx.UserContent()
+	if userContent == nil {
+		return nil
+	}
+	parts := userContent.Parts
+	if len(parts) == 0 || parts[0] == nil || parts[0].Text == "" {
 		return nil
 	}
 

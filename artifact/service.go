@@ -33,6 +33,9 @@ type Service interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
+	// Implementations that assign versions optimistically may fail to claim one
+	// while other writers save the same artifact; that failure is transient and
+	// the call can be retried.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
@@ -265,8 +268,16 @@ type VersionsResponse struct {
 
 // ArtifactVersion contains metadata describing a specific version of an artifact.
 type ArtifactVersion struct {
-	Version        int64
-	CanonicalURI   string
+	Version int64
+
+	// CanonicalURI identifies the stored payload in the scheme native to the
+	// backing store, such as gs:// for Google Cloud Storage. It is an identity,
+	// not a download endpoint: it is what a consumer that understands the
+	// scheme resolves, including a model handed it as the FileURI of a
+	// [genai.Part] FileData. It is not an authenticated HTTP URL, and a service
+	// that has no such scheme may leave it empty.
+	CanonicalURI string
+
 	CustomMetadata map[string]any
 	CreateTime     time.Time
 	MimeType       string

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 // Package fakes contains a fake implementation of different ADK services used for testing
-
 package fakes
 
 import (

@@ -23,6 +23,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,99 @@ type Frontmatter struct {
 	Compatibility string            `yaml:"compatibility,omitempty"`
 	Metadata      map[string]string `yaml:"metadata,omitempty"`
 	AllowedTools  []string          `yaml:"allowed-tools,omitempty"`
+}
+
+// frontmatterYAML keeps the public Frontmatter representation stable while
+// accepting both the specification's scalar allowed-tools value and the YAML
+// sequence accepted by earlier ADK Go releases.
+type frontmatterYAML struct {
+	Name          string            `yaml:"name"`
+	Description   string            `yaml:"description"`
+	License       string            `yaml:"license,omitempty"`
+	Compatibility string            `yaml:"compatibility,omitempty"`
+	Metadata      map[string]string `yaml:"metadata,omitempty"`
+	AllowedTools  allowedToolsYAML  `yaml:"allowed-tools,omitempty"`
+}
+
+type allowedToolsYAML []string
+
+const allowedToolsFormat = "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression)"
+
+func (a *allowedToolsYAML) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.SequenceNode:
+		var tools []string
+		if err := node.Decode(&tools); err != nil {
+			return err
+		}
+		*a = tools
+		return nil
+	case yaml.ScalarNode:
+		if node.Tag == "!!null" {
+			*a = nil
+			return nil
+		}
+		if node.Tag != "!!str" {
+			return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
+		}
+		tools, err := splitAllowedTools(node.Value)
+		if err != nil {
+			return err
+		}
+		*a = tools
+		return nil
+	default:
+		return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
+	}
+}
+
+// splitAllowedTools splits tool names or tool expressions separated by
+// whitespace or commas. Separators inside balanced parentheses are preserved.
+func splitAllowedTools(value string) ([]string, error) {
+	var tools []string
+	var current strings.Builder
+	depth := 0
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		tools = append(tools, current.String())
+		current.Reset()
+	}
+
+	for _, r := range value {
+		switch {
+		case r == '(':
+			depth++
+			current.WriteRune(r)
+		case r == ')':
+			if depth == 0 {
+				return nil, fmt.Errorf("%s: unexpected ')'", allowedToolsFormat)
+			}
+			depth--
+			current.WriteRune(r)
+		case depth == 0 && (unicode.IsSpace(r) || r == ','):
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if depth != 0 {
+		return nil, fmt.Errorf("%s: unclosed '('", allowedToolsFormat)
+	}
+	flush()
+	return tools, nil
+}
+
+func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
+	return &Frontmatter{
+		Name:          f.Name,
+		Description:   f.Description,
+		License:       f.License,
+		Compatibility: f.Compatibility,
+		Metadata:      f.Metadata,
+		AllowedTools:  []string(f.AllowedTools),
+	}
 }
 
 // Parse reads and validates YAML frontmatter from a SKILL.md reader.
@@ -70,16 +164,17 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 		yamlBytes.Write(line)
 	}
 
-	fm := Frontmatter{}
+	fmYAML := frontmatterYAML{}
 	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes.Bytes()))
 	decoder.KnownFields(true)
-	if err := decoder.Decode(&fm); err != nil {
+	if err := decoder.Decode(&fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
-	if err := Validate(&fm); err != nil {
+	fm := fmYAML.toFrontmatter()
+	if err := Validate(fm); err != nil {
 		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
-	return &fm, nil
+	return fm, nil
 }
 
 // ParseBytes splits and validates YAML frontmatter from SKILL.md content bytes.
@@ -141,11 +236,11 @@ func Validate(fm *Frontmatter) error {
 // Markdown instruction body. It validates the Frontmatter before building.
 func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err := Validate(fm); err != nil {
-		return nil, fmt.Errorf("invalid frontmatter: %v", err)
+		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
 	marshalled, err := yaml.Marshal(fm)
 	if err != nil {
-		return nil, fmt.Errorf("marshal frontmatter: %v", err)
+		return nil, fmt.Errorf("marshal frontmatter: %w", err)
 	}
 	return slices.Concat(frontmatterSeparator, marshalled, frontmatterSeparator, []byte(markdown)), nil
 }

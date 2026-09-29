@@ -21,6 +21,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
+// Registry protocol type for A2A agents.
+const protocolTypeA2AAgent = "A2A_AGENT"
+
 // Registry protocol-binding wire values.
 const (
 	bindingJSONRPC  = "JSONRPC"
