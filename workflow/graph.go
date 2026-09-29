@@ -14,10 +14,14 @@
 
 package workflow
 
+import "slices"
+
 // graph is the precomputed structural view of a workflow's edges.
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
 type graph struct {
+	// edges holds every edge in the order the workflow was built with.
+	edges         []Edge
 	successors    map[Node][]Edge
 	predecessors  map[Node][]Edge
 	isRootWrapper bool
@@ -34,16 +38,12 @@ func newGraph(edges []Edge) *graph {
 		succ[edge.From] = append(succ[edge.From], edge)
 		pred[edge.To] = append(pred[edge.To], edge)
 	}
-	return &graph{successors: succ, predecessors: pred}
+	return &graph{edges: slices.Clone(edges), successors: succ, predecessors: pred}
 }
 
-// allEdges returns all edges in the graph.
+// allEdges returns all edges in the graph, in construction order.
 func (g *graph) allEdges() []Edge {
-	var edges []Edge
-	for _, succs := range g.successors {
-		edges = append(edges, succs...)
-	}
-	return edges
+	return slices.Clone(g.edges)
 }
 
 // successorsOf returns the outgoing edges for a node.

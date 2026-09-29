@@ -274,20 +274,14 @@ func (w *Workflow) Name() string {
 	return w.name
 }
 
-// Edges returns the workflow's edges, in no particular order, so a caller can
-// walk its graph without running it. See [AgentNode.Agent].
-//
-// The graph indexes each edge once under its source node, so every edge appears
-// exactly once here.
+// Edges returns a copy of the workflow's edges, in the order they were passed
+// to [New], so a caller can walk its graph without running it. See
+// [AgentNode.Agent].
 func (w *Workflow) Edges() []Edge {
 	if w == nil || w.graph == nil {
 		return nil
 	}
-	var edges []Edge
-	for _, es := range w.graph.successors {
-		edges = append(edges, es...)
-	}
-	return edges
+	return w.graph.allEdges()
 }
 
 // Run drives the workflow to completion or to a graceful pause

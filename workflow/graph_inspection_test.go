@@ -15,7 +15,6 @@
 package workflow_test
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -48,35 +47,47 @@ func TestAgentNodeAgent(t *testing.T) {
 	}
 }
 
-// TestWorkflowEdges covers reading a workflow's edges back, and
-// TestWorkflowNodeWorkflow the descent into a nested one, so a caller can walk
-// a whole graph without running it.
+// TestWorkflowEdges pins that Edges returns every edge in construction order.
+// The graph indexes edges in maps, so an order read back from them changes from
+// call to call, and a caller that takes the first match of something would get
+// a different answer each time. The chain is long enough that map order all but
+// never reproduces it. Neither the slice passed to New nor the one Edges
+// returns is shared with the workflow.
 func TestWorkflowEdges(t *testing.T) {
-	first, err := workflow.NewAgentNode(newInspectionAgent(t, "first"), workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode failed: %v", err)
+	var edges []workflow.Edge
+	var want []string
+	from := workflow.Start
+	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		node, err := workflow.NewAgentNode(newInspectionAgent(t, name), workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("NewAgentNode(%q) failed: %v", name, err)
+		}
+		edges = append(edges, workflow.Edge{From: from, To: node})
+		want = append(want, from.Name()+"->"+name)
+		from = node
 	}
-	second, err := workflow.NewAgentNode(newInspectionAgent(t, "second"), workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode failed: %v", err)
-	}
-	w, err := workflow.New("chain", []workflow.Edge{
-		{From: workflow.Start, To: first},
-		{From: first, To: second},
-	})
+	w, err := workflow.New("chain", edges)
 	if err != nil {
 		t.Fatalf("workflow.New failed: %v", err)
 	}
 
-	var names []string
-	for _, e := range w.Edges() {
-		names = append(names, e.From.Name()+"->"+e.To.Name())
+	for range 5 {
+		var got []string
+		for _, e := range w.Edges() {
+			got = append(got, e.From.Name()+"->"+e.To.Name())
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("Edges() mismatch (-want +got):\n%s", diff)
+		}
 	}
-	slices.Sort(names)
-	want := []string{"first->second", workflow.Start.Name() + "->first"}
-	slices.Sort(want)
-	if diff := cmp.Diff(want, names); diff != "" {
-		t.Errorf("Edges() mismatch (-want +got):\n%s", diff)
+
+	w.Edges()[0] = workflow.Edge{}
+	if w.Edges()[0].From == nil {
+		t.Error("writing to the slice Edges returned changed the workflow's edges")
+	}
+	edges[1] = workflow.Edge{}
+	if w.Edges()[1].From == nil {
+		t.Error("writing to the slice passed to New changed the workflow's edges")
 	}
 }
 
