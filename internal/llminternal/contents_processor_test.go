@@ -1302,8 +1302,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		},
 		{
 			// A call that never receives a response is reachable: base_flow
-			// creates no response event for a long-running tool or a deferring
-			// ResponseDeferrer. Such a call has an empty responseEventIndicesSet,
+			// creates no response event for a long-running tool, which it
+			// lists in LongRunningToolIDs so that dropOrphanedFunctionCalls
+			// keeps it. Such a call has an empty responseEventIndicesSet,
 			// so it is never routed to the tail. It keeps its order relative to
 			// the other events that stay put, which leaves it ahead of the
 			// completed pair that does move to the tail.
@@ -1320,7 +1321,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
-				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: agentName, LongRunningToolIDs: []string{fcAsyncUnanswered.ID}, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
 			},
 			want: []*genai.Content{
@@ -1328,6 +1329,91 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
 				NewContentFromFunctionCall(fcAsyncPlan, "model"),
 				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+			},
+		},
+		{
+			// The same history when the unanswered call is not pending: a
+			// turn interrupted before the tool ran. The call is dropped.
+			name: "Late async completion drops an interrupted call from history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+			},
+		},
+		{
+			// A turn that ended between a call and its result, followed by a
+			// new user message.
+			name: "Unanswered call at the end of a turn is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("search for test", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("are you still there?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("search for test", "user"),
+				genai.NewContentFromText("are you still there?", "user"),
+			},
+		},
+		{
+			name: "Unanswered call mid-history is dropped and the text around it kept",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncStatus, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncStatus, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{Text: "Notifying ops first."},
+					{FunctionCall: fcAsyncUnanswered},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Cancel that", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncStatus, "model"),
+				NewContentFromFunctionResponse(frAsyncStatus, "user"),
+				genai.NewContentFromText("Notifying ops first.", "model"),
+				genai.NewContentFromText("Cancel that", "user"),
+			},
+		},
+		{
+			// Dropping the trailing call must not leave the async response as
+			// the last event, which would let the latest-response
+			// rearrangement discard the text turns between it and its call.
+			name: "Trailing unanswered call after an async completion keeps the interleaved turns",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("While waiting, tell me a joke", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Why did the chicken cross the road?", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+				genai.NewContentFromText("While waiting, tell me a joke", "user"),
+				genai.NewContentFromText("Why did the chicken cross the road?", "model"),
+			},
+		},
+		{
+			name: "Pending long-running call stays in history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LongRunningToolIDs: []string{fcAsyncUnanswered.ID}, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Any update?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
+				genai.NewContentFromText("Any update?", "user"),
 			},
 		},
 		{
