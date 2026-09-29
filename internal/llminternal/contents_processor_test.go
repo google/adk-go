@@ -1289,9 +1289,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			// the async call and its completion — including the user asking
 			// "What is the status?" — are dropped by
 			// rearrangeEventsForLatestFunctionResponse, whose preservation loop
-			// keeps only events carrying calls or responses. That is
-			// pre-existing behavior, identical on main, and not what this row
-			// is testing.
+			// keeps events carrying calls or responses and orphan remnants.
+			// Filtering ordinary text is pre-existing behavior and not what
+			// this row is testing.
 			want: []*genai.Content{
 				genai.NewContentFromText("Plan how to add feature Q", "user"),
 				NewContentFromFunctionCall(fcAsyncStatus, "model"),
@@ -1302,8 +1302,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		},
 		{
 			// A call that never receives a response is reachable: base_flow
-			// creates no response event for a long-running tool or a deferring
-			// ResponseDeferrer. Such a call has an empty responseEventIndicesSet,
+			// creates no response event for a long-running tool, which it
+			// lists in LongRunningToolIDs so that dropOrphanedFunctionCalls
+			// keeps it. Such a call has an empty responseEventIndicesSet,
 			// so it is never routed to the tail. It keeps its order relative to
 			// the other events that stay put, which leaves it ahead of the
 			// completed pair that does move to the tail.
@@ -1320,7 +1321,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
-				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: agentName, LongRunningToolIDs: []string{fcAsyncUnanswered.ID}, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
 			},
 			want: []*genai.Content{
@@ -1328,6 +1329,91 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
 				NewContentFromFunctionCall(fcAsyncPlan, "model"),
 				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+			},
+		},
+		{
+			// The same history when the unanswered call is not pending: a
+			// turn interrupted before the tool ran. The call is dropped.
+			name: "Late async completion drops an interrupted call from history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanAck, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+			},
+		},
+		{
+			// A turn that ended between a call and its result, followed by a
+			// new user message.
+			name: "Unanswered call at the end of a turn is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("search for test", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("are you still there?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("search for test", "user"),
+				genai.NewContentFromText("are you still there?", "user"),
+			},
+		},
+		{
+			name: "Unanswered call mid-history is dropped and the text around it kept",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncStatus, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncStatus, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{Text: "Notifying ops first."},
+					{FunctionCall: fcAsyncUnanswered},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Cancel that", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncStatus, "model"),
+				NewContentFromFunctionResponse(frAsyncStatus, "user"),
+				genai.NewContentFromText("Notifying ops first.", "model"),
+				genai.NewContentFromText("Cancel that", "user"),
+			},
+		},
+		{
+			// Dropping the trailing call must not leave the async response as
+			// the last event, which would let the latest-response
+			// rearrangement discard the text turns between it and its call.
+			name: "Trailing unanswered call after an async completion keeps the interleaved turns",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncPlan, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("While waiting, tell me a joke", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Why did the chicken cross the road?", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frAsyncPlanFinal, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncPlan, "model"),
+				NewContentFromFunctionResponse(frAsyncPlanFinal, "user"),
+				genai.NewContentFromText("While waiting, tell me a joke", "user"),
+				genai.NewContentFromText("Why did the chicken cross the road?", "model"),
+			},
+		},
+		{
+			name: "Pending long-running call stays in history",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Plan how to add feature Q", "user")}},
+				{Author: agentName, LongRunningToolIDs: []string{fcAsyncUnanswered.ID}, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcAsyncUnanswered, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Any update?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Plan how to add feature Q", "user"),
+				NewContentFromFunctionCall(fcAsyncUnanswered, "model"),
+				genai.NewContentFromText("Any update?", "user"),
 			},
 		},
 		{
@@ -1545,6 +1631,82 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Hello", "user"),
 				genai.NewContentFromText("Hi", "model"),
 				genai.NewContentFromText("What is the weather?", "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves text sharing an orphaned response part",
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "note", FunctionResponse: frOrphaned},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("note", "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves separate text beside an orphaned response",
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				// Ordinary text without an orphaned response still follows the
+				// existing intermediate-event filtering rule.
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("plain note", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "note"}, {FunctionResponse: frOrphaned},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("note", "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves model orphan remnant without continuation",
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{Text: "note", FunctionResponse: frOrphaned},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			// The latest call/response pair stays last, so retaining model text
+			// does not trigger a synthetic user continuation.
+			want: []*genai.Content{
+				genai.NewContentFromText("note", "model"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves orphan remnants around unrelated tools",
+			events: []*session.Event{
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{Text: "first note", FunctionResponse: frOrphaned},
+				}}}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+					{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("image")}, FunctionResponse: frOrphaned},
+				}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frOrphaned, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("first note", "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+				{Role: "user", Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("image")}}}},
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
 			},
 		},
 		{

@@ -174,6 +174,10 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 				if len(gotSpans) != 0 {
 					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
 				}
+
+				// A trailing empty response must not replace the partial response used
+				// when the deferred span records token usage.
+				yield(nil, nil)
 			}
 		},
 	}
