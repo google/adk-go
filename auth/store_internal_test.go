@@ -84,9 +84,14 @@ func TestInMemoryCredentialStoreSweepIgnoresTheCallersClock(t *testing.T) {
 	}
 
 	s.arm()
+	swept := s.swept()
 	ahead := platform.WithTimeProvider(t.Context(), func() time.Time { return time.Now().AddDate(5, 0, 0) })
 	if _, _, err := s.Get(ahead, CredentialKey{UserID: "someone-else", Key: "res"}); err != nil {
 		t.Fatalf("Get() error = %v", err)
+	}
+	// Without a sweep the size check below passes for the wrong reason.
+	if s.swept().Equal(swept) {
+		t.Fatal("the armed Get did not sweep, so this test proves nothing")
 	}
 	if got := s.size(); got != 3 {
 		t.Errorf("store holds %d entries, want all 3 — one caller's clock must not expire another's credentials", got)
@@ -168,10 +173,16 @@ func TestInMemoryCredentialStoreSetStripsMonotonic(t *testing.T) {
 }
 
 // arm makes the next call sweep, so a test need not wait out sweepInterval.
+//
+// Shortening the interval alone is not enough. On a coarse clock the next
+// call's time.Now() can equal lastSweep, and a zero gap never reaches even
+// one nanosecond. On Windows back-to-back readings usually tie. Clearing
+// lastSweep makes the sweep due whatever the clock's resolution.
 func (s *InMemoryCredentialStore) arm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepEvery = time.Nanosecond
+	s.lastSweep = time.Time{}
 }
 
 func (s *InMemoryCredentialStore) size() int {
