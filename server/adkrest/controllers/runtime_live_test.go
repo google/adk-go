@@ -605,3 +605,42 @@ func TestTruncateCloseReason(t *testing.T) {
 		t.Errorf("close frame payload = %d bytes, want at most 125", got)
 	}
 }
+
+func TestRunLiveHandlerEnforcesMessageSizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		size    int
+		forward bool
+	}{
+		{name: "at limit is forwarded", size: maxLiveMessageBytes, forward: true},
+		{name: "one byte over is rejected", size: maxLiveMessageBytes + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			liveSession := newRecordingLiveSession()
+			conn, handlerDone := dialRunLiveHandler(t, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return liveSession, func(yield func(*session.Event, error) bool) { <-liveSession.closed }, nil
+			})
+			if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, tc.size)); err != nil {
+				t.Fatalf("WriteMessage() failed: %v", err)
+			}
+
+			if tc.forward {
+				got := waitForLiveRequest(t, liveSession)
+				if blob, ok := got.RealtimeInput.(*genai.Blob); !ok || len(blob.Data) != tc.size {
+					t.Fatalf("RealtimeInput = %T, want a *genai.Blob of %d bytes", got.RealtimeInput, tc.size)
+				}
+				return
+			}
+
+			if closeErr := readCloseError(t, conn); closeErr.Code != websocket.CloseMessageTooBig {
+				t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
+			}
+			select {
+			case req := <-liveSession.requests:
+				t.Fatalf("oversized message reached the live session: %v", req)
+			default:
+			}
+			waitForHandlerExit(t, handlerDone)
+		})
+	}
+}
