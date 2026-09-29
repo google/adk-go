@@ -64,8 +64,10 @@ type SaveRequest struct {
 
 	// Below are optional fields.
 
-	// If set, the artifact will be saved with this version.
-	// If unset, a new version will be created.
+	// Version selects the slot to store the artifact at. When it is positive,
+	// the artifact is written to that exact slot, overwriting any content
+	// already there; when it is zero (the default), the next version is
+	// assigned.
 	Version int64
 }
 

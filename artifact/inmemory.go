@@ -154,12 +154,17 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nextVersion := int64(1)
-	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
-		nextVersion = internalVer + 1
+	// Store at the requested version when one is given, otherwise assign the
+	// next one, as documented on SaveRequest.Version.
+	wantVersion := req.Version
+	if wantVersion <= 0 {
+		wantVersion = 1
+		if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
+			wantVersion = internalVer + 1
+		}
 	}
-	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
-	return &SaveResponse{Version: nextVersion}, nil
+	s.set(appName, userID, sessionID, fileName, wantVersion, artifact)
+	return &SaveResponse{Version: wantVersion}, nil
 }
 
 // Delete implements [artifact.Service]

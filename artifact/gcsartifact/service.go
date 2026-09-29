@@ -135,6 +135,17 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 
+	// Honor an explicitly requested version by writing to that exact slot. The
+	// retry loop below only auto-assigns the next version when none is
+	// requested, matching SaveRequest.Version.
+	if req.Version > 0 {
+		blobName := buildBlobName(appName, userID, sessionID, fileName, req.Version)
+		if err := writeArtifact(ctx, s.bucket.object(blobName), req.Part); err != nil {
+			return nil, fmt.Errorf("failed to save artifact: %w", err)
+		}
+		return &artifact.SaveResponse{Version: req.Version}, nil
+	}
+
 	var lastErr error
 	for attempt := range maxSaveAttempts {
 		response, err := s.versions(ctx, &artifact.VersionsRequest{
