@@ -452,6 +452,45 @@ func TestSetupSubroutersServesRealRESTAPI(t *testing.T) {
 	}
 }
 
+// TestIncludeAppInfoFlag pins that -include_app_info is what mounts the
+// experimental app-info endpoint, and that it is off without it, as the Agents
+// CLI wire contract requires: the endpoint hands out every agent's instruction
+// and tool declarations.
+func TestIncludeAppInfoFlag(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "app", Description: "root agent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantStatus int
+	}{
+		{name: "off by default", wantStatus: http.StatusNotFound},
+		{name: "on with the flag", args: []string{"-include_app_info"}, wantStatus: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(append([]string{"-path_prefix", "/api"}, tc.args...)); err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			router := mux.NewRouter().StrictSlash(true)
+			if err := l.SetupSubrouters(router, &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+			}); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/apps/app/app-info", nil))
+			if rec.Code != tc.wantStatus {
+				t.Errorf("GET /api/apps/app/app-info: status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestWebSocketUpgradeThroughMount covers /run_live, which takes over the
 // connection instead of writing a response.
 //

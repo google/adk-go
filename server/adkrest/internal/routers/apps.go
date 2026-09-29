@@ -17,6 +17,8 @@ package routers
 import (
 	"net/http"
 
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/exp/appinfo"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
@@ -42,25 +44,28 @@ func (r *AppsAPIRouter) Routes() Routes {
 	}
 }
 
-// AppInfoAPIRouter defines the route for the app-info API. It is a router of
-// its own so that the server can leave it unmounted, which it does by default.
+// AppInfoAPIRouter defines the route for the experimental app-info API, which
+// package exp/appinfo implements. It is a router of its own so that the server
+// can leave it unmounted, which it does by default.
 type AppInfoAPIRouter struct {
-	appsController *controllers.AppsAPIController
+	agentLoader agent.Loader
 }
 
-// NewAppInfoAPIRouter creates a new AppInfoAPIRouter.
-func NewAppInfoAPIRouter(controller *controllers.AppsAPIController) *AppInfoAPIRouter {
-	return &AppInfoAPIRouter{appsController: controller}
+// NewAppInfoAPIRouter creates a new AppInfoAPIRouter describing the apps
+// agentLoader serves.
+func NewAppInfoAPIRouter(agentLoader agent.Loader) *AppInfoAPIRouter {
+	return &AppInfoAPIRouter{agentLoader: agentLoader}
 }
 
 // Routes returns the routes for the app-info API.
 func (r *AppInfoAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
-			Name:        "AppInfo",
-			Methods:     []string{http.MethodGet},
-			Pattern:     "/apps/{app_name}/app-info",
-			HandlerFunc: r.appsController.AppInfoHandler,
+			Name:         "AppInfo",
+			Methods:      []string{http.MethodGet},
+			Pattern:      "/apps/{app_name}/app-info",
+			HandlerFunc:  appinfo.Handler(r.agentLoader),
+			Experimental: true,
 		},
 	}
 }

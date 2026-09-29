@@ -357,7 +357,7 @@ func NewLauncher() weblauncher.Sublauncher {
 		"structure panels need them. "+
 		"!!! WARNING !!! : debug endpoints are not safe to be used in production "+
 		"environment, do not set them to true in production.")
-	fs.BoolVar(&config.includeAppInfoAPI, "include_app_info", false, "Mounts GET /apps/{app_name}/app-info, which reports each LLM agent's instruction and tool declarations. Off by default; turn it on for evaluation tooling, leave it off in production.")
+	fs.BoolVar(&config.includeAppInfoAPI, "include_app_info", false, "Mounts the experimental GET /apps/{app_name}/app-info, which reports each LLM agent's instruction and tool declarations. Off by default; turn it on for evaluation tooling, leave it off in production.")
 
 	return &apiLauncher{
 		config: config,

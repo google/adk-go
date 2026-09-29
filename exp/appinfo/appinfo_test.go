@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package services_test
+package appinfo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -33,8 +35,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/v2/server/adkrest/internal/models"
-	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -135,6 +136,20 @@ func toolNames(tools []*genai.Tool) []string {
 	return names
 }
 
+// captureLog sends the standard logger to a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return &buf
+}
+
 // deadlineToolset records the context deadline each agent's toolset is
 // resolved under, so a test can tell a budget shared by the whole walk from one
 // handed out afresh per agent.
@@ -158,19 +173,21 @@ func (d *deadlineToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) 
 	return nil, nil
 }
 
-// fakeToolset returns a fixed set of tools without touching the network.
+// fakeToolset returns a fixed set of tools, or a fixed error, without touching
+// the network.
 type fakeToolset struct {
 	name  string
 	tools []tool.Tool
+	err   error
 }
 
 func (f *fakeToolset) Name() string { return f.name }
 
 func (f *fakeToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	return f.tools, nil
+	return f.tools, f.err
 }
 
-func TestGetAppInfo(t *testing.T) {
+func TestBuild(t *testing.T) {
 	tests := []struct {
 		name string
 		// root builds the agent tree under test.
@@ -178,7 +195,7 @@ func TestGetAppInfo(t *testing.T) {
 		// wantAgents is the expected set of keys in the returned map.
 		wantAgents []string
 		// check makes assertions beyond the set of agent names.
-		check func(t *testing.T, agents map[string]*models.AgentInfo)
+		check func(t *testing.T, agents map[string]*AgentInfo)
 	}{
 		{
 			name: "single LLM agent without tools",
@@ -190,22 +207,19 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"assistant"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				got := agents["assistant"]
+				if got.Description != "A plain assistant." {
+					t.Errorf("Description = %q, want %q", got.Description, "A plain assistant.")
+				}
 				if got.Instruction != "Answer briefly." {
 					t.Errorf("Instruction = %q, want %q", got.Instruction, "Answer briefly.")
 				}
-				if got.Tools == nil {
-					t.Error("Tools = nil, want an empty slice (a nil slice marshals to null)")
+				if got.Tools == nil || len(got.Tools) != 0 {
+					t.Errorf("Tools = %#v, want an empty, non-nil slice (a nil slice marshals to null)", got.Tools)
 				}
-				if len(got.Tools) != 0 {
-					t.Errorf("len(Tools) = %d, want 0", len(got.Tools))
-				}
-				if got.SubAgents == nil {
-					t.Error("SubAgents = nil, want an empty slice (a nil slice marshals to null)")
-				}
-				if len(got.SubAgents) != 0 {
-					t.Errorf("len(SubAgents) = %d, want 0", len(got.SubAgents))
+				if got.SubAgents == nil || len(got.SubAgents) != 0 {
+					t.Errorf("SubAgents = %#v, want an empty, non-nil slice (a nil slice marshals to null)", got.SubAgents)
 				}
 			},
 		},
@@ -220,9 +234,8 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"assistant"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				got := toolNames(agents["assistant"].Tools)
-				if diff := cmp.Diff([]string{"get_weather"}, got); diff != "" {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				if diff := cmp.Diff([]string{"get_weather"}, toolNames(agents["assistant"].Tools)); diff != "" {
 					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 				}
 				decl := agents["assistant"].Tools[0].FunctionDeclarations[0]
@@ -242,12 +255,12 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"searcher"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if diff := cmp.Diff([]string{"get_weather"}, toolNames(agents["searcher"].Tools)); diff != "" {
-					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
-				}
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				if got := len(agents["searcher"].Tools); got != 1 {
 					t.Errorf("len(Tools) = %d, want 1", got)
+				}
+				if diff := cmp.Diff([]string{"get_weather"}, toolNames(agents["searcher"].Tools)); diff != "" {
+					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 				}
 			},
 		},
@@ -266,7 +279,7 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"db"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				want := []string{"list_tables", "ping", "run_query"}
 				if diff := cmp.Diff(want, toolNames(agents["db"].Tools)); diff != "" {
 					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
@@ -274,7 +287,29 @@ func TestGetAppInfo(t *testing.T) {
 			},
 		},
 		{
-			name: "nested agents are flattened and linked by name",
+			name: "a toolset that fails, and a nil one, are skipped and the agent still described",
+			root: func(t *testing.T) agent.Agent {
+				return newLLMAgent(t, llmagent.Config{
+					Name:        "db",
+					Description: "Talks to a database.",
+					Instruction: "Query.",
+					Tools:       []tool.Tool{newWeatherTool(t, "ping")},
+					Toolsets: []tool.Toolset{
+						&fakeToolset{name: "broken", err: errors.New("server unreachable")},
+						nil,
+						&fakeToolset{name: "working", tools: []tool.Tool{newWeatherTool(t, "run_query")}},
+					},
+				})
+			},
+			wantAgents: []string{"db"},
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				if diff := cmp.Diff([]string{"ping", "run_query"}, toolNames(agents["db"].Tools)); diff != "" {
+					t.Errorf("tool names mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		{
+			name: "LLM sub-agents are described and listed by name",
 			root: func(t *testing.T) agent.Agent {
 				deepest := newLLMAgent(t, llmagent.Config{
 					Name:        "currency",
@@ -297,7 +332,7 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"concierge", "currency", "hotel"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				if diff := cmp.Diff([]string{"hotel"}, agents["concierge"].SubAgents); diff != "" {
 					t.Errorf("concierge sub-agents mismatch (-want +got):\n%s", diff)
 				}
@@ -307,9 +342,10 @@ func TestGetAppInfo(t *testing.T) {
 			},
 		},
 		{
-			// adk-python drops a non-LLM sub-agent together with everything
-			// below it, so writer goes missing from a 200 response.
-			name: "an LLM agent under a non-LLM agent is reported, the non-LLM agent is not",
+			// adk-python stops at the SequentialAgent, so writer goes missing.
+			// It is described here, but root does not list it: root hands off
+			// to pipeline, and pipeline runs writer.
+			name: "an LLM agent below a non-LLM agent is described but not listed by the LLM agent above",
 			root: func(t *testing.T) agent.Agent {
 				child := newLLMAgent(t, llmagent.Config{
 					Name:        "writer",
@@ -326,11 +362,9 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"root", "writer"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				// root links straight to writer: the sequential agent between
-				// them is stepped over, so no name here dangles.
-				if diff := cmp.Diff([]string{"writer"}, agents["root"].SubAgents); diff != "" {
-					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				if got := agents["root"].SubAgents; len(got) != 0 {
+					t.Errorf("root SubAgents = %v, want empty; pipeline is not an LLM agent", got)
 				}
 				if diff := cmp.Diff([]string{"draft"}, toolNames(agents["writer"].Tools)); diff != "" {
 					t.Errorf("writer tool names mismatch (-want +got):\n%s", diff)
@@ -338,7 +372,7 @@ func TestGetAppInfo(t *testing.T) {
 			},
 		},
 		{
-			name: "a chain of non-LLM agents is stepped over",
+			name: "a chain of non-LLM agents is walked through",
 			root: func(t *testing.T) agent.Agent {
 				leaf := newLLMAgent(t, llmagent.Config{
 					Name:        "leaf",
@@ -355,11 +389,6 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"leaf", "root"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if diff := cmp.Diff([]string{"leaf"}, agents["root"].SubAgents); diff != "" {
-					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
-				}
-			},
 		},
 		{
 			// adk-python answers 400 "Root agent is not an LlmAgent" here
@@ -381,7 +410,7 @@ func TestGetAppInfo(t *testing.T) {
 			wantAgents: []string{"drafter", "editor"},
 		},
 		{
-			name: "an agent reachable through two branches is reported once and listed once",
+			name: "an agent reachable through two branches is described once",
 			root: func(t *testing.T) agent.Agent {
 				shared := newLLMAgent(t, llmagent.Config{
 					Name:        "shared",
@@ -398,11 +427,6 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"root", "shared"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if diff := cmp.Diff([]string{"shared"}, agents["root"].SubAgents); diff != "" {
-					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
-				}
-			},
 		},
 		{
 			// A nil sub-agent is a caller's mistake, but the constructors
@@ -422,16 +446,30 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"child", "root"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				if diff := cmp.Diff([]string{"child"}, agents["root"].SubAgents); diff != "" {
 					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
 				}
 			},
 		},
 		{
-			// An instruction provider is named rather than resolved, matching
-			// adk-python. Reporting it empty would read as an agent with no
-			// instruction at all.
+			name: "an instruction template is reported as written",
+			root: func(t *testing.T) agent.Agent {
+				return newLLMAgent(t, llmagent.Config{
+					Name:        "templated",
+					Description: "Greets the user by name.",
+					Instruction: "You are helping {user_name}. Reply in {language?}.",
+				})
+			},
+			wantAgents: []string{"templated"},
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				want := "You are helping {user_name}. Reply in {language?}."
+				if got := agents["templated"].Instruction; got != want {
+					t.Errorf("Instruction = %q, want %q", got, want)
+				}
+			},
+		},
+		{
 			name: "an instruction provider is named, not resolved",
 			root: func(t *testing.T) agent.Agent {
 				return newLLMAgent(t, llmagent.Config{
@@ -441,9 +479,29 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"dynamic"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				want := "<InstructionProvider: services_test.computeInstruction>"
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				want := "<InstructionProvider: appinfo.computeInstruction>"
 				if got := agents["dynamic"].Instruction; got != want {
+					t.Errorf("Instruction = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			// The provider takes over from Instruction when the agent runs, so
+			// the static text is never sent to the model.
+			name: "an instruction provider wins over a static instruction",
+			root: func(t *testing.T) agent.Agent {
+				return newLLMAgent(t, llmagent.Config{
+					Name:                "both",
+					Description:         "Sets both.",
+					Instruction:         "Never sent to the model.",
+					InstructionProvider: computeInstruction,
+				})
+			},
+			wantAgents: []string{"both"},
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				want := "<InstructionProvider: appinfo.computeInstruction>"
+				if got := agents["both"].Instruction; got != want {
 					t.Errorf("Instruction = %q, want %q", got, want)
 				}
 			},
@@ -451,7 +509,7 @@ func TestGetAppInfo(t *testing.T) {
 		{
 			// A workflow agent keeps the agents of its graph in its edges, not
 			// in SubAgents, so following SubAgents alone finds none of them.
-			name: "agents in a workflow graph are reported",
+			name: "agents in a workflow graph are described",
 			root: func(t *testing.T) agent.Agent {
 				return newWorkflowAgent(t, "graph_root", "Runs a graph.",
 					newLLMAgent(t, llmagent.Config{
@@ -468,7 +526,7 @@ func TestGetAppInfo(t *testing.T) {
 				)
 			},
 			wantAgents: []string{"researcher", "summarizer"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				if diff := cmp.Diff([]string{"lookup"}, toolNames(agents["researcher"].Tools)); diff != "" {
 					t.Errorf("researcher tool names mismatch (-want +got):\n%s", diff)
 				}
@@ -477,7 +535,7 @@ func TestGetAppInfo(t *testing.T) {
 		{
 			// A graph node can itself be a graph, so the walk has to descend
 			// into a sub-workflow rather than stopping at the node holding it.
-			name: "agents in a nested sub-workflow are reported",
+			name: "agents in a nested sub-workflow are described",
 			root: func(t *testing.T) agent.Agent {
 				buried := newLLMAgent(t, llmagent.Config{
 					Name:        "buried",
@@ -506,7 +564,7 @@ func TestGetAppInfo(t *testing.T) {
 			wantAgents: []string{"buried"},
 		},
 		{
-			name: "an LLM agent above a workflow agent links through to its graph",
+			name: "an LLM agent above a workflow agent does not list the graph's agents",
 			root: func(t *testing.T) agent.Agent {
 				graph := newWorkflowAgent(t, "graph", "Runs a graph.",
 					newLLMAgent(t, llmagent.Config{
@@ -523,19 +581,16 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"root", "worker"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
-				if diff := cmp.Diff([]string{"worker"}, agents["root"].SubAgents); diff != "" {
-					t.Errorf("root sub-agents mismatch (-want +got):\n%s", diff)
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
+				if got := agents["root"].SubAgents; len(got) != 0 {
+					t.Errorf("root SubAgents = %v, want empty; graph is not an LLM agent", got)
 				}
 			},
 		},
 		{
 			// An agent tool runs its agent under its own runner and session, so
 			// none of that agent's events reach the stream and none is ever
-			// attributed to it. Evaluation keys an agent by the author of the
-			// events it produced, so reporting one that authors none would put
-			// an entry in the map that no event can ever match. It is still
-			// reported as a tool on its caller.
+			// attributed to it. It is still reported as a tool on its caller.
 			name: "an agent used as a tool is reported as a tool, not as an agent",
 			root: func(t *testing.T) agent.Agent {
 				wrapped := newLLMAgent(t, llmagent.Config{
@@ -552,7 +607,7 @@ func TestGetAppInfo(t *testing.T) {
 				})
 			},
 			wantAgents: []string{"root"},
-			check: func(t *testing.T, agents map[string]*models.AgentInfo) {
+			check: func(t *testing.T, agents map[string]*AgentInfo) {
 				if got := agents["root"].SubAgents; len(got) != 0 {
 					t.Errorf("root SubAgents = %v, want empty; an agent tool is not a sub-agent", got)
 				}
@@ -561,27 +616,79 @@ func TestGetAppInfo(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Which agents a dynamic node runs is decided by Go code at run
+			// time, so there is nothing to walk before it runs.
+			name: "an agent run by a dynamic node is not found",
+			root: func(t *testing.T) agent.Agent {
+				hidden, err := workflow.NewAgentNode(newLLMAgent(t, llmagent.Config{
+					Name:        "hidden",
+					Description: "Run from Go code.",
+					Instruction: "Work.",
+				}), workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode failed: %v", err)
+				}
+				dynamic := workflow.NewDynamicNode("orchestrator",
+					func(ctx agent.Context, in string, _ func(*session.Event) error) (string, error) {
+						return workflow.RunNode[string](ctx, hidden, in)
+					}, workflow.NodeConfig{})
+				root, err := workflowagent.New(workflowagent.Config{
+					Name:        "dynamic_graph",
+					Description: "Runs a dynamic node.",
+					Edges:       workflow.Chain(workflow.Start, dynamic),
+				})
+				if err != nil {
+					t.Fatalf("workflowagent.New failed: %v", err)
+				}
+				return root
+			},
+			wantAgents: nil,
+		},
+		{
+			// Documented as not found: the walk does not unwrap a
+			// ParallelWorker, which keeps the node it runs private.
+			name: "an agent wrapped in a ParallelWorker is not found",
+			root: func(t *testing.T) agent.Agent {
+				wrapped, err := workflow.NewAgentNode(newLLMAgent(t, llmagent.Config{
+					Name:        "per_item",
+					Description: "Runs once per input item.",
+					Instruction: "Work.",
+				}), workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode failed: %v", err)
+				}
+				worker, err := workflow.NewParallelWorker("fan_out", wrapped, 0, workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewParallelWorker failed: %v", err)
+				}
+				root, err := workflowagent.New(workflowagent.Config{
+					Name:        "parallel_graph",
+					Description: "Fans out over its input.",
+					Edges:       workflow.Chain(workflow.Start, worker),
+				})
+				if err != nil {
+					t.Fatalf("workflowagent.New failed: %v", err)
+				}
+				return root
+			},
+			wantAgents: nil,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agents := services.GetAppInfo(context.Background(), "test_app", tc.root(t)).Agents
+			agents := build(t.Context(), "test_app", tc.root(t)).Agents
 
-			gotNames := make([]string, 0, len(agents))
-			for name := range agents {
-				gotNames = append(gotNames, name)
-			}
-			slices.Sort(gotNames)
+			gotNames := slices.Sorted(maps.Keys(agents))
 			if diff := cmp.Diff(tc.wantAgents, gotNames); diff != "" {
 				t.Errorf("agent names mismatch (-want +got):\n%s", diff)
 			}
-
 			for name, info := range agents {
 				if info.Name != name {
 					t.Errorf("agents[%q].Name = %q, want %q", name, info.Name, name)
 				}
 			}
-
 			if tc.check != nil {
 				tc.check(t, agents)
 			}
@@ -589,12 +696,112 @@ func TestGetAppInfo(t *testing.T) {
 	}
 }
 
-// TestGetAppInfoToolsetBudgetIsPerRequest pins that the toolset timeout is one
+// TestBuildNameClash covers two different agents sharing a name. The response
+// is keyed by name, so only one can be described: the first the walk reaches.
+// The walk still descends into the other, so an agent below it is not lost.
+func TestBuildNameClash(t *testing.T) {
+	logs := captureLog(t)
+
+	first := newLLMAgent(t, llmagent.Config{
+		Name:        "helper",
+		Description: "The first helper.",
+		Instruction: "Help first.",
+	})
+	below := newLLMAgent(t, llmagent.Config{
+		Name:        "below",
+		Description: "Below the second helper.",
+		Instruction: "Work.",
+	})
+	second := newLLMAgent(t, llmagent.Config{
+		Name:        "helper",
+		Description: "The second helper.",
+		Instruction: "Help second.",
+		SubAgents:   []agent.Agent{below},
+	})
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "root",
+		Description: "Root agent.",
+		Instruction: "Delegate.",
+		SubAgents: []agent.Agent{
+			newSequentialAgent(t, "left", "Left branch.", first),
+			newSequentialAgent(t, "right", "Right branch.", second),
+		},
+	})
+
+	agents := build(t.Context(), "test_app", root).Agents
+
+	if diff := cmp.Diff([]string{"below", "helper", "root"}, slices.Sorted(maps.Keys(agents))); diff != "" {
+		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
+	}
+	if got := agents["helper"].Description; got != "The first helper." {
+		t.Errorf("helper Description = %q, want the first helper's", got)
+	}
+	if !strings.Contains(logs.String(), `two different agents are named "helper"`) {
+		t.Errorf("log does not report the name clash; got:\n%s", logs.String())
+	}
+}
+
+// TestBuildSharedAgentIsNotAClash covers the other side of the name clash: one
+// agent reached along two paths is the same agent, so it is described once and
+// no clash is logged.
+func TestBuildSharedAgentIsNotAClash(t *testing.T) {
+	logs := captureLog(t)
+
+	shared := newLLMAgent(t, llmagent.Config{
+		Name:        "shared",
+		Description: "Reachable from two branches.",
+		Instruction: "Help.",
+	})
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "root",
+		Description: "Root agent.",
+		Instruction: "Delegate.",
+		SubAgents: []agent.Agent{
+			newSequentialAgent(t, "left", "Left branch.", shared),
+			newSequentialAgent(t, "right", "Right branch.", shared),
+		},
+	})
+
+	build(t.Context(), "test_app", root)
+
+	if strings.Contains(logs.String(), "two different agents") {
+		t.Errorf("a shared agent was logged as a name clash:\n%s", logs.String())
+	}
+}
+
+// TestBuildFailingToolsetLogsNoErrorText pins that a toolset's error text stays
+// out of the log. It can carry a server URL with a token in its query, and any
+// caller who reaches the endpoint can make it be logged.
+func TestBuildFailingToolsetLogsNoErrorText(t *testing.T) {
+	logs := captureLog(t)
+
+	root := newLLMAgent(t, llmagent.Config{
+		Name:        "db",
+		Description: "Talks to a database.",
+		Instruction: "Query.",
+		Toolsets: []tool.Toolset{&fakeToolset{
+			name: "broken",
+			err:  errors.New(`Get "https://mcp.example/?key=SECRET-TOKEN": connection refused`),
+		}},
+	})
+
+	build(t.Context(), "test_app", root)
+
+	got := logs.String()
+	if !strings.Contains(got, `skipping toolset "broken"`) {
+		t.Errorf("log does not report the skipped toolset:\n%s", got)
+	}
+	if strings.Contains(got, "SECRET-TOKEN") {
+		t.Errorf("log contains the toolset's error text:\n%s", got)
+	}
+}
+
+// TestBuildToolsetBudgetIsPerRequest pins that the toolset timeout is one
 // budget for the whole walk. Handing each agent its own would multiply it by
 // the number of agents holding a toolset, so a request could outlive the
 // server's write timeout many times over while the client already saw a broken
 // response.
-func TestGetAppInfoToolsetBudgetIsPerRequest(t *testing.T) {
+func TestBuildToolsetBudgetIsPerRequest(t *testing.T) {
 	first := &deadlineToolset{name: "first"}
 	second := &deadlineToolset{name: "second"}
 
@@ -612,7 +819,7 @@ func TestGetAppInfoToolsetBudgetIsPerRequest(t *testing.T) {
 		SubAgents:   []agent.Agent{child},
 	})
 
-	services.GetAppInfo(context.Background(), "test_app", root)
+	build(t.Context(), "test_app", root)
 
 	if len(first.deadlines) != 1 || len(second.deadlines) != 1 {
 		t.Fatalf("toolsets resolved %d and %d times, want 1 each",
@@ -626,21 +833,17 @@ func TestGetAppInfoToolsetBudgetIsPerRequest(t *testing.T) {
 	}
 }
 
-// TestGetAppInfoLoopDoesNotPoisonASiblingBranch covers the second thing a loop
-// breaks, after non-termination. Turning back at an agent already on the path
-// gives that agent an answer true only for the path the walk came in on, so
-// caching it hands the truncated answer to a later parent that could have seen
-// the whole subtree.
+// TestBuildLoop covers an agent graph that is not a tree. The constructors
+// cannot build one, because a sub-agent exists before its parent, but
+// SubAgents returns the live slice, so a caller can close a loop afterwards.
+// The walk must terminate and still reach every agent the loop leaves
+// reachable.
 //
 //	root  -> [outer(Seq), sibling(LLM)]
 //	outer -> [inner(Seq), leaf(LLM)]
 //	inner -> outer                       (the loop)
 //	sibling -> inner
-//
-// inner is walked first from inside outer, where the loop cuts it short and it
-// reaches nothing. sibling reaches leaf through inner -> outer -> leaf, so
-// sibling must still report leaf.
-func TestGetAppInfoLoopDoesNotPoisonASiblingBranch(t *testing.T) {
+func TestBuildLoop(t *testing.T) {
 	leaf := newLLMAgent(t, llmagent.Config{
 		Name:        "leaf",
 		Description: "Does the work.",
@@ -672,21 +875,17 @@ func TestGetAppInfoLoopDoesNotPoisonASiblingBranch(t *testing.T) {
 	}
 	subAgents[0] = outer
 
-	info := services.GetAppInfo(context.Background(), "test_app", root)
+	agents := build(t.Context(), "test_app", root).Agents
 
-	if diff := cmp.Diff([]string{"leaf"}, info.Agents["sibling"].SubAgents); diff != "" {
-		t.Errorf("sibling sub-agents mismatch (-want +got):\n%s", diff)
-	}
-	gotNames := slices.Sorted(maps.Keys(info.Agents))
-	if diff := cmp.Diff([]string{"leaf", "root", "sibling"}, gotNames); diff != "" {
+	if diff := cmp.Diff([]string{"leaf", "root", "sibling"}, slices.Sorted(maps.Keys(agents))); diff != "" {
 		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
 	}
 }
 
-// TestGetAppInfoAgentsAlwaysPresent covers an app with no LLM agent anywhere.
-// The contract requires the agents key on every /app-info response, because
-// evaluation reads it, so an empty map has to marshal to {} and not vanish.
-func TestGetAppInfoAgentsAlwaysPresent(t *testing.T) {
+// TestBuildAgentsAlwaysPresent covers an app with no LLM agent anywhere. The
+// agents key is read on every response, so an empty map has to marshal to {}
+// and not vanish, and isComputerUse is always emitted, as adk-python does.
+func TestBuildAgentsAlwaysPresent(t *testing.T) {
 	root, err := agent.New(agent.Config{
 		Name:        "custom_root",
 		Description: "A custom agent with no LLM agent below it.",
@@ -695,27 +894,21 @@ func TestGetAppInfoAgentsAlwaysPresent(t *testing.T) {
 		t.Fatalf("agent.New failed: %v", err)
 	}
 
-	info := services.GetAppInfo(context.Background(), "test_app", root)
-	if info.Agents == nil {
-		t.Error("Agents = nil, want an empty map (a nil map marshals to null)")
-	}
-	if len(info.Agents) != 0 {
-		t.Errorf("len(Agents) = %d, want 0", len(info.Agents))
-	}
-
-	body, err := json.Marshal(info)
+	body, err := json.Marshal(build(t.Context(), "test_app", root))
 	if err != nil {
 		t.Fatalf("json.Marshal failed: %v", err)
 	}
-	if !strings.Contains(string(body), `"agents":{}`) {
-		t.Errorf("response has no agents key; body: %s", body)
+	for _, want := range []string{`"agents":{}`, `"isComputerUse":false`, `"language":"go"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("response has no %s; body: %s", want, body)
+		}
 	}
 }
 
-// TestGetAppInfoNonLLMRootIsNamedButNotDescribed pins the one place the
-// agents map and RootAgentName disagree: the root is always named, and it is
-// only described when it is an LLM agent.
-func TestGetAppInfoNonLLMRootIsNamedButNotDescribed(t *testing.T) {
+// TestBuildNonLLMRootIsNamedButNotDescribed pins the one place the agents map
+// and RootAgentName disagree: the root is always named, and it is only
+// described when it is an LLM agent.
+func TestBuildNonLLMRootIsNamedButNotDescribed(t *testing.T) {
 	writer := newLLMAgent(t, llmagent.Config{
 		Name:        "writer",
 		Description: "Writes a draft.",
@@ -723,7 +916,10 @@ func TestGetAppInfoNonLLMRootIsNamedButNotDescribed(t *testing.T) {
 	})
 	root := newSequentialAgent(t, "pipeline", "Runs steps in order.", writer)
 
-	info := services.GetAppInfo(context.Background(), "test_app", root)
+	info := build(t.Context(), "test_app", root)
+	if info.Name != "test_app" {
+		t.Errorf("Name = %q, want %q", info.Name, "test_app")
+	}
 	if info.RootAgentName != "pipeline" {
 		t.Errorf("RootAgentName = %q, want %q", info.RootAgentName, "pipeline")
 	}
@@ -731,61 +927,7 @@ func TestGetAppInfoNonLLMRootIsNamedButNotDescribed(t *testing.T) {
 		t.Errorf("Description = %q, want %q", info.Description, "Runs steps in order.")
 	}
 	if _, ok := info.Agents["pipeline"]; ok {
-		t.Error("agents contains the non-LLM root; only LLM agents are reported")
-	}
-	if _, ok := info.Agents["writer"]; !ok {
-		t.Error("agents is missing writer; the subtree below a non-LLM agent must still be walked")
-	}
-}
-
-// TestGetAppInfoCyclicNonLLMAgents covers an agent graph that is not a tree.
-// The constructors cannot build one, because a sub-agent exists before its
-// parent, but SubAgents returns the live slice, so a caller can close a loop
-// afterwards. Stepping over agents that are not LLM agents means the walk no
-// longer terminates on its own here -- there is no agent along the loop to
-// record and stop at -- so it must detect the loop instead of exhausting the
-// stack.
-func TestGetAppInfoCyclicNonLLMAgents(t *testing.T) {
-	leaf := newLLMAgent(t, llmagent.Config{
-		Name:        "leaf",
-		Description: "Does the work.",
-		Instruction: "Work.",
-	})
-	inner := newSequentialAgent(t, "inner", "Inner pipeline.", leaf)
-	outer := newSequentialAgent(t, "outer", "Outer pipeline.", inner)
-	root := newLLMAgent(t, llmagent.Config{
-		Name:        "root",
-		Description: "Root agent.",
-		Instruction: "Delegate.",
-		SubAgents:   []agent.Agent{outer},
-	})
-
-	// Close the loop: inner's only sub-agent becomes outer, its own parent.
-	subAgents := inner.SubAgents()
-	if len(subAgents) != 1 {
-		t.Fatalf("len(inner.SubAgents()) = %d, want 1", len(subAgents))
-	}
-	subAgents[0] = outer
-	if got := inner.SubAgents()[0].Name(); got != "outer" {
-		t.Fatalf("inner.SubAgents()[0] = %q after the loop was closed, want outer", got)
-	}
-
-	info := services.GetAppInfo(context.Background(), "test_app", root)
-
-	// leaf is gone, because the loop replaced the edge that reached it. What
-	// matters is that the call returned at all.
-	gotNames := slices.Sorted(maps.Keys(info.Agents))
-	if diff := cmp.Diff([]string{"root"}, gotNames); diff != "" {
-		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
-	}
-	if got := info.Agents["root"].SubAgents; len(got) != 0 {
-		t.Errorf("root SubAgents = %v, want empty; the loop reaches no LLM agent", got)
-	}
-}
-
-func TestGetAppInfoNilRoot(t *testing.T) {
-	if got := services.GetAppInfo(context.Background(), "test_app", nil); got != nil {
-		t.Errorf("GetAppInfo(nil root) = %v, want nil", got)
+		t.Error("agents contains the non-LLM root; only LLM agents are described")
 	}
 }
 
@@ -803,41 +945,38 @@ func mcpEcho(ctx context.Context, req *mcp.CallToolRequest, in mcpEchoInput) (*m
 	return nil, mcpEchoOutput{Echoed: in.Text}, nil
 }
 
-// TestGetAppInfoWithMCPToolset covers a real remote-style toolset: tools are
-// discovered over the MCP protocol at request time rather than being known
-// statically. The server runs in memory, so the test stays offline.
-func TestGetAppInfoWithMCPToolset(t *testing.T) {
+// newMCPToolset serves one echo tool from an in-memory MCP server, so a test
+// covers tools discovered over the protocol at request time while staying
+// offline.
+func newMCPToolset(t *testing.T) tool.Toolset {
+	t.Helper()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-
 	server := mcp.NewServer(&mcp.Implementation{Name: "echo_server", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "Echoes the given text."}, mcpEcho)
 	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
 		t.Fatalf("failed to connect MCP server: %v", err)
 	}
-
 	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
 	if err != nil {
 		t.Fatalf("mcptoolset.New failed: %v", err)
 	}
+	return ts
+}
 
+func TestBuildWithMCPToolset(t *testing.T) {
 	root := newLLMAgent(t, llmagent.Config{
 		Name:        "echo_agent",
 		Description: "Echoes text.",
 		Instruction: "Use the echo tool.",
 		Tools:       []tool.Tool{newWeatherTool(t, "local_tool")},
-		Toolsets:    []tool.Toolset{ts},
+		Toolsets:    []tool.Toolset{newMCPToolset(t)},
 	})
 
-	info := services.GetAppInfo(t.Context(), "mcp_app", root)
-	if info == nil {
-		t.Fatal("GetAppInfo returned nil")
-	}
+	info := build(t.Context(), "mcp_app", root)
 
-	got := toolNames(info.Agents["echo_agent"].Tools)
-	if diff := cmp.Diff([]string{"echo", "local_tool"}, got); diff != "" {
+	if diff := cmp.Diff([]string{"echo", "local_tool"}, toolNames(info.Agents["echo_agent"].Tools)); diff != "" {
 		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}
-
 	// The declaration must survive the MCP round trip, schema included.
 	for _, tl := range info.Agents["echo_agent"].Tools {
 		decl := tl.FunctionDeclarations[0]
@@ -853,39 +992,23 @@ func TestGetAppInfoWithMCPToolset(t *testing.T) {
 	}
 }
 
-// TestGetAppInfoMCPToolsetContextCancelled covers a toolset that cannot be
-// reached in time: the agent must still be described, minus its toolset's
-// tools. It also pins the context propagation -- the request context reaches
-// ts.Tools, so a client disconnect stops toolset resolution.
-func TestGetAppInfoMCPToolsetContextCancelled(t *testing.T) {
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-
-	server := mcp.NewServer(&mcp.Implementation{Name: "echo_server", Version: "v1.0.0"}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "Echoes the given text."}, mcpEcho)
-	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
-		t.Fatalf("failed to connect MCP server: %v", err)
-	}
-
-	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
-	if err != nil {
-		t.Fatalf("mcptoolset.New failed: %v", err)
-	}
-
+// TestBuildMCPToolsetContextCancelled covers a toolset that cannot be reached
+// in time: the agent must still be described, minus its toolset's tools. It
+// also pins that the request context reaches ts.Tools, so a client disconnect
+// stops toolset resolution.
+func TestBuildMCPToolsetContextCancelled(t *testing.T) {
 	root := newLLMAgent(t, llmagent.Config{
 		Name:        "echo_agent",
 		Description: "Echoes text.",
 		Instruction: "Use the echo tool.",
 		Tools:       []tool.Tool{newWeatherTool(t, "local_tool")},
-		Toolsets:    []tool.Toolset{ts},
+		Toolsets:    []tool.Toolset{newMCPToolset(t)},
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	info := services.GetAppInfo(ctx, "mcp_app", root)
-	if info == nil {
-		t.Fatal("GetAppInfo returned nil")
-	}
+	info := build(ctx, "mcp_app", root)
 	if diff := cmp.Diff([]string{"local_tool"}, toolNames(info.Agents["echo_agent"].Tools)); diff != "" {
 		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}

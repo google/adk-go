@@ -101,8 +101,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	artifactsController := controllers.NewArtifactsAPIController(cfg.ArtifactService)
 	artifactsController.WithAuthorizer(authorizer)
 
-	appsController := controllers.NewAppsAPIController(cfg.AgentLoader)
-
 	subrouters := []routers.Router{
 		routers.NewSessionsAPIRouter(sessionsController),
 		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIControllerWithConfig(controllers.RuntimeAPIControllerConfig{
@@ -120,7 +118,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			// with one rule.
 			CheckOrigin: policy.CheckOrigin,
 		})),
-		routers.NewAppsAPIRouter(appsController),
+		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
 		&routers.AgentBuilderAPIRouter{}, // Ungated on purpose; see its doc comment.
@@ -138,7 +136,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		)
 	}
 	if cfg.AppInfoAPIConfig.IncludeAppInfoAPI {
-		subrouters = append(subrouters, routers.NewAppInfoAPIRouter(appsController))
+		subrouters = append(subrouters, routers.NewAppInfoAPIRouter(cfg.AgentLoader))
 	}
 
 	authenticator := cfg.Authenticator
@@ -284,12 +282,17 @@ type DebugAPIConfig struct {
 
 // AppInfoAPIConfig contains parameters for the app-info API.
 type AppInfoAPIConfig struct {
-	// IncludeAppInfoAPI mounts GET /apps/{app_name}/app-info.
+	// IncludeAppInfoAPI mounts GET /apps/{app_name}/app-info, the experimental
+	// endpoint implemented by package google.golang.org/adk/v2/exp/appinfo. Its
+	// response may change, or the endpoint may be removed, in a later version,
+	// and the server logs a warning saying so on its first request.
 	//
 	// Off by default, as the Agents CLI wire contract requires: the endpoint
 	// reports each agent's system instruction and tool declarations, which is
 	// what an evaluation harness needs and more than a deployed server should
-	// hand out. Turn it on for evaluation, leave it off in production.
+	// hand out. Each request also resolves every agent's toolsets, which can
+	// connect to MCP servers. Turn it on for evaluation, leave it off in
+	// production.
 	//
 	// The route requires authentication like any other, but [ServerConfig.Authenticator]
 	// defaults to [authn.Noop], which admits every request. Setting this without
