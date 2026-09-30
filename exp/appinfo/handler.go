@@ -18,19 +18,34 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/agent"
 )
 
+// experimentalWarning is logged the first time the endpoint serves a request.
+// Its text is the notice adk-python's experimental decorator attaches to a
+// feature (src/google/adk/utils/feature_decorator.py), so the two runtimes warn
+// in the same words.
+const experimentalWarning = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feature is experimental and may change or be removed in future versions without notice. It may introduce breaking changes at any time."
+
 // Handler returns the handler for GET /apps/{app_name}/app-info. It takes the
 // app name from the gorilla/mux route variable app_name, loads that app's root
 // agent from loader, and answers with its [AppInfo] as JSON.
 //
 // It answers 404 for an app loader does not serve and 503 when loader is nil.
+//
+// The first request it serves logs a warning that the endpoint is
+// experimental, once per returned handler, as adk-python warns the first time
+// an experimental feature is used. Mounted behind authentication, as the REST
+// server mounts it, a request that is refused never reaches it and does not
+// use up the warning.
 func Handler(loader agent.Loader) http.HandlerFunc {
+	var warnOnce sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
+		warnOnce.Do(func() { log.Print(experimentalWarning) })
 		if loader == nil {
 			http.Error(w, "no agent loader configured", http.StatusServiceUnavailable)
 			return

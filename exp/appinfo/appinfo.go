@@ -19,8 +19,8 @@
 // adk-python's API server.
 //
 // The endpoint is experimental. Its response may change, or the endpoint may be
-// removed, in a later version without notice, and the REST server logs a
-// warning saying so the first time it serves a request.
+// removed, in a later version without notice, and [Handler] logs a warning
+// saying so the first time it serves a request.
 //
 // The ADK REST API serves it only when asked to, since it hands out every
 // agent's instruction and tool declarations: set

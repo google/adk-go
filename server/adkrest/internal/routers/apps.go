@@ -61,11 +61,10 @@ func NewAppInfoAPIRouter(agentLoader agent.Loader) *AppInfoAPIRouter {
 func (r *AppInfoAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
-			Name:         "AppInfo",
-			Methods:      []string{http.MethodGet},
-			Pattern:      "/apps/{app_name}/app-info",
-			HandlerFunc:  appinfo.Handler(r.agentLoader),
-			Experimental: true,
+			Name:        "AppInfo",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/app-info",
+			HandlerFunc: appinfo.Handler(r.agentLoader),
 		},
 	}
 }

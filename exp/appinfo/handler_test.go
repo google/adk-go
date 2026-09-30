@@ -16,10 +16,12 @@ package appinfo_test
 
 import (
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -140,5 +142,47 @@ func TestHandlerEncodingFailure(t *testing.T) {
 	rec := serve(t, loader, httptest.NewRequest(http.MethodGet, "/apps/odd/app-info", nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d; body: %q", rec.Code, http.StatusInternalServerError, rec.Body)
+	}
+}
+
+// TestHandlerWarnsOnce pins adk-python's behavior for an experimental feature:
+// one warning on first use, however many requests follow and however
+// concurrently, and a fresh warning for a handler built afresh.
+func TestHandlerWarnsOnce(t *testing.T) {
+	// The standard logger serializes its writes, so a plain builder is safe.
+	var logs strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	loader := newLoader(t, llmagent.Config{Name: "concierge", Description: "Plans trips.", Instruction: "Coordinate."})
+	router := mux.NewRouter()
+	router.Handle(path, appinfo.Handler(loader))
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/apps/concierge/app-info", nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+		})
+	}
+	wg.Wait()
+
+	const want = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feature is experimental and may change or be removed in future versions without notice. It may introduce breaking changes at any time.\n"
+	if got := logs.String(); got != want {
+		t.Errorf("log = %q, want the warning exactly once: %q", got, want)
+	}
+
+	logs.Reset()
+	serve(t, loader, httptest.NewRequest(http.MethodGet, "/apps/concierge/app-info", nil))
+	if got := logs.String(); got != want {
+		t.Errorf("a new handler logged %q, want its own warning: %q", got, want)
 	}
 }
