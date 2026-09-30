@@ -412,7 +412,13 @@ type EventRef struct {
 	Timestamp    time.Time `json:"timestamp"`
 }
 
-// Prefixes for defining session's state scopes
+// Prefixes for defining session's state scopes.
+//
+// The prefixes are single-level and mutually exclusive; they do not compose.
+// For example, "app:temp:key" is a valid app-scoped key, but the "temp:"
+// portion carries no temporary-scope semantics: the entry is stored under
+// "temp:key" within app state, persisted like any other app state, and read
+// back with the full key "app:temp:key".
 const (
 	// KeyPrefixApp is the prefix for app-level state keys.
 	// They are shared across all users and sessions for that application.
