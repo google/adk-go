@@ -156,15 +156,15 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 		s.currentFunctionID = part.FunctionCall.ID
 	}
 	for _, arg := range part.FunctionCall.PartialArgs {
-		jsonPath := arg.JsonPath
-		if jsonPath == "" {
-			continue
-		}
-		value, ok := s.getValueFromPartialArg(arg, jsonPath)
+		segments, ok := parseJSONPath(arg.JsonPath)
 		if !ok {
 			continue
 		}
-		s.setValueByJSONPath(jsonPath, value)
+		value, ok := s.getValueFromPartialArg(arg, segments)
+		if !ok {
+			continue
+		}
+		s.setValueByPath(segments, value)
 	}
 	if part.FunctionCall.WillContinue != nil && *part.FunctionCall.WillContinue {
 		return
@@ -173,7 +173,7 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	s.flushFunctionCallToSequence()
 }
 
-func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.PartialArg, jsonPath string) (any, bool) {
+func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.PartialArg, segments []pathSegment) (any, bool) {
 	var value any
 	var hasValue bool
 
@@ -181,26 +181,9 @@ func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.P
 		stringChunk := partialArg.StringValue
 		hasValue = true
 
-		// Clean up the JSONPath prefix
-		pathWithoutPrefix := jsonPath
-		if strings.HasPrefix(jsonPath, "$.") {
-			pathWithoutPrefix = jsonPath[2:]
-		}
-		pathParts := strings.Split(pathWithoutPrefix, ".")
-
-		// Try to get existing value by traversing the map
-		var existingValue any = s.currentFunctionArgs
-		for _, part := range pathParts {
-			if m, ok := existingValue.(map[string]any); ok {
-				if val, exists := m[part]; exists {
-					existingValue = val
-					continue
-				}
-			}
-			// If we can't find the path or it's not a map, reset existingValue
-			existingValue = nil
-			break
-		}
+		// A string is streamed in chunks that all carry the same path, so
+		// append this one to whatever of it has already been assembled.
+		existingValue, _ := valueByPath(s.currentFunctionArgs, segments)
 
 		// Append to existing string or set new value
 		if str, ok := existingValue.(string); ok {
@@ -223,45 +206,203 @@ func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.P
 	return value, hasValue
 }
 
-func (s *streamingResponseAggregator) setValueByJSONPath(jsonPath string, value any) {
+// pathSegment is one step of a JSON Path: an object member name, or an array
+// index when isIndex is set.
+type pathSegment struct {
+	name    string
+	index   int
+	isIndex bool
+}
+
+// maxPathIndex is the largest array index a path may address.
+// parseBracketSegment checks it after every digit, and that check is what keeps
+// the index from overflowing int: without it "$.a[9999999999999999999]" wraps
+// to a negative index and setInto, which trusts the index it is given, panics.
+// It also bounds the slice a single index can grow; no function call argument
+// list comes close to it.
+const maxPathIndex = 1 << 16
+
+// parseJSONPath splits the RFC 9535 JSON Path that addresses a streamed
+// argument (https://datatracker.ietf.org/doc/html/rfc9535) into its segments.
+// Only the selectors a normalized path is built from are accepted — "$.name",
+// "$['name']" and "$[0]" — because that is all the model produces; anything
+// else, including wildcards, slices and \u escapes in a quoted name, reports
+// false so that the chunk is dropped rather than written to an invented key.
+func parseJSONPath(jsonPath string) ([]pathSegment, bool) {
+	rest := strings.TrimPrefix(jsonPath, "$")
+	var segments []pathSegment
+	for rest != "" {
+		if rest[0] == '[' {
+			segment, remainder, ok := parseBracketSegment(rest)
+			if !ok {
+				return nil, false
+			}
+			segments, rest = append(segments, segment), remainder
+			continue
+		}
+		if rest[0] == '.' {
+			rest = rest[1:]
+		} else if len(segments) > 0 {
+			return nil, false
+		}
+		name, remainder := splitMemberName(rest)
+		if name == "" {
+			return nil, false
+		}
+		segments, rest = append(segments, pathSegment{name: name}), remainder
+	}
+	if len(segments) == 0 {
+		return nil, false
+	}
+	return segments, true
+}
+
+// splitMemberName takes the shorthand member name at the front of a path.
+func splitMemberName(path string) (name, rest string) {
+	if i := strings.IndexAny(path, ".["); i >= 0 {
+		return path[:i], path[i:]
+	}
+	return path, ""
+}
+
+// parseBracketSegment takes the bracketed selector at the front of a path,
+// which is either an array index or a quoted member name.
+func parseBracketSegment(path string) (pathSegment, string, bool) {
+	body := path[1:]
+	if body != "" && (body[0] == '\'' || body[0] == '"') {
+		name, rest, ok := parseQuotedName(body)
+		if !ok || rest == "" || rest[0] != ']' {
+			return pathSegment{}, "", false
+		}
+		return pathSegment{name: name}, rest[1:], true
+	}
+	end := strings.IndexByte(body, ']')
+	if end <= 0 {
+		return pathSegment{}, "", false
+	}
+	index := 0
+	for i := range end {
+		digit := body[i]
+		if digit < '0' || digit > '9' {
+			return pathSegment{}, "", false
+		}
+		index = index*10 + int(digit-'0')
+		if index > maxPathIndex {
+			return pathSegment{}, "", false
+		}
+	}
+	return pathSegment{index: index, isIndex: true}, body[end+1:], true
+}
+
+// parseQuotedName reads a quoted member name, undoing the single-character
+// escapes RFC 9535 defines for one.
+func parseQuotedName(path string) (name, rest string, ok bool) {
+	quote := path[0]
+	var parsed strings.Builder
+	for i := 1; i < len(path); i++ {
+		switch char := path[i]; char {
+		case quote:
+			return parsed.String(), path[i+1:], true
+		case '\\':
+			i++
+			if i == len(path) {
+				return "", "", false
+			}
+			escaped, ok := unescape(path[i])
+			if !ok {
+				return "", "", false
+			}
+			parsed.WriteByte(escaped)
+		default:
+			parsed.WriteByte(char)
+		}
+	}
+	return "", "", false
+}
+
+func unescape(char byte) (byte, bool) {
+	switch char {
+	case '\'', '"', '\\', '/':
+		return char, true
+	case 'b':
+		return '\b', true
+	case 'f':
+		return '\f', true
+	case 'n':
+		return '\n', true
+	case 'r':
+		return '\r', true
+	case 't':
+		return '\t', true
+	}
+	return 0, false
+}
+
+// setValueByPath writes value at the location the segments address, creating
+// the maps and slices on the way to it.
+func (s *streamingResponseAggregator) setValueByPath(segments []pathSegment, value any) {
 	// Initialize the map if it hasn't been already
 	if s.currentFunctionArgs == nil {
 		s.currentFunctionArgs = make(map[string]any)
 	}
-
-	// Remove leading "$." from jsonPath
-	path := jsonPath
-	if strings.HasPrefix(jsonPath, "$.") {
-		path = jsonPath[2:]
+	// Function call arguments are a JSON object, so a path that starts at an
+	// array index addresses nothing and setInto would return a slice.
+	if args, ok := setInto(s.currentFunctionArgs, segments, value).(map[string]any); ok {
+		s.currentFunctionArgs = args
 	}
+}
 
-	// Split path into components
-	pathParts := strings.Split(path, ".")
-	if len(pathParts) == 0 || (len(pathParts) == 1 && pathParts[0] == "") {
-		return // Handle empty path case
-	}
-
-	// Navigate to the correct location
-	current := s.currentFunctionArgs
-
-	// Iterate through all parts except the last one
-	for _, part := range pathParts[:len(pathParts)-1] {
-		next, exists := current[part]
-
-		// If the path doesn't exist, or the existing value isn't a map,
-		// create a new map at this node.
-		nextMap, ok := next.(map[string]any)
-		if !exists || !ok {
-			nextMap = make(map[string]any)
-			current[part] = nextMap
+// setInto returns container with value written at the location segments
+// address within it, which is a new container when the one that is there
+// cannot hold that segment. A slice grows to fit an index, so an argument
+// whose elements arrive out of order keeps the positions the model chose.
+func setInto(container any, segments []pathSegment, value any) any {
+	segment := segments[0]
+	if segment.isIndex {
+		elements, _ := container.([]any)
+		for len(elements) <= segment.index {
+			elements = append(elements, nil)
 		}
-
-		current = nextMap
+		elements[segment.index] = descend(elements[segment.index], segments, value)
+		return elements
 	}
+	members, ok := container.(map[string]any)
+	if !ok {
+		members = make(map[string]any)
+	}
+	members[segment.name] = descend(members[segment.name], segments, value)
+	return members
+}
 
-	// Set the final value at the last key
-	lastKey := pathParts[len(pathParts)-1]
-	current[lastKey] = value
+func descend(existing any, segments []pathSegment, value any) any {
+	if len(segments) == 1 {
+		return value
+	}
+	return setInto(existing, segments[1:], value)
+}
+
+// valueByPath reads the value the segments address, reporting whether the
+// whole path exists.
+func valueByPath(args map[string]any, segments []pathSegment) (any, bool) {
+	var current any = args
+	for _, segment := range segments {
+		if segment.isIndex {
+			elements, ok := current.([]any)
+			if !ok || segment.index >= len(elements) {
+				return nil, false
+			}
+			current = elements[segment.index]
+			continue
+		}
+		members, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if current, ok = members[segment.name]; !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func (s *streamingResponseAggregator) flushTextBufferToSequence() {

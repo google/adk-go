@@ -15,18 +15,23 @@
 package api
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -70,33 +75,6 @@ func callAPI(t *testing.T, prefix string, inner http.Handler, method, target str
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return rec
-}
-
-func TestNormalizeOrigin(t *testing.T) {
-	tests := []struct {
-		name string
-		addr string
-		want string
-	}{
-		{name: "bare host and port gets http", addr: "localhost:8080", want: "http://localhost:8080"},
-		{name: "bare host gets http", addr: "ui.example.com", want: "http://ui.example.com"},
-		{name: "http kept", addr: "http://localhost:4200", want: "http://localhost:4200"},
-		{name: "https kept", addr: "https://ui.example.com", want: "https://ui.example.com"},
-		{name: "trailing slash stripped", addr: "http://localhost:8080/", want: "http://localhost:8080"},
-		{name: "path stripped", addr: "https://ui.example.com/app/index.html", want: "https://ui.example.com"},
-		{name: "query stripped", addr: "http://localhost:8080/?a=b", want: "http://localhost:8080"},
-		{name: "wildcard passes through", addr: "*", want: "*"},
-		{name: "empty passes through", addr: "", want: ""},
-		{name: "surrounding space trimmed", addr: "  localhost:8080  ", want: "http://localhost:8080"},
-		{name: "ipv6 host and port", addr: "[::1]:8080", want: "http://[::1]:8080"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeOrigin(tt.addr); got != tt.want {
-				t.Errorf("normalizeOrigin(%q) = %q, want %q", tt.addr, got, tt.want)
-			}
-		})
-	}
 }
 
 func TestCORSHeaders(t *testing.T) {
@@ -471,5 +449,346 @@ func TestSetupSubroutersServesRealRESTAPI(t *testing.T) {
 				t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
 			}
 		})
+	}
+}
+
+// TestWebSocketUpgradeThroughMount covers /run_live, which takes over the
+// connection instead of writing a response.
+//
+// The prefixed mount wraps the ResponseWriter to rewrite redirects, and
+// gorilla/websocket type-asserts that writer to http.Hijacker directly rather
+// than following Unwrap. A wrapper missing Hijack therefore turns every
+// upgrade into a 500, on the default /api prefix but not on an empty one.
+// httptest.NewServer is used rather than a recorder because only a real
+// connection can be hijacked.
+func TestWebSocketUpgradeThroughMount(t *testing.T) {
+	for _, prefix := range []string{"/api", ""} {
+		t.Run("prefix="+prefix, func(t *testing.T) {
+			upgrader := websocket.Upgrader{}
+			echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					// Upgrade has already written the error response.
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("live"))
+			})
+
+			router := mux.NewRouter().StrictSlash(true)
+			inner := mux.NewRouter().StrictSlash(true)
+			inner.Path("/run_live").Handler(echo)
+			registerAPIRoutes(router, prefix, inner)
+
+			srv := httptest.NewServer(router)
+			defer srv.Close()
+
+			url := "ws" + strings.TrimPrefix(srv.URL, "http") + prefix + "/run_live"
+			conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				status := "no response"
+				if resp != nil {
+					status = resp.Status
+				}
+				t.Fatalf("Dial(%s) error = %v (%s), want a successful upgrade", url, err, status)
+			}
+			defer func() { _ = conn.Close() }()
+
+			// Without a deadline, an upgrade that succeeds but never sends a
+			// frame hangs until the package timeout, taking every other test in
+			// the package down with it instead of failing this one.
+			if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				t.Fatalf("SetReadDeadline() error = %v", err)
+			}
+
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				t.Fatalf("ReadMessage() error = %v, want the server's frame", err)
+			}
+			if got := string(msg); got != "live" {
+				t.Errorf("ReadMessage() = %q, want %q", got, "live")
+			}
+		})
+	}
+}
+
+// TestUserMessageNamesWhatTheDebugFlagCosts covers the startup hint.
+//
+// The graph and trace routes are off by default because they expose tool-call
+// arguments, responses and tool names. That is the right default, but it leaves
+// two web UI panels answering 404, and until now the only signal was an error
+// in the browser console. The startup banner says it instead.
+func TestUserMessageNamesWhatTheDebugFlagCosts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantHint bool
+	}{
+		{"flag absent", nil, true},
+		{"flag set", []string{"--include_debug_api"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse() failed: %v", err)
+			}
+
+			var lines []string
+			l.UserMessage("http://localhost:8080", func(v ...any) {
+				lines = append(lines, fmt.Sprint(v...))
+			})
+			out := strings.Join(lines, "\n")
+
+			got := strings.Contains(out, "-include_debug_api")
+			if got != tc.wantHint {
+				t.Errorf("hint present = %v, want %v; output:\n%s", got, tc.wantHint, out)
+			}
+			if tc.wantHint && !strings.Contains(out, "Traces") {
+				t.Errorf("hint does not name the panels it costs; output:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestHijackReportsNotSupported covers the branch taken when the writer
+// underneath the mount cannot be hijacked.
+//
+// The wrapper has to report that as http.ErrNotSupported rather than a bare
+// error, because http.ResponseController finds this method before it follows
+// Unwrap. A caller asking errors.Is(err, http.ErrNotSupported) would otherwise
+// get a different answer purely because the mount is in the way.
+func TestHijackReportsNotSupported(t *testing.T) {
+	// httptest.ResponseRecorder implements no Hijacker, which is the case.
+	w := &redirectRewriter{ResponseWriter: httptest.NewRecorder(), prefix: "/api"}
+
+	conn, brw, err := w.Hijack()
+
+	if err == nil {
+		t.Fatal("Hijack() error = nil, want a failure on a writer that cannot be hijacked")
+	}
+	if conn != nil || brw != nil {
+		t.Errorf("Hijack() = (%v, %v), want both nil alongside the error", conn, brw)
+	}
+	if !errors.Is(err, http.ErrNotSupported) {
+		t.Errorf("Hijack() error = %v, want it to wrap http.ErrNotSupported", err)
+	}
+}
+
+// TestRunLiveUpgradesThroughTheRealMount drives the actual REST server rather
+// than a stub inner router.
+//
+// The stub version proves the mount can carry an upgrade. This proves the
+// endpoint that was broken can. The session does not exist, so the server
+// accepts the upgrade and then closes; what matters is that the handshake
+// completes at all, which is what returned 500 before Hijack was forwarded.
+func TestRunLiveUpgradesThroughTheRealMount(t *testing.T) {
+	agnt, err := agent.New(agent.Config{
+		Name: "HelloWorldAgent",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	l := NewLauncher()
+	if _, err := l.Parse([]string{"-path_prefix", "/api"}); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := l.SetupSubrouters(router, &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(agnt),
+		SessionService: session.InMemoryService(),
+	}); err != nil {
+		t.Fatalf("SetupSubrouters() error = %v", err)
+	}
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") +
+		"/api/run_live?app_name=HelloWorldAgent&user_id=u&session_id=does-not-exist"
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		status := "no response"
+		if resp != nil {
+			status = resp.Status
+		}
+		t.Fatalf("Dial(%s) error = %v (%s), want the handshake to complete", url, err, status)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("handshake status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
+	}
+
+	// The server closes because the session is missing. Reading that close is
+	// what confirms the connection was live, and the deadline keeps a silent
+	// server from hanging the package.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Log("server sent a frame before closing, which is also fine")
+	}
+}
+
+// TestSetupSubroutersPassesWebUIOriginToRESTServer pins that -webui_address
+// reaches the REST server's origin check, not only the CORS header. The header
+// alone tells a browser it may read the response; without the same value on the
+// check, the request never gets one.
+func TestSetupSubroutersPassesWebUIOriginToRESTServer(t *testing.T) {
+	const devUI = "http://localhost:4200"
+
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	l := NewLauncher()
+	if _, err := l.Parse([]string{"-webui_address", devUI, "-path_prefix", "/api"}); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := l.SetupSubrouters(router, &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(agnt),
+		SessionService: session.InMemoryService(),
+	}); err != nil {
+		t.Fatalf("SetupSubrouters() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		wantStatus int
+	}{
+		{name: "configured web UI origin", origin: devUI, wantStatus: http.StatusOK},
+		{name: "any other origin", origin: "http://evil.com", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+			req.Header.Set("Origin", tc.origin)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSetupSubroutersPassesBindHostToRESTServer pins that the launcher's bind
+// address reaches the REST server's Host check.
+//
+// That check is the only one that sees a rebound page's same-origin GET: a
+// browser sends no Origin header on one, so the Host it names is the only tell.
+// It arms on a declared loopback bind and stays off without one, so a dropped
+// BindHost leaves the request served rather than failing anywhere visible.
+func TestSetupSubroutersPassesBindHostToRESTServer(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		bindHost   string
+		host       string
+		wantStatus int
+	}{
+		{
+			name:       "rebound host on a loopback bind",
+			bindHost:   "127.0.0.1",
+			host:       "evil.com:8080",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "loopback host on a loopback bind",
+			bindHost:   "127.0.0.1",
+			host:       "localhost:8080",
+			wantStatus: http.StatusOK,
+		},
+		{
+			// A routable bind is an operator exposing the server on purpose,
+			// so it is reachable under whatever name resolves to it.
+			name:       "rebound host on an all-interfaces bind",
+			bindHost:   "0.0.0.0",
+			host:       "evil.com:8080",
+			wantStatus: http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse([]string{"-path_prefix", "/api"}); err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			router := mux.NewRouter().StrictSlash(true)
+			if err := l.SetupSubrouters(router, &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+				BindHost:       tc.bindHost,
+			}); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+			req.Host = tc.host
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAPIServerHonorsConfigMaxPayloadSize verifies that launcher.Config.
+// MaxPayloadSize is passed through to the ADK REST API server, so the API
+// server's body limit can be raised above its 10 MiB default.
+//
+// It fails without that plumbing: the API server would stay at
+// adkrest.DefaultMaxPayloadSize and reject the raised body below (between the
+// default and the configured limit) with 400.
+func TestAPIServerHonorsConfigMaxPayloadSize(t *testing.T) {
+	// 20 MiB - twice the adkrest default, clearly above the default limit.
+	const configuredMax = int64(20 << 20)
+
+	a := &apiLauncher{
+		flags:  flag.NewFlagSet("api", flag.ContinueOnError),
+		config: &apiConfig{frontendAddress: "localhost:8080"},
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	if err := a.SetupSubrouters(router, &launcher.Config{
+		SessionService: session.InMemoryService(),
+		MaxPayloadSize: configuredMax,
+	}); err != nil {
+		t.Fatalf("SetupSubrouters: %v", err)
+	}
+
+	sessionsURL := "/apps/my-app/users/u1/sessions"
+	sendSessionBody := func(padding int) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"state": {"padding": %q}}`, strings.Repeat("a", padding))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, sessionsURL, strings.NewReader(body)))
+		return rec
+	}
+
+	// A body between the 10 MiB default and the configured 20 MiB limit. It is
+	// valid JSON, so it must succeed once the configured limit is honored; at
+	// the default it would be rejected.
+	raiseRec := sendSessionBody(int(adkrest.DefaultMaxPayloadSize) + 4096)
+	if raiseRec.Code != http.StatusOK {
+		t.Fatalf("raised-limit request: got status %d, want %d (%s)", raiseRec.Code, http.StatusOK, raiseRec.Body.String())
+	}
+
+	// The configured limit is still enforced above it.
+	overRec := sendSessionBody(int(configuredMax) + 4096)
+	if overRec.Code != http.StatusBadRequest {
+		t.Fatalf("over-configured request: got status %d, want %d (%s)", overRec.Code, http.StatusBadRequest, overRec.Body.String())
+	}
+	if !strings.Contains(overRec.Body.String(), "http: request body too large") {
+		t.Fatalf("over-configured request: got body %q, want mention of %q", overRec.Body.String(), "http: request body too large")
 	}
 }

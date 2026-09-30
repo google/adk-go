@@ -1,13 +1,14 @@
 **Please ensure you have read the [contribution guide](https://github.com/google/adk-go/blob/main/CONTRIBUTING.md) before creating a pull request.**
 
-### Link to Issue or Description of Change
+### Linked issue
 
-**1. Link to an existing issue (if applicable):**
+**1. Link the issue this change is for.** Required for everything except small
+documentation and typo fixes. If no issue exists yet, please open one first.
 
 - Closes: #_issue_number_
 - Related: #_issue_number_
 
-**2. Or, if no issue exists, describe the change:**
+**2. Describe the change:**
 
 _If applicable, please follow the issue templates to provide as much detail as
 possible._
