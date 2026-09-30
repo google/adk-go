@@ -12,90 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
-	"net/http"
-	"reflect"
-	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/model"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-// ClientConfig configures the OpenAI client. Mirrors model/gemini, which takes
-// *genai.ClientConfig. Empty APIKey/BaseURL fall back to the OPENAI_API_KEY /
-// OPENAI_BASE_URL env vars (handled by openai-go's default options).
-type ClientConfig struct {
-	APIKey     string
-	BaseURL    string       // for OpenAI-compatible endpoints
-	HTTPClient *http.Client // optional; e.g. for tests
-
-	// Options is an escape hatch for advanced openai-go request options,
-	// appended after the options derived from the fields above.
-	Options []option.RequestOption
-}
-
-type openAIModel struct {
+// Model talks to the Responses API. It is what openaimodel.NewModel returns
+// for a ClientConfig whose API is openaimodel.APIResponses or unset.
+type Model struct {
 	client *openai.Client
 	name   string
 }
 
-// NewModel constructs a new openAIModel.
-// The context is unused but kept for signature parity with other model constructors (e.g., gemini.NewModel).
-func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM, error) {
-	if modelName == "" {
-		return nil, ErrModelNameRequired
-	}
-	if cfg == nil {
-		cfg = &ClientConfig{}
-	}
-	var opts []option.RequestOption
-	if cfg.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(cfg.APIKey))
-	}
-	if cfg.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
-	}
-	if cfg.HTTPClient != nil {
-		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
-	}
-	opts = append(opts, cfg.Options...)
-	client := openai.NewClient(opts...)
-	return &openAIModel{client: &client, name: modelName}, nil
-}
-
-func (m *openAIModel) Name() string { return m.name }
+// Name returns the model name a request is sent with when it does not name
+// one itself.
+func (m *Model) Name() string { return m.name }
 
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
-func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
-		return singleErrorSequence(ErrRequestNil)
+		return shared.SingleErrorSequence(shared.ErrRequestNil)
 	}
-	params, err := buildOpenAIParams(m.name, req)
+	params, err := buildParams(m.name, req)
 	if err != nil {
-		return singleErrorSequence(err)
+		return shared.SingleErrorSequence(err)
 	}
-	timeout := requestTimeout(req.Config)
+	timeout := shared.RequestTimeout(req.Config)
 	if stream {
 		return m.generateStream(ctx, params, timeout)
 	}
 	return m.generate(ctx, params, timeout)
 }
 
-func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
+func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed, not reassigned: the closure captures ctx by reference, so
 		// assigning to it would leave the second range over this sequence
@@ -125,7 +89,7 @@ func (m *openAIModel) generate(ctx context.Context, params responses.ResponseNew
 	}
 }
 
-func (m *openAIModel) generateStream(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
+func (m *Model) generateStream(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed for the same reason as in generate: reassigning the captured
 		// ctx would poison a second range with the first one's cancellation.
@@ -206,7 +170,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 		}
 
 		final := aggregator.Close()
-		if !carriesContent(final) && term.seen {
+		if !shared.CarriesContent(final) && term.seen {
 			// The deltas contributed nothing that survived aggregation, but the
 			// terminal event can still hold the whole turn: a batched message,
 			// or a tool call the aggregator dropped. Rebuild it the way the
@@ -215,7 +179,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 			switch {
 			case err == nil:
 				final = converters.Genai2LLMResponse(genaiResp)
-			case final != nil && isEmptyOutput(err):
+			case final != nil && shared.IsEmptyOutput(err):
 				// Nothing to rebuild from, but the aggregator did produce a
 				// turn: report it with the reason the event carries rather than
 				// failing a call the model answered. A truncated turn is
@@ -233,7 +197,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
 				content := genaiResp.Candidates[0].Content
-				if completedContentSupersedes(final.Content, content) {
+				if shared.CompletedContentSupersedes(final.Content, content) {
 					final.Content = content
 				}
 			}
@@ -255,7 +219,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params responses.Respo
 // the response it carried repeated: a "response.incomplete" declares a turn cut
 // short even when its payload reports no status and no reason.
 type terminalEvent struct {
-	resp *responses.Response
+	resp *oairesponses.Response
 	// seen is set by a terminal event, the only kind that says why the turn
 	// ended. It implies resp != nil.
 	seen       bool
@@ -277,23 +241,10 @@ func (t terminalEvent) completed() bool {
 // having decoded stands for the object's presence; testing "id" alone would
 // also reject a populated response that merely omits it. A bare "{}" leaves
 // every raw value empty and is still rejected.
-func carriesResponse(resp *responses.Response) bool {
+func carriesResponse(resp *oairesponses.Response) bool {
 	j := &resp.JSON
 	return j.ID.Valid() || j.Status.Valid() || j.Output.Valid() ||
 		j.IncompleteDetails.Valid() || j.Error.Valid() || j.Model.Valid()
-}
-
-// isEmptyOutput reports whether a conversion failed for want of anything to
-// convert, as against something unusable.
-func isEmptyOutput(err error) bool {
-	return errors.Is(err, ErrNoOutputItems) || errors.Is(err, ErrNoTextOrToolContent)
-}
-
-// carriesContent reports whether a response holds anything a caller can read.
-// An aggregated turn can arrive empty: a streamed function call with no name is
-// dropped, and deltas may contribute no part at all.
-func carriesContent(resp *model.LLMResponse) bool {
-	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
 }
 
 // adoptTerminalCalls makes the terminal event's tool calls the turn's own. Text
@@ -311,7 +262,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	if !term.seen {
 		return nil
 	}
-	var items []responses.ResponseOutputItemUnion
+	var items []oairesponses.ResponseOutputItemUnion
 	for _, item := range term.resp.Output {
 		if item.Type == "function_call" {
 			items = append(items, item)
@@ -321,7 +272,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 		// Naming no calls says nothing about them: what streamed stands.
 		return nil
 	}
-	kept, streamedCalls, at := partsWithoutCalls(final.Content)
+	kept, streamedCalls, at := shared.PartsWithoutCalls(final.Content)
 	if term.incomplete && len(items) < len(streamedCalls) {
 		// Only a completed response states the turn's whole output. A shorter
 		// list on an incomplete one is the truncation showing, so replacing
@@ -419,7 +370,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 // [namesAgree] gates every tier, so arguments never cross from one tool to
 // another. Two calls to one tool, reordered and identified by neither, stay out
 // of reach: nothing tells them apart.
-func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
+func streamedCounterpart(item oairesponses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
 	if item.CallID != "" {
 		for _, call := range streamed {
 			if call.ID == item.CallID && namesAgree(item, call) {
@@ -452,7 +403,7 @@ func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, stream
 
 // namesAgree reports whether a terminal item and a streamed call name the same
 // tool, counting a name either side leaves out as no disagreement.
-func namesAgree(item responses.ResponseOutputItemUnion, call *genai.FunctionCall) bool {
+func namesAgree(item oairesponses.ResponseOutputItemUnion, call *genai.FunctionCall) bool {
 	return item.Name == "" || call.Name == "" || call.Name == item.Name
 }
 
@@ -460,7 +411,7 @@ func namesAgree(item responses.ResponseOutputItemUnion, call *genai.FunctionCall
 // ahead of anything else it would turn into a part. Which text part a call
 // belongs before cannot be read off the event, since the deltas concatenate
 // into parts of their own; whether it comes first can.
-func eventLeadsWithCall(items []responses.ResponseOutputItemUnion) bool {
+func eventLeadsWithCall(items []oairesponses.ResponseOutputItemUnion) bool {
 	for _, item := range items {
 		switch item.Type {
 		case "function_call":
@@ -510,97 +461,9 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 	}
 }
 
-// partsWithoutCalls splits a turn's parts into those that are not function
-// calls, the calls themselves, both in the order they streamed, and the index
-// among the kept parts where the first call sat — where the calls the turn ends
-// up reporting belong. A turn holding no call reports the index past the last
-// part; see [eventLeadsWithCall] for what places those.
-func partsWithoutCalls(content *genai.Content) ([]*genai.Part, []*genai.FunctionCall, int) {
-	if content == nil {
-		return nil, nil, 0
-	}
-	kept := make([]*genai.Part, 0, len(content.Parts))
-	var calls []*genai.FunctionCall
-	at := -1
-	for _, part := range content.Parts {
-		if part.FunctionCall != nil {
-			if at < 0 {
-				at = len(kept)
-			}
-			calls = append(calls, part.FunctionCall)
-			continue
-		}
-		kept = append(kept, part)
-	}
-	if at < 0 {
-		at = len(kept)
-	}
-	return kept, calls, at
-}
-
-// completedContentSupersedes reports whether a terminal snapshot can safely
-// replace content assembled from stream deltas. Reasoning alone is not a usable
-// replacement, and the snapshot must retain all visible text and function calls
-// that callers already received from the stream.
-// When replacement is allowed, reasoning follows the completed response to match
-// the blocking path. Streamed thoughts absent from that snapshot are not added
-// back; they have already been delivered as partial responses.
-func completedContentSupersedes(aggregate, completed *genai.Content) bool {
-	if completed == nil {
-		return false
-	}
-
-	var aggregateText, completedText strings.Builder
-	var aggregateCalls, completedCalls []*genai.FunctionCall
-	usable := false
-	for _, part := range aggregate.Parts {
-		if part == nil {
-			continue
-		}
-		if part.Text != "" && !part.Thought {
-			aggregateText.WriteString(part.Text)
-		}
-		if part.FunctionCall != nil {
-			aggregateCalls = append(aggregateCalls, part.FunctionCall)
-		}
-	}
-	for _, part := range completed.Parts {
-		if part == nil {
-			continue
-		}
-		if part.Text != "" && !part.Thought {
-			completedText.WriteString(part.Text)
-			usable = true
-		}
-		if part.FunctionCall != nil {
-			completedCalls = append(completedCalls, part.FunctionCall)
-			usable = true
-		}
-	}
-	if !usable || !strings.Contains(completedText.String(), aggregateText.String()) {
-		return false
-	}
-
-	matched := make([]bool, len(completedCalls))
-	for _, aggregateCall := range aggregateCalls {
-		found := false
-		for i, completedCall := range completedCalls {
-			if !matched[i] && reflect.DeepEqual(aggregateCall, completedCall) {
-				matched[i] = true
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
 // finalizeStreamResponse closes out a streamed turn on the aggregated response.
 //
-// Deltas carry no finish reason (see singlePartResponse), so this is the one
+// Deltas carry no finish reason (see shared.SinglePartResponse), so this is the one
 // response that marks the turn complete, and the last point where the terminal
 // OpenAI response is in reach — hence the fields copied here, which are what
 // let a streamed turn report what the same turn reports unstreamed. An erroring
@@ -622,22 +485,13 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	// term.seen implies term.resp != nil.
 	final.UsageMetadata = convertUsage(term.resp.Usage)
 	final.FinishReason = finishReason(term.resp, term.incomplete)
-	final.LogprobsResult = logprobsFor(term.resp, answerText(final.Content))
+	final.LogprobsResult = logprobsFor(term.resp, shared.AnswerText(final.Content))
 	attachFinishSignal(final, term.resp, term.incomplete)
 }
 
-// FinishMessageKey is the [model.LLMResponse.CustomMetadata] key under which a
-// turn that ended badly but still carries an answer reports the provider's own
-// account of why — a content filter's "content_filter", an incomplete reason
-// this package does not map, or a server error message. Its FinishReason says
-// the turn was cut short; this says what the provider called it.
-//
-// A turn left with nothing to read reports the same wording in ErrorCode and
-// ErrorMessage instead, which callers treat as a failed turn.
-//
-// It reaches in-process callers, session storage and A2A metadata, but not
-// REST: server/adkrest maps events field by field and omits CustomMetadata, so
-// an ADK Web consumer sees the FinishReason alone.
+// FinishMessageKey is the CustomMetadata key a turn that ended badly reports
+// the provider's own account of why under; openaimodel.FinishMessageKey, which
+// must equal it, documents it for callers.
 const FinishMessageKey = "openai_finish_message"
 
 // attachFinishSignal surfaces why a turn did not end cleanly, in the place that
@@ -651,7 +505,7 @@ const FinishMessageKey = "openai_finish_message"
 // read uses the error fields. genai's PromptFeedback suits neither branch: the
 // framework converter reads it only for a response with no candidates, and
 // convertResponse always emits one.
-func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response, incompleteEvent bool) {
+func attachFinishSignal(resp *model.LLMResponse, openaiResp *oairesponses.Response, incompleteEvent bool) {
 	if resp == nil || openaiResp == nil {
 		return
 	}
@@ -662,7 +516,7 @@ func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response,
 		return
 	}
 	msg := finishMessage(openaiResp, incompleteEvent)
-	if carriesContent(resp) {
+	if shared.CarriesContent(resp) {
 		if msg != "" {
 			if resp.CustomMetadata == nil {
 				resp.CustomMetadata = map[string]any{}
@@ -681,23 +535,7 @@ func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response,
 	resp.ErrorMessage = msg
 }
 
-// answerText is the response's text as a caller reads it, thoughts excluded:
-// what logprobs have to describe.
-func answerText(content *genai.Content) string {
-	if content == nil {
-		return ""
-	}
-	var text strings.Builder
-	for _, part := range content.Parts {
-		if part.Thought {
-			continue
-		}
-		text.WriteString(part.Text)
-	}
-	return text.String()
-}
-
-func attachMetadata(resp *model.LLMResponse, openaiResp *responses.Response) {
+func attachMetadata(resp *model.LLMResponse, openaiResp *oairesponses.Response) {
 	if resp == nil || openaiResp == nil {
 		return
 	}
@@ -708,8 +546,7 @@ func attachMetadata(resp *model.LLMResponse, openaiResp *responses.Response) {
 	resp.CustomMetadata["openai_model"] = openaiResp.Model
 }
 
-func singleErrorSequence(err error) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(nil, err)
-	}
+// New returns a Model talking to the Responses API as modelName.
+func New(client *openai.Client, modelName string) *Model {
+	return &Model{client: client, name: modelName}
 }

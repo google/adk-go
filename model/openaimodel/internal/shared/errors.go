@@ -12,59 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package shared
 
-import "google.golang.org/adk/v2/model/openaimodel/internal/shared"
+import "errors"
 
-// The sentinels are defined in the internal package the endpoint paths return
-// them from, and aliased here. Assignment preserves identity, so errors.Is is
-// unaffected.
 var (
 	// ErrModelNameRequired is returned when a model name is not provided.
-	ErrModelNameRequired = shared.ErrModelNameRequired
+	ErrModelNameRequired = errors.New("openai: model name is required")
 	// ErrUnsupportedAPI is returned when ClientConfig.API names an API this package does not implement.
-	ErrUnsupportedAPI = shared.ErrUnsupportedAPI
+	ErrUnsupportedAPI = errors.New("openai: unsupported API")
 	// ErrNoChoices is returned when a Chat Completions response carries no choices.
-	ErrNoChoices = shared.ErrNoChoices
+	ErrNoChoices = errors.New("openai: response included no choices")
 	// ErrRequestNil is returned when the provided request is nil.
-	ErrRequestNil = shared.ErrRequestNil
+	ErrRequestNil = errors.New("openai: request is nil")
 	// ErrNoContents is returned when the LLM request has no contents.
-	ErrNoContents = shared.ErrNoContents
+	ErrNoContents = errors.New("openai: LLM request has no contents to convert")
 	// ErrFunctionCallMissingName is returned when a function call is missing a name.
-	ErrFunctionCallMissingName = shared.ErrFunctionCallMissingName
+	ErrFunctionCallMissingName = errors.New("openai: function call missing name")
 	// ErrTopKNotSupported is returned when TopK is used, which is not supported.
-	ErrTopKNotSupported = shared.ErrTopKNotSupported
+	ErrTopKNotSupported = errors.New("openai: topK is not supported")
 	// ErrStopSequencesNotSupported is returned when stop sequences are used with the Responses API, which does not support them.
-	ErrStopSequencesNotSupported = shared.ErrStopSequencesNotSupported
+	ErrStopSequencesNotSupported = errors.New("openai: stop sequences are not supported")
 	// ErrMultipleCandidatesNotSupported is returned when multiple candidates are requested, which is not supported.
-	ErrMultipleCandidatesNotSupported = shared.ErrMultipleCandidatesNotSupported
+	ErrMultipleCandidatesNotSupported = errors.New("openai: multiple candidates per request are not supported")
 	// ErrPenaltiesNotSupported is returned when frequency/presence penalties are used with the Responses API, which does not support them.
-	ErrPenaltiesNotSupported = shared.ErrPenaltiesNotSupported
+	ErrPenaltiesNotSupported = errors.New("openai: frequency/presence penalties are not supported")
 	// ErrLabelsNotSupported is returned when request labels are used, which is not supported.
-	ErrLabelsNotSupported = shared.ErrLabelsNotSupported
+	ErrLabelsNotSupported = errors.New("openai: request labels are not supported")
 	// ErrSafetySettingsNotSupported is returned when Gemini safety settings are used, which is not supported.
-	ErrSafetySettingsNotSupported = shared.ErrSafetySettingsNotSupported
+	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
-	ErrUnsupportedMIMEType = shared.ErrUnsupportedMIMEType
+	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
-	ErrUnsupportedConfigField = shared.ErrUnsupportedConfigField
+	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
+
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.
-	ErrEmptyJSONSchema = shared.ErrEmptyJSONSchema
+	ErrEmptyJSONSchema = errors.New("openai: empty json schema")
 	// ErrEmptyResponse is returned when the OpenAI API returns an empty response.
-	ErrEmptyResponse = shared.ErrEmptyResponse
+	ErrEmptyResponse = errors.New("openai: empty response")
 	// ErrNoOutputItems is returned when the response contains no output items.
-	ErrNoOutputItems = shared.ErrNoOutputItems
-	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
-	ErrUnsupportedMessageContentType = shared.ErrUnsupportedMessageContentType
-	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
-	ErrUnsupportedOutputItemType = shared.ErrUnsupportedOutputItemType
-	// ErrFunctionCallArgs is returned when a function call's arguments are not a decodable JSON object.
-	ErrFunctionCallArgs = shared.ErrFunctionCallArgs
-	// ErrNoTextOrToolContent is returned when the response output does not contain text or tool content.
-	ErrNoTextOrToolContent = shared.ErrNoTextOrToolContent
+	ErrNoOutputItems = errors.New("openai: response included no output items")
 	// ErrResponseFailed is returned when the server reports the response itself
 	// as failed, whatever output it came with. Such a failure arrives as HTTP
 	// 200, and both a blocking call and a stream report it in place of the
 	// output that would otherwise have read as a turn.
-	ErrResponseFailed = shared.ErrResponseFailed
+	ErrResponseFailed = errors.New("openai: response failed")
+	// ErrUnsupportedMessageContentType is returned when an unsupported message content type is used.
+	ErrUnsupportedMessageContentType = errors.New("openai: unsupported message content type")
+	// ErrUnsupportedOutputItemType is returned when an unsupported output item type is used.
+	ErrUnsupportedOutputItemType = errors.New("openai: unsupported output item type")
+	// ErrFunctionCallArgs is returned when a function call's arguments are not a decodable JSON object.
+	ErrFunctionCallArgs = errors.New("openai: parse function call args")
+	// ErrNoTextOrToolContent is returned when the response output does not contain text or tool content.
+	ErrNoTextOrToolContent = errors.New("openai: response output did not contain text or tool content")
 )
