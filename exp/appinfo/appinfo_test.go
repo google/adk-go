@@ -34,6 +34,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -738,6 +740,92 @@ func TestBuildNameClash(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `two different agents are named "helper"`) {
 		t.Errorf("log does not report the name clash; got:\n%s", logs.String())
+	}
+}
+
+// TestBuildTellsAgentKindsApartByIdentity covers every kind of agent the ADK
+// constructors build. Two different agents of one kind share a name, and each
+// holds its own LLM agent. Were the walk to tell them apart by name, it would
+// turn back at the second and never find the LLM agent below it.
+func TestBuildTellsAgentKindsApartByIdentity(t *testing.T) {
+	kinds := []struct {
+		name string
+		// wrap builds an agent of this kind named "dup" that runs child.
+		wrap func(t *testing.T, child agent.Agent) agent.Agent
+	}{
+		{name: "custom agent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			a, err := agent.New(agent.Config{Name: "dup", Description: "Custom.", SubAgents: []agent.Agent{child}})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			return a
+		}},
+		{name: "LLM agent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			return newLLMAgent(t, llmagent.Config{Name: "dup", Description: "LLM.", Instruction: "Delegate.", SubAgents: []agent.Agent{child}})
+		}},
+		{name: "SequentialAgent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			return newSequentialAgent(t, "dup", "Sequential.", child)
+		}},
+		{name: "ParallelAgent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			a, err := parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "dup", Description: "Parallel.", SubAgents: []agent.Agent{child}}})
+			if err != nil {
+				t.Fatalf("parallelagent.New failed: %v", err)
+			}
+			return a
+		}},
+		{name: "LoopAgent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			a, err := loopagent.New(loopagent.Config{MaxIterations: 1, AgentConfig: agent.Config{Name: "dup", Description: "Loop.", SubAgents: []agent.Agent{child}}})
+			if err != nil {
+				t.Fatalf("loopagent.New failed: %v", err)
+			}
+			return a
+		}},
+		{name: "workflow agent", wrap: func(t *testing.T, child agent.Agent) agent.Agent {
+			return newWorkflowAgent(t, "dup", "Workflow.", child)
+		}},
+	}
+	for _, kind := range kinds {
+		t.Run(kind.name, func(t *testing.T) {
+			captureLog(t)
+			first := newLLMAgent(t, llmagent.Config{Name: "first_child", Description: "Below the first.", Instruction: "Work."})
+			second := newLLMAgent(t, llmagent.Config{Name: "second_child", Description: "Below the second.", Instruction: "Work."})
+			root := newLLMAgent(t, llmagent.Config{
+				Name:        "root",
+				Description: "Root agent.",
+				Instruction: "Delegate.",
+				SubAgents:   []agent.Agent{kind.wrap(t, first), kind.wrap(t, second)},
+			})
+
+			agents := build(t.Context(), "test_app", root).Agents
+
+			for _, want := range []string{"first_child", "second_child"} {
+				if _, ok := agents[want]; !ok {
+					t.Errorf("agents has no %q; got %v", want, slices.Sorted(maps.Keys(agents)))
+				}
+			}
+		})
+	}
+}
+
+// valueAgent is an agent built outside the ADK constructors: a struct that
+// embeds agent.Agent, used by value, with a field that makes it impossible to
+// use as a map key.
+type valueAgent struct {
+	agent.Agent
+	tags []string
+}
+
+// TestBuildAgentOfAnotherMake covers an agent that holds no ADK internal state.
+// The walk keys it by name, since keying it by itself would panic, and still
+// finds the agents below it.
+func TestBuildAgentOfAnotherMake(t *testing.T) {
+	inner := newLLMAgent(t, llmagent.Config{Name: "inner", Description: "Below the wrapper.", Instruction: "Work."})
+	root := valueAgent{Agent: newSequentialAgent(t, "wrapper", "Wraps a pipeline.", inner), tags: []string{"custom"}}
+
+	agents := build(t.Context(), "test_app", root).Agents
+
+	if diff := cmp.Diff([]string{"inner"}, slices.Sorted(maps.Keys(agents))); diff != "" {
+		t.Errorf("agent names mismatch (-want +got):\n%s", diff)
 	}
 }
 

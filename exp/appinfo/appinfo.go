@@ -190,15 +190,16 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 	return agents
 }
 
-// identity is the key the walk tells agents apart by. It is the agent itself
-// when that is a pointer, as every agent the ADK constructors build is, and the
-// agent's name otherwise: any other dynamic type may not be usable as a map key
-// without panicking.
+// identity is the key the walk tells agents apart by: the agent's internal
+// state, which every agent the ADK constructors build holds and no two share.
+// An agent built some other way, such as a struct embedding agent.Agent, is
+// keyed by its name instead. The agent itself cannot be the key, since a map
+// key of a type that is not comparable panics.
 func identity(a agent.Agent) any {
-	if reflect.ValueOf(a).Kind() == reflect.Pointer {
-		return a
+	if internalAgent, ok := a.(agentinternal.Agent); ok {
+		return agentinternal.Reveal(internalAgent)
 	}
-	return "name:" + a.Name()
+	return a.Name()
 }
 
 // describe reports the LLM agent a, whose internal state is state.
