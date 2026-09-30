@@ -17,40 +17,50 @@
 // EXPERIMENTAL: This package is experimental and its behavior may change or be
 // removed in the future.
 //
-// It implements the model.LLM interface, making it compatible with
-// providers that expose the OpenAI Responses API surface. This package
-// allows for easy integration of OpenAI's language models into applications.
+// It implements the model.LLM interface against either of OpenAI's two HTTP
+// APIs, selected by [ClientConfig.API]:
 //
-// Every top-level field of genai.GenerateContentConfig is either translated to
-// the Responses API or rejected with an error naming it, the pre-existing errors
-// being checked first so existing errors.Is call sites are unaffected. Rejection
-// keys on presence, which is only observable where the zero value cannot itself
-// be a setting, so a plain bool or string carrying its zero — AudioTimestamp
-// false, CachedContent or MediaResolution empty — passes unremarked, as does
-// HTTPOptions.Headers, ignored by design because headers addressed to another
-// backend must not reach OpenAI.
+//	[APIResponses]        POST /v1/responses, the default
+//	[APIChatCompletions]  POST /v1/chat/completions, the surface most
+//	                      OpenAI-compatible third-party providers implement
 //
-//	Translated  Temperature, TopP, MaxOutputTokens, SystemInstruction,
+// Every top-level field of genai.GenerateContentConfig is either translated or
+// rejected with an error naming it, the pre-existing errors being checked first
+// so existing errors.Is call sites are unaffected. Rejection keys on presence,
+// which is only observable where the zero value cannot itself be a setting, so
+// a plain bool or string carrying its zero — AudioTimestamp false, CachedContent
+// or MediaResolution empty — passes unremarked, as does HTTPOptions.Headers,
+// ignored by design because headers addressed to another backend must not reach
+// OpenAI.
+//
+// The two APIs do not translate the same set, because they do not accept the
+// same fields:
+//
+//	Both        Temperature, TopP, MaxOutputTokens, SystemInstruction,
 //	            ResponseMIMEType, ResponseSchema, ResponseJsonSchema,
 //	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
 //	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
-//	Rejected    TopK, StopSequences, CandidateCount above one, the penalties,
-//	            Labels, SafetySettings, an unsupported ResponseMIMEType, Seed,
-//	            CachedContent, ResponseModalities, MediaResolution,
-//	            SpeechConfig, AudioTimestamp, ImageConfig, RoutingConfig,
-//	            ModelSelectionConfig, ModelArmorConfig,
+//	Chat only   StopSequences, FrequencyPenalty, PresencePenalty, Seed
+//	Rejected    TopK, CandidateCount above one, Labels, SafetySettings, an
+//	            unsupported ResponseMIMEType, CachedContent, ResponseModalities,
+//	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
+//	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
-//	            HTTPOptions apart from Timeout and Headers
-//	Ignored     HTTPOptions.Headers
+//	            HTTPOptions apart from Timeout and Headers, and on Responses
+//	            also StopSequences, the penalties and Seed
+//	Ignored     HTTPOptions.Headers, and on Chat Completions
+//	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.
 //
-// Model reasoning is reported to the caller as thought parts, but it is not
-// sent back on a later turn: the Responses API accepts reasoning only as an
-// input item referencing the id of the item that produced it, and ADK does not
-// carry those ids. Reasoning therefore informs the turn that produced it and no
+// On the Responses API, model reasoning is reported to the caller as thought
+// parts; Chat Completions responses are read for text, refusals and tool calls
+// only. Reasoning is not sent back on a later turn to either API: the
+// Responses API accepts it only as an input item referencing the id of the
+// item that produced it, which ADK does not carry, and Chat Completions has no
+// field for it. Reasoning therefore informs the turn that produced it and no
 // other; a caller that needs a conclusion to survive should have the model
 // state it in the answer. What this package cannot police is reasoning that
 // something upstream has already rendered as ordinary text: a peer agent's
@@ -65,4 +75,16 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
+//
+// Selecting the Chat Completions API is one more field:
+//
+//	cfg := &openaimodel.ClientConfig{
+//		APIKey: os.Getenv("OPENAI_API_KEY"),
+//		API:    openaimodel.APIChatCompletions,
+//	}
+//
+// Setting BaseURL points either API at another OpenAI-compatible provider that
+// serves it. Make sure APIKey is non-empty when BaseURL points at another
+// provider. The OpenAI client falls back to the OPENAI_API_KEY environment
+// variable when it is empty, and would send that key to BaseURL.
 package openaimodel

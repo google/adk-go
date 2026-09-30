@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // streamTranslator helps us process OpenAI streaming events by buffering
@@ -39,7 +41,7 @@ func newStreamTranslator() *streamTranslator {
 	}
 }
 
-func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*genai.GenerateContentResponse, error) {
+func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*genai.GenerateContentResponse, error) {
 	// We process each incoming OpenAI streaming event and convert it into a
 	// generic genai.GenerateContentResponse.
 	switch evt.Type {
@@ -49,28 +51,28 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 			return nil, nil
 		}
 		// For text deltas, we create a response with a single text part.
-		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseRefusalDelta:
 		delta := evt.AsResponseRefusalDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Blocking responses expose refusals as text, so streaming does the same.
-		return singlePartResponse(&genai.Part{Text: delta.Delta}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseReasoningTextDelta:
 		delta := evt.AsResponseReasoningTextDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Reasoning text deltas are treated as thought parts.
-		return singlePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
 	case responseReasoningSummaryTextDelta:
 		delta := evt.AsResponseReasoningSummaryTextDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Reasoning summary deltas are also treated as thought parts.
-		return singlePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
 	case responseFunctionCallArgumentsDelta:
 		delta := evt.AsResponseFunctionCallArgumentsDelta()
 		if delta.Delta != "" {
@@ -86,7 +88,7 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		if err != nil {
 			return nil, err
 		}
-		return singlePartResponse(part), nil
+		return shared.SinglePartResponse(part), nil
 	case responseFailed:
 		failed := evt.AsResponseFailed()
 		// Built by the same renderer the blocking path uses, so one server
@@ -96,7 +98,7 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		// Generic stream errors are also returned.
 		// Same treatment as a failed response body: the text is the server's,
 		// so it is capped, and quoted rather than interpolated bare.
-		if msg := clipServerText(evt.Message); msg != "" {
+		if msg := shared.ClipServerText(evt.Message); msg != "" {
 			return nil, fmt.Errorf("openai stream error: %q", msg)
 		}
 		return nil, fmt.Errorf("openai stream error")
@@ -144,7 +146,7 @@ func (t *streamTranslator) buffer(id string) *strings.Builder {
 // We construct a genai.Part with a genai.FunctionCall by retrieving the complete,
 // buffered function arguments (either from the done event or our functionArgs map)
 // and unmarshaling them from JSON. Finally, we clean up the buffered arguments.
-func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallArgumentsDoneEvent) (*genai.Part, error) {
+func (t *streamTranslator) emitFunctionCall(done oairesponses.ResponseFunctionCallArgumentsDoneEvent) (*genai.Part, error) {
 	payload := done.Arguments
 	if payload == "" {
 		if b, ok := t.functionArgs[done.ItemID]; ok {
@@ -182,26 +184,4 @@ func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallA
 			Args: args,
 		},
 	}, nil
-}
-
-// singlePartResponse wraps one streamed part as a genai response.
-//
-// The candidate deliberately carries no finish reason: the aggregator treats any
-// non-empty one as terminal, and genai.FinishReasonUnspecified is the non-empty
-// string "FINISH_REASON_UNSPECIFIED", so setting it marks every delta the end of
-// the turn. generateStream reports the real reason on the final response.
-func singlePartResponse(part *genai.Part) *genai.GenerateContentResponse {
-	if part == nil {
-		return nil
-	}
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{
-			{
-				Content: &genai.Content{
-					Role:  string(genai.RoleModel),
-					Parts: []*genai.Part{part},
-				},
-			},
-		},
-	}
 }
