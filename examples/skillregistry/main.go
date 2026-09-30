@@ -35,12 +35,130 @@ import (
 func main() {
 	ctx := context.Background()
 
-	err := Process(ctx)
+	err := Process7(ctx)
 	if err != nil {
 		panic(err)
 	}
 
 	// private-kdroste-test-skill
+}
+
+func Process7(ctx context.Context) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	cache, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+	cache.IntialRead()
+
+	source, err := skillregistry.NewCachedSkillRegistrySource(ctx, cache)
+	if err != nil {
+		return fmt.Errorf("cannot NewCachedSkillRegistrySource: %w", err)
+	}
+
+	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	skillToolset, err := skilltoolset.New(ctx, skilltoolset.Config{Source: source})
+	if err != nil {
+		log.Fatalf("Failed to create skill toolset: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:        "skills_agent",
+		Model:       model,
+		Description: "Agent to demonstrate using skills.",
+		Instruction: "You are a helpful assistant.",
+		Toolsets:    []tool.Toolset{skillToolset},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(a),
+	}
+
+	l := full.NewLauncher()
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	}
+	return nil
+}
+
+func Process6(ctx context.Context) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	cache, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+	cache.IntialRead()
+
+	cs, err := skillregistry.NewCachedSkillRegistrySource(ctx, cache)
+	if err != nil {
+		return fmt.Errorf("cannot NewCachedSkillRegistrySource: %w", err)
+	}
+
+	fms, err := cs.ListFrontmatters(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot ListFrontmatters: %w", err)
+	}
+	log.Printf("got Frontmatters: %+v", len(fms))
+	// for _, fm := range fms {
+	// 	log.Printf("fm: %+v", fm)
+	// }
+
+	skillPath := "projects/kdroste-adk-2025-12/locations/global/skills/private-kdroste-dice-thrower-04"
+
+	f, err := cs.LoadFrontmatter(ctx, skillPath)
+	// f, err := cs.LoadFrontmatter(ctx, "private-kdroste-dice-thrower-04")
+
+	if err != nil {
+		return fmt.Errorf("cannot LoadFrontmatter: %w", err)
+	}
+	log.Printf("f: %+v", f)
+
+	i, err := cs.LoadInstructions(ctx, skillPath)
+	if err != nil {
+		return fmt.Errorf("cannot LoadInstructions: %w", err)
+	}
+	log.Printf("i: %+v", i)
+
+	return nil
+}
+
+func Process5(ctx context.Context) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	tlc, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+	log.Printf("tlc: %+v", tlc)
+
+	err = tlc.IntialRead()
+	if err != nil {
+		return fmt.Errorf("cannot tlc.IntialRead: %w", err)
+	}
+
+	log.Printf("tlc after the initial read")
+
+	return nil
 }
 
 func Process(ctx context.Context) error {
