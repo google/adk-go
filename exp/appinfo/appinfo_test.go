@@ -77,8 +77,7 @@ func newLLMAgent(t *testing.T, cfg llmagent.Config) agent.Agent {
 	return a
 }
 
-// computeInstruction is a named InstructionProvider, so a test can assert on
-// the name app-info reports for it.
+// computeInstruction is an InstructionProvider for the tests below.
 func computeInstruction(ctx agent.ReadonlyContext) (string, error) {
 	return "resolved at run time", nil
 }
@@ -472,7 +471,7 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "an instruction provider is named, not resolved",
+			name: "an instruction provider is reported as a placeholder, not resolved",
 			root: func(t *testing.T) agent.Agent {
 				return newLLMAgent(t, llmagent.Config{
 					Name:                "dynamic",
@@ -482,7 +481,7 @@ func TestBuild(t *testing.T) {
 			},
 			wantAgents: []string{"dynamic"},
 			check: func(t *testing.T, agents map[string]*AgentInfo) {
-				want := "<InstructionProvider: appinfo.computeInstruction>"
+				want := "<InstructionProvider>"
 				if got := agents["dynamic"].Instruction; got != want {
 					t.Errorf("Instruction = %q, want %q", got, want)
 				}
@@ -502,7 +501,7 @@ func TestBuild(t *testing.T) {
 			},
 			wantAgents: []string{"both"},
 			check: func(t *testing.T, agents map[string]*AgentInfo) {
-				want := "<InstructionProvider: appinfo.computeInstruction>"
+				want := "<InstructionProvider>"
 				if got := agents["both"].Instruction; got != want {
 					t.Errorf("Instruction = %q, want %q", got, want)
 				}

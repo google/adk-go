@@ -56,10 +56,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"reflect"
-	"runtime"
 	"slices"
-	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -93,8 +90,7 @@ type AppInfo struct {
 //
 // Instruction is the agent's instruction as written, placeholders included.
 // For an agent whose instruction comes from an InstructionProvider it is
-// "<InstructionProvider: name>", naming the provider, since resolving it needs
-// an invocation.
+// "<InstructionProvider>", since resolving the provider needs an invocation.
 //
 // SubAgents names the agent's own sub-agents that are LLM agents. A sub-agent
 // of another kind is not listed, and neither are the LLM agents below it: they
@@ -275,31 +271,20 @@ func workflowEdges(a agent.Agent) []workflow.Edge {
 	return cfg.Edges
 }
 
+// providerInstruction is what app-info reports for an instruction that comes
+// from an InstructionProvider.
+const providerInstruction = "<InstructionProvider>"
+
 // instruction is the agent's instruction as app-info reports it.
 //
 // A provider takes over from Instruction when both are set, as it does when the
-// agent runs, so it is checked first. It is named rather than resolved, since
-// resolving it needs session state that exists only during an invocation.
-// adk-python reports the same placeholder.
+// agent runs, so it is checked first. It is not resolved, since resolving it
+// needs session state that exists only during an invocation.
 func instruction(state *llminternal.State) string {
 	if state.InstructionProvider == nil {
 		return state.Instruction
 	}
-	return fmt.Sprintf("<InstructionProvider: %s>", providerName(state.InstructionProvider))
-}
-
-// providerName is the declared name of an instruction provider, trimmed of its
-// package path.
-func providerName(p llminternal.InstructionProvider) string {
-	fn := runtime.FuncForPC(reflect.ValueOf(p).Pointer())
-	if fn == nil {
-		return "unknown"
-	}
-	name := fn.Name()
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		name = name[i+1:]
-	}
-	return name
+	return providerInstruction
 }
 
 // toolDeclarations describes the tools an LLM agent exposes to the model, as
