@@ -884,7 +884,7 @@ func TestBuildLoop(t *testing.T) {
 
 // TestBuildAgentsAlwaysPresent covers an app with no LLM agent anywhere. The
 // agents key is read on every response, so an empty map has to marshal to {}
-// and not vanish, and isComputerUse is always emitted, as adk-python does.
+// and not vanish.
 func TestBuildAgentsAlwaysPresent(t *testing.T) {
 	root, err := agent.New(agent.Config{
 		Name:        "custom_root",
@@ -898,7 +898,7 @@ func TestBuildAgentsAlwaysPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal failed: %v", err)
 	}
-	for _, want := range []string{`"agents":{}`, `"isComputerUse":false`, `"language":"go"`} {
+	for _, want := range []string{`"agents":{}`, `"language":"go"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("response has no %s; body: %s", want, body)
 		}

@@ -86,7 +86,6 @@ type AppInfo struct {
 	RootAgentName string                `json:"rootAgentName"`
 	Description   string                `json:"description"`
 	Language      string                `json:"language"`
-	IsComputerUse bool                  `json:"isComputerUse"`
 	Agents        map[string]*AgentInfo `json:"agents"`
 }
 
