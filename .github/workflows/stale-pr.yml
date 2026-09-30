@@ -22,6 +22,7 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pull-requests: write    # label the PR and post the comment
     steps:
@@ -70,14 +71,17 @@ jobs:
 
             // authorAssociation misses members whose org membership is private,
             // so fall back to the permission API, which 404s for everyone else.
+            // Anything other than that 404, a 403 from the rate limiter say,
+            // leaves the login unclassified: null rather than false.
             // One lookup per login, however many PRs that person touched.
             const permCache = new Map();
             async function hasWriteAccess(login) {
               if (!permCache.has(login)) {
-                const { data } = await github.rest.repos
+                const perm = await github.rest.repos
                   .getCollaboratorPermissionLevel({ ...context.repo, username: login })
-                  .catch(() => ({ data: { permission: 'none' } }));
-                permCache.set(login, WRITE.includes(data.permission));
+                  .then(r => r.data)
+                  .catch(e => (e.status === 404 ? { permission: 'none' } : null));
+                permCache.set(login, perm ? WRITE.includes(perm.permission) : null);
               }
               return permCache.get(login);
             }
@@ -100,16 +104,23 @@ jobs:
               ].filter(c => c.at && c.author);
 
               const fromMaintainer = [];
+              let unclassified = false;
               for (const c of said) {
                 if (c.author.login === author || isBot(c.author)) continue;
-                if (!MAINTAINER.includes(c.authorAssociation)
-                    && !await hasWriteAccess(c.author.login)) continue;
+                if (!MAINTAINER.includes(c.authorAssociation)) {
+                  const write = await hasWriteAccess(c.author.login);
+                  if (write === null) unclassified = true;
+                  if (!write) continue;
+                }
                 fromMaintainer.push(c.at);
               }
 
               return {
                 author,
                 maintainer: latest(fromMaintainer),
+                // Someone whose access could not be looked up may be the
+                // maintainer who spoke last, so the clock cannot be trusted.
+                unclassified,
                 // Pushing a commit answers a review as well as a reply does.
                 byAuthor: latest([
                   ...said.filter(c => c.author.login === author).map(c => c.at),
@@ -137,11 +148,18 @@ jobs:
 
             const cutoff = Date.now() - QUIET_DAYS * 86400 * 1000;
             const stalled = [];
-            for (const pr of await search('is:pr is:open review:changes_requested')) {
+            // Unlocked only: on a locked pull request the author cannot reply
+            // to the notice.
+            for (const pr of await search('is:pr is:open is:unlocked review:changes_requested')) {
               if (pr.isDraft || pr.reviewDecision !== 'CHANGES_REQUESTED') continue;
               if (pr.labels.nodes.some(l => l.name === LABEL)) continue;
+              if (!pr.author) continue;  // deleted account, nobody to nudge
 
               const when = await activity(pr);
+              if (when.unclassified) {
+                core.warning(`#${pr.number}: permission lookup failed, skipping`);
+                continue;
+              }
               if (!when.maintainer || when.maintainer > cutoff) continue;
               if (when.byAuthor >= when.maintainer) continue;  // ball is in our court
               if (when.nudged && !(when.byAuthor > when.nudged)) continue;
@@ -153,8 +171,9 @@ jobs:
             let marked = 0;
             for (const { pr, since } of stalled.slice(0, MAX_MARKS)) {
               const days = Math.floor((Date.now() - since) / 86400000);
-              await github.rest.issues.addLabels(
-                { ...context.repo, issue_number: pr.number, labels: [LABEL] });
+              // Comment first. A label without the marker comment is one the
+              // clearing pass above never takes off. A marker without the label
+              // reads as a label removed by hand, and later sweeps leave it be.
               await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
                 body:
                   `Marking this pull request stale, @${pr.author.login}.\n\n` +
@@ -167,6 +186,8 @@ jobs:
                   'sweep. Saying you need more time counts. If you would rather someone else ' +
                   'finished it, say so and we will look for an owner.\n\n' +
                   MARKER });
+              await github.rest.issues.addLabels(
+                { ...context.repo, issue_number: pr.number, labels: [LABEL] });
               marked++;
               core.info(`marked #${pr.number} stale (quiet ${days}d)`);
             }
