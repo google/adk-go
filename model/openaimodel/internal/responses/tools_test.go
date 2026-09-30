@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"encoding/json"
@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 )
@@ -97,49 +97,6 @@ func TestConvertTools(t *testing.T) {
 				}
 				if !tool.OfFunction.Strict.Valid() || tool.OfFunction.Strict.Value {
 					t.Errorf("tool %d Strict = %+v, want an explicit false", i, tool.OfFunction.Strict)
-				}
-			}
-		})
-	}
-}
-
-func TestEnsureFunctionToolOnly(t *testing.T) {
-	tests := []struct {
-		name    string
-		tool    *genai.Tool
-		wantErr string
-	}{
-		{
-			name:    "nil tool",
-			tool:    nil,
-			wantErr: "tool 0 is nil",
-		},
-		{
-			name:    "non-function tool",
-			tool:    &genai.Tool{GoogleSearch: &genai.GoogleSearch{}},
-			wantErr: "non-function tools",
-		},
-		{
-			name:    "no functions",
-			tool:    &genai.Tool{},
-			wantErr: "does not declare any functions",
-		},
-		{
-			name: "valid",
-			tool: &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "fn1"}}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := ensureFunctionToolOnly(0, tc.tool)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("expected no error, got %v", err)
-				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 				}
 			}
 		})
@@ -290,8 +247,9 @@ func TestConvertFunctionDeclarationMarshalsStrict(t *testing.T) {
 }
 
 // TestConvertFunctionDeclarationKeepsOptionalParameters pins the constraint that
-// rules out simply reusing enforceStrictOpenAISchema here: it rewrites required
-// to list every property, which would make optional tool arguments mandatory.
+// rules out simply reusing shared.EnforceStrictOpenAISchema here: it
+// rewrites required to list every property, which would make optional tool
+// arguments mandatory.
 //
 // All three parameter paths are covered, because the rewrite has to be pinned
 // out of each one separately. ParametersJsonSchema is the path functiontool.New
@@ -368,50 +326,12 @@ func TestConvertFunctionDeclarationKeepsOptionalParameters(t *testing.T) {
 	}
 }
 
-func TestSchemaToMap(t *testing.T) {
-	tests := []struct {
-		name    string
-		schema  *genai.Schema
-		wantErr bool
-		want    map[string]any
-	}{
-		{
-			name:   "nil schema",
-			schema: nil,
-			want:   nil,
-		},
-		{
-			name:   "string type",
-			schema: &genai.Schema{Type: genai.TypeString},
-			want:   map[string]any{"type": "string"}, // Marshals as "STRING" if using standard json, but we lower it
-		},
-		{
-			name:    "invalid type",
-			schema:  &genai.Schema{Example: make(chan int)},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := schemaToMap(tc.schema)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("schemaToMap() error = %v, wantErr %v", err, tc.wantErr)
-			} else {
-				if got["type"] != tc.want["type"] {
-					t.Fatalf("unexpected map: %+v, want %+v", got, tc.want)
-				}
-			}
-		})
-	}
-}
-
 func TestConvertToolChoice(t *testing.T) {
 	tests := []struct {
 		name    string
 		toolCfg *genai.ToolConfig
 		wantErr bool
-		want    *responses.ResponseNewParamsToolChoiceUnion
+		want    *oairesponses.ResponseNewParamsToolChoiceUnion
 	}{
 		{
 			name:    "nil cfg",
@@ -425,8 +345,8 @@ func TestConvertToolChoice(t *testing.T) {
 					Mode: genai.FunctionCallingConfigModeNone,
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsNone),
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(oairesponses.ToolChoiceOptionsNone),
 			},
 		},
 		{
@@ -446,9 +366,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1"},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeAuto,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeAuto,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},
@@ -471,9 +391,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1"},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeAuto,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeAuto,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},
@@ -486,8 +406,8 @@ func TestConvertToolChoice(t *testing.T) {
 					Mode: genai.FunctionCallingConfigModeAny,
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsRequired),
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(oairesponses.ToolChoiceOptionsRequired),
 			},
 		},
 		{
@@ -498,9 +418,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1", ""},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeRequired,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeRequired,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},

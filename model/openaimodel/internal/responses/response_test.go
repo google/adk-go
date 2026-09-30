@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"encoding/json"
@@ -21,23 +21,25 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 func TestConvertResponse_Text(t *testing.T) {
-	resp := &responses.Response{
+	resp := &oairesponses.Response{
 		ID:    "resp-1",
 		Model: "gpt-test",
-		Output: []responses.ResponseOutputItemUnion{
+		Output: []oairesponses.ResponseOutputItemUnion{
 			{
 				Type: "message",
-				Content: []responses.ResponseOutputMessageContentUnion{
+				Content: []oairesponses.ResponseOutputMessageContentUnion{
 					{Type: "output_text", Text: "hello"},
 				},
 			},
 		},
-		Usage: responses.ResponseUsage{
+		Usage: oairesponses.ResponseUsage{
 			InputTokens:  5,
 			OutputTokens: 2,
 			TotalTokens:  7,
@@ -56,11 +58,11 @@ func TestConvertResponse_Text(t *testing.T) {
 }
 
 func TestConvertResponse_Refusal(t *testing.T) {
-	resp := &responses.Response{
-		Output: []responses.ResponseOutputItemUnion{
+	resp := &oairesponses.Response{
+		Output: []oairesponses.ResponseOutputItemUnion{
 			{
 				Type: "message",
-				Content: []responses.ResponseOutputMessageContentUnion{
+				Content: []oairesponses.ResponseOutputMessageContentUnion{
 					{Type: "refusal", Refusal: "nope"},
 				},
 			},
@@ -77,17 +79,17 @@ func TestConvertResponse_Refusal(t *testing.T) {
 }
 
 func TestConvertResponse_NoOutput(t *testing.T) {
-	_, err := convertResponse(&responses.Response{})
+	_, err := convertResponse(&oairesponses.Response{})
 	if err == nil {
 		t.Fatalf("expected error for empty output")
 	}
 }
 
 func TestConvertResponse_FailedStatus(t *testing.T) {
-	output := []responses.ResponseOutputItemUnion{
+	output := []oairesponses.ResponseOutputItemUnion{
 		{
 			Type: "message",
-			Content: []responses.ResponseOutputMessageContentUnion{
+			Content: []oairesponses.ResponseOutputMessageContentUnion{
 				{Type: "output_text", Text: "half an answer"},
 			},
 		},
@@ -96,15 +98,15 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 	// the empty "()" left by a missing code, only shows up in an exact match.
 	tests := []struct {
 		name    string
-		resp    *responses.Response
+		resp    *oairesponses.Response
 		wantErr string
 	}{
 		{
 			name: "no output",
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "resp_123",
-				Status: responses.ResponseStatusFailed,
-				Error: responses.ResponseError{
+				Status: oairesponses.ResponseStatusFailed,
+				Error: oairesponses.ResponseError{
 					Code:    "server_error",
 					Message: "the model failed to generate a response",
 				},
@@ -113,11 +115,11 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 		},
 		{
 			name: "partial output",
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "resp_123",
-				Status: responses.ResponseStatusFailed,
+				Status: oairesponses.ResponseStatusFailed,
 				Output: output,
-				Error: responses.ResponseError{
+				Error: oairesponses.ResponseError{
 					Code:    "server_error",
 					Message: "the model failed to generate a response",
 				},
@@ -126,17 +128,17 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 		},
 		{
 			name: "message only",
-			resp: &responses.Response{
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Message: "upstream exploded"},
+			resp: &oairesponses.Response{
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Message: "upstream exploded"},
 			},
 			wantErr: `openai: response failed: "upstream exploded"`,
 		},
 		{
 			name: "code only",
-			resp: &responses.Response{
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Code: "rate_limit_exceeded"},
+			resp: &oairesponses.Response{
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Code: "rate_limit_exceeded"},
 			},
 			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
 		},
@@ -144,21 +146,21 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			name: "id only",
 			// Nothing but the status and the ID, still the handle to quote back
 			// to the provider.
-			resp:    &responses.Response{ID: "resp_123", Status: responses.ResponseStatusFailed},
+			resp:    &oairesponses.Response{ID: "resp_123", Status: oairesponses.ResponseStatusFailed},
 			wantErr: `openai: response failed (id "resp_123")`,
 		},
 		{
 			name: "no error object",
-			resp: &responses.Response{Status: responses.ResponseStatusFailed},
+			resp: &oairesponses.Response{Status: oairesponses.ResponseStatusFailed},
 			// The bare sentinel, with nothing appended to it.
 			wantErr: "openai: response failed",
 		},
 		{
 			name: "blank message",
 			// Nothing but spaces must not leave a dangling separator.
-			resp: &responses.Response{
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Code: "server_error", Message: "  \n "},
+			resp: &oairesponses.Response{
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Code: "server_error", Message: "  \n "},
 			},
 			wantErr: `openai: response failed (code "server_error")`,
 		},
@@ -167,9 +169,9 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			// Reported twice rather than elided: dropping a code because the
 			// message appears to contain it loses it whenever the message
 			// merely embeds it in a longer token.
-			resp: &responses.Response{
-				Status: responses.ResponseStatusFailed,
-				Error: responses.ResponseError{
+			resp: &oairesponses.Response{
+				Status: oairesponses.ResponseStatusFailed,
+				Error: oairesponses.ResponseError{
 					Code:    "server_error",
 					Message: "server_error: upstream exploded",
 				},
@@ -179,10 +181,10 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 		{
 			name: "code embedded in a longer token in the message",
 			// The case an unanchored substring test would silently drop.
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "resp_1",
-				Status: responses.ResponseStatusFailed,
-				Error: responses.ResponseError{
+				Status: oairesponses.ResponseStatusFailed,
+				Error: oairesponses.ResponseError{
 					Code:    "server_error",
 					Message: "Downstream returned server_error_5xx; retry later.",
 				},
@@ -192,10 +194,10 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 		{
 			name: "message already names the id",
 			// Same rule for the ID, which had no de-duplication of its own.
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "resp_123",
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Message: "resp_123 could not be completed"},
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Message: "resp_123 could not be completed"},
 			},
 			wantErr: `openai: response failed (id "resp_123"): "resp_123 could not be completed"`,
 		},
@@ -204,9 +206,9 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			// The whole reason the values are quoted: bare, this renders
 			// identically to an id of "resp_123" beside a code of
 			// "invalid_prompt".
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "resp_123, code invalid_prompt",
-				Status: responses.ResponseStatusFailed,
+				Status: oairesponses.ResponseStatusFailed,
 			},
 			wantErr: `openai: response failed (id "resp_123, code invalid_prompt")`,
 		},
@@ -214,10 +216,10 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			name: "id and code that merely have padding",
 			// Distinct from the whitespace-only row below: these trim to
 			// something, so a one-sided trim would leave the padding in.
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "  resp_123  ",
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Code: "\tserver_error "},
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Code: "\tserver_error "},
 			},
 			wantErr: `openai: response failed (id "resp_123", code "server_error")`,
 		},
@@ -225,10 +227,10 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			name: "blank id and code",
 			// Both trims, which nothing else exercises: whitespace-only values
 			// must contribute no label at all.
-			resp: &responses.Response{
+			resp: &oairesponses.Response{
 				ID:     "  ",
-				Status: responses.ResponseStatusFailed,
-				Error:  responses.ResponseError{Code: " \t ", Message: "upstream exploded"},
+				Status: oairesponses.ResponseStatusFailed,
+				Error:  oairesponses.ResponseError{Code: " \t ", Message: "upstream exploded"},
 			},
 			wantErr: `openai: response failed: "upstream exploded"`,
 		},
@@ -236,15 +238,15 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			// The two halves of the absent-status rule, one at a time. With
 			// both set, flipping its || to && would go unnoticed.
 			name: "no status, message only",
-			resp: &responses.Response{
-				Error: responses.ResponseError{Message: "upstream exploded"},
+			resp: &oairesponses.Response{
+				Error: oairesponses.ResponseError{Message: "upstream exploded"},
 			},
 			wantErr: `openai: response failed: "upstream exploded"`,
 		},
 		{
 			name: "no status, code only",
-			resp: &responses.Response{
-				Error: responses.ResponseError{Code: "rate_limit_exceeded"},
+			resp: &oairesponses.Response{
+				Error: oairesponses.ResponseError{Code: "rate_limit_exceeded"},
 			},
 			wantErr: `openai: response failed (code "rate_limit_exceeded")`,
 		},
@@ -255,8 +257,8 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			if got != nil {
 				t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
 			}
-			if !errors.Is(err, ErrResponseFailed) {
-				t.Fatalf("error = %v, want errors.Is(err, ErrResponseFailed)", err)
+			if !errors.Is(err, shared.ErrResponseFailed) {
+				t.Fatalf("error = %v, want errors.Is(err, shared.ErrResponseFailed)", err)
 			}
 			if got := err.Error(); got != tc.wantErr {
 				t.Errorf("error = %q, want %q", got, tc.wantErr)
@@ -273,40 +275,40 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
 	tests := []struct {
 		name   string
-		status responses.ResponseStatus
+		status oairesponses.ResponseStatus
 		reason string
 		want   genai.FinishReason
 	}{
-		{name: "completed", status: responses.ResponseStatusCompleted, want: genai.FinishReasonStop},
+		{name: "completed", status: oairesponses.ResponseStatusCompleted, want: genai.FinishReasonStop},
 		{
 			name:   "truncated",
-			status: responses.ResponseStatusIncomplete,
+			status: oairesponses.ResponseStatusIncomplete,
 			reason: "max_output_tokens",
 			want:   genai.FinishReasonMaxTokens,
 		},
 		{
 			name:   "content filtered",
-			status: responses.ResponseStatusIncomplete,
+			status: oairesponses.ResponseStatusIncomplete,
 			reason: "content_filter",
 			want:   genai.FinishReasonSafety,
 		},
-		{name: "incomplete with no reason", status: responses.ResponseStatusIncomplete, want: genai.FinishReasonOther},
-		{name: "cancelled", status: responses.ResponseStatusCancelled, want: genai.FinishReasonOther},
-		{name: "queued", status: responses.ResponseStatusQueued, want: genai.FinishReasonOther},
-		{name: "in progress", status: responses.ResponseStatusInProgress, want: genai.FinishReasonOther},
+		{name: "incomplete with no reason", status: oairesponses.ResponseStatusIncomplete, want: genai.FinishReasonOther},
+		{name: "cancelled", status: oairesponses.ResponseStatusCancelled, want: genai.FinishReasonOther},
+		{name: "queued", status: oairesponses.ResponseStatusQueued, want: genai.FinishReasonOther},
+		{name: "in progress", status: oairesponses.ResponseStatusInProgress, want: genai.FinishReasonOther},
 		{name: "unknown to this SDK", status: "moderated", want: genai.FinishReasonOther},
 		{name: "absent", status: "", want: genai.FinishReasonStop},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := &responses.Response{
+			resp := &oairesponses.Response{
 				ID:                "resp_123",
 				Status:            tc.status,
-				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: tc.reason},
-				Output: []responses.ResponseOutputItemUnion{
+				IncompleteDetails: oairesponses.ResponseIncompleteDetails{Reason: tc.reason},
+				Output: []oairesponses.ResponseOutputItemUnion{
 					{
 						Type: "message",
-						Content: []responses.ResponseOutputMessageContentUnion{
+						Content: []oairesponses.ResponseOutputMessageContentUnion{
 							{Type: "output_text", Text: "half an answer"},
 						},
 					},
@@ -316,7 +318,7 @@ func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
 			// that it does not override one. The absent-status row omits it,
 			// since there it would be a failure rather than a turn.
 			if tc.status != "" {
-				resp.Error = responses.ResponseError{Code: "server_error", Message: "ignore me"}
+				resp.Error = oairesponses.ResponseError{Code: "server_error", Message: "ignore me"}
 			}
 			got, err := convertResponse(resp)
 			if err != nil {
@@ -335,7 +337,7 @@ func TestConvertResponse_StatusOtherThanFailed(t *testing.T) {
 func TestConvertResponse_Logprobs(t *testing.T) {
 	tests := []struct {
 		name       string
-		logprobs   []responses.ResponseOutputTextLogprob
+		logprobs   []oairesponses.ResponseOutputTextLogprob
 		wantResult *genai.LogprobsResult
 	}{
 		{
@@ -345,11 +347,11 @@ func TestConvertResponse_Logprobs(t *testing.T) {
 		},
 		{
 			name: "fully specified",
-			logprobs: []responses.ResponseOutputTextLogprob{
+			logprobs: []oairesponses.ResponseOutputTextLogprob{
 				{
 					Token:   "hel",
 					Logprob: -0.1,
-					TopLogprobs: []responses.ResponseOutputTextLogprobTopLogprob{
+					TopLogprobs: []oairesponses.ResponseOutputTextLogprobTopLogprob{
 						{Token: "hel", Logprob: -0.1},
 						{Token: "hi", Logprob: -2.3},
 					},
@@ -381,13 +383,13 @@ func TestConvertResponse_Logprobs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := &responses.Response{
+			resp := &oairesponses.Response{
 				ID:    "resp-1",
 				Model: "gpt-test",
-				Output: []responses.ResponseOutputItemUnion{
+				Output: []oairesponses.ResponseOutputItemUnion{
 					{
 						Type: "message",
-						Content: []responses.ResponseOutputMessageContentUnion{
+						Content: []oairesponses.ResponseOutputMessageContentUnion{
 							{
 								Type:     "output_text",
 								Text:     "hello",
@@ -413,18 +415,18 @@ func TestConvertResponse_Logprobs(t *testing.T) {
 }
 
 func TestConvertResponse_IncompleteDetails(t *testing.T) {
-	resp := &responses.Response{
+	resp := &oairesponses.Response{
 		ID:    "resp-1",
 		Model: "gpt-test",
-		Output: []responses.ResponseOutputItemUnion{
+		Output: []oairesponses.ResponseOutputItemUnion{
 			{
 				Type: "message",
-				Content: []responses.ResponseOutputMessageContentUnion{
+				Content: []oairesponses.ResponseOutputMessageContentUnion{
 					{Type: "output_text", Text: "hello"},
 				},
 			},
 		},
-		IncompleteDetails: responses.ResponseIncompleteDetails{
+		IncompleteDetails: oairesponses.ResponseIncompleteDetails{
 			Reason: "max_output_tokens",
 		},
 	}
@@ -446,7 +448,7 @@ func TestConvertResponse_IncompleteDetails(t *testing.T) {
 func TestConvertFunctionCall(t *testing.T) {
 	tests := []struct {
 		name     string
-		call     responses.ResponseOutputItemUnion
+		call     oairesponses.ResponseOutputItemUnion
 		wantErr  bool
 		wantID   string
 		wantName string
@@ -454,10 +456,10 @@ func TestConvertFunctionCall(t *testing.T) {
 	}{
 		{
 			name: "valid",
-			call: responses.ResponseOutputItemUnion{
+			call: oairesponses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{"arg":"val"}`},
+				Arguments: oairesponses.ResponseOutputItemUnionArguments{OfString: `{"arg":"val"}`},
 			},
 			wantID:   "call-1",
 			wantName: "test_fn",
@@ -465,10 +467,10 @@ func TestConvertFunctionCall(t *testing.T) {
 		},
 		{
 			name: "bad json",
-			call: responses.ResponseOutputItemUnion{
+			call: oairesponses.ResponseOutputItemUnion{
 				CallID:    "call-1",
 				Name:      "test_fn",
-				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{bad`},
+				Arguments: oairesponses.ResponseOutputItemUnionArguments{OfString: `{bad`},
 			},
 			wantErr: true,
 		},
@@ -601,7 +603,7 @@ func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var item responses.ResponseOutputItemUnion
+			var item oairesponses.ResponseOutputItemUnion
 			if err := json.Unmarshal([]byte(tc.raw), &item); err != nil {
 				t.Fatalf("json.Unmarshal(%s) err = %v", tc.raw, err)
 			}
@@ -610,8 +612,8 @@ func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
 				t.Fatalf("convertFunctionCall() error = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
-				if !errors.Is(err, ErrFunctionCallArgs) {
-					t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+				if !errors.Is(err, shared.ErrFunctionCallArgs) {
+					t.Errorf("error = %v, want errors.Is(err, shared.ErrFunctionCallArgs)", err)
 				}
 				return
 			}
@@ -632,29 +634,29 @@ func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
 func TestConvertFunctionCall_HandBuiltArguments(t *testing.T) {
 	tests := []struct {
 		name     string
-		args     responses.ResponseOutputItemUnionArguments
+		args     oairesponses.ResponseOutputItemUnionArguments
 		wantArgs map[string]any
 	}{
 		{
 			name:     "string arm",
-			args:     responses.ResponseOutputItemUnionArguments{OfString: `{"location":"Paris"}`},
+			args:     oairesponses.ResponseOutputItemUnionArguments{OfString: `{"location":"Paris"}`},
 			wantArgs: map[string]any{"location": "Paris"},
 		},
 		{
 			name:     "bare arm",
-			args:     responses.ResponseOutputItemUnionArguments{OfResponseToolSearchCallArguments: map[string]any{"location": "Paris"}},
+			args:     oairesponses.ResponseOutputItemUnionArguments{OfResponseToolSearchCallArguments: map[string]any{"location": "Paris"}},
 			wantArgs: map[string]any{"location": "Paris"},
 		},
 		{
 			name:     "zero value",
-			args:     responses.ResponseOutputItemUnionArguments{},
+			args:     oairesponses.ResponseOutputItemUnionArguments{},
 			wantArgs: map[string]any{},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := convertFunctionCall(responses.ResponseOutputItemUnion{Arguments: tc.args})
+			got, err := convertFunctionCall(oairesponses.ResponseOutputItemUnion{Arguments: tc.args})
 			if err != nil {
 				t.Fatalf("convertFunctionCall() err = %v", err)
 			}
@@ -677,7 +679,7 @@ func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
 		{"type":"message","content":[{"type":"output_text","text":"hello"}]},
 		{"type":"function_call","name":"write_file","call_id":"call-1","arguments":[1,2]}]}`
 
-	var resp responses.Response
+	var resp oairesponses.Response
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		t.Fatalf("json.Unmarshal() err = %v", err)
 	}
@@ -689,8 +691,8 @@ func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
 	if got != nil {
 		t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
 	}
-	if !errors.Is(err, ErrFunctionCallArgs) {
-		t.Errorf("error = %v, want errors.Is(err, ErrFunctionCallArgs)", err)
+	if !errors.Is(err, shared.ErrFunctionCallArgs) {
+		t.Errorf("error = %v, want errors.Is(err, shared.ErrFunctionCallArgs)", err)
 	}
 	for _, want := range []string{`write_file`, `call-1`} {
 		if !strings.Contains(err.Error(), want) {
@@ -702,9 +704,9 @@ func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
 // decodeResponse builds a response the way the wire does, so a test can pin
 // behavior that turns on whether a field was sent — which a struct literal
 // cannot express.
-func decodeResponse(t *testing.T, body string) *responses.Response {
+func decodeResponse(t *testing.T, body string) *oairesponses.Response {
 	t.Helper()
-	var resp responses.Response
+	var resp oairesponses.Response
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("decoding %s: %v", body, err)
 	}
@@ -795,37 +797,37 @@ func TestFinishReason(t *testing.T) {
 func TestFinishMessage(t *testing.T) {
 	tests := []struct {
 		name            string
-		resp            *responses.Response
+		resp            *oairesponses.Response
 		incompleteEvent bool
 		want            string
 	}{
 		{name: "nil response"},
 		{
 			name: "the server's error message outranks the rest",
-			resp: &responses.Response{
-				Status:            responses.ResponseStatusFailed,
-				Error:             responses.ResponseError{Message: "upstream exploded"},
-				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "content_filter"},
+			resp: &oairesponses.Response{
+				Status:            oairesponses.ResponseStatusFailed,
+				Error:             oairesponses.ResponseError{Message: "upstream exploded"},
+				IncompleteDetails: oairesponses.ResponseIncompleteDetails{Reason: "content_filter"},
 			},
 			want: "upstream exploded",
 		},
 		{
 			name: "then the incomplete reason",
-			resp: &responses.Response{
-				Status:            responses.ResponseStatusIncomplete,
-				IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "something_new"},
+			resp: &oairesponses.Response{
+				Status:            oairesponses.ResponseStatusIncomplete,
+				IncompleteDetails: oairesponses.ResponseIncompleteDetails{Reason: "something_new"},
 			},
 			want: "something_new",
 		},
 		{
 			name: "and the status when that is all there is",
-			resp: &responses.Response{Status: responses.ResponseStatusIncomplete},
+			resp: &oairesponses.Response{Status: oairesponses.ResponseStatusIncomplete},
 			want: "incomplete",
 		},
 		{
 			// A silent payload behind an event whose name is the only account.
 			name:            "the event's own name when the payload is silent",
-			resp:            &responses.Response{},
+			resp:            &oairesponses.Response{},
 			incompleteEvent: true,
 			want:            "incomplete",
 		},
@@ -833,7 +835,7 @@ func TestFinishMessage(t *testing.T) {
 			// The precedence truncated() applies, applied here too: a turn the
 			// event says did not finish cannot report "completed" as why.
 			name:            "the event's name outranks a payload calling the turn completed",
-			resp:            &responses.Response{Status: responses.ResponseStatusCompleted},
+			resp:            &oairesponses.Response{Status: oairesponses.ResponseStatusCompleted},
 			incompleteEvent: true,
 			want:            "incomplete",
 		},
@@ -841,16 +843,16 @@ func TestFinishMessage(t *testing.T) {
 			// Only that contradiction is overridden. A status agreeing the turn
 			// did not finish is still the provider's own wording for why.
 			name:            "a status the event does not contradict is reported",
-			resp:            &responses.Response{Status: responses.ResponseStatusFailed},
+			resp:            &oairesponses.Response{Status: oairesponses.ResponseStatusFailed},
 			incompleteEvent: true,
 			want:            "failed",
 		},
 		{
 			name: "a completed payload behind no such event stands",
-			resp: &responses.Response{Status: responses.ResponseStatusCompleted},
+			resp: &oairesponses.Response{Status: oairesponses.ResponseStatusCompleted},
 			want: "completed",
 		},
-		{name: "nothing to say", resp: &responses.Response{}},
+		{name: "nothing to say", resp: &oairesponses.Response{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -865,15 +867,15 @@ func TestFinishMessage(t *testing.T) {
 // describe, so a streamed turn cannot report the terminal event's probabilities
 // over what the deltas built.
 func TestLogprobsFor(t *testing.T) {
-	resp := &responses.Response{
-		Output: []responses.ResponseOutputItemUnion{
+	resp := &oairesponses.Response{
+		Output: []oairesponses.ResponseOutputItemUnion{
 			{
 				Type: "message",
-				Content: []responses.ResponseOutputMessageContentUnion{
+				Content: []oairesponses.ResponseOutputMessageContentUnion{
 					{
 						Type: "output_text",
 						Text: "hello",
-						Logprobs: []responses.ResponseOutputTextLogprob{
+						Logprobs: []oairesponses.ResponseOutputTextLogprob{
 							{Token: "hello", Logprob: -0.5},
 						},
 					},
@@ -894,15 +896,15 @@ func TestLogprobsFor(t *testing.T) {
 	// A refusal becomes a text part like any other (see convertOutputItems), so
 	// it counts towards the answer the logprobs describe.
 	t.Run("a refusal is part of the answer", func(t *testing.T) {
-		refused := &responses.Response{
-			Output: []responses.ResponseOutputItemUnion{
+		refused := &oairesponses.Response{
+			Output: []oairesponses.ResponseOutputItemUnion{
 				{
 					Type: "message",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{
 							Type:     "output_text",
 							Text:     "hello",
-							Logprobs: []responses.ResponseOutputTextLogprob{{Token: "hello", Logprob: -0.5}},
+							Logprobs: []oairesponses.ResponseOutputTextLogprob{{Token: "hello", Logprob: -0.5}},
 						},
 						{Type: "refusal", Refusal: "I cannot"},
 					},
@@ -921,16 +923,16 @@ func TestLogprobsFor(t *testing.T) {
 func TestConvertOutputItems(t *testing.T) {
 	tests := []struct {
 		name    string
-		items   []responses.ResponseOutputItemUnion
+		items   []oairesponses.ResponseOutputItemUnion
 		want    []*genai.Part
 		wantErr error
 	}{
 		{
 			name: "valid items",
-			items: []responses.ResponseOutputItemUnion{
+			items: []oairesponses.ResponseOutputItemUnion{
 				{
 					Type: "message",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{Type: "output_text", Text: "text1"},
 						{Type: "refusal", Refusal: "nope"},
 					},
@@ -939,14 +941,14 @@ func TestConvertOutputItems(t *testing.T) {
 					Type:      "function_call",
 					CallID:    "call-1",
 					Name:      "fn",
-					Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{}`},
+					Arguments: oairesponses.ResponseOutputItemUnionArguments{OfString: `{}`},
 				},
 				{
 					Type: "reasoning",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{Text: "thought1"},
 					},
-					Summary: []responses.ResponseReasoningItemSummary{
+					Summary: []oairesponses.ResponseReasoningItemSummary{
 						{Text: "summary1"},
 					},
 				},
@@ -968,38 +970,38 @@ func TestConvertOutputItems(t *testing.T) {
 		{
 			name:    "empty items",
 			items:   nil,
-			wantErr: ErrNoOutputItems,
+			wantErr: shared.ErrNoOutputItems,
 		},
 		{
 			name: "invalid type",
-			items: []responses.ResponseOutputItemUnion{
+			items: []oairesponses.ResponseOutputItemUnion{
 				{Type: "invalid"},
 			},
-			wantErr: ErrUnsupportedOutputItemType,
+			wantErr: shared.ErrUnsupportedOutputItemType,
 		},
 		{
 			name: "invalid message content type",
-			items: []responses.ResponseOutputItemUnion{
+			items: []oairesponses.ResponseOutputItemUnion{
 				{
 					Type: "message",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{Type: "invalid"},
 					},
 				},
 			},
-			wantErr: ErrUnsupportedMessageContentType,
+			wantErr: shared.ErrUnsupportedMessageContentType,
 		},
 		{
 			name: "empty message content",
-			items: []responses.ResponseOutputItemUnion{
+			items: []oairesponses.ResponseOutputItemUnion{
 				{
 					Type: "message",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{Type: "output_text", Text: ""}, // Empty text is skipped
 					},
 				},
 			},
-			wantErr: ErrNoTextOrToolContent,
+			wantErr: shared.ErrNoTextOrToolContent,
 		},
 	}
 
@@ -1022,7 +1024,7 @@ func TestConvertOutputItems(t *testing.T) {
 func TestConvertLogprobs(t *testing.T) {
 	tests := []struct {
 		name  string
-		items []responses.ResponseOutputItemUnion
+		items []oairesponses.ResponseOutputItemUnion
 		want  *genai.LogprobsResult
 	}{
 		{
@@ -1032,17 +1034,17 @@ func TestConvertLogprobs(t *testing.T) {
 		},
 		{
 			name: "fully specified",
-			items: []responses.ResponseOutputItemUnion{
+			items: []oairesponses.ResponseOutputItemUnion{
 				{
 					Type: "message",
-					Content: []responses.ResponseOutputMessageContentUnion{
+					Content: []oairesponses.ResponseOutputMessageContentUnion{
 						{
 							Type: "output_text",
-							Logprobs: []responses.ResponseOutputTextLogprob{
+							Logprobs: []oairesponses.ResponseOutputTextLogprob{
 								{
 									Token:   "hel",
 									Logprob: -0.1,
-									TopLogprobs: []responses.ResponseOutputTextLogprobTopLogprob{
+									TopLogprobs: []oairesponses.ResponseOutputTextLogprobTopLogprob{
 										{Token: "hel", Logprob: -0.1},
 										{Token: "hi", Logprob: -2.3},
 									},
