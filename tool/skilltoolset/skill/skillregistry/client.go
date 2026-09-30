@@ -91,8 +91,6 @@ func (c *client) iterateDo(acc func(*agentregistry.Skill) (bool, error)) error {
 			if !cont {
 				break
 			}
-
-			log.Printf("iterateDo got skill: %+v", sk)
 		}
 		if !cont { // acc returned false in order no to continue
 			break
@@ -117,7 +115,6 @@ func (c *client) GetZip(rev string) (*zip.Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the revision: %w", err)
 	}
-	log.Printf("Read %v bytes", len(b))
 
 	r := strings.NewReader(string(b))
 	zip, err := zip.NewReader(r, int64(len(b)))
@@ -160,7 +157,7 @@ func (c *client) FindFrontmatters(query string) ([]*agentregistry.Frontmatter, e
 				continue
 			}
 			res = append(res, fm)
-			log.Printf("FindFrontmatters got skill with non-nil frontmatter; skill: %+v frontmatter: %+v", sk, fm)
+			// log.Printf("FindFrontmatters got skill with non-nil frontmatter; skill: %+v frontmatter: %+v", sk, fm)
 		}
 		if pageToken == "" {
 			break
@@ -253,13 +250,13 @@ func (c *client) ListFrontmatters() ([]*agentregistry.Frontmatter, error) {
 
 		res = append(res, f.Frontmatter)
 
-		b, err := f.MarshalJSON()
-		if err != nil {
-			log.Printf("cannot MarshalJSON for f")
-			return false, nil
-		}
+		// b, err := f.MarshalJSON()
+		// if err != nil {
+		// 	log.Printf("cannot MarshalJSON for f")
+		// 	return false, nil
+		// }
 
-		log.Printf("ListFrontmatters: GOT SKILL: %+v", string(b))
+		// log.Printf("ListFrontmatters: GOT SKILL: %+v", string(b))
 
 		return true, nil
 	})

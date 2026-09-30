@@ -45,7 +45,7 @@ type SkillRegistrySourceConfig struct {
 
 // NewSkillRegistrySource creates a [skill.Source] backed by the Skill Registry of the
 // Gemini Enterprise Agent Platform. Client options are forwarded to
-// [NewSkillRegistryClient].
+// [NewClient].
 //
 // Skills are keyed by their SKILL_ID — the last segment of the skill's resource
 // name — because that is the folder name the skill is mounted under when it is
