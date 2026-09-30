@@ -29,16 +29,8 @@ import (
 // agent from loader, and answers with its [AppInfo] as JSON.
 //
 // It answers 404 for an app loader does not serve and 503 when loader is nil.
-// It also answers 403 to a request a browser marks as cross-site
-// (Sec-Fetch-Site: cross-site). The REST server's Origin check cannot catch a
-// plain cross-site GET such as an image load, which carries no Origin, and
-// describing an app resolves toolsets, which can connect to MCP servers.
 func Handler(loader agent.Loader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
-			http.Error(w, "Forbidden: cross-site request", http.StatusForbidden)
-			return
-		}
 		if loader == nil {
 			http.Error(w, "no agent loader configured", http.StatusServiceUnavailable)
 			return

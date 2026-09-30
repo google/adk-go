@@ -115,34 +115,6 @@ func TestHandlerWithoutLoader(t *testing.T) {
 	}
 }
 
-// TestHandlerRefusesCrossSite covers a browser request from another site. A
-// plain GET such as an image load carries no Origin, so only Sec-Fetch-Site
-// tells it apart, and a client that is not a browser sends neither.
-func TestHandlerRefusesCrossSite(t *testing.T) {
-	loader := newLoader(t, llmagent.Config{Name: "concierge", Description: "Plans trips.", Instruction: "Coordinate."})
-	for _, tc := range []struct {
-		name string
-		site string
-		want int
-	}{
-		{name: "no header", want: http.StatusOK},
-		{name: "none", site: "none", want: http.StatusOK},
-		{name: "same-origin", site: "same-origin", want: http.StatusOK},
-		{name: "same-site", site: "same-site", want: http.StatusOK},
-		{name: "cross-site", site: "cross-site", want: http.StatusForbidden},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/apps/concierge/app-info", nil)
-			if tc.site != "" {
-				req.Header.Set("Sec-Fetch-Site", tc.site)
-			}
-			if rec := serve(t, loader, req); rec.Code != tc.want {
-				t.Errorf("status = %d, want %d", rec.Code, tc.want)
-			}
-		})
-	}
-}
-
 // unencodableTool declares a schema JSON cannot represent.
 type unencodableTool struct{}
 
