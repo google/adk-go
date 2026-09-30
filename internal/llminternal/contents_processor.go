@@ -69,9 +69,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
-			state.IncludeContents != includeContentsDefault
+			state.IncludeContents != IncludeContentsDefault
 		fn := buildContentsDefault // anything but "none", unless the placement hides it.
-		if state.IncludeContents == includeContentsNone || placementHidesHistory {
+		if state.IncludeContents == IncludeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		isSingleTurn := ModeFor(ctx, name, state) == ModeSingleTurn
@@ -214,11 +214,11 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	}
 	filtered = processedEvents
 
-	filtered = dropOrphanedFunctionResponses(filtered, allEvents)
+	filtered, orphanRemnants := dropOrphanedFunctionResponses(filtered, allEvents)
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
-	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered)
+	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered, orphanRemnants)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +227,11 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	if err != nil {
 		return nil, err
 	}
+	// Runs after both rearrangements: dropping a trailing unanswered call
+	// first would leave a function response as the last event and let
+	// rearrangeEventsForLatestFunctionResponse discard the turns between it
+	// and its call.
+	filtered = dropOrphanedFunctionCalls(filtered)
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
@@ -266,7 +271,9 @@ func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
-func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*session.Event {
+// dropOrphanedFunctionResponses also identifies surviving events whose orphaned
+// responses were removed, so later rearrangement preserves their remaining content.
+func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*session.Event, map[*session.Event]bool) {
 	callIDs := make(map[string]struct{})
 	for _, event := range allEvents {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
@@ -286,6 +293,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*sessio
 
 	var orphanedIDs []string
 	result := make([]*session.Event, 0, len(events))
+	orphanRemnants := make(map[*session.Event]bool)
 	for _, event := range events {
 		content := utils.Content(event)
 		if content == nil {
@@ -315,22 +323,85 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) []*sessio
 		cloned.LLMResponse.Content.Parts = parts
 		if len(cloned.LLMResponse.Content.Parts) > 0 {
 			result = append(result, cloned)
+			orphanRemnants[cloned] = true
 		}
 	}
 
 	if len(orphanedIDs) > 0 {
 		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
 	}
+	return result, orphanRemnants
+}
+
+// dropOrphanedFunctionCalls removes function calls that no function response
+// in events answers, such as a call left behind by a turn interrupted before
+// its tool ran. Providers that require every call to be answered reject such
+// a history, and it would otherwise be replayed on every later turn.
+//
+// A call without an ID is kept, because there is no ID to match a response
+// against, so a missing response proves nothing. A call listed in an event's
+// LongRunningToolIDs is kept, because it is legitimately awaiting a response.
+//
+// Events carrying a dropped call are cloned, so the session history is not
+// modified, and an event left with no parts is removed.
+func dropOrphanedFunctionCalls(events []*session.Event) []*session.Event {
+	answered := make(map[string]struct{})
+	for _, event := range events {
+		for _, response := range utils.FunctionResponses(utils.Content(event)) {
+			if response.ID != "" {
+				answered[response.ID] = struct{}{}
+			}
+		}
+		for _, id := range event.LongRunningToolIDs {
+			answered[id] = struct{}{}
+		}
+	}
+
+	isOrphan := func(part *genai.Part) bool {
+		if part == nil || part.FunctionCall == nil || part.FunctionCall.ID == "" {
+			return false
+		}
+		_, found := answered[part.FunctionCall.ID]
+		return !found
+	}
+
+	var orphanedIDs []string
+	result := make([]*session.Event, 0, len(events))
+	for _, event := range events {
+		content := utils.Content(event)
+		if content == nil || !slices.ContainsFunc(content.Parts, isOrphan) {
+			result = append(result, event)
+			continue
+		}
+
+		// The whole part goes, thought signature included, as in adk-python.
+		cloned := cloneEvent(event)
+		parts := cloned.LLMResponse.Content.Parts[:0]
+		for _, part := range content.Parts {
+			if isOrphan(part) {
+				orphanedIDs = append(orphanedIDs, part.FunctionCall.ID)
+				continue
+			}
+			parts = append(parts, part)
+		}
+		cloned.LLMResponse.Content.Parts = parts
+		if len(parts) > 0 {
+			result = append(result, cloned)
+		}
+	}
+
+	if len(orphanedIDs) > 0 {
+		log.Printf("adk: dropping function calls with no matching function response: %q", orphanedIDs)
+	}
 	return result
 }
 
-// rearrangeEventsForLatestFunctionResponse
-// This function only acts if the very last event is a function response.
-// It searches backward for the matching call, deletes all intervening events,
-// and appends a single (merged) response.
-// If the latest function_response is for an async function_call, all events
-// between the initial function_call and the latest function_response will be removed.
-func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*session.Event, error) {
+// rearrangeEventsForLatestFunctionResponse merges responses to the latest event's
+// matching call while preserving unrelated tool events and orphanRemnants.
+// Retaining orphanRemnants is an exception for content left by orphan pruning;
+// other intervening non-tool events, including ordinary user and model text,
+// are still dropped.
+func rearrangeEventsForLatestFunctionResponse(events []*session.Event, orphanRemnants map[*session.Event]bool) ([]*session.Event, error) {
 	if len(events) < 2 {
 		return events, nil
 	}
@@ -424,6 +495,11 @@ SearchLoop: // A label to allow breaking out of the nested loop
 
 		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
+			// Unlike Python's blanket intermediate-event removal, retain content
+			// deliberately preserved when pruning unrelated orphaned responses.
+			if orphanRemnants[event] {
+				resultEvents = append(resultEvents, event)
+			}
 			continue
 		}
 
