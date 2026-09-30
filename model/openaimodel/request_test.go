@@ -16,6 +16,7 @@ package openaimodel
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -383,17 +384,219 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{InlineData: &genai.Blob{Data: []byte{0x1}}},
+					{ExecutableCode: &genai.ExecutableCode{Code: "1+1", Language: genai.LanguagePython}},
 				},
 			},
 		},
 	}
 	_, err := buildOpenAIParams("fallback", req)
 	if err == nil {
-		t.Fatalf("expected error for inline data part")
+		t.Fatalf("expected error for executable code part")
 	}
 	if errors.Is(err, ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildOpenAIParams() err = %v, want an unsupported-content-part error", err)
+	}
+}
+
+// TestBuildOpenAIParams_InlineDataImage guards that a genai.Part.InlineData
+// image (base64 bytes + MIME type) is converted into an OpenAI
+// responses.ResponseInputImageParam using a base64 data URL, matching
+// adk-python's _inline_data_part_to_response_content.
+func TestBuildOpenAIParams_InlineDataImage(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: string(genai.RoleUser),
+				Parts: []*genai.Part{
+					{InlineData: &genai.Blob{MIMEType: "image/png", Data: pngBytes}},
+				},
+			},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 1 || items[0].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	content := items[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 1 || content[0].OfInputImage == nil {
+		t.Fatalf("unexpected message content: %+v", content)
+	}
+	img := content[0].OfInputImage
+	wantURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
+	if !img.ImageURL.Valid() || img.ImageURL.Value != wantURL {
+		t.Fatalf("image url = %+v, want %q", img.ImageURL, wantURL)
+	}
+	if got := img.Type; got != constant.InputImage("input_image") {
+		t.Errorf("image type = %q, want input_image", got)
+	}
+}
+
+// TestBuildOpenAIParams_InlineDataNonImageFile guards that non-image
+// InlineData (e.g. a PDF) becomes an input_file item carrying an inline
+// base64 data URL rather than an input_image item.
+func TestBuildOpenAIParams_InlineDataNonImageFile(t *testing.T) {
+	pdfBytes := []byte{0x25, 0x50, 0x44, 0x46}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: string(genai.RoleUser),
+				Parts: []*genai.Part{
+					{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: pdfBytes}},
+				},
+			},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 1 || items[0].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	content := items[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 1 || content[0].OfInputFile == nil {
+		t.Fatalf("unexpected message content: %+v", content)
+	}
+	f := content[0].OfInputFile
+	wantData := "data:application/pdf;base64," + base64.StdEncoding.EncodeToString(pdfBytes)
+	if !f.FileData.Valid() || f.FileData.Value != wantData {
+		t.Fatalf("file data = %+v, want %q", f.FileData, wantData)
+	}
+	if got := f.Type; got != constant.InputFile("input_file") {
+		t.Errorf("file type = %q, want input_file", got)
+	}
+}
+
+// TestBuildOpenAIParams_FileDataImageURI guards that a genai.Part.FileData
+// pointing at a remote image URI is converted into an input_image item that
+// carries the URI directly (no re-encoding).
+func TestBuildOpenAIParams_FileDataImageURI(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: string(genai.RoleUser),
+				Parts: []*genai.Part{
+					{FileData: &genai.FileData{FileURI: "https://example.com/cat.png", MIMEType: "image/png"}},
+				},
+			},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 1 || items[0].OfMessage == nil {
+		t.Fatalf("unexpected input items: %+v", items)
+	}
+	content := items[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 1 || content[0].OfInputImage == nil {
+		t.Fatalf("unexpected message content: %+v", content)
+	}
+	img := content[0].OfInputImage
+	if !img.ImageURL.Valid() || img.ImageURL.Value != "https://example.com/cat.png" {
+		t.Fatalf("image url = %+v, want https://example.com/cat.png", img.ImageURL)
+	}
+}
+
+// TestBuildOpenAIParams_FileDataNonImageURI guards that a genai.Part.FileData
+// pointing at a non-image remote file (e.g. a PDF) becomes an input_file item
+// carrying the URL, and that an OpenAI file-id-shaped URI ("file-...") is
+// routed through FileID instead of FileURL.
+func TestBuildOpenAIParams_FileDataNonImageURI(t *testing.T) {
+	tests := []struct {
+		name       string
+		uri        string
+		wantFileID string
+		wantURL    string
+	}{
+		{name: "http url", uri: "https://example.com/doc.pdf", wantURL: "https://example.com/doc.pdf"},
+		{name: "openai file id", uri: "file-abc123", wantFileID: "file-abc123"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role: string(genai.RoleUser),
+						Parts: []*genai.Part{
+							{FileData: &genai.FileData{FileURI: tc.uri, MIMEType: "application/pdf"}},
+						},
+					},
+				},
+			}
+			params, err := buildOpenAIParams("fallback", req)
+			if err != nil {
+				t.Fatalf("buildOpenAIParams() err = %v", err)
+			}
+			items := params.Input.OfInputItemList
+			if len(items) != 1 || items[0].OfMessage == nil {
+				t.Fatalf("unexpected input items: %+v", items)
+			}
+			content := items[0].OfMessage.Content.OfInputItemContentList
+			if len(content) != 1 || content[0].OfInputFile == nil {
+				t.Fatalf("unexpected message content: %+v", content)
+			}
+			f := content[0].OfInputFile
+			if tc.wantURL != "" {
+				if !f.FileURL.Valid() || f.FileURL.Value != tc.wantURL {
+					t.Fatalf("file url = %+v, want %q", f.FileURL, tc.wantURL)
+				}
+			}
+			if tc.wantFileID != "" {
+				if !f.FileID.Valid() || f.FileID.Value != tc.wantFileID {
+					t.Fatalf("file id = %+v, want %q", f.FileID, tc.wantFileID)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildOpenAIParams_MixedTextAndImagePreservesOrder guards that a single
+// message mixing text and image parts is emitted as ONE message whose
+// content list mixes input_text and input_image items IN PART ORDER, rather
+// than being dropped, erroring, or reordered by the old text-only
+// accumulator.
+func TestBuildOpenAIParams_MixedTextAndImagePreservesOrder(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: string(genai.RoleUser),
+				Parts: []*genai.Part{
+					{Text: "What is in this image?"},
+					{InlineData: &genai.Blob{MIMEType: "image/png", Data: pngBytes}},
+					{Text: "Answer briefly."},
+				},
+			},
+		},
+	}
+	params, err := buildOpenAIParams("fallback", req)
+	if err != nil {
+		t.Fatalf("buildOpenAIParams() err = %v", err)
+	}
+	items := params.Input.OfInputItemList
+	if len(items) != 1 || items[0].OfMessage == nil {
+		t.Fatalf("expected exactly one message, got: %+v", items)
+	}
+	content := items[0].OfMessage.Content.OfInputItemContentList
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d: %+v", len(content), content)
+	}
+	if content[0].OfInputText == nil || content[0].OfInputText.Text != "What is in this image?" {
+		t.Errorf("content[0] = %+v, want input_text %q", content[0], "What is in this image?")
+	}
+	if content[1].OfInputImage == nil {
+		t.Errorf("content[1] = %+v, want input_image", content[1])
+	}
+	if content[2].OfInputText == nil || content[2].OfInputText.Text != "Answer briefly." {
+		t.Errorf("content[2] = %+v, want input_text %q", content[2], "Answer briefly.")
 	}
 }
 
@@ -583,9 +786,10 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			want: []string{"in/user:q"},
 		},
 		{
-			// Marking media as a thought must not smuggle it past the
-			// unsupported-part check and out of the request unannounced.
-			name: "thought_marked_media_is_still_rejected",
+			// Media is content, so a thought marker on a part carrying it
+			// must not make it vanish -- the same reason a thought-marked
+			// call survives. The marker suppresses text, not payload.
+			name: "thought_marked_media_is_sent",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -593,14 +797,13 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:<non-text>"},
 		},
 		{
-			// The same part with reasoning text riding on it. Suppressing the
-			// text must not also suppress the rejection, or the image leaves
-			// the request unannounced — the arm keys on what the part
-			// contributed, not on whether it had text.
-			name: "thought_text_riding_on_media_is_still_rejected",
+			// The same part with reasoning text riding on it. The text is
+			// suppressed and the image is not: the two are read independently,
+			// so dropping the scratchpad does not drop what it was about.
+			name: "thought_text_riding_on_media_keeps_the_media",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -609,7 +812,7 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:<non-text>"},
 		},
 		{
 			name: "thought_text_riding_on_code_is_still_rejected",
@@ -665,29 +868,47 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: `unsupported role "assistant"`,
 		},
 		{
-			// Not a thought at all: an image riding on ordinary text used to
-			// leave the request silently, because the text matched an arm and
-			// the rejection never ran. The check is independent of what the
-			// part contributed, so it is reported here too.
-			name: "media_riding_on_plain_text_is_rejected",
+			// Not a thought at all: an image riding on ordinary text. Both
+			// reach the request, and the content list keeps the order they
+			// arrived in -- the text of a part, then its media.
+			name: "media_riding_on_plain_text_keeps_both",
 			contents: []*genai.Content{
 				userTurn(&genai.Part{
 					Text:       "describe this",
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			want: []string{"in/user:describe this|<non-text>"},
 		},
 		{
-			// Same hole on the call arm.
-			name: "media_riding_on_a_call_is_rejected",
+			// Still a rejection, but no longer because the field is
+			// unsendable: a replayed assistant turn goes out as an output
+			// message, and an output message carries output_text only, so
+			// there is nowhere to put the image. Saying so beats dropping it.
+			name: "media_riding_on_a_call_in_a_model_turn_is_rejected",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
 					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
 					InlineData:   &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			wantErrText: "replayed assistant turn with image/file content is not supported",
+		},
+		{
+			// The positive half, on a user turn, where an input message can
+			// carry the image: the media is sent and keeps its place ahead of
+			// the tool output it rode in on.
+			name: "media_riding_on_a_response_in_a_user_turn_keeps_both",
+			contents: []*genai.Content{
+				modelTurn(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}}),
+				userTurn(&genai.Part{
+					FunctionResponse: &genai.FunctionResponse{
+						Name: "lookup", ID: "c1", Response: map[string]any{"ok": true},
+					},
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				}),
+			},
+			want: []string{"call:lookup/c1", "in/user:<non-text>", "output:c1"},
 		},
 		{
 			// A part that carries only bookkeeping reaches nothing: it is not
@@ -944,6 +1165,21 @@ func TestReplayedReasoning(t *testing.T) {
 			&genai.Part{Thought: true, AudioTranscription: &genai.Transcription{Text: "hello"}},
 			false,
 		},
+		// Media is sendable content, so a thought marker on a part carrying
+		// it must not make it replayed reasoning: dropping it would lose
+		// something, which is the whole test this predicate applies.
+		{
+			"thought_marked_inline_data",
+			&genai.Part{Thought: true, InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			false,
+		},
+		{
+			"thought_marked_file_data",
+			&genai.Part{Thought: true, FileData: &genai.FileData{
+				MIMEType: "image/png", FileURI: "https://example.com/a.png",
+			}},
+			false,
+		},
 		// These three only qualify media carried in another field, so on a
 		// thought they hold nothing back.
 		{
@@ -986,6 +1222,8 @@ var accountedForFields = map[string]string{
 	"ThoughtSignature": "no Responses input item can carry one",
 	"FunctionCall":     "sent as a function_call item",
 	"FunctionResponse": "sent as a function_call_output item",
+	"InlineData":       "sent as an input_image or input_file item",
+	"FileData":         "likewise, by URI or file id",
 	"VideoMetadata":    "qualifies media carried in another field",
 	"MediaResolution":  "qualifies media carried in another field",
 	"PartMetadata":     "caller bookkeeping, never content",
