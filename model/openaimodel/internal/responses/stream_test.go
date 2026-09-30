@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"context"
@@ -20,14 +20,16 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 
 	"google.golang.org/adk/v2/internal/llminternal"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-func decodeEvent(t *testing.T, body string) responses.ResponseStreamEventUnion {
+func decodeEvent(t *testing.T, body string) oairesponses.ResponseStreamEventUnion {
 	t.Helper()
-	var evt responses.ResponseStreamEventUnion
+	var evt oairesponses.ResponseStreamEventUnion
 	if err := json.Unmarshal([]byte(body), &evt); err != nil {
 		t.Fatalf("decodeEvent: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestStreamTranslator_WithAggregator(t *testing.T) {
 	tr := newStreamTranslator()
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
-	events := []responses.ResponseStreamEventUnion{
+	events := []oairesponses.ResponseStreamEventUnion{
 		decodeEvent(t, `{"type":"response.output_text.delta","delta":"hel"}`),
 		decodeEvent(t, `{"type":"response.output_text.delta","delta":"lo"}`),
 	}
@@ -167,8 +169,8 @@ func TestStreamTranslator_ResponseFailed(t *testing.T) {
 	if resp != nil {
 		t.Errorf("process() = %+v, want nil alongside the error", resp)
 	}
-	if !errors.Is(err, ErrResponseFailed) {
-		t.Fatalf("process() err = %v, want errors.Is(err, ErrResponseFailed)", err)
+	if !errors.Is(err, shared.ErrResponseFailed) {
+		t.Fatalf("process() err = %v, want errors.Is(err, shared.ErrResponseFailed)", err)
 	}
 	if want := `openai: response failed (id "resp_123", code "server_error"): "the model failed to generate a response"`; err.Error() != want {
 		t.Errorf("process() err = %q, want %q", err, want)
@@ -198,8 +200,8 @@ func TestStreamTranslator_ResponseFailed_PathsAgree(t *testing.T) {
 			_, blockErr := convertResponse(&failed.Response)
 
 			for path, err := range map[string]error{"stream": streamErr, "blocking": blockErr} {
-				if !errors.Is(err, ErrResponseFailed) {
-					t.Fatalf("%s path err = %v, want errors.Is(err, ErrResponseFailed)", path, err)
+				if !errors.Is(err, shared.ErrResponseFailed) {
+					t.Fatalf("%s path err = %v, want errors.Is(err, shared.ErrResponseFailed)", path, err)
 				}
 			}
 			if streamErr.Error() != blockErr.Error() {

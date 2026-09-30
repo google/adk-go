@@ -107,10 +107,15 @@ type ProviderConfig struct {
 // goroutine. Build one per request and the cost is per request.
 var ErrClientUnavailable = errors.New("gcp: default credentials client unavailable")
 
-// ErrNoActingUser means the provider could not determine the acting end user,
-// either because the context is not an ADK context or because the invocation
-// carries no user. No user, no credential — the same call adk-python makes,
-// which raises on a missing user id rather than degrading the turn.
+// ErrNoActingUser means the provider could not determine the acting end user:
+// either no identity was recoverable from the context, or one was and its
+// UserID is empty. The second does not imply a session: a decorator's Value can
+// answer with an [agent.Identity] it built directly, so this turns on the field
+// rather than on what lies behind it. The first is not a single condition —
+// [agent.IdentityFromContext] reports it without saying why, and its doc says
+// the reasons are not a closed set. No user, no credential — the same call
+// adk-python makes, which raises on a missing user id rather than degrading the
+// turn.
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
@@ -299,7 +304,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 	if id.UserID == "" {
 		// No ids in the message: this text is fed to the model and persisted in
 		// the session, and every id here comes off the request.
-		return nil, fmt.Errorf("%w: the invocation's session carries no user", ErrNoActingUser)
+		return nil, fmt.Errorf("%w: the invocation identity carries no user", ErrNoActingUser)
 	}
 
 	// Before the cache read, because the Client is part of the cache key and a
@@ -463,9 +468,13 @@ func (p *provider) runInit(in *clientInit) {
 	// This runs on a goroutine the provider owns, so nothing above can recover a
 	// panic here and it would take the process down — where an eagerly built
 	// client would merely have panicked in the caller's own frame. Report it as
-	// this attempt's failure instead, panic value and all, and release the
-	// waiters: without this, an abrupt exit leaves pending set with its goroutine
-	// dead and every later caller waits out initTimeout forever.
+	// this attempt's failure instead, panic value and all.
+	//
+	// The second arm catches an abrupt exit that is not a panic, which a builder
+	// reaches through runtime.Goexit. publish runs either way, so what that arm
+	// prevents is not a stuck attempt but a silent one: without it the Goexit is
+	// published as a successful build carrying no client, and every waiter gets a
+	// nil client with a nil error.
 	published := false
 	defer func() {
 		if published {

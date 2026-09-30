@@ -12,29 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // convertTools takes our generic tool definitions and converts them into
 // OpenAI's specific tool format. We ensure that only function tools are
 // supported and properly declared.
-func convertTools(cfg *genai.GenerateContentConfig) ([]responses.ToolUnionParam, error) {
+func convertTools(cfg *genai.GenerateContentConfig) ([]oairesponses.ToolUnionParam, error) {
 	if cfg == nil || len(cfg.Tools) == 0 {
 		return nil, nil
 	}
-	var tools []responses.ToolUnionParam
+	var tools []oairesponses.ToolUnionParam
 	for i, tool := range cfg.Tools {
-		if err := ensureFunctionToolOnly(i, tool); err != nil {
+		if err := shared.EnsureFunctionToolOnly(i, tool); err != nil {
 			return nil, err
 		}
 		for _, decl := range tool.FunctionDeclarations {
@@ -42,29 +42,14 @@ func convertTools(cfg *genai.GenerateContentConfig) ([]responses.ToolUnionParam,
 			if err != nil {
 				return nil, err
 			}
-			tools = append(tools, responses.ToolUnionParam{OfFunction: fn})
+			tools = append(tools, oairesponses.ToolUnionParam{OfFunction: fn})
 		}
 	}
 	return tools, nil
 }
 
-func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
-	if tool == nil {
-		return fmt.Errorf("openai: tool %d is nil", idx)
-	}
-	if tool.Retrieval != nil || tool.GoogleSearch != nil || tool.GoogleSearchRetrieval != nil ||
-		tool.GoogleMaps != nil || tool.EnterpriseWebSearch != nil ||
-		tool.URLContext != nil || tool.ComputerUse != nil || tool.CodeExecution != nil {
-		return fmt.Errorf("openai: non-function tools are not supported (tool %d)", idx)
-	}
-	if len(tool.FunctionDeclarations) == 0 {
-		return fmt.Errorf("openai: tool %d does not declare any functions", idx)
-	}
-	return nil
-}
-
 // convertFunctionDeclaration takes a generic genai.FunctionDeclaration and
-// converts it into an OpenAI-specific responses.FunctionToolParam. We handle
+// converts it into an OpenAI-specific oairesponses.FunctionToolParam. We handle
 // the function's name, description, and importantly, convert its parameters
 // from a generic schema format to a map[string]any that the OpenAI API expects.
 //
@@ -72,7 +57,7 @@ func ensureFunctionToolOnly(idx int, tool *genai.Tool) error {
 // the mode from the schema shape and add the caller's optional arguments to
 // required. Pinning it on would do that permanently, so off is the only value
 // that keeps an optional argument optional; adk-python's Responses path agrees.
-func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.FunctionToolParam, error) {
+func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*oairesponses.FunctionToolParam, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("openai: nil function declaration")
 	}
@@ -80,12 +65,12 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := schemaToMap(fn.Parameters)
+	paramsMap, err := shared.SchemaToMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = normalizeSchema(fn.ParametersJsonSchema)
+		paramsMap, err = shared.NormalizeSchema(fn.ParametersJsonSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +83,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		}
 	}
 
-	fnParam := &responses.FunctionToolParam{
+	fnParam := &oairesponses.FunctionToolParam{
 		Name:       fn.Name,
 		Type:       constant.Function("function"),
 		Parameters: paramsMap,
@@ -114,12 +99,12 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 // FunctionCallingConfig into an OpenAI-specific tool choice parameter.
 // We handle different function calling modes (Auto, None, Any) and
 // incorporate any allowed function names into the appropriate OpenAI format.
-func convertToolChoice(toolCfg *genai.ToolConfig) (*responses.ResponseNewParamsToolChoiceUnion, error) {
+func convertToolChoice(toolCfg *genai.ToolConfig) (*oairesponses.ResponseNewParamsToolChoiceUnion, error) {
 	if toolCfg == nil || toolCfg.FunctionCallingConfig == nil {
 		return nil, nil
 	}
 	cfg := toolCfg.FunctionCallingConfig
-	choice := &responses.ResponseNewParamsToolChoiceUnion{}
+	choice := &oairesponses.ResponseNewParamsToolChoiceUnion{}
 	switch cfg.Mode {
 	case "", genai.FunctionCallingConfigModeUnspecified, genai.FunctionCallingConfigModeAuto:
 		if len(cfg.AllowedFunctionNames) == 0 {
@@ -128,19 +113,19 @@ func convertToolChoice(toolCfg *genai.ToolConfig) (*responses.ResponseNewParamsT
 			return nil, nil
 		}
 		// If specific functions are allowed in auto mode, we specify them.
-		choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, responses.ToolChoiceAllowedModeAuto)
+		choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, oairesponses.ToolChoiceAllowedModeAuto)
 	case genai.FunctionCallingConfigModeNone:
 		// Explicitly disable tool calling.
-		choice.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsNone)
+		choice.OfToolChoiceMode = param.NewOpt(oairesponses.ToolChoiceOptionsNone)
 	case genai.FunctionCallingConfigModeAny:
 		if len(cfg.AllowedFunctionNames) == 0 {
 			// If 'any' is specified without allowed names, it means the model
 			// can call any tool.
-			choice.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsRequired)
+			choice.OfToolChoiceMode = param.NewOpt(oairesponses.ToolChoiceOptionsRequired)
 		} else {
 			// If 'any' is specified with allowed names, the model must call
 			// one of the allowed tools.
-			choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, responses.ToolChoiceAllowedModeRequired)
+			choice.OfAllowedTools = allowedToolParam(cfg.AllowedFunctionNames, oairesponses.ToolChoiceAllowedModeRequired)
 		}
 	default:
 		return nil, fmt.Errorf("openai: unsupported tool calling mode %q", cfg.Mode)
@@ -152,7 +137,7 @@ func convertToolChoice(toolCfg *genai.ToolConfig) (*responses.ResponseNewParamsT
 	return nil, nil
 }
 
-func allowedToolParam(names []string, mode responses.ToolChoiceAllowedMode) *responses.ToolChoiceAllowedParam {
+func allowedToolParam(names []string, mode oairesponses.ToolChoiceAllowedMode) *oairesponses.ToolChoiceAllowedParam {
 	tools := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		if name == "" {
@@ -166,50 +151,9 @@ func allowedToolParam(names []string, mode responses.ToolChoiceAllowedMode) *res
 	if len(tools) == 0 {
 		return nil
 	}
-	return &responses.ToolChoiceAllowedParam{
+	return &oairesponses.ToolChoiceAllowedParam{
 		Mode:  mode,
 		Type:  constant.AllowedTools("allowed_tools"),
 		Tools: tools,
-	}
-}
-
-func schemaToMap(schema *genai.Schema) (map[string]any, error) {
-	if schema == nil {
-		return nil, nil
-	}
-	bytes, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("openai: marshal schema: %w", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(bytes, &result); err != nil {
-		return nil, fmt.Errorf("openai: unmarshal schema: %w", err)
-	}
-	lowercaseSchemaTypes(result)
-	return result, nil
-}
-
-func lowercaseSchemaTypes(val any) {
-	switch v := val.(type) {
-	case map[string]any:
-		if t, ok := v["type"]; ok {
-			switch tVal := t.(type) {
-			case string:
-				v["type"] = strings.ToLower(tVal)
-			case []any:
-				for i, item := range tVal {
-					if str, ok := item.(string); ok {
-						tVal[i] = strings.ToLower(str)
-					}
-				}
-			}
-		}
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
-		}
-	case []any:
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
-		}
 	}
 }
