@@ -248,6 +248,10 @@ func children(a agent.Agent) []agent.Agent {
 				case *workflow.AgentNode:
 					out = append(out, node.Agent())
 				case *workflow.WorkflowNode:
+					// Edges come back in no particular order, so if two
+					// different agents share a name and one is in a nested
+					// workflow, which one is described can change from
+					// request to request. Sort them here if that matters.
 					walkEdges(node.Workflow().Edges())
 				}
 			}

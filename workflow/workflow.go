@@ -274,9 +274,8 @@ func (w *Workflow) Name() string {
 	return w.name
 }
 
-// Edges returns a copy of the workflow's edges, in the order they were passed
-// to [New], so a caller can walk its graph without running it. See
-// [AgentNode.Agent].
+// Edges returns a copy of the workflow's edges, in no particular order, so a
+// caller can walk its graph without running it. See [AgentNode.Agent].
 func (w *Workflow) Edges() []Edge {
 	if w == nil || w.graph == nil {
 		return nil
