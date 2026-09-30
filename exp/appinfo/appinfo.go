@@ -126,6 +126,8 @@ type AgentInfo struct {
 // toolset.
 const toolsetResolveBudget = 10 * time.Second
 
+const languageGo string = "go"
+
 // declarer is implemented by tools the model calls as functions.
 type declarer interface {
 	Declaration() *genai.FunctionDeclaration
@@ -141,7 +143,7 @@ func build(ctx context.Context, appName string, root agent.Agent) *AppInfo {
 		Name:          appName,
 		RootAgentName: root.Name(),
 		Description:   root.Description(),
-		Language:      "go",
+		Language:      languageGo,
 		Agents:        collectAgents(ctx, appName, root),
 	}
 }
