@@ -104,6 +104,7 @@ A change is complete only when all of these pass locally:
 - `telemetry/`, `util/`   Public helper packages
 - `platform/`  Overridable seams for time & UUID generation (deterministic tests)
 - `internal/`  Private packages — NOT public API; `internal/httprr` is vendored
+- `exp/`       Experimental features, one package each — public but NOT stable API
 - `examples/`  Runnable example agents (quickstart, tools, a2a, skills, …)
 - `scripts/`   Repo tooling (ADK Web container build and asset refresh)
 
@@ -200,6 +201,10 @@ most of this repo does, or `TODO(#1234)` when an issue tracks it. A bare
   Match the package you are working in before reaching for the other style.
 - Export as little as you can. A new exported symbol is a permanent commitment,
   and `apidiff` holds you to it.
+- A feature whose API is not settled yet goes in its own package under `exp/`,
+  which nothing outside `exp/` may import. See
+  [Experimental features](CONTRIBUTING.md#experimental-features) in
+  `CONTRIBUTING.md` for when to use it and the rules a package there follows.
 - Error messages name what failed and give the context needed to place it —
   `parallel worker %s expects a slice input, got %T`, not `invalid input type`.
   Match the messages already in that package.
@@ -274,7 +279,8 @@ See [Multi-Module Development](CONTRIBUTING.md#multi-module-development) in
   compares every module against the merge base and fails on an incompatible
   change. A `breaking-change` label downgrades that failure to a report, so
   applying it is a deliberate decision to make with a maintainer, not a way
-  round a red check.
+  round a red check. Packages under `exp/` are the exception: a break there is
+  allowed, and the label records it.
 - Edit vendored code (`internal/httprr`) or commit secrets / API keys.
 - Add tests that make live LLM or network calls.
 
