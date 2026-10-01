@@ -35,8 +35,9 @@ type MCPClient interface {
 }
 
 // connectionRefresher wraps an MCP client/transport and handles automatic reconnection.
-// It implements MCPClient and transparently retries operations after reconnecting
-// when the underlying session fails.
+// It implements MCPClient. After a session failure it repairs the connection,
+// but retries only operations that are safe to repeat. CallTool is never retried
+// because a connection error does not reveal whether the server ran the tool.
 type connectionRefresher struct {
 	client    *mcp.Client
 	transport mcp.Transport
@@ -90,12 +91,25 @@ func (c *connectionRefresher) Close() error {
 	return c.closeErr
 }
 
-// CallTool calls a tool on the MCP server, automatically reconnecting if needed.
+// CallTool calls a tool on the MCP server. After a connection failure it
+// repairs the connection and returns the original error without resending the
+// call. The server may already have run the tool before the connection failed,
+// so repeating the call could duplicate a side effect. The repaired connection
+// serves the next call.
 func (c *connectionRefresher) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	result, _, err := withRetry(ctx, c, func(session *mcp.ClientSession) (*mcp.CallToolResult, error) {
-		return session.CallTool(ctx, params)
-	})
-	return result, err
+	session, err := c.getSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.CallTool(ctx, params)
+	if err == nil {
+		return result, nil
+	}
+	_, repairErr := c.repairConnection(ctx, err)
+	if repairErr != nil {
+		return nil, repairErr
+	}
+	return nil, err
 }
 
 // ListTools lists all available tools from the MCP server, handling pagination
@@ -137,6 +151,7 @@ func (c *connectionRefresher) ListTools(ctx context.Context) ([]*mcp.Tool, error
 
 // withRetry executes fn with the current session, and if it fails, attempts to refresh
 // the connection and retry once. Returns the result, whether a reconnection occurred, and any error.
+// Use it only for operations that are safe to repeat.
 func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.ClientSession) (T, error)) (T, bool, error) {
 	var zero T
 
@@ -147,17 +162,29 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 
 	result, err := fn(session)
 	if err != nil {
-		if !shouldRefreshConnection(err) {
+		session, err = c.repairConnection(ctx, err)
+		if err != nil {
 			return zero, false, err
-		}
-		session, refreshErr := c.refreshConnection(ctx)
-		if refreshErr != nil {
-			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
 		}
 		result, err = fn(session)
 		return result, true, err
 	}
 	return result, false, err
+}
+
+// repairConnection refreshes the connection after opErr, an operation's
+// failure, when opErr indicates the connection is broken. It returns the new
+// session. It returns opErr itself when opErr does not call for a refresh, and
+// an error wrapping opErr when the refresh fails.
+func (c *connectionRefresher) repairConnection(ctx context.Context, opErr error) (*mcp.ClientSession, error) {
+	if !shouldRefreshConnection(opErr) {
+		return nil, opErr
+	}
+	session, err := c.refreshConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w (reconnection also failed: %v)", opErr, err)
+	}
+	return session, nil
 }
 
 // shouldRefreshConnection returns true if the error indicates we should
