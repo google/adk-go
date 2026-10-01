@@ -60,7 +60,7 @@ func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) age
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
-// t.Context(), which is automatically cancelled when the test ends
+// t.Context(), which is automatically canceled when the test ends
 // — preventing leaked scheduler goroutines from outliving the test.
 func newMockCtx(t *testing.T) *MockInvocationContext {
 	t.Helper()
@@ -277,7 +277,7 @@ func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.E
 func TestWorkflowRouting(t *testing.T) {
 	// testTracker collects the names of nodes that ran. The
 	// scheduler runs sibling nodes concurrently, so appends must be
-	// serialised.
+	// serialized.
 	type testTracker struct {
 		mu       sync.Mutex
 		executed []string
@@ -388,7 +388,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"B"},
@@ -412,7 +412,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"A", "B"},
