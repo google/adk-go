@@ -36,12 +36,11 @@ import (
 
 // apiConfig contains parametres for lauching ADK REST API
 type apiConfig struct {
-	frontendAddress   string
-	pathPrefix        string
-	sseWriteTimeout   time.Duration
-	traceCapacity     int
-	includeDebugAPI   bool
-	includeAppInfoAPI bool
+	frontendAddress string
+	pathPrefix      string
+	sseWriteTimeout time.Duration
+	traceCapacity   int
+	includeDebugAPI bool
 }
 
 // apiLauncher can launch ADK REST API
@@ -299,9 +298,6 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		DebugAPIConfig: adkrest.DebugAPIConfig{
 			IncludeDebugAPI: a.config.includeDebugAPI,
 		},
-		AppInfoAPIConfig: adkrest.AppInfoAPIConfig{
-			IncludeAppInfoAPI: a.config.includeAppInfoAPI,
-		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create REST server: %w", err)
@@ -357,7 +353,6 @@ func NewLauncher() weblauncher.Sublauncher {
 		"structure panels need them. "+
 		"!!! WARNING !!! : debug endpoints are not safe to be used in production "+
 		"environment, do not set them to true in production.")
-	fs.BoolVar(&config.includeAppInfoAPI, "include_app_info", false, "Mounts the experimental GET /apps/{app_name}/app-info, which reports each LLM agent's instruction and tool declarations. Off by default; turn it on for evaluation tooling, leave it off in production.")
 
 	return &apiLauncher{
 		config: config,

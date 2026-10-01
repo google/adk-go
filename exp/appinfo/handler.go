@@ -39,9 +39,12 @@ const experimentalWarning = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feat
 //
 // The first request it serves logs a warning that the endpoint is
 // experimental, once per returned handler, as adk-python warns the first time
-// an experimental feature is used. Mounted behind authentication, as the REST
-// server mounts it, a request that is refused never reaches it and does not
-// use up the warning.
+// an experimental feature is used. Mounted behind authentication, as
+// [NewLauncher] mounts it, a request that is refused never reaches it and does
+// not use up the warning.
+//
+// The handler does no authentication or Origin and Host checking of its own.
+// A server that mounts it directly is responsible for both.
 func Handler(loader agent.Loader) http.HandlerFunc {
 	var warnOnce sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {

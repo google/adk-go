@@ -135,9 +135,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
 		)
 	}
-	if cfg.AppInfoAPIConfig.IncludeAppInfoAPI {
-		subrouters = append(subrouters, routers.NewAppInfoAPIRouter(cfg.AgentLoader))
-	}
 
 	authenticator := cfg.Authenticator
 	if authenticator == nil {
@@ -161,15 +158,14 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 
 // ServerConfig contains parameters for the ADK REST API server.
 type ServerConfig struct {
-	SessionService   session.Service
-	MemoryService    memory.Service
-	AgentLoader      agent.Loader
-	ArtifactService  artifact.Service
-	SSEWriteTimeout  time.Duration
-	PluginConfig     runner.PluginConfig
-	DebugConfig      DebugTelemetryConfig
-	DebugAPIConfig   DebugAPIConfig
-	AppInfoAPIConfig AppInfoAPIConfig
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	SSEWriteTimeout time.Duration
+	PluginConfig    runner.PluginConfig
+	DebugConfig     DebugTelemetryConfig
+	DebugAPIConfig  DebugAPIConfig
 
 	// Authenticator authenticates inbound requests to every endpoint except the
 	// public ones (/health and /version): a request without valid credentials
@@ -278,27 +274,6 @@ type DebugAPIConfig struct {
 	//
 	// WARNING: do not use debug api on PROD environment
 	IncludeDebugAPI bool
-}
-
-// AppInfoAPIConfig contains parameters for the app-info API.
-type AppInfoAPIConfig struct {
-	// IncludeAppInfoAPI mounts GET /apps/{app_name}/app-info, the experimental
-	// endpoint implemented by package google.golang.org/adk/v2/exp/appinfo. Its
-	// response may change, or the endpoint may be removed, in a later version,
-	// and the server logs a warning saying so on its first request.
-	//
-	// Off by default, as the Agents CLI wire contract requires: the endpoint
-	// reports each agent's system instruction and tool declarations, which is
-	// what an evaluation harness needs and more than a deployed server should
-	// hand out. Each request also resolves every agent's toolsets, which can
-	// connect to MCP servers. Turn it on for evaluation, leave it off in
-	// production.
-	//
-	// The route requires authentication like any other, but [ServerConfig.Authenticator]
-	// defaults to [authn.Noop], which admits every request. Setting this without
-	// also setting an Authenticator serves every agent's instructions and tool
-	// schemas to an anonymous caller.
-	IncludeAppInfoAPI bool
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.

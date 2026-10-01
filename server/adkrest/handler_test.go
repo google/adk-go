@@ -17,7 +17,6 @@ package adkrest
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -135,100 +134,6 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestNewServerAppInfoAPIGate(t *testing.T) {
-	const appInfoRoute = "/apps/" + testAppName + "/app-info"
-
-	for _, tc := range []struct {
-		name       string
-		include    bool
-		wantRouted bool
-	}{
-		{name: "omitted by default", include: false, wantRouted: false},
-		{name: "included when opted in", include: true, wantRouted: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rootAgent, err := agent.New(agent.Config{Name: testAppName, Description: "root agent"})
-			if err != nil {
-				t.Fatalf("agent.New() failed: %v", err)
-			}
-			srv, err := NewServer(ServerConfig{
-				SessionService:   session.InMemoryService(),
-				AgentLoader:      agent.NewSingleLoader(rootAgent),
-				AppInfoAPIConfig: AppInfoAPIConfig{IncludeAppInfoAPI: tc.include},
-			})
-			if err != nil {
-				t.Fatalf("NewServer() error = %v", err)
-			}
-
-			rr := httptest.NewRecorder()
-			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, appInfoRoute, nil))
-			routed := rr.Body.String() != muxNotFound
-			if routed != tc.wantRouted {
-				t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
-					appInfoRoute, routed, tc.wantRouted, rr.Code, rr.Body.String())
-			}
-		})
-	}
-}
-
-// TestNewServerAppInfoWarnsOnce covers the experimental warning end to end:
-// one line on the first request the route actually serves, and none for a
-// request authentication refuses, as adk-python warns on an experimental
-// feature's first use. HEAD is served too, as for every GET route.
-func TestNewServerAppInfoWarnsOnce(t *testing.T) {
-	var logs strings.Builder
-	prevOut, prevFlags := log.Writer(), log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-	})
-
-	rootAgent, err := agent.New(agent.Config{Name: testAppName, Description: "root agent"})
-	if err != nil {
-		t.Fatalf("agent.New() failed: %v", err)
-	}
-	srv, err := NewServer(ServerConfig{
-		SessionService:   session.InMemoryService(),
-		AgentLoader:      agent.NewSingleLoader(rootAgent),
-		Authenticator:    authn.NewHeader("X-User"),
-		AppInfoAPIConfig: AppInfoAPIConfig{IncludeAppInfoAPI: true},
-	})
-	if err != nil {
-		t.Fatalf("NewServer() error = %v", err)
-	}
-	route := "/apps/" + testAppName + "/app-info"
-	request := func(method string, authenticated bool) int {
-		req := httptest.NewRequest(method, route, nil)
-		if authenticated {
-			req.Header.Set("X-User", "alice")
-		}
-		rr := httptest.NewRecorder()
-		srv.ServeHTTP(rr, req)
-		return rr.Code
-	}
-
-	if code := request(http.MethodGet, false); code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated GET: status = %d, want %d", code, http.StatusUnauthorized)
-	}
-	if strings.Contains(logs.String(), "[EXPERIMENTAL]") {
-		t.Errorf("a refused request logged the warning:\n%s", logs.String())
-	}
-	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodGet} {
-		if code := request(method, true); code != http.StatusOK {
-			t.Errorf("%s: status = %d, want %d", method, code, http.StatusOK)
-		}
-	}
-
-	// Counted rather than compared whole, so an unrelated log line on the
-	// request path cannot fail the test.
-	const want = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feature is experimental and may change or be removed in future versions without notice. It may introduce breaking changes at any time.\n"
-	if got := logs.String(); strings.Count(got, want) != 1 || strings.Count(got, "[EXPERIMENTAL]") != 1 {
-		t.Errorf("log = %q, want the warning exactly once: %q", got, want)
 	}
 }
 

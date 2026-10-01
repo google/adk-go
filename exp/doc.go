@@ -22,6 +22,7 @@
 //
 // The subpackages are:
 //
-//   - [google.golang.org/adk/v2/exp/appinfo]: the app-info endpoint of the ADK
-//     REST API, which describes an app's agents, instructions and tools
+//   - [google.golang.org/adk/v2/exp/appinfo]: the app-info endpoint, which
+//     describes an app's agents, instructions and tools, and the web
+//     sublauncher that serves it
 package exp

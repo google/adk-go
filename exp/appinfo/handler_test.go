@@ -35,7 +35,7 @@ import (
 
 const path = "/apps/{app_name}/app-info"
 
-// serve routes one request to the handler the way the REST server does, so the
+// serve routes one request to the handler through a mux router, so the
 // app_name route variable is set.
 func serve(t *testing.T, loader agent.Loader, req *http.Request) *httptest.ResponseRecorder {
 	t.Helper()

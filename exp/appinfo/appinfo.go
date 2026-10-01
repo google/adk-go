@@ -22,12 +22,19 @@
 // removed, in a later version without notice, and [Handler] logs a warning
 // saying so the first time it serves a request.
 //
-// The ADK REST API serves it only when asked to, since it hands out every
-// agent's instruction and tool declarations: set
-// adkrest.ServerConfig.AppInfoAPIConfig.IncludeAppInfoAPI, or pass
-// -include_app_info to the api sublauncher:
+// It is served only when asked for, since it hands out every agent's
+// instruction and tool declarations. [NewLauncher] returns the web sublauncher
+// that serves it. Pass it to web.NewLauncher before the api sublauncher, and
+// name it on the command line:
 //
-//	go run . web api -include_app_info
+//	l := universal.NewLauncher(
+//		console.NewLauncher(),
+//		web.NewLauncher(webui.NewLauncher(), appinfo.NewLauncher(), api.NewLauncher()),
+//	)
+//
+//	go run . web api -path_prefix / appinfo
+//
+// A server built some other way can mount [Handler] itself.
 //
 // # What is reported
 //
