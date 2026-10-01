@@ -177,9 +177,6 @@ A package under `exp/`:
 -   **Is part of the root module.** `exp/<feature>` is a package of
     `google.golang.org/adk/v2`, not a separate module. It is released with
     everything else and can use the module's `internal/` packages.
--   **Is imported by nothing outside `exp/`.** Stable packages, `cmd/`
-    included, must not depend on it. Users opt in by importing it, and removing
-    the feature means deleting its directory and nothing else.
 -   **Adds what it needs elsewhere as stable API.** An accessor the feature
     needs in a stable package is ordinary API there, under the normal
     compatibility rules, and it stays when the experiment goes. Add only what is

@@ -201,9 +201,8 @@ most of this repo does, or `TODO(#1234)` when an issue tracks it. A bare
   Match the package you are working in before reaching for the other style.
 - Export as little as you can. A new exported symbol is a permanent commitment,
   and `apidiff` holds you to it.
-- A feature whose API is not settled yet goes in its own package under `exp/`,
-  which nothing outside `exp/` may import. See
-  [Experimental features](CONTRIBUTING.md#experimental-features) in
+- A feature whose API is not settled yet goes in its own package under `exp/`.
+  See [Experimental features](CONTRIBUTING.md#experimental-features) in
   `CONTRIBUTING.md` for when to use it and the rules a package there follows.
 - Error messages name what failed and give the context needed to place it —
   `parallel worker %s expects a slice input, got %T`, not `invalid input type`.
