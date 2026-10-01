@@ -71,7 +71,8 @@ type State struct {
 	InputSchema  *genai.Schema
 	OutputSchema *genai.Schema
 
-	OutputKey string
+	OutputKey      string
+	OutputArtifact string
 
 	// LiveModeInjection guards the single live-mode tool injection an agent
 	// receives. Its lifetime follows the agent rather than a global cache.

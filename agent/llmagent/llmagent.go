@@ -30,6 +30,7 @@ import (
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -96,6 +97,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			OutputArtifact:            cfg.OutputArtifact,
 		},
 	}
 
@@ -345,6 +347,17 @@ type Config struct {
 	// - Connects agents to coordinate with each other.
 	OutputKey string
 
+	// OutputArtifact is an optional artifact filename under which the agent's
+	// final text reply is saved as a new revision.
+	//
+	// When set, the reply text is written to the invocation's artifact service,
+	// the saved version is recorded in EventActions.ArtifactDelta, and the
+	// event's non-thought text parts are replaced with a short reference so the
+	// body is not persisted in the session or replayed on later turns. Saving
+	// requires an artifact service on the runner; the run fails if none is
+	// configured.
+	OutputArtifact string
+
 	// Mode is the delegation mode for this agent.
 	//
 	// Options:
@@ -469,7 +482,12 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 	return func(yield func(*session.Event, error) bool) {
 		for ev, err := range f.Run(ctx) {
-			a.maybeSaveOutputToState(ev)
+			if err == nil {
+				if saveErr := a.maybeSaveOutput(ctx, ev); saveErr != nil {
+					yield(nil, saveErr)
+					return
+				}
+			}
 			if !yield(ev, err) {
 				return
 			}
@@ -521,6 +539,11 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return sess, wrappedIter, nil
 }
 
+func (a *llmAgent) maybeSaveOutput(ctx agent.InvocationContext, event *session.Event) error {
+	a.maybeSaveOutputToState(event)
+	return a.maybeSaveOutputToArtifact(ctx, event)
+}
+
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event
 // was authored by some other agent (e.g. current agent transferred to another agent)
 func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
@@ -535,7 +558,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		var sb strings.Builder
 		hasTextPart := false
 		for _, part := range event.Content.Parts {
-			if part.Text != "" && !part.Thought {
+			if part != nil && part.Text != "" && !part.Thought {
 				hasTextPart = true
 				sb.WriteString(part.Text)
 			}
@@ -561,6 +584,74 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 
 		event.Actions.StateDelta[a.OutputKey] = result
 	}
+}
+
+func (a *llmAgent) maybeSaveOutputToArtifact(ctx agent.InvocationContext, event *session.Event) error {
+	if a.OutputArtifact == "" || event == nil || event.Author != a.Name() {
+		return nil
+	}
+	mode := llminternal.ModeFor(ctx, a.Name(), &a.State)
+	if mode == llminternal.ModeTask {
+		return nil
+	}
+	if !event.IsFinalResponse() || event.Content == nil || len(event.Content.Parts) == 0 {
+		return nil
+	}
+	if len(utils.FunctionCalls(event.Content)) > 0 || len(utils.FunctionResponses(event.Content)) > 0 {
+		return nil
+	}
+	var sb strings.Builder
+	hasTextPart := false
+	for _, part := range event.Content.Parts {
+		if part != nil && part.Text != "" && !part.Thought {
+			hasTextPart = true
+			sb.WriteString(part.Text)
+		}
+	}
+	if !hasTextPart {
+		return nil
+	}
+	result := sb.String()
+
+	if a.OutputSchema != nil {
+		if strings.TrimSpace(result) == "" {
+			return nil
+		}
+		parsed, err := utils.ValidateOutputSchema(result, a.OutputSchema)
+		if err != nil {
+			return fmt.Errorf("LlmAgent %q output validation failed", a.Name())
+		}
+		if mode == llminternal.ModeSingleTurn {
+			event.Output = parsed
+		}
+		if a.OutputKey != "" {
+			if event.Actions.StateDelta == nil {
+				event.Actions.StateDelta = make(map[string]any)
+			}
+			event.Actions.StateDelta[a.OutputKey] = parsed
+		}
+	}
+
+	if ctx == nil || ctx.Artifacts() == nil {
+		return fmt.Errorf("agent %q cannot save OutputArtifact %q: artifact service is not configured", a.Name(), a.OutputArtifact)
+	}
+	cbCtx := agent.NewCallbackContextWithArtifactTracking(ctx, &event.Actions)
+	resp, err := cbCtx.Artifacts().Save(ctx, a.OutputArtifact, genai.NewPartFromText(result))
+	if err != nil {
+		return fmt.Errorf("agent %q failed to save OutputArtifact %q: %w", a.Name(), a.OutputArtifact, err)
+	}
+
+	kept := make([]*genai.Part, 0, len(event.Content.Parts))
+	for _, part := range event.Content.Parts {
+		if part != nil && (part.Text == "" || part.Thought) {
+			kept = append(kept, part)
+		}
+	}
+	kept = append(kept, genai.NewPartFromText(fmt.Sprintf("Saved artifact %q (version %d).", a.OutputArtifact, resp.Version)))
+	contentCopy := *event.Content
+	contentCopy.Parts = kept
+	event.Content = &contentCopy
+	return nil
 }
 
 // FindAgent finds a sub-agent by name.
