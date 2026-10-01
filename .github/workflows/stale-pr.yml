@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       pull-requests: write    # label the PR and post the comment
+      checks: read            # check suites date the author's pushes
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
@@ -34,10 +35,12 @@ jobs:
             const QUIET_DAYS = 14;   // silence that counts as stalled
             const MAX_MARKS = 10;    // stampede guard, per run
             const WRITE = ['admin', 'maintain', 'write'];
-            const MAINTAINER = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const SELF = 'github-actions[bot]';  // posts the notice
 
             // Reviews, conversation comments and inline comments each live in
-            // their own list, and a nudge can be any of the three.
+            // their own list, and a nudge can be any of the three. Check suites
+            // record when each push happened and who made it, and force-push
+            // events record who rewrote the branch.
             const QUERY = `
               query($q: String!, $cursor: String) {
                 search(query: $q, type: ISSUE, first: 20, after: $cursor) {
@@ -47,12 +50,16 @@ jobs:
                     author { login __typename }
                     labels(first: 30) { nodes { name } }
                     comments(last: 50) {
-                      nodes { createdAt authorAssociation body author { login __typename } } }
+                      nodes { createdAt author { login __typename } } }
                     reviews(last: 50) {
-                      nodes { submittedAt authorAssociation author { login __typename } } }
+                      nodes { submittedAt author { login __typename } } }
                     reviewThreads(last: 40) { nodes { comments(last: 30) {
-                      nodes { createdAt authorAssociation author { login __typename } } } } }
-                    commits(last: 1) { nodes { commit { committedDate } } }
+                      nodes { createdAt author { login __typename } } } } }
+                    commits(last: 10) { nodes { commit { committedDate
+                      checkSuites(first: 20) { nodes { createdAt creator { login } } } } } }
+                    timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 10) {
+                      nodes { ... on HeadRefForcePushedEvent {
+                        createdAt actor { login __typename } } } }
                   } }
                 }
               }`;
@@ -69,10 +76,12 @@ jobs:
               return out;
             }
 
-            // authorAssociation misses members whose org membership is private,
-            // so fall back to the permission API, which 404s for everyone else.
-            // Anything other than that 404, a 403 from the rate limiter say,
-            // leaves the login unclassified: null rather than false.
+            // Only someone with write access is a maintainer the author owes
+            // an answer. authorAssociation cannot tell: MEMBER is any member of
+            // the owning org, and COLLABORATOR includes read and triage access.
+            // The permission API can. A 404 there means no access at all.
+            // Anything else that fails, a 403 from the rate limiter say, leaves
+            // the login unclassified: null rather than false.
             // One lookup per login, however many PRs that person touched.
             const permCache = new Map();
             async function hasWriteAccess(login) {
@@ -107,41 +116,90 @@ jobs:
               let unclassified = false;
               for (const c of said) {
                 if (c.author.login === author || isBot(c.author)) continue;
-                if (!MAINTAINER.includes(c.authorAssociation)) {
-                  const write = await hasWriteAccess(c.author.login);
-                  if (write === null) unclassified = true;
-                  if (!write) continue;
-                }
+                const write = await hasWriteAccess(c.author.login);
+                if (write === null) unclassified = true;
+                if (!write) continue;
                 fromMaintainer.push(c.at);
               }
 
+              // Pushing a commit answers a review as well as a reply does. A
+              // commit keeps its committedDate however late it is pushed, so
+              // the push is dated by the check suites it starts, and their
+              // creator is whoever pushed. A push counts unless someone else
+              // with write access made it: a maintainer pressing "Update
+              // branch" is not the author answering, while a coding agent
+              // pushing for the author, cursor[bot] say, is.
+              const commits = pr.commits.nodes.map(n => n.commit);
+              const pushes = [];
+              for (const s of commits.flatMap(c => c.checkSuites.nodes)) {
+                if (!s.creator) continue;
+                if (s.creator.login !== author) {
+                  const write = await hasWriteAccess(s.creator.login);
+                  if (write === null) unclassified = true;
+                  if (write !== false) continue;
+                }
+                pushes.push(s.createdAt);
+              }
+              // A head commit that no check has picked up yet, or ever will
+              // while Actions is down, falls back to its own date.
+              const head = commits.at(-1);
+              if (head && !head.checkSuites.nodes.some(s => s.creator)) {
+                pushes.push(head.committedDate);
+              }
+
+              // A maintainer who force-pushed, to rebase say, replaced the
+              // commits whose check suites recorded the author's earlier
+              // pushes, so those pushes can no longer be seen.
+              const rewrites = [];
+              for (const e of pr.timelineItems.nodes) {
+                if (!e.actor || e.actor.login === author || isBot(e.actor)) continue;
+                const write = await hasWriteAccess(e.actor.login);
+                if (write === null) unclassified = true;
+                if (write) rewrites.push(e.createdAt);
+              }
+
               return {
-                author,
                 maintainer: latest(fromMaintainer),
                 // Someone whose access could not be looked up may be the
-                // maintainer who spoke last, so the clock cannot be trusted.
+                // maintainer who spoke last, or may have pushed for the
+                // author, so the clock cannot be trusted.
                 unclassified,
-                // Pushing a commit answers a review as well as a reply does.
                 byAuthor: latest([
                   ...said.filter(c => c.author.login === author).map(c => c.at),
-                  pr.commits.nodes[0]?.commit?.committedDate,
+                  ...pushes,
                 ]),
-                // Our own past nudge, which is what makes a manually removed
-                // label stick rather than coming straight back tomorrow.
-                nudged: latest(pr.comments.nodes
-                  .filter(c => (c.body ?? '').includes(MARKER)).map(c => c.createdAt)),
+                rewritten: latest(rewrites),
               };
+            }
+
+            // Our own past nudge, which is what makes a manually removed label
+            // stick rather than coming straight back tomorrow. Every comment,
+            // because on a busy PR the notice can be older than the last 50.
+            // Only ours, so a marker pasted by hand cannot make a label set by
+            // hand look like one this sweep may remove.
+            async function lastNudge(pr) {
+              const comments = await github.paginate(github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 });
+              return latest(comments
+                .filter(c => c.user?.login === SELF && (c.body ?? '').includes(MARKER))
+                .map(c => c.created_at));
             }
 
             // Authors who came back get the label taken off. Only ours: a label
             // applied by hand is somebody's judgement, not this sweep's to undo.
             let cleared = 0;
             for (const pr of await search(`is:pr is:open label:"${LABEL}"`)) {
+              const nudged = await lastNudge(pr);
+              if (!nudged) continue;
               const when = await activity(pr);
-              if (!when.nudged) continue;
-              if (!(when.byAuthor > when.nudged)) continue;
-              await github.rest.issues.removeLabel(
-                { ...context.repo, issue_number: pr.number, name: LABEL }).catch(() => {});
+              if (!(when.byAuthor > nudged)) continue;
+              try {
+                await github.rest.issues.removeLabel(
+                  { ...context.repo, issue_number: pr.number, name: LABEL });
+              } catch (e) {
+                core.warning(`#${pr.number}: could not remove the ${LABEL} label: ${e.message}`);
+                continue;
+              }
               cleared++;
               core.info(`cleared #${pr.number}`);
             }
@@ -153,7 +211,8 @@ jobs:
             for (const pr of await search('is:pr is:open is:unlocked review:changes_requested')) {
               if (pr.isDraft || pr.reviewDecision !== 'CHANGES_REQUESTED') continue;
               if (pr.labels.nodes.some(l => l.name === LABEL)) continue;
-              if (!pr.author) continue;  // deleted account, nobody to nudge
+              // A deleted account or a bot such as dependabot: nobody to nudge.
+              if (!pr.author || isBot(pr.author)) continue;
 
               const when = await activity(pr);
               if (when.unclassified) {
@@ -162,7 +221,11 @@ jobs:
               }
               if (!when.maintainer || when.maintainer > cutoff) continue;
               if (when.byAuthor >= when.maintainer) continue;  // ball is in our court
-              if (when.nudged && !(when.byAuthor > when.nudged)) continue;
+              // The author may have pushed between the last maintainer message
+              // and a maintainer's force-push, and the sweep cannot tell.
+              if (when.rewritten > when.maintainer) continue;
+              const nudged = await lastNudge(pr);
+              if (nudged && !(when.byAuthor > nudged)) continue;
 
               stalled.push({ pr, since: when.maintainer });
             }
@@ -177,8 +240,8 @@ jobs:
               await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
                 body:
                   `Marking this pull request stale, @${pr.author.login}.\n\n` +
-                  `A reviewer asked for changes ${days} days ago and nothing has come back ` +
-                  'since. Our [contribution guide]' +
+                  `A reviewer asked for changes, and a maintainer last wrote here ${days} ` +
+                  'days ago. Nothing has come back since. Our [contribution guide]' +
                   '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#stale-pull-requests) ' +
                   'gives you two weeks to reply before a maintainer may take the change over, ' +
                   'and this one is past that.\n\n' +
