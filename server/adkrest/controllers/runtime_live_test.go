@@ -1135,7 +1135,7 @@ func TestRunLiveHandler_PingWriteDeadlineIsKeepaliveTimeout(t *testing.T) {
 	}
 }
 
-func TestFailedPingLeavesConnectionOpen(t *testing.T) {
+func TestRunLiveHandler_FailedPingClosesConnection(t *testing.T) {
 	const keepalive = 200 * time.Millisecond
 
 	liveSession := newRecordingLiveSession()
@@ -1452,7 +1452,7 @@ func TestNewRuntimeAPIControllerWithConfig_LiveLimits(t *testing.T) {
 		{
 			// Halving would give zero, which would make time.NewTicker panic
 			// on every /run_live request.
-			name:          "a one-nanosecond keepalive still pings",
+			name:          "a one-nanosecond keepalive keeps a non-zero ping interval",
 			cfg:           RuntimeAPIControllerConfig{LiveKeepaliveTimeout: time.Nanosecond},
 			wantBytes:     defaultMaxLiveMessageBytes,
 			wantKeepalive: time.Nanosecond,

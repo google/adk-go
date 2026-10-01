@@ -119,8 +119,9 @@ type RuntimeAPIControllerConfig struct {
 
 	// MaxLiveMessageBytes caps one client message on a /run_live connection.
 	// A message larger than the cap closes the connection with close code 1009
-	// instead of being buffered, so a single caller cannot make the server
-	// allocate without bound.
+	// instead of being buffered, so no one message can make the server
+	// allocate without bound. It bounds a message, not a session: messages
+	// under the cap still accumulate in the session behind it.
 	//
 	// optional; zero means 16 MiB, negative means no cap
 	MaxLiveMessageBytes int64
@@ -140,9 +141,11 @@ type RuntimeAPIControllerConfig struct {
 	LiveKeepaliveTimeout time.Duration
 
 	// MaxLiveSessions caps how many /run_live connections this controller
-	// serves at once. Past the cap the handler answers 503 and does not
-	// upgrade, so one caller cannot hold open more agent sessions, model
-	// connections and goroutines than the process can carry.
+	// serves at once. Past the cap the handler returns an error carrying 503
+	// and does not upgrade, so one caller cannot hold open more agent
+	// sessions, model connections and goroutines than the process can carry.
+	// [NewErrorHandler] is what turns that error into the response; a caller
+	// mounting [RunLiveHandler] itself has to write the status.
 	//
 	// There is no cap by default, as in adk-python. Behind an autoscaler such
 	// as Cloud Run, the platform's own per-instance concurrency setting decides
