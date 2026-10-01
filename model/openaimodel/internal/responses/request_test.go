@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package responses
 
 import (
 	"context"
@@ -31,24 +31,26 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
+	oairesponses "github.com/openai/openai-go/v3/responses"
+	oaishared "github.com/openai/openai-go/v3/shared"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-func TestBuildOpenAIParams_Text(t *testing.T) {
+func TestBuildParams_Text(t *testing.T) {
 	req := &model.LLMRequest{
 		Model: "gpt-4o-mini",
 		Contents: []*genai.Content{
 			genai.NewContentFromText("ping", genai.RoleUser),
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 	if got, want := string(params.Model), "gpt-4o-mini"; got != want {
 		t.Fatalf("Model mismatch got=%q want=%q", got, want)
@@ -66,12 +68,12 @@ func TestBuildOpenAIParams_Text(t *testing.T) {
 	}
 }
 
-// TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText guards that a replayed
+// TestBuildParams_MultiTurnAssistantUsesOutputText guards that a replayed
 // assistant turn is serialized as an output message with content type
 // "output_text". Sending "input_text" for the assistant role makes the OpenAI
 // Responses API reject every multi-turn request with HTTP 400 from the second
 // message onward.
-func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
+func TestBuildParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	req := &model.LLMRequest{
 		Model: "gpt-4o-mini",
 		Contents: []*genai.Content{
@@ -80,9 +82,9 @@ func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 			genai.NewContentFromText("can you code", genai.RoleUser),
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 
 	items := params.Input.OfInputItemList
@@ -140,13 +142,13 @@ func TestBuildOpenAIParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	}
 }
 
-// TestBuildOpenAIParams_ItemOrdering pins the order in which a model turn's
+// TestBuildParams_ItemOrdering pins the order in which a model turn's
 // parts become input items. Text is buffered and flushed by convertContents
 // immediately before a function call or response is appended; dropping that
 // flush does not lose the text but does emit it after the call, silently
 // reordering the history. Assistant text became a third item kind with the
 // output_text fix, so the ordering needs a guard.
-func TestBuildOpenAIParams_ItemOrdering(t *testing.T) {
+func TestBuildParams_ItemOrdering(t *testing.T) {
 	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "call_1"}}
 	tests := []struct {
 		name  string
@@ -169,9 +171,9 @@ func TestBuildOpenAIParams_ItemOrdering(t *testing.T) {
 			req := &model.LLMRequest{Contents: []*genai.Content{
 				{Role: string(genai.RoleModel), Parts: tc.parts},
 			}}
-			params, err := buildOpenAIParams("fallback", req)
+			params, err := buildParams("fallback", req)
 			if err != nil {
-				t.Fatalf("buildOpenAIParams() err = %v", err)
+				t.Fatalf("buildParams() err = %v", err)
 			}
 			var got []string
 			for _, item := range params.Input.OfInputItemList {
@@ -195,7 +197,7 @@ func TestBuildOpenAIParams_ItemOrdering(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
+func TestBuildParams_FunctionCall(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			{
@@ -207,12 +209,12 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
-	var call *responses.ResponseFunctionToolCallParam
-	var response *responses.ResponseInputItemFunctionCallOutputParam
+	var call *oairesponses.ResponseFunctionToolCallParam
+	var response *oairesponses.ResponseInputItemFunctionCallOutputParam
 	for _, item := range params.Input.OfInputItemList {
 		switch {
 		case item.OfFunctionCall != nil:
@@ -234,7 +236,7 @@ func TestBuildOpenAIParams_FunctionCall(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
+func TestBuildParams_JSONSchema(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("respond JSON", genai.RoleUser)},
 		Config: &genai.GenerateContentConfig{
@@ -247,9 +249,9 @@ func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 	if params.Text.Format.OfJSONSchema == nil {
 		t.Fatalf("expected json schema format, got: %+v", params.Text.Format)
@@ -259,11 +261,11 @@ func TestBuildOpenAIParams_JSONSchema(t *testing.T) {
 	}
 }
 
-// TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire checks the
+// TestBuildParams_JSONSchemaPropertylessObjectOnTheWire checks the
 // serialized body rather than the schema map, because omitzero and the SDK's
 // union arms decide what the API actually receives. A property-less object
 // reaching OpenAI without all three keys is rejected with a 400.
-func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
+func TestBuildParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("respond JSON", genai.RoleUser)},
 		Config: &genai.GenerateContentConfig{
@@ -277,9 +279,9 @@ func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 	data, err := json.Marshal(params)
 	if err != nil {
@@ -325,11 +327,11 @@ func TestBuildOpenAIParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	}
 }
 
-// TestBuildOpenAIParams_ToolsPinStrictOff checks the strict flag on the request
+// TestBuildParams_ToolsPinStrictOff checks the strict flag on the request
 // body rather than on the converted tool, because that is what decides the
 // validation mode. The declaration below is already strict-compatible, which is
 // the case the Responses API would otherwise normalize into strict mode.
-func TestBuildOpenAIParams_ToolsPinStrictOff(t *testing.T) {
+func TestBuildParams_ToolsPinStrictOff(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("weather?", genai.RoleUser)},
 		Config: &genai.GenerateContentConfig{
@@ -346,9 +348,9 @@ func TestBuildOpenAIParams_ToolsPinStrictOff(t *testing.T) {
 			}},
 		},
 	}
-	params, err := buildOpenAIParams("fallback", req)
+	params, err := buildParams("fallback", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() err = %v", err)
+		t.Fatalf("buildParams() err = %v", err)
 	}
 	data, err := json.Marshal(params)
 	if err != nil {
@@ -373,10 +375,10 @@ func TestBuildOpenAIParams_ToolsPinStrictOff(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
+func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// The leading turn is what makes this test bite: on its own the
 	// unsupported part leaves the request empty, so a build that skipped it
-	// silently would still fail with ErrNoContents and look like a rejection.
+	// silently would still fail with shared.ErrNoContents and look like a rejection.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
@@ -388,12 +390,12 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 			},
 		},
 	}
-	_, err := buildOpenAIParams("fallback", req)
+	_, err := buildParams("fallback", req)
 	if err == nil {
 		t.Fatalf("expected error for inline data part")
 	}
-	if errors.Is(err, ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
-		t.Errorf("buildOpenAIParams() err = %v, want an unsupported-content-part error", err)
+	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
+		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
 	}
 }
 
@@ -407,7 +409,7 @@ func TestBuildOpenAIParams_UnsupportedPart(t *testing.T) {
 // Responses API rejects the former on the assistant role, so a replayed
 // assistant turn emitted as an input message would be a real defect that a
 // shared "assistant:" rendering would hide.
-func describeInput(items responses.ResponseInputParam) []string {
+func describeInput(items oairesponses.ResponseInputParam) []string {
 	got := make([]string, 0, len(items))
 	for _, item := range items {
 		switch {
@@ -442,7 +444,7 @@ func describeInput(items responses.ResponseInputParam) []string {
 	return got
 }
 
-func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
+func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 	thought := func(text string) *genai.Part { return &genai.Part{Text: text, Thought: true} }
 	modelTurn := func(parts ...*genai.Part) *genai.Content {
 		return &genai.Content{Role: string(genai.RoleModel), Parts: parts}
@@ -515,7 +517,7 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 		},
 		{
 			// Dropping a thought-marked call would strand its response and
-			// fail the request in callTracker.
+			// fail the request in shared.CallTracker.
 			name: "thought_marked_call_and_response_survive",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
@@ -734,14 +736,14 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 					FunctionCall: &genai.FunctionCall{},
 				}),
 			},
-			wantErr: ErrFunctionCallMissingName,
+			wantErr: shared.ErrFunctionCallMissingName,
 		},
 		{
 			// A request left empty by the drop is reported rather than sent,
 			// and says the drop emptied it rather than that nothing was sent.
 			name:        "only_thoughts",
 			contents:    []*genai.Content{modelTurn(thought("scratch"))},
-			wantErr:     ErrNoContents,
+			wantErr:     shared.ErrNoContents,
 			wantErrText: "every part was dropped as replayed reasoning",
 		},
 		{
@@ -750,28 +752,28 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 			// still reports the drop.
 			name:        "thought_and_blank_answer",
 			contents:    []*genai.Content{modelTurn(thought("scratch"), &genai.Part{Text: "   "})},
-			wantErr:     ErrNoContents,
+			wantErr:     shared.ErrNoContents,
 			wantErrText: "every part was dropped as replayed reasoning",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params, err := buildOpenAIParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
 			if tt.wantErr != nil || tt.wantErrText != "" {
 				if err == nil {
-					t.Fatalf("buildOpenAIParams() err = nil, want an error")
+					t.Fatalf("buildParams() err = nil, want an error")
 				}
 				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
-					t.Fatalf("buildOpenAIParams() err = %v, want %v", err, tt.wantErr)
+					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
 				}
 				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Errorf("buildOpenAIParams() err = %q, want it to mention %q", err, tt.wantErrText)
+					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("buildOpenAIParams() err = %v", err)
+				t.Fatalf("buildParams() err = %v", err)
 			}
 			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("input items = %q, want %q", got, tt.want)
@@ -780,11 +782,11 @@ func TestBuildOpenAIParams_DropsReplayedThoughts(t *testing.T) {
 	}
 }
 
-// TestBuildOpenAIParams_NoContentsSentinelIdentity pins which requests get the
-// bare ErrNoContents and which get it wrapped, because a caller comparing with
+// TestBuildParams_NoContentsSentinelIdentity pins which requests get the
+// bare shared.ErrNoContents and which get it wrapped, because a caller comparing with
 // == rather than errors.Is sees only the bare one. Only a drop that suppressed
 // text the model would otherwise have seen earns the wrap.
-func TestBuildOpenAIParams_NoContentsSentinelIdentity(t *testing.T) {
+func TestBuildParams_NoContentsSentinelIdentity(t *testing.T) {
 	tests := []struct {
 		name     string
 		contents []*genai.Content
@@ -867,13 +869,13 @@ func TestBuildOpenAIParams_NoContentsSentinelIdentity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildOpenAIParams("fallback", &model.LLMRequest{Contents: tt.contents})
-			if !errors.Is(err, ErrNoContents) {
-				t.Fatalf("buildOpenAIParams() err = %v, want it to wrap %v", err, ErrNoContents)
+			_, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if !errors.Is(err, shared.ErrNoContents) {
+				t.Fatalf("buildParams() err = %v, want it to wrap %v", err, shared.ErrNoContents)
 			}
 			//nolint:errorlint // the point of the test is the identity, not the chain.
-			if gotBare := err == ErrNoContents; gotBare != tt.wantBare {
-				t.Errorf("err == ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
+			if gotBare := err == shared.ErrNoContents; gotBare != tt.wantBare {
+				t.Errorf("err == shared.ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
 			}
 		})
 	}
@@ -966,15 +968,16 @@ func TestReplayedReasoning(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := replayedReasoning(tt.part); got != tt.want {
-				t.Errorf("replayedReasoning() = %v, want %v", got, tt.want)
+			if got := shared.ReplayedReasoning(tt.part); got != tt.want {
+				t.Errorf("ReplayedReasoning() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// accountedForFields is the specification unsupportedPayload implements: the
-// genai.Part fields convertContents knows what to do with, and why.
+// accountedForFields is the specification shared.UnsupportedPayload
+// implements: the genai.Part fields the request converters know what to do with,
+// and why.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
@@ -983,9 +986,9 @@ func TestReplayedReasoning(t *testing.T) {
 var accountedForFields = map[string]string{
 	"Text":             "sent, or dropped when it is reasoning",
 	"Thought":          "the marker deciding which",
-	"ThoughtSignature": "no Responses input item can carry one",
-	"FunctionCall":     "sent as a function_call item",
-	"FunctionResponse": "sent as a function_call_output item",
+	"ThoughtSignature": "no request field on either endpoint carries one",
+	"FunctionCall":     "sent as a call",
+	"FunctionResponse": "sent as the call's result",
 	"VideoMetadata":    "qualifies media carried in another field",
 	"MediaResolution":  "qualifies media carried in another field",
 	"PartMetadata":     "caller bookkeeping, never content",
@@ -998,21 +1001,21 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 		t.Run(field.Name, func(t *testing.T) {
 			if !field.IsExported() {
 				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
-					"check by hand whether unsupportedPayload should report it", field.Name)
+					"check by hand whether UnsupportedPayload should report it", field.Name)
 			}
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := unsupportedPayload(part)
+			got := shared.UnsupportedPayload(part)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
-					t.Errorf("unsupportedPayload() = %q for a part carrying only %s, want %q: %s",
+					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
 						got, field.Name, "", why)
 				}
 				return
 			}
 			if got != field.Name {
-				t.Fatalf("unsupportedPayload() = %q for a part carrying only %s, want %q: "+
+				t.Fatalf("UnsupportedPayload() = %q for a part carrying only %s, want %q: "+
 					"a field the package cannot send must be reported, not dropped",
 					got, field.Name, field.Name)
 			}
@@ -1025,11 +1028,11 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 				req := &model.LLMRequest{Contents: []*genai.Content{
 					{Role: string(genai.RoleModel), Parts: []*genai.Part{ride.part}},
 				}}
-				_, err := buildOpenAIParams("fallback", req)
+				_, err := buildParams("fallback", req)
 				// HasSuffix rather than Contains: one field name can prefix
 				// another, and reporting the shorter one must not pass.
 				if err == nil || !strings.HasSuffix(err.Error(), want) {
-					t.Errorf("buildOpenAIParams() err = %v for %s carried %s, want it to end with %q",
+					t.Errorf("buildParams() err = %v for %s carried %s, want it to end with %q",
 						err, field.Name, ride.name, want)
 				}
 			}
@@ -1079,8 +1082,8 @@ func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
 		t.Run(field.Name, func(t *testing.T) {
 			part := &genai.Part{Thought: true, Text: "scratch"}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
-			if replayedReasoning(part) {
-				t.Errorf("replayedReasoning() = true for a thought carrying %s; "+
+			if shared.ReplayedReasoning(part) {
+				t.Errorf("ReplayedReasoning() = true for a thought carrying %s; "+
 					"it would be dropped instead of rejected as unsupported", field.Name)
 			}
 		})
@@ -1112,17 +1115,17 @@ func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
 }
 
 func TestCallTrackerNewFunctionResponse_UnknownCallID(t *testing.T) {
-	tracker := callTracker{pending: []string{"call-1"}}
+	tracker := shared.CallTracker{Pending: []string{"call-1"}}
 	fr := &genai.FunctionResponse{
 		Name:     "lookup",
 		ID:       "call-missing",
 		Response: map[string]any{"ok": true},
 	}
-	if _, err := tracker.newFunctionResponse(fr); err == nil || !strings.Contains(err.Error(), "unknown or already completed") {
+	if _, err := newFunctionResponse(&tracker, fr); err == nil || !strings.Contains(err.Error(), "unknown or already completed") {
 		t.Fatalf("expected error for unknown call id, got %v", err)
 	}
-	if len(tracker.pending) != 1 || tracker.pending[0] != "call-1" {
-		t.Fatalf("pending calls should remain untouched, got %+v", tracker.pending)
+	if len(tracker.Pending) != 1 || tracker.Pending[0] != "call-1" {
+		t.Fatalf("pending calls should remain untouched, got %+v", tracker.Pending)
 	}
 }
 
@@ -1137,7 +1140,7 @@ func TestApplyGenerationConfig(t *testing.T) {
 		name       string
 		cfg        *genai.GenerateContentConfig
 		wantErr    error
-		wantParams *responses.ResponseNewParams
+		wantParams *oairesponses.ResponseNewParams
 	}{
 		{
 			name: "nil config",
@@ -1146,37 +1149,37 @@ func TestApplyGenerationConfig(t *testing.T) {
 		{
 			name:    "TopK not supported",
 			cfg:     &genai.GenerateContentConfig{TopK: &topK},
-			wantErr: ErrTopKNotSupported,
+			wantErr: shared.ErrTopKNotSupported,
 		},
 		{
 			name:    "StopSequences not supported",
 			cfg:     &genai.GenerateContentConfig{StopSequences: []string{"stop"}},
-			wantErr: ErrStopSequencesNotSupported,
+			wantErr: shared.ErrStopSequencesNotSupported,
 		},
 		{
 			name:    "Multiple candidates not supported",
 			cfg:     &genai.GenerateContentConfig{CandidateCount: 2},
-			wantErr: ErrMultipleCandidatesNotSupported,
+			wantErr: shared.ErrMultipleCandidatesNotSupported,
 		},
 		{
 			name:    "Penalties not supported",
 			cfg:     &genai.GenerateContentConfig{FrequencyPenalty: &p},
-			wantErr: ErrPenaltiesNotSupported,
+			wantErr: shared.ErrPenaltiesNotSupported,
 		},
 		{
 			name:    "Labels not supported",
 			cfg:     &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}},
-			wantErr: ErrLabelsNotSupported,
+			wantErr: shared.ErrLabelsNotSupported,
 		},
 		{
 			name:    "Safety settings not supported",
 			cfg:     &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
-			wantErr: ErrSafetySettingsNotSupported,
+			wantErr: shared.ErrSafetySettingsNotSupported,
 		},
 		{
 			name:    "Unsupported MIME type",
 			cfg:     &genai.GenerateContentConfig{ResponseMIMEType: "image/png"},
-			wantErr: ErrUnsupportedMIMEType,
+			wantErr: shared.ErrUnsupportedMIMEType,
 		},
 		{
 			name: "success fully configured",
@@ -1190,16 +1193,16 @@ func TestApplyGenerationConfig(t *testing.T) {
 				ResponseMIMEType:  "application/json",
 				ResponseSchema:    &genai.Schema{Type: genai.TypeObject},
 			},
-			wantParams: &responses.ResponseNewParams{
+			wantParams: &oairesponses.ResponseNewParams{
 				Temperature:     param.NewOpt(float64(float32(temp))),
 				TopP:            param.NewOpt(float64(float32(topP))),
 				MaxOutputTokens: param.NewOpt(int64(100)),
 				TopLogprobs:     param.NewOpt(int64(int32(logprobs))),
-				Include:         []responses.ResponseIncludable{responses.ResponseIncludableMessageOutputTextLogprobs},
+				Include:         []oairesponses.ResponseIncludable{oairesponses.ResponseIncludableMessageOutputTextLogprobs},
 				Instructions:    param.NewOpt("sys"),
-				Text: responses.ResponseTextConfigParam{
-					Format: responses.ResponseFormatTextConfigUnionParam{
-						OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Text: oairesponses.ResponseTextConfigParam{
+					Format: oairesponses.ResponseFormatTextConfigUnionParam{
+						OfJSONSchema: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 							Name:   "adk_response",
 							Strict: param.NewOpt(true),
 							Type:   constant.JSONSchema("json_schema"),
@@ -1219,10 +1222,10 @@ func TestApplyGenerationConfig(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseMIMEType: "application/json",
 			},
-			wantParams: &responses.ResponseNewParams{
-				Text: responses.ResponseTextConfigParam{
-					Format: responses.ResponseFormatTextConfigUnionParam{
-						OfJSONObject: &shared.ResponseFormatJSONObjectParam{
+			wantParams: &oairesponses.ResponseNewParams{
+				Text: oairesponses.ResponseTextConfigParam{
+					Format: oairesponses.ResponseFormatTextConfigUnionParam{
+						OfJSONObject: &oaishared.ResponseFormatJSONObjectParam{
 							Type: constant.JSONObject("json_object"),
 						},
 					},
@@ -1234,16 +1237,16 @@ func TestApplyGenerationConfig(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseLogprobs: true,
 			},
-			wantParams: &responses.ResponseNewParams{
+			wantParams: &oairesponses.ResponseNewParams{
 				TopLogprobs: param.NewOpt(int64(1)),
-				Include:     []responses.ResponseIncludable{responses.ResponseIncludableMessageOutputTextLogprobs},
+				Include:     []oairesponses.ResponseIncludable{oairesponses.ResponseIncludableMessageOutputTextLogprobs},
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			err := applyGenerationConfig(params, tc.cfg)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("applyGenerationConfig() error = %v, wantErr %v", err, tc.wantErr)
@@ -1278,9 +1281,9 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.field, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
@@ -1297,47 +1300,47 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		thinking *genai.ThinkingConfig
-		want     shared.ReasoningParam
+		want     oaishared.ReasoningParam
 	}{
-		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
-		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningParam{Effort: shared.ReasoningEffortLow}},
-		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
-		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMinimal}},
+		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortLow}},
+		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh}},
 		// Explicitly unspecified is distinct from unset, and resolves to medium.
-		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// Responses has no token budget, so only zero/non-zero survives. Zero is
 		// none rather than minimal: minimal is the least thinking, not none of it.
-		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
-		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// -1 is genai's "you decide", and the way to say that to Responses is to
 		// send no effort at all rather than to pick one on the caller's behalf.
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}, shared.ReasoningParam{}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
 		{"dynamic budget with thoughts", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(dynamicThinkingBudget)),
+			ThinkingBudget:  genai.Ptr(int32(shared.DynamicThinkingBudget)),
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 		// A level wins over a budget, so an explicit MINIMAL still means minimal
 		// even alongside the zero budget that would otherwise mean none.
 		{"level wins over budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelMinimal,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMinimal}},
 		// IncludeThoughts is what asks for summaries, and only it.
 		{"thoughts with level", &genai.ThinkingConfig{
 			ThinkingLevel:   genai.ThinkingLevelHigh,
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh, Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh, Summary: oaishared.ReasoningSummaryAuto}},
 		{"thoughts with budget", &genai.ThinkingConfig{
 			ThinkingBudget:  genai.Ptr(int32(2048)),
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium, Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium, Summary: oaishared.ReasoningSummaryAuto}},
 		// Thoughts alone leave the effort to the model rather than inventing one.
-		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
@@ -1359,13 +1362,13 @@ func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
 		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
 		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}},
 		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(4096))}},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}},
 		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
@@ -1398,11 +1401,11 @@ func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 				ThinkingConfig: tc.thinking,
 			})
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), "ThinkingBudget") {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
@@ -1418,29 +1421,29 @@ func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
 	tests := []struct {
 		name     string
 		thinking *genai.ThinkingConfig
-		want     shared.ReasoningParam
+		want     oaishared.ReasoningParam
 	}{
 		{"unspecified alone", &genai.ThinkingConfig{
 			ThinkingLevel: genai.ThinkingLevelUnspecified,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		{"unspecified yields to zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
 		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
-			ThinkingBudget: genai.Ptr(int32(dynamicThinkingBudget)),
-		}, shared.ReasoningParam{}},
+			ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget)),
+		}, oaishared.ReasoningParam{}},
 		// A named level is a choice, so it keeps winning.
 		{"named level still wins over zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelHigh,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
@@ -1454,11 +1457,11 @@ func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
 // A thinking level genai grows later must be named in an error, not lowercased
 // into an effort string the API rejects with a message pointing nowhere useful.
 func TestApplyGenerationConfigRejectsUnknownThinkingLevel(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("EXHAUSTIVE")},
 	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "EXHAUSTIVE") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name the level", err)
@@ -1480,25 +1483,25 @@ func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 		genai.ThinkingLevelHigh,
 	}
 	for _, level := range levels {
-		if _, ok := reasoningEfforts[level]; !ok {
-			t.Errorf("reasoningEfforts is missing genai.ThinkingLevel %q", level)
+		if _, ok := shared.ReasoningEfforts[level]; !ok {
+			t.Errorf("shared.ReasoningEfforts is missing genai.ThinkingLevel %q", level)
 		}
 	}
-	if len(reasoningEfforts) != len(levels) {
-		t.Errorf("reasoningEfforts has %d entries, want %d: it gained one this test does not list", len(reasoningEfforts), len(levels))
+	if len(shared.ReasoningEfforts) != len(levels) {
+		t.Errorf("shared.ReasoningEfforts has %d entries, want %d: it gained one this test does not list", len(shared.ReasoningEfforts), len(levels))
 	}
 
 	// And the mapping is reachable end to end, not just present in the map: a
 	// map entry nothing reads would pass the loop above and still drop the level.
 	for _, level := range levels {
-		params := &responses.ResponseNewParams{}
+		params := &oairesponses.ResponseNewParams{}
 		cfg := &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: level}}
 		if err := applyGenerationConfig(params, cfg); err != nil {
 			t.Errorf("applyGenerationConfig(ThinkingLevel %q) error = %v, want nil", level, err)
 			continue
 		}
-		if params.Reasoning.Effort != reasoningEfforts[level] {
-			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, reasoningEfforts[level])
+		if params.Reasoning.Effort != shared.ReasoningEfforts[level] {
+			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, shared.ReasoningEfforts[level])
 		}
 	}
 }
@@ -1518,11 +1521,11 @@ func TestApplyGenerationConfigAcceptsEmptyThinkingConfig(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
-			if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+			if !reflect.DeepEqual(params.Reasoning, oaishared.ReasoningParam{}) {
 				t.Errorf("params.Reasoning = %+v, want zero: nothing was asked for", params.Reasoning)
 			}
 		})
@@ -1532,11 +1535,11 @@ func TestApplyGenerationConfigAcceptsEmptyThinkingConfig(t *testing.T) {
 // Reasoning stays unset when the caller asks for nothing, so non-reasoning
 // models are not sent a reasoning block they would reject.
 func TestApplyGenerationConfigOmitsReasoningByDefault(t *testing.T) {
-	params := &responses.ResponseNewParams{}
+	params := &oairesponses.ResponseNewParams{}
 	if err := applyGenerationConfig(params, &genai.GenerateContentConfig{}); err != nil {
 		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 	}
-	if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+	if !reflect.DeepEqual(params.Reasoning, oaishared.ReasoningParam{}) {
 		t.Errorf("params.Reasoning = %+v, want zero", params.Reasoning)
 	}
 }
@@ -1558,9 +1561,9 @@ func TestApplyGenerationConfigRejectsUntranslatableValues(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.names) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.names)
@@ -1589,7 +1592,7 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg); err != nil {
+			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg); err != nil {
 				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
 			}
 		})
@@ -1599,11 +1602,11 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 // Presence, not value: an off value still means the caller expected the knob to
 // be wired up. Sniffing for no-op values would need re-deciding per new field.
 func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		EnableEnhancedCivicAnswers: genai.Ptr(false),
 	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "EnableEnhancedCivicAnswers") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name EnableEnhancedCivicAnswers", err)
@@ -1616,21 +1619,21 @@ func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 func TestApplyGenerationConfigServiceTier(t *testing.T) {
 	tests := []struct {
 		tier genai.ServiceTier
-		want responses.ResponseNewParamsServiceTier
+		want oairesponses.ResponseNewParamsServiceTier
 	}{
-		{genai.ServiceTierFlex, responses.ResponseNewParamsServiceTierFlex},
-		{genai.ServiceTierPriority, responses.ResponseNewParamsServiceTierPriority},
+		{genai.ServiceTierFlex, oairesponses.ResponseNewParamsServiceTierFlex},
+		{genai.ServiceTierPriority, oairesponses.ResponseNewParamsServiceTierPriority},
 		// genai's "standard" is what OpenAI calls "default".
-		{genai.ServiceTierStandard, responses.ResponseNewParamsServiceTierDefault},
+		{genai.ServiceTierStandard, oairesponses.ResponseNewParamsServiceTierDefault},
 		// genai calls this one "Default service tier, which is standard", so it
 		// lands where standard does rather than on auto, which would hand the
 		// caller whichever tier their project happens to have configured.
-		{genai.ServiceTierUnspecified, responses.ResponseNewParamsServiceTierDefault},
+		{genai.ServiceTierUnspecified, oairesponses.ResponseNewParamsServiceTierDefault},
 	}
 
 	for _, tc := range tests {
 		t.Run(string(tc.tier), func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ServiceTier: tc.tier}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
@@ -1642,11 +1645,11 @@ func TestApplyGenerationConfigServiceTier(t *testing.T) {
 
 	// A tier genai adds later is named rather than passed through as a string
 	// the API would refuse for reasons the caller cannot act on.
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ServiceTier: genai.ServiceTier("platinum"),
 	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("unknown tier: error = %v, want %v", err, ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("unknown tier: error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "platinum") {
 		t.Errorf("unknown tier: error = %q, want it to name the tier", err)
@@ -1678,11 +1681,11 @@ func TestServiceTiersCoverEveryGenaiTier(t *testing.T) {
 func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 	timeout := 45 * time.Second
 	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
-	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+	if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, cfg); err != nil {
 		t.Fatalf("applyGenerationConfig() error = %v, want nil: a timeout is honored", err)
 	}
-	if got := requestTimeout(cfg); got != timeout {
-		t.Errorf("requestTimeout() = %v, want %v", got, timeout)
+	if got := shared.RequestTimeout(cfg); got != timeout {
+		t.Errorf("shared.RequestTimeout() = %v, want %v", got, timeout)
 	}
 }
 
@@ -1691,11 +1694,11 @@ func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		timeout := d
-		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+		err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
 		})
-		if !errors.Is(err, ErrUnsupportedConfigField) {
-			t.Fatalf("timeout %v: error = %v, want %v", d, err, ErrUnsupportedConfigField)
+		if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+			t.Fatalf("timeout %v: error = %v, want %v", d, err, shared.ErrUnsupportedConfigField)
 		}
 		if !strings.Contains(err.Error(), "Timeout") {
 			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
@@ -1720,7 +1723,7 @@ func TestCallerAuthorizationHeaderDisplacesTheAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	client := openai.NewClient(option.WithAPIKey("real-key"), option.WithBaseURL(srv.URL))
-	params := responses.ResponseNewParams{Model: shared.ResponsesModel("m")}
+	params := oairesponses.ResponseNewParams{Model: oaishared.ResponsesModel("m")}
 
 	// Only the header the stub saw matters here, never the decoded response.
 	_, _ = client.Responses.New(context.Background(), params)
@@ -1753,82 +1756,23 @@ func TestHeadersAffectNeitherValidationNorTimeout(t *testing.T) {
 	for _, h := range headers {
 		names := slices.Sorted(maps.Keys(h))
 		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Headers: h}}
-		if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
+		if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, cfg); err != nil {
 			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", names, err)
 		}
-		if got := requestTimeout(cfg); got != 0 {
+		if got := shared.RequestTimeout(cfg); got != 0 {
 			t.Errorf("headers %v: produced a %v timeout, want none", names, got)
 		}
-	}
-}
-
-// The end of that promise, checked where it can actually be observed: no header
-// a caller put in HTTPOptions may appear on the outgoing request.
-func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		name := "blocking"
-		if stream {
-			name = "streaming"
-		}
-		t.Run(name, func(t *testing.T) { assertNoHeaderReachesTheWire(t, stream) })
-	}
-}
-
-func assertNoHeaderReachesTheWire(t *testing.T, stream bool) {
-	t.Helper()
-	wireTimeout := 30 * time.Second
-	var got http.Header
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Clone()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"r","object":"response","status":"completed",` +
-			`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
-			`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`))
-	}))
-	defer srv.Close()
-
-	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "real-key", BaseURL: srv.URL})
-	if err != nil {
-		t.Fatalf("NewModel() error = %v", err)
-	}
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
-		// A timeout is set deliberately. Without one the translation returns
-		// early, so header forwarding reintroduced after that point would
-		// never run here and the test would pass vacuously.
-		Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
-			Timeout: &wireTimeout,
-			Headers: http.Header{
-				"Authorization":  []string{"Bearer caller"},
-				"X-Goog-Api-Key": []string{"gemini-key"},
-				"X-Trace-Id":     []string{"harmless"},
-			},
-		}},
-	}
-	for _, err := range m.GenerateContent(context.Background(), req, stream) {
-		if err != nil && !stream {
-			t.Fatalf("GenerateContent() error = %v", err)
-		}
-	}
-	if v := got.Get("Authorization"); v != "Bearer real-key" {
-		t.Errorf("Authorization = %s, want the configured key: a caller header displaced it", redact(v))
-	}
-	if v := got.Get("X-Goog-Api-Key"); v != "" {
-		t.Errorf("X-Goog-Api-Key = %s, want absent: a Gemini credential reached the provider", redact(v))
-	}
-	if v := got.Get("X-Trace-Id"); v != "" {
-		t.Errorf("X-Trace-Id = %s, want absent: headers are not forwarded", redact(v))
 	}
 }
 
 // A slice can tell an explicit empty from unset, so it should: asking for no
 // modalities at all is still a request this package cannot honor.
 func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
-	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ResponseModalities: []string{},
 	})
-	if !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "ResponseModalities") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name ResponseModalities", err)
@@ -1836,7 +1780,7 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 }
 
 // Every named error is checked before the sentinel, so an errors.Is call site
-// that worked before ErrUnsupportedConfigField existed still works when the
+// that worked before shared.ErrUnsupportedConfigField existed still works when the
 // caller happens to set one of the newly-rejected fields as well.
 func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	topK := float32(5)
@@ -1852,31 +1796,31 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 		{"TopK over Seed", &genai.GenerateContentConfig{
 			TopK: &topK,
 			Seed: genai.Ptr(int32(7)),
-		}, ErrTopKNotSupported},
+		}, shared.ErrTopKNotSupported},
 		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs: genai.Ptr(int32(5)),
 			Labels:   map[string]string{"team": "search"},
-		}, ErrLabelsNotSupported},
+		}, shared.ErrLabelsNotSupported},
 		{"SafetySettings over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs:       genai.Ptr(int32(5)),
 			SafetySettings: []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment}},
-		}, ErrSafetySettingsNotSupported},
+		}, shared.ErrSafetySettingsNotSupported},
 		{"MIME type over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs:         genai.Ptr(int32(5)),
 			ResponseMIMEType: "text/csv",
-		}, ErrUnsupportedMIMEType},
+		}, shared.ErrUnsupportedMIMEType},
 		// The budget has to be one applyThinkingConfig actually rejects, or
 		// there is no competing error for the named one to win against and the
 		// case passes whether precedence works or not.
 		{"StopSequences over ThinkingConfig", &genai.GenerateContentConfig{
 			StopSequences:  []string{"STOP"},
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))},
-		}, ErrStopSequencesNotSupported},
+		}, shared.ErrStopSequencesNotSupported},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, tc.want)
 			}
@@ -1885,7 +1829,7 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 }
 
 // Guards against the bug returning as genai grows fields: every exported field
-// must be translated, covered by a named error, or in unsupportedConfigFields.
+// must be translated, covered by a named error, or in shared.UnsupportedConfigFields.
 // When this fails, add the new field to whichever of the three it belongs in —
 // not to this test alone, which would only re-hide the drop.
 func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
@@ -1905,7 +1849,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"Tools":              true,
 		"ToolConfig":         true,
 	}
-	// Fields rejected with their own error, predating ErrUnsupportedConfigField.
+	// Fields rejected with their own error, predating shared.ErrUnsupportedConfigField.
 	namedError := map[string]bool{
 		"TopK":             true,
 		"StopSequences":    true,
@@ -1916,9 +1860,9 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"SafetySettings":   true,
 		"ResponseMIMEType": true,
 	}
-	rejected := make(map[string]bool, len(unsupportedConfigFields))
-	for _, field := range unsupportedConfigFields {
-		rejected[field.name] = true
+	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
+	for _, field := range shared.UnsupportedConfigFields {
+		rejected[field.Name] = true
 	}
 
 	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
@@ -1935,7 +1879,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
 	for name := range rejected {
 		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("unsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
+			t.Errorf("shared.UnsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
 		}
 	}
 }
@@ -1961,108 +1905,17 @@ func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
 	}
 }
 
-func TestFlattenContentText(t *testing.T) {
-	tests := []struct {
-		name    string
-		content *genai.Content
-		want    string
-		wantErr bool
-	}{
-		{
-			name:    "nil content",
-			content: nil,
-			want:    "",
-		},
-		{
-			name: "valid text parts",
-			content: &genai.Content{
-				Parts: []*genai.Part{
-					{Text: "part1"},
-					nil,
-					{Text: "part2"},
-				},
-			},
-			want: "part1\npart2",
-		},
-		{
-			name: "non-text part",
-			content: &genai.Content{
-				Parts: []*genai.Part{
-					{FunctionCall: &genai.FunctionCall{Name: "fn"}},
-				},
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			txt, err := flattenContentText(tc.content)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("flattenContentText() error = %v, wantErr %v", err, tc.wantErr)
-			}
-			if txt != tc.want {
-				t.Fatalf("flattenContentText() = %q, want %q", txt, tc.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeSchema(t *testing.T) {
-	tests := []struct {
-		name    string
-		schema  any
-		want    map[string]any
-		wantErr bool
-	}{
-		{
-			name:    "nil schema",
-			schema:  nil,
-			wantErr: true,
-		},
-		{
-			name:   "map schema",
-			schema: map[string]any{"type": "object"},
-			want:   map[string]any{"type": "object"},
-		},
-		{
-			name: "struct schema",
-			schema: struct {
-				Type string `json:"type"`
-			}{Type: "array"},
-			want: map[string]any{"type": "array"},
-		},
-		{
-			name:    "invalid schema",
-			schema:  func() {}, // unmarshalable
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := normalizeSchema(tc.schema)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("normalizeSchema() error = %v, wantErr %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && got["type"] != tc.want["type"] {
-				t.Fatalf("normalizeSchema() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestNormalizeRole(t *testing.T) {
 	tests := []struct {
 		role    genai.Role
-		want    responses.EasyInputMessageRole
+		want    oairesponses.EasyInputMessageRole
 		wantErr bool
 	}{
-		{"", responses.EasyInputMessageRoleUser, false},
-		{genai.RoleUser, responses.EasyInputMessageRoleUser, false},
-		{genai.RoleModel, responses.EasyInputMessageRoleAssistant, false},
-		{"system", responses.EasyInputMessageRoleSystem, false},
-		{"developer", responses.EasyInputMessageRoleDeveloper, false},
+		{"", oairesponses.EasyInputMessageRoleUser, false},
+		{genai.RoleUser, oairesponses.EasyInputMessageRoleUser, false},
+		{genai.RoleModel, oairesponses.EasyInputMessageRoleAssistant, false},
+		{"system", oairesponses.EasyInputMessageRoleSystem, false},
+		{"developer", oairesponses.EasyInputMessageRoleDeveloper, false},
 		{"invalid", "", true},
 	}
 	for _, tc := range tests {
@@ -2082,7 +1935,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     *genai.GenerateContentConfig
-		want    *responses.ResponseFormatTextJSONSchemaConfigParam
+		want    *oairesponses.ResponseFormatTextJSONSchemaConfigParam
 		wantErr bool
 	}{
 		{
@@ -2095,7 +1948,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseSchema: &genai.Schema{Title: "CustomTitle", Type: genai.TypeObject},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "CustomTitle",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2114,7 +1967,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseJsonSchema: map[string]any{"type": "object"},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2137,7 +1990,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2172,7 +2025,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					"$defs": map[string]any{"bag": map[string]any{"type": "object"}},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2214,7 +2067,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2237,7 +2090,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseJsonSchema: map[string]any{"type": "object", "properties": "garbage"},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2254,7 +2107,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 			cfg: &genai.GenerateContentConfig{
 				ResponseJsonSchema: map[string]any{"type": "object", "properties": nil},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2281,7 +2134,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2316,7 +2169,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2343,7 +2196,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					"additionalProperties": map[string]any{"type": "string"},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2366,7 +2219,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					"type":  "object",
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2391,7 +2244,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "NestedTitle",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2468,7 +2321,7 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 					},
 				},
 			},
-			want: &responses.ResponseFormatTextJSONSchemaConfigParam{
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
@@ -2600,7 +2453,7 @@ func TestNewJSONSchemaFormatDoesNotMutateResponseJSONSchema(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
+func TestBuildParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 	const minimum = int64(9007199254740993)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
@@ -2619,9 +2472,9 @@ func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 		},
 	}
 
-	params, err := buildOpenAIParams("gpt-4o-mini", req)
+	params, err := buildParams("gpt-4o-mini", req)
 	if err != nil {
-		t.Fatalf("buildOpenAIParams() error = %v", err)
+		t.Fatalf("buildParams() error = %v", err)
 	}
 	data, err := json.Marshal(params)
 	if err != nil {
@@ -2633,7 +2486,7 @@ func TestBuildOpenAIParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 }
 
 // The timeout has to reach the request, not merely be computed: asserting that
-// requestTimeout returns the right duration says nothing about the
+// shared.RequestTimeout returns the right duration says nothing about the
 // context.WithTimeout wiring in generate and generateStream, which is the only
 // thing HTTPOptions still does.
 //
@@ -2669,11 +2522,8 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 			defer close(release)
 
 			timeout := 100 * time.Millisecond
-			m, err := NewModel(context.Background(), "gpt-4o-mini",
-				&ClientConfig{APIKey: "test", BaseURL: srv.URL})
-			if err != nil {
-				t.Fatalf("NewModel() error = %v", err)
-			}
+			m := newTestModel("gpt-4o-mini",
+				&testClientConfig{APIKey: "test", BaseURL: srv.URL})
 			req := &model.LLMRequest{
 				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
 				Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
@@ -2703,18 +2553,18 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 }
 
-// ignoredHTTPOptionFields is part of the contract, so it has to name a real
+// shared.IgnoredHTTPOptionFields is part of the contract, so it has to name a real
 // field, and every field has to be accounted for in exactly one of the three
 // categories the package documents.
 func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 	honored := map[string]bool{"Timeout": true}
-	ignored := make(map[string]bool, len(ignoredHTTPOptionFields))
-	for _, name := range ignoredHTTPOptionFields {
+	ignored := make(map[string]bool, len(shared.IgnoredHTTPOptionFields))
+	for _, name := range shared.IgnoredHTTPOptionFields {
 		ignored[name] = true
 	}
-	rejected := make(map[string]bool, len(unsupportedHTTPOptionFields))
-	for _, field := range unsupportedHTTPOptionFields {
-		rejected[field.name] = true
+	rejected := make(map[string]bool, len(shared.UnsupportedHTTPOptionFields))
+	for _, field := range shared.UnsupportedHTTPOptionFields {
+		rejected[field.Name] = true
 	}
 
 	optType := reflect.TypeOf(genai.HTTPOptions{})
@@ -2735,12 +2585,12 @@ func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 	}
 	for name := range ignored {
 		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("ignoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+			t.Errorf("shared.IgnoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
 		}
 	}
 	for name := range rejected {
 		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("unsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+			t.Errorf("shared.UnsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
 		}
 	}
 }
@@ -2753,26 +2603,6 @@ func redact(v string) string {
 		return "empty"
 	}
 	return fmt.Sprintf("<%d-byte value>", len(v))
-}
-
-// requestTimeout must be safe on its own terms. applyGenerationConfig rejects a
-// non-positive timeout before any request is built, so this guard is defense in
-// depth — and it is tested directly rather than assumed unreachable, because a
-// guard that only holds while callers keep the right order is not a guard.
-func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		timeout := d
-		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
-		if got := requestTimeout(cfg); got != 0 {
-			t.Errorf("requestTimeout(%v) = %v, want 0: a non-positive bound must not become a deadline", d, got)
-		}
-	}
-	// The positive case still comes through, so the guard is not simply off.
-	positive := time.Second
-	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
-	if got := requestTimeout(cfg); got != positive {
-		t.Errorf("requestTimeout(%v) = %v, want it unchanged", positive, got)
-	}
 }
 
 // An iter.Seq2 may be ranged more than once, and each range is its own call.
@@ -2804,10 +2634,7 @@ func assertReRangeable(t *testing.T, stream bool) {
 	defer srv.Close()
 
 	timeout := 30 * time.Second
-	m, err := NewModel(context.Background(), "gpt-4o-mini", &ClientConfig{APIKey: "test", BaseURL: srv.URL})
-	if err != nil {
-		t.Fatalf("NewModel() error = %v", err)
-	}
+	m := newTestModel("gpt-4o-mini", &testClientConfig{APIKey: "test", BaseURL: srv.URL})
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
 		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
@@ -2832,7 +2659,7 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions carries one live value per unsupportedHTTPOptionFields
+// geminiShapedHTTPOptions carries one live value per shared.UnsupportedHTTPOptionFields
 // entry, shared so the pairing test below derives from the cases that actually
 // run rather than from a second list agreeing with neither.
 //
@@ -2855,11 +2682,11 @@ var geminiShapedHTTPOptions = []struct {
 func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 	for _, tc := range geminiShapedHTTPOptions {
 		t.Run(tc.field, func(t *testing.T) {
-			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 				HTTPOptions: tc.opts,
 			})
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
@@ -2876,14 +2703,14 @@ func TestEveryUnsupportedHTTPOptionFieldIsDriven(t *testing.T) {
 	for _, tc := range geminiShapedHTTPOptions {
 		driven[tc.field] = true
 	}
-	for _, field := range unsupportedHTTPOptionFields {
-		if !driven[field.name] {
-			t.Errorf("unsupportedHTTPOptionFields has %q with no case in "+
-				"geminiShapedHTTPOptions, so its predicate never runs", field.name)
+	for _, field := range shared.UnsupportedHTTPOptionFields {
+		if !driven[field.Name] {
+			t.Errorf("shared.UnsupportedHTTPOptionFields has %q with no case in "+
+				"geminiShapedHTTPOptions, so its predicate never runs", field.Name)
 		}
 	}
-	if len(driven) != len(unsupportedHTTPOptionFields) {
-		t.Errorf("%d cases for %d predicates", len(driven), len(unsupportedHTTPOptionFields))
+	if len(driven) != len(shared.UnsupportedHTTPOptionFields) {
+		t.Errorf("%d cases for %d predicates", len(driven), len(shared.UnsupportedHTTPOptionFields))
 	}
 }
 
@@ -2918,20 +2745,20 @@ func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.field, func(t *testing.T) {
-			params := &responses.ResponseNewParams{}
+			params := &oairesponses.ResponseNewParams{}
 			if err := applyGenerationConfig(params, tc.cfg); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil: %s is listed as translated", err, tc.field)
 			}
 			// Listed as translated means it reaches the params, not merely that
 			// it is tolerated; HTTPOptions.Timeout is the one that lands
-			// elsewhere, on the context, so it is checked through requestTimeout.
+			// elsewhere, on the context, so it is checked through shared.RequestTimeout.
 			if tc.field == "HTTPOptions.Timeout" {
-				if requestTimeout(tc.cfg) == 0 {
-					t.Error("requestTimeout() = 0, want the configured bound")
+				if shared.RequestTimeout(tc.cfg) == 0 {
+					t.Error("shared.RequestTimeout() = 0, want the configured bound")
 				}
 				return
 			}
-			if reflect.DeepEqual(*params, responses.ResponseNewParams{}) {
+			if reflect.DeepEqual(*params, oairesponses.ResponseNewParams{}) {
 				t.Errorf("%s left the params untouched, so it is not translated", tc.field)
 			}
 		})

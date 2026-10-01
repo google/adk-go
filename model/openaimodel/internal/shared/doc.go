@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package version
-
-// Version exposes the current ADK Go version, used for llm request tagging.
+// Package shared holds the parts of the OpenAI conversion that neither
+// endpoint owns: schema normalisation, server-text handling, call-id tracking,
+// the generation-config fields both reject, and the error sentinels both
+// return.
 //
-// The trailing annotation marks this line for Release Please, which rewrites
-// the value in the release PR. Do not edit it by hand.
-const Version = "2.5.0" // x-release-please-version
+// Its identifiers are exported so the sibling endpoint packages can reach them.
+// The package is internal, so none of them is public API.
+package shared
