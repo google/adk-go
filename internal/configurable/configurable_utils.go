@@ -18,12 +18,15 @@ package configurable
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
@@ -373,40 +376,157 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-// ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
+// Reasons a config reference can be rejected. They are sentinels so that callers
+// and tests can identify the rejection without matching on the message text.
+var (
+	// errConfigReferenceNotLocal reports a reference that names a file outside
+	// the referencing config's directory by its spelling alone.
+	errConfigReferenceNotLocal = errors.New("config reference must be a relative path inside the agent directory")
+	// errConfigReferenceSymlink reports a reference that reaches its target
+	// through a symbolic link, or through any other reparse point, below that
+	// directory.
+	errConfigReferenceSymlink = errors.New("config reference traverses a link")
+)
+
+// resolveConfigReference turns a config-supplied reference into an absolute path
+// that is guaranteed to sit inside the referencing config's own directory.
+//
+// A reference must be local to the parent directory in filepath.IsLocal's sense,
+// which settles the lexical half of the question on every platform. The other
+// half is symlinks, and they are refused rather than resolved: a link is not
+// followed to see where it points, it simply disqualifies the reference. That is
+// the stricter of the two rules, and unlike resolving it does not depend on the
+// link's target existing at the moment of the check.
+//
+// Refusing rather than resolving means a link that stays inside the directory
+// is refused too. That is a deliberate trade with a real cost: a config
+// directory materialised entirely out of links — a Kubernetes ConfigMap or
+// projected volume, a Bazel runfiles forest, a Nix store path — cannot use
+// nested references at all, and has to be staged into a directory of real files
+// first. The alternative, resolving each link and re-testing containment, cannot
+// be made safe: a link pointing outside at a target that does not exist yet
+// resolves to nothing and passes the test, and it stops being missing the moment
+// anything creates the target.
+//
+// Only components below the parent directory are refused. The parent itself may
+// be reached through any number of links.
+//
+// Every place that loads a nested YAML config from a reference must route
+// through here: the check is the trust boundary between the config being loaded
+// and the rest of the filesystem, and a second copy of it is a second place to
+// forget.
+func resolveConfigReference(parentPath, refPath string) (string, error) {
+	// IsLocal rejects the empty string along with the escaping spellings, but an
+	// empty reference is almost always an unfilled template rather than an
+	// attempt to escape, and the generic message renders it as a dangling ": ".
 	if refPath == "" {
-		return nil, fmt.Errorf("agent reference path cannot be empty")
+		return "", fmt.Errorf("%w: reference is empty", errConfigReferenceNotLocal)
+	}
+	// IsLocal is purely lexical and rejects, in one call, everything that could
+	// name a file outside the directory the reference is evaluated in: absolute
+	// paths, any ".." that escapes, and on Windows drive-relative refs such as
+	// `C:node.yaml`, UNC paths and reserved names such as NUL.
+	if !filepath.IsLocal(refPath) {
+		return "", fmt.Errorf("%w: %s", errConfigReferenceNotLocal, refPath)
 	}
 
-	if filepath.IsAbs(refPath) {
-		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
-	}
-
-	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
-
-	absPath, err := filepath.Abs(targetPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
-	}
-
-	// Prevent path traversal outside the parent agent's directory. Both sides are
-	// made absolute before comparing, and symlinks are resolved where the paths
-	// exist, so a symlink inside the agent directory cannot be used to escape it.
 	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
+		return "", fmt.Errorf("failed to resolve agent directory: %w", err)
 	}
+	// Canonicalise the parent directory before joining, so that the path returned
+	// from here is the real one. Callers use it as the key of agentRegistry and
+	// nodeRegistry, and without this two spellings of one directory — the real
+	// path and a symlink to it — would each get their own cache entry and each
+	// build their own copy of the same agent.
+	//
+	// It is not what makes the containment check correct. The component walk
+	// below relies on os.Lstat, which follows every component except the last, so
+	// the two sides cannot end up rooted differently whether or not this runs.
 	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
 		parentDir = resolved
 	}
-	checkPath := absPath
-	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-		checkPath = resolved
+
+	// parentDir is absolute and Join cleans the result, so this is the absolute,
+	// lexically-normalized target path.
+	absPath := filepath.Join(parentDir, refPath)
+
+	// IsLocal already guarantees the join lands inside parentDir lexically, so the
+	// only remaining way out is a symlink on the way down. Refusing links is
+	// stronger than resolving them: a link whose target does not exist yet
+	// resolves to nothing, and resolving would wave exactly that through.
+	if err := refuseSymlinkComponents(parentDir, refPath); err != nil {
+		return "", err
 	}
-	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
-		return nil, fmt.Errorf(
-			"path traversal detected: config_path %q resolves outside agent directory", refPath)
+
+	return absPath, nil
+}
+
+// isLinkLike reports whether a component may redirect the read somewhere other
+// than where its own name sits in the tree.
+//
+// ModeSymlink alone is not enough on Windows. A directory junction is a reparse
+// point with tag IO_REPARSE_TAG_MOUNT_POINT, and since Go 1.23 (godebug
+// winsymlink=1) os.Lstat reports it as ModeIrregular, not ModeSymlink: see
+// os/types_windows.go, where IO_REPARSE_TAG_SYMLINK sets ModeSymlink and mount
+// points fall through to ModeIrregular. Before Go 1.23 mount points did carry
+// ModeSymlink, which is why testing for it alone looks sufficient. This module
+// declares go 1.26, so it gets the newer mapping and a junction would walk
+// straight past a ModeSymlink-only test.
+//
+// ModeIrregular is a broad term: it covers reparse tags that do not redirect
+// anywhere, such as cloud-provider placeholder files, and those are refused
+// along with the rest. It is not universal either — IO_REPARSE_TAG_AF_UNIX maps
+// to ModeSocket and IO_REPARSE_TAG_DEDUP is reported as an ordinary file — but
+// neither of those redirects a read out of the directory, so neither matters
+// here.
+func isLinkLike(mode fs.FileMode) bool {
+	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
+// refuseSymlinkComponents fails if any component of refPath below dir is a
+// link: a symbolic link on any platform, or a junction or other reparse point
+// on Windows. Where the link points is not consulted, so one that stays inside
+// dir is refused too — see resolveConfigReference for why the check is drawn
+// that way.
+//
+// The boundary is narrower than "cannot reach outside dir" in two directions. A
+// hard link inside dir to a file outside it is indistinguishable from a regular
+// file here, and defending against it belongs wherever the directory is
+// populated, typically archive extraction. A FIFO or device node is likewise
+// left alone, since it redirects nothing.
+//
+// A component that cannot exist cannot be a link, so a reference naming a
+// missing file, or one below a component that is not a directory, is left for
+// the caller's own read to report as not found.
+func refuseSymlinkComponents(dir, refPath string) error {
+	cur := dir
+	// IsLocal guarantees Clean leaves no ".." components to walk through.
+	for _, part := range strings.Split(filepath.Clean(refPath), string(os.PathSeparator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		// ENOTDIR is the same situation as ErrNotExist for this check: nothing can
+		// exist below a component that is not a directory, so there is no link to
+		// find. Reporting it as an inspection failure would give callers a third
+		// class of error to handle for a reference that is simply not there.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to inspect config reference %q: %w", refPath, err)
+		}
+		if isLinkLike(fi.Mode()) {
+			return fmt.Errorf("%w: %s", errConfigReferenceSymlink, refPath)
+		}
+	}
+	return nil
+}
+
+// ResolveAgentReference builds an agent from a reference config.
+func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(parentPath, refPath)
+	if err != nil {
+		return nil, err
 	}
 
 	registryMu.RLock()

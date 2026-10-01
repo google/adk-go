@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -200,14 +199,13 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 	isYAML := strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml")
 
 	if isYAML {
-		targetPath := ref
-		if !filepath.IsAbs(ref) {
-			targetPath = filepath.Join(filepath.Dir(parentPath), ref)
-		}
+		// Node refs are loaded straight off disk by resolveNodeFromYAML, so they
+		// need the same containment check as agent refs: without it a workflow
+		// config can read and instantiate a node from anywhere on the filesystem.
 		var err error
-		absPath, err = filepath.Abs(targetPath)
+		absPath, err = resolveConfigReference(parentPath, ref)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+			return nil, err
 		}
 		cacheKey = absPath
 	} else {
