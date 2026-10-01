@@ -433,7 +433,7 @@ func TestLiveReconnectPolicyJittered(t *testing.T) {
 			seen[got] = true
 		}
 		// Without spread every client that dropped together redials together,
-		// which is the behaviour the jitter exists to prevent.
+		// which is the behavior the jitter exists to prevent.
 		if len(seen) < 2 {
 			t.Error("jittered returned a single value: delays are not being spread")
 		}

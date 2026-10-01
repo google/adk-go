@@ -100,7 +100,7 @@ func ToSessionEvent(event Event) *session.Event {
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			// Actions.Compaction is deliberately not mapped inbound. A
 			// compaction record tells prompt assembly to drop a span of history
-			// and substitute content in its place, so honouring one from a
+			// and substitute content in its place, so honoring one from a
 			// request body would let a client erase a conversation and inject
 			// text into it as a model turn. Only the runner writes these.
 			// FromSessionEvent still returns them, so a client can read

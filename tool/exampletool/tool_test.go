@@ -71,11 +71,17 @@ func (m *mockToolContext) Actions() *session.EventActions {
 func (m *mockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (m *mockToolContext) AgentName() string                                       { return "mock_agent" }
-func (m *mockToolContext) InvocationID() string                                    { return "mock_invocation" }
-func (m *mockToolContext) AppName() string                                         { return "mock_app" }
-func (m *mockToolContext) Branch() string                                          { return "mock_branch" }
-func (m *mockToolContext) SessionID() string                                       { return "mock_session" }
+
+func (m *mockToolContext) AgentName() string { return "mock_agent" }
+
+func (m *mockToolContext) InvocationID() string { return "mock_invocation" }
+
+func (m *mockToolContext) AppName() string { return "mock_app" }
+
+func (m *mockToolContext) Branch() string { return "mock_branch" }
+
+func (m *mockToolContext) SessionID() string { return "mock_session" }
+
 func (m *mockToolContext) UserID() string                                          { return "mock_user" }
 func (m *mockToolContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
 
