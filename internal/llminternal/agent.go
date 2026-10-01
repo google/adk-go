@@ -69,7 +69,8 @@ type State struct {
 	InputSchema  *genai.Schema
 	OutputSchema *genai.Schema
 
-	OutputKey string
+	OutputKey      string
+	OutputArtifact string
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)

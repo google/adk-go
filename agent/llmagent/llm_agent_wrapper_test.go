@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
@@ -1502,5 +1503,105 @@ func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
 
 	if got := llminternal.Reveal(internalSub).Mode; got != llminternal.ModeUnset {
 		t.Errorf("the undeclared sub-agent's mode after building a coordinator = %q, want unset", got)
+	}
+}
+
+type recordingStaticModel struct {
+	replies  []string
+	requests []*model.LLMRequest
+}
+
+func (m *recordingStaticModel) Name() string { return "recording-static" }
+
+func (m *recordingStaticModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		cloned := *req
+		cloned.Contents = append([]*genai.Content(nil), req.Contents...)
+		m.requests = append(m.requests, &cloned)
+		idx := len(m.requests) - 1
+		reply := "default"
+		if idx < len(m.replies) {
+			reply = m.replies[idx]
+		}
+		yield(&model.LLMResponse{
+			Content: genai.NewContentFromText(reply, genai.RoleModel),
+		}, nil)
+	}
+}
+
+func TestLlmAgent_OutputArtifact_MultiTurnDoesNotReplayBody(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rev1Body = "REVISION_ONE_UNIQUE_BODY_MARKER"
+		rev2Body = "REVISION_TWO_UNIQUE_BODY_MARKER"
+	)
+	mockLLM := &recordingStaticModel{replies: []string{rev1Body, rev2Body}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:           "designer",
+		Model:          mockLLM,
+		OutputArtifact: "design.md",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	sessionSvc := session.InMemoryService()
+	artifactSvc := artifact.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             a,
+		SessionService:    sessionSvc,
+		ArtifactService:   artifactSvc,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	for _, prompt := range []string{"draft v1", "draft v2"} {
+		for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText(prompt, genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("r.Run(%q): %v", prompt, err)
+			}
+		}
+	}
+
+	if len(mockLLM.requests) != 2 {
+		t.Fatalf("len(mockLLM.requests) = %d, want 2", len(mockLLM.requests))
+	}
+	for _, content := range mockLLM.requests[1].Contents {
+		for _, part := range content.Parts {
+			if part != nil && strings.Contains(part.Text, rev1Body) {
+				t.Fatalf("second turn prompt replayed revision 1 body: %q", part.Text)
+			}
+		}
+	}
+
+	sessResp, err := sessionSvc.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessionSvc.Get: %v", err)
+	}
+	for ev := range sessResp.Session.Events().All() {
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part != nil && (strings.Contains(part.Text, rev1Body) || strings.Contains(part.Text, rev2Body)) {
+				t.Fatalf("persisted session event retained artifact body: %q", part.Text)
+			}
+		}
+	}
+
+	for wantVer, wantBody := range map[int64]string{1: rev1Body, 2: rev2Body} {
+		loaded, err := artifactSvc.Load(t.Context(), &artifact.LoadRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: wantVer,
+		})
+		if err != nil {
+			t.Fatalf("artifactSvc.Load(version=%d): %v", wantVer, err)
+		}
+		if loaded.Part.Text != wantBody {
+			t.Errorf("version %d text = %q, want %q", wantVer, loaded.Part.Text, wantBody)
+		}
 	}
 }
