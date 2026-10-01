@@ -637,3 +637,69 @@ func TestSetupSubroutersPassesWebUIOriginToRESTServer(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupSubroutersPassesBindHostToRESTServer pins that the launcher's bind
+// address reaches the REST server's Host check.
+//
+// That check is the only one that sees a rebound page's same-origin GET: a
+// browser sends no Origin header on one, so the Host it names is the only tell.
+// It arms on a declared loopback bind and stays off without one, so a dropped
+// BindHost leaves the request served rather than failing anywhere visible.
+func TestSetupSubroutersPassesBindHostToRESTServer(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		bindHost   string
+		host       string
+		wantStatus int
+	}{
+		{
+			name:       "rebound host on a loopback bind",
+			bindHost:   "127.0.0.1",
+			host:       "evil.com:8080",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "loopback host on a loopback bind",
+			bindHost:   "127.0.0.1",
+			host:       "localhost:8080",
+			wantStatus: http.StatusOK,
+		},
+		{
+			// A routable bind is an operator exposing the server on purpose,
+			// so it is reachable under whatever name resolves to it.
+			name:       "rebound host on an all-interfaces bind",
+			bindHost:   "0.0.0.0",
+			host:       "evil.com:8080",
+			wantStatus: http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse([]string{"-path_prefix", "/api"}); err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			router := mux.NewRouter().StrictSlash(true)
+			if err := l.SetupSubrouters(router, &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+				BindHost:       tc.bindHost,
+			}); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+			req.Host = tc.host
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}

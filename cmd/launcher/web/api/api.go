@@ -278,6 +278,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		ArtifactService: config.ArtifactService,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 		PluginConfig:    config.PluginConfig,
+		BindHost:        config.BindHost,
 		// The same value the CORS header advertises. An origin whose script may
 		// read our responses is one we should accept requests from, and whose
 		// host is a legitimate way to reach us.

@@ -63,4 +63,13 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+
+	// BindHost is the address the server is bound to, as the web launcher
+	// resolved it from -host. A loopback value arms the Host check in
+	// [adkrest.ServerConfig.BindHost], which refuses a rebound page's
+	// same-origin GET: a browser sends no Origin on one, so Host is the only
+	// thing that gives it away.
+	//
+	// Empty means no bind was declared and that check stays off.
+	BindHost string
 }
