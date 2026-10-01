@@ -16,6 +16,7 @@ package artifact_test
 
 import (
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -32,6 +33,61 @@ func TestInMemoryArtifactService(t *testing.T) {
 		return artifact.InMemoryService(), nil
 	}
 	tests.TestArtifactService(t, "InMemory", factory)
+}
+
+func TestInMemoryListSessionNamedUser(t *testing.T) {
+	srv := artifact.InMemoryService()
+	for _, file := range []struct {
+		sessionID string
+		fileName  string
+	}{
+		{"user", "private.txt"},
+		{"user", "private.txt"}, // Multiple versions must not duplicate filenames.
+		{"user", "user:shared.txt"},
+		{"other-session", "user:shared.txt"},
+		{"other-session", "other.txt"},
+	} {
+		if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+			AppName: "app", UserID: "u", SessionID: file.sessionID,
+			FileName: file.fileName, Part: genai.NewPartFromText("fixture"),
+		}); err != nil {
+			t.Fatalf("Save failed: %T", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		want      []string
+	}{
+		{
+			name:      "owner retains private and shared artifacts",
+			sessionID: "user",
+			want:      []string{"private.txt", "user:shared.txt"},
+		},
+		{
+			name:      "other session sees only its own and shared artifacts",
+			sessionID: "other-session",
+			want:      []string{"other.txt", "user:shared.txt"},
+		},
+		{
+			name:      "empty session sees only shared artifacts",
+			sessionID: "empty-session",
+			want:      []string{"user:shared.txt"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := srv.List(t.Context(), &artifact.ListRequest{
+				AppName: "app", UserID: "u", SessionID: tc.sessionID,
+			})
+			if err != nil {
+				t.Fatalf("List failed: %T", err)
+			}
+			if !slices.Equal(resp.FileNames, tc.want) {
+				t.Error("List must return only the session's own and user-scoped filenames, sorted and without duplicates")
+			}
+		})
+	}
 }
 
 func TestInMemoryArtifactVersionFields(t *testing.T) {
