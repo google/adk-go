@@ -164,23 +164,31 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
-// reservedToolNames are tool names the framework itself puts on the wire. In-model
-// built-ins (google_search, google_maps, ...) only append to the request's config
-// tools and never occupy their name in the tool map, so a server advertising one of
-// these would have its tool dispatched in place of the framework's own. Refuse them
-// at registration instead.
+// reservedToolNames are names this framework itself puts on the wire, in two classes.
+//
+// Dispatch names are resolved back out of the request by the framework rather than by
+// the model, so a server tool holding one of them changes which implementation runs.
+//
+// In-model built-ins (google_search and the rest) are registered through
+// RegisterToolFactory in internal/configurable and append to the request's config
+// tools; they are listed here because a second tool answering to the same name leaves
+// the model, not the framework, choosing between them.
+//
+// Only names this repository actually defines belong here. google_maps is the Java
+// spelling (the Go tool is google_maps_grounding), and vertex_ai_search and
+// code_execution appear in no Go tool, so listing them would refuse names this port
+// never had a problem with.
 var reservedToolNames = map[string]struct{}{
-	"set_model_response": {},
-	"transfer_to_agent":  {},
-	"finish_task":        {},
-	"task_completed":     {},
-	"google_search":      {},
-	"google_maps":        {},
-	"url_context":        {},
-	"vertex_ai_search":   {},
-	"code_execution":     {},
-	"load_artifacts":     {},
-	"load_memory":        {},
+	"set_model_response":    {},
+	"transfer_to_agent":     {},
+	"finish_task":           {},
+	"task_completed":        {},
+	"exit_loop":             {},
+	"load_artifacts":        {},
+	"load_memory":           {},
+	"google_search":         {},
+	"google_maps_grounding": {},
+	"url_context":           {},
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
