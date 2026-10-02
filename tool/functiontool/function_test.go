@@ -422,6 +422,32 @@ type objectMarshaler struct{ N int }
 
 func (objectMarshaler) MarshalJSON() ([]byte, error) { return []byte(`{"other":1}`), nil }
 
+func TestFunctionTool_OutputSchemaMismatch(t *testing.T) {
+	type Args struct{}
+	maxLen := 3
+	tl, err := functiontool.New(functiontool.Config{
+		Name:         "short_text_tool",
+		Description:  "a tool whose result must be at most three characters",
+		OutputSchema: &jsonschema.Schema{Type: "string", MaxLength: &maxLen},
+	}, func(ctx agent.ToolContext, _ Args) (string, error) {
+		return "abcdefgh", nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New failed: %v", err)
+	}
+	funcTool, ok := tl.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("%T does not implement toolinternal.FunctionTool", tl)
+	}
+	got, err := funcTool.Run(createToolContext(t), map[string]any{})
+	if got != nil {
+		t.Errorf("Run returned result %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("Run returned no error, want one for a result that violates OutputSchema")
+	}
+}
+
 func TestFunctionTool_WrapsNonMapResult(t *testing.T) {
 	type Args struct{}
 	type player struct {
