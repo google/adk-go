@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package skillregistry
+package simplecache
 
 import (
 	"context"
@@ -20,13 +20,14 @@ import (
 	"strings"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
 type CachedSkillRegistrySource struct {
-	cache Cache
+	cache skillregistry.Cache
 }
 
-func NewCachedSkillRegistrySource(ctx context.Context, cache Cache) (*CachedSkillRegistrySource, error) {
+func NewCachedSkillRegistrySource(ctx context.Context, cache skillregistry.Cache) (*CachedSkillRegistrySource, error) {
 	return &CachedSkillRegistrySource{cache: cache}, nil
 }
 

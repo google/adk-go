@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"strings"
 
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
@@ -43,12 +44,14 @@ type Client interface {
 	GetZip(rev string) (*zip.Reader, error)
 	FindFrontmatters(query string) ([]*agentregistry.Frontmatter, error)
 	ResourceID(name string) string
+	ParseSkillName(name string) (projectID, location, skillName string, resErr error)
 }
 
 type client struct {
-	parent   string
-	pageSize int64
-	svc      *agentregistry.ProjectsLocationsSkillsService
+	parent     string
+	namePrefix string
+	pageSize   int64
+	svc        *agentregistry.ProjectsLocationsSkillsService
 }
 
 func NewClient(ctx context.Context, cfg Config) (Client, error) {
@@ -59,9 +62,10 @@ func NewClient(ctx context.Context, cfg Config) (Client, error) {
 
 	svc := agentregistry.NewProjectsLocationsSkillsService(as)
 	return &client{
-		svc:      svc,
-		pageSize: 40,
-		parent:   fmt.Sprintf(`projects/%v/locations/%v`, cfg.ProjectID, cfg.Location),
+		svc:        svc,
+		pageSize:   40,
+		parent:     fmt.Sprintf(`projects/%v/locations/%v`, cfg.ProjectID, cfg.Location),
+		namePrefix: fmt.Sprintf(`projects/%v/locations/`, cfg.ProjectID),
 	}, nil
 }
 
@@ -288,19 +292,37 @@ func (c *client) GetSkill(name string) (*agentregistry.Skill, error) {
 	return s, nil
 }
 
-// // Skill states, as reported by [Skill.State] and [SkillRevision.State].
-// const (
-// 	SkillStateUnspecified = "STATE_UNSPECIFIED"
-// 	SkillStateActive      = "ACTIVE"
-// 	SkillStateDraft       = "DRAFT"
-// 	SkillStateCreating    = "CREATING"
-// 	SkillStateFailed      = "FAILED"
-// 	SkillStateDeleting    = "DELETING"
-// )
+// // ParseSkillID parses strings according to skillIDRegex.
+// // Returns an error if the skillID doesn't match.
+// // Example of a valid skillID: `urn:skill:projects-1234567890:locations:global:private-skill-name`
+// func (c *client) ParseSkillID(skillID string) (projectID, location, skillName string, resErr error) {
 
-// // Skill origins, as reported by [Skill.SkillSource].
-// const (
-// 	SkillSourceUnspecified = "SKILL_SOURCE_UNSPECIFIED"
-// 	SkillSourceUser        = "USER"
-// 	SkillSourceSystem      = "SYSTEM"
-// )
+// 	matches := skillIDRegex.FindStringSubmatch(skillID)
+// 	if len(matches) != 4 {
+// 		return "", "", "", fmt.Errorf("invalid skillID format")
+// 	}
+// 	projectID = matches[1]
+// 	location = matches[2]
+// 	skillName = matches[3]
+
+// 	return projectID, location, skillName, nil
+// }
+
+// Exampple: `projects/your-project-name/locations/global/skills/cloud.google.com-google-cloud-solution-n-tier-serverless-web-app`
+
+var skillIDRegex = regexp.MustCompile("projects/([^/]+)/locations/([^/]+)/skills/([^/]+)")
+
+// ParseSkillID parses strings according to skillIDRegex.
+// Returns an error if the skillID doesn't match.
+// Example of a valid skillID: `urn:skill:projects-1234567890:locations:global:private-skill-name`
+func (c *client) ParseSkillName(name string) (projectID, location, skillName string, resErr error) {
+	matches := skillIDRegex.FindStringSubmatch(name)
+	if len(matches) != 4 {
+		return "", "", "", fmt.Errorf("invalid skillID format")
+	}
+	projectID = matches[1]
+	location = matches[2]
+	skillName = matches[3]
+
+	return projectID, location, skillName, nil
+}

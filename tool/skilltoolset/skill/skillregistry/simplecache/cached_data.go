@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package skillregistry
+package simplecache
 
 import (
 	"fmt"
@@ -20,12 +20,12 @@ import (
 	"time"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 )
 
 type dataCache struct {
 	skills      []*cachedSkill
-	idToSkill   map[string]*cachedSkill
 	nameToSkill map[string]*cachedSkill
 
 	readingSkillsStart time.Time
@@ -33,14 +33,12 @@ type dataCache struct {
 }
 
 // newDataCache creates dataCache using the provided list of [agentregistry.Skill].
-func newDataCache(client Client, skills []*agentregistry.Skill) *dataCache {
+func newDataCache(client skillregistry.Client, skills []*agentregistry.Skill) *dataCache {
 	dc := &dataCache{
 		skills:      make([]*cachedSkill, 0, len(skills)),
-		idToSkill:   make(map[string]*cachedSkill),
 		nameToSkill: make(map[string]*cachedSkill),
 	}
 	dc.skills = make([]*cachedSkill, 0, len(skills))
-	dc.idToSkill = make(map[string]*cachedSkill)
 	dc.nameToSkill = make(map[string]*cachedSkill)
 
 	// add all skills to the internal structures
@@ -48,7 +46,6 @@ func newDataCache(client Client, skills []*agentregistry.Skill) *dataCache {
 		cs := newCachedSkill(client, sk)
 
 		dc.skills = append(dc.skills, cs)
-		dc.idToSkill[sk.Uid] = cs
 		dc.nameToSkill[sk.Name] = cs
 	}
 
@@ -58,8 +55,8 @@ func newDataCache(client Client, skills []*agentregistry.Skill) *dataCache {
 // loadSkills loads the full list of skills (sequencial due to paging) and returns a new dataCache containing the skills
 // An error is returned when getting the list of skills fails.
 // No frontmatters are loaded. No zip files are loaded.
-func loadSkills(c Client) (*dataCache, error) {
-	log.Printf("loadSkills")
+func loadSkills(c skillregistry.Client) (*dataCache, error) {
+	log.Printf("loadSkills start")
 	start := time.Now()
 
 	skills, err := c.ListSkills()
@@ -75,13 +72,32 @@ func loadSkills(c Client) (*dataCache, error) {
 	return dc, nil
 }
 
+// frontmatterReadDone is used to report the results of parallel workers readeing frontmatters
+type frontmatterReadDone struct {
+	// prefixedSkillName field is tricky. SkillRegistry uses in fact the key = (project, location, provider, displayname)
+	// provider is "private" for your own skills or contains provider code (like "cloud.google.com").
+	// In ADK project and location is client-specific. But we have only name to identify the skill.
+	// So, we combine provider and pure name into one prefixedSkillName. By doing this we have the same key like SkillRegistry: (project, location, provider + "-" + displayname)
+	// From now on, we override Frontmatter name (which doesn't have to be unique or match SkillRegistry) to this value.
+	prefixedSkillName string
+
+	// non-nil in case when the frontmatter cannot be read
+	err error
+
+	// the skill which was the input parameter for worker (needed to be able to match the results with the right skill)
+	skill *cachedSkill
+}
+
 // loadFrontmatters loads fronmatters for skills in dataCache.
 // It's being done in parallel using nWorkers
-func loadFrontmatters(c Client, nWorkers int, dc *dataCache) error {
+func loadFrontmatters(c skillregistry.Client, nWorkers int, dc *dataCache) error {
+	if nWorkers <= 0 {
+		return fmt.Errorf("nWorkers must be > 0")
+	}
 	log.Printf("loadFrontmatters")
 
 	toProcess := make(chan *cachedSkill, len(dc.skills))
-	done := make(chan struct{}, len(dc.skills))
+	done := make(chan frontmatterReadDone, len(dc.skills))
 
 	for i := 0; i < nWorkers; i++ {
 		go frontmatterWorker(i, c, toProcess, done)
@@ -94,7 +110,14 @@ func loadFrontmatters(c Client, nWorkers int, dc *dataCache) error {
 
 	// return for all workers to finish
 	for i := 0; i < len(dc.skills); i++ {
-		<-done
+		res := <-done
+		if res.err != nil {
+			// fail on the first failure
+			return res.err
+		}
+		if res.prefixedSkillName != "" {
+			dc.nameToSkill[res.prefixedSkillName] = res.skill
+		}
 	}
 	log.Printf("loadFrontmatters done")
 	return nil
@@ -102,23 +125,34 @@ func loadFrontmatters(c Client, nWorkers int, dc *dataCache) error {
 
 // frontmatterWorker is used to load frontmatters in parallel. It uses the provided
 // client to load frontmatter.
-// TODO: error handling
-func frontmatterWorker(i int, c Client, toProcess chan *cachedSkill, done chan struct{}) {
+func frontmatterWorker(i int, c skillregistry.Client, toProcess chan *cachedSkill, done chan frontmatterReadDone) {
 	for sk := range toProcess {
 		// log.Printf("frontmatterWorker %d processing %v", i, sk.origSkill.Name)
 		s, err := c.GetSkill(sk.origSkill.Name)
 		if err != nil {
-			log.Printf("frontmatterWorker %d failed for %v: %v", i, sk.origSkill.Name, err)
+			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d failed: %w", i, err)}
 			continue
 		}
+
+		// we assume that the location is aligned with the client, so we can safely strip it.
+		// prefixedSkillName is by SkillRegistry build using the provider and the display name.
+		// for your own skills with name "SkillName" you will see private-SkillName.
+		_, _, prefixedSkillName, err := c.ParseSkillName(sk.origSkill.Name)
+		if err != nil {
+			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d failed to parse skillID: %w", i, err)}
+			continue
+		}
+
+		// skillName here is a prefix + displayName (provided by SkillRegistry)
 		sk.frontmatter = skill.Frontmatter{
-			Name:          sk.origSkill.Name,
+			Name:          prefixedSkillName, // here we need the unique name, so we are overriding whatever comes from the Frontmatter
 			Description:   s.Frontmatter.Description,
 			License:       s.Frontmatter.License,
 			Compatibility: s.Frontmatter.Compatibility,
 			Metadata:      s.Frontmatter.Metadata,
 		}
-		// log.Printf("frontmatterWorker %d processed  %v", i, sk.origSkill.Name)
-		done <- struct{}{}
+
+		// return the parsed skillName
+		done <- frontmatterReadDone{prefixedSkillName: prefixedSkillName, skill: sk, err: nil}
 	}
 }

@@ -12,24 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package skillregistry
+package simplecache
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 )
 
 type cachedSkill struct {
-	client Client
+	client skillregistry.Client
 
-	origSkill   agentregistry.Skill
-	frontmatter skill.Frontmatter
+	origSkill       agentregistry.Skill
+	frontmatter     skill.Frontmatter
+	instructions    string
+	gotInstructions bool
 
 	resources *resources
 }
 
 // newCachedSkill returns a new cachedSkill containting the provided agentregistry.Skill
-func newCachedSkill(client Client, s *agentregistry.Skill) *cachedSkill {
+func newCachedSkill(client skillregistry.Client, s *agentregistry.Skill) *cachedSkill {
 	return &cachedSkill{
 		client:    client,
 		origSkill: *s,
@@ -43,4 +48,24 @@ func (s *cachedSkill) getResource(path string) (*resource, error) {
 
 func (s *cachedSkill) listResources(subpath string) ([]string, error) {
 	return s.resources.listResources(s.origSkill.DefaultRevision, subpath)
+}
+
+func (s *cachedSkill) getInstruction() (string, error) {
+	if s.gotInstructions {
+		return s.instructions, nil
+	}
+
+	res, err := s.getResource("SKILL.md")
+	if err != nil {
+		return "", fmt.Errorf("cannot getResource: %w", err)
+	}
+
+	_, instr, err := skill.ParseBytes(res.content)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse: %w", err)
+	}
+
+	s.instructions = instr
+	s.gotInstructions = true
+	return instr, nil
 }
