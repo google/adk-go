@@ -59,6 +59,9 @@ func (m *mockModelForTest) Backend() genai.Backend {
 var (
 	testExporter *tracetest.InMemoryExporter
 	initTracer   sync.Once
+
+	testLogExporter *inMemoryLogExporter
+	initLogger      sync.Once
 )
 
 func TestGenerateContentTracing(t *testing.T) {
@@ -174,6 +177,10 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 				if len(gotSpans) != 0 {
 					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
 				}
+
+				// A trailing empty response must not replace the partial response used
+				// when the deferred span records token usage.
+				yield(nil, nil)
 			}
 		},
 	}
@@ -364,14 +371,19 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 }
 
 func setupLoggerProvider(t *testing.T) *inMemoryLogExporter {
-	logExporter := &inMemoryLogExporter{}
-	provider := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)),
-	)
-	originalProvider := global.GetLoggerProvider()
-	global.SetLoggerProvider(provider)
-	t.Cleanup(func() {
-		global.SetLoggerProvider(originalProvider)
+	t.Helper()
+	initLogger.Do(func() {
+		// internal/telemetry resolves its logger from the global provider at package init.
+		// The global delegate only forwards to the first provider set, so we can override only once.
+		testLogExporter = &inMemoryLogExporter{}
+		global.SetLoggerProvider(sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewSimpleProcessor(testLogExporter)),
+		))
 	})
-	return logExporter
+	// Reset the exporter before each test so records from earlier runs don't leak in.
+	testLogExporter.records = nil
+	t.Cleanup(func() {
+		testLogExporter.records = nil
+	})
+	return testLogExporter
 }

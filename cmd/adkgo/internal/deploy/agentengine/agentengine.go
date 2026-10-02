@@ -40,6 +40,13 @@ import (
 	"google.golang.org/adk/server/agentengine"
 )
 
+// agentEngineOperationTimeout bounds how long we wait for a
+// CreateReasoningEngine/UpdateReasoningEngine long-running operation to
+// complete. Building and deploying the container image typically takes
+// 15-30 minutes, well over the client's default per-RPC timeout, even on a
+// successful deployment.
+const agentEngineOperationTimeout = 45 * time.Minute
+
 type gCloudFlags struct {
 	region      string
 	projectName string
@@ -333,7 +340,13 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 
 			p("Waiting for operation to complete...")
-			re, err := op.Wait(ctx)
+			// Agent Engine deployments build and push a container image, which can
+			// take well beyond the client's default per-RPC timeout even though the
+			// deployment itself succeeds. Give the poll loop a long, explicit
+			// deadline instead of letting it inherit the default.
+			waitCtx, cancel := context.WithTimeout(ctx, agentEngineOperationTimeout)
+			defer cancel()
+			re, err := op.Wait(waitCtx)
 			if err != nil {
 				return fmt.Errorf("operation failed: %w", err)
 			}
@@ -422,7 +435,11 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 			}
 
 			p("Waiting for operation to complete...")
-			re, err := op.Wait(ctx)
+			// See the matching comment in gcloudDeployToAgentEngine: the default
+			// per-RPC timeout is shorter than a real deployment can take.
+			waitCtx, cancel := context.WithTimeout(ctx, agentEngineOperationTimeout)
+			defer cancel()
+			re, err := op.Wait(waitCtx)
 			if err != nil {
 				return fmt.Errorf("operation failed: %w", err)
 			}

@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package database provides a session.Service backed by a relational
+// database (for example PostgreSQL, Spanner, or SQLite) using GORM.
+//
+// The service never creates or alters its tables. Call [AutoMigrate] after
+// constructing it, on every startup: a release of this package may add
+// columns, and writes to that table fail until they exist. Applications that
+// manage the schema themselves instead of calling AutoMigrate must add those
+// columns before deploying the release that introduces them.
 package database
 
 import (
@@ -40,7 +48,7 @@ type databaseService struct {
 // accepts optional [gorm.Option] values for further GORM configuration.
 //
 // It returns the new [session.Service] or an error if the database connection
-// [gorm.Open] fails.
+// [gorm.Open] fails. The service does not create its tables. See [AutoMigrate].
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
@@ -51,6 +59,9 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
+// It creates missing tables and columns, alters existing columns whose type,
+// size or nullability differs from the models, and never drops a column. It
+// can be called repeatedly and is meant to run on every startup.
 //
 // NOTE: This function relies on a type assertion to the concrete *databaseService
 // implementation. It will return an error if the provided session.Service is
