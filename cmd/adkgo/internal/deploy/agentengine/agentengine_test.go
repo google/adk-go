@@ -226,4 +226,9 @@ func TestPrepareDockerfile_EntryPointReachesRUNLine(t *testing.T) {
 	if !strings.HasSuffix(runLine, want) {
 		t.Errorf("RUN line = %q, want it to end with %q", runLine, want)
 	}
+	// The web server defaults to loopback now, so the container CMD must opt
+	// back into all interfaces or Agent Engine cannot reach it.
+	if wantCMD := `["/app/` + flags.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "8080"`; !strings.Contains(string(content), wantCMD) {
+		t.Errorf("Dockerfile CMD must bind the web server to all interfaces with -host 0.0.0.0:\n%s", content)
+	}
 }
