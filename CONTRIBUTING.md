@@ -163,14 +163,14 @@ leaves the PR queued so a later `v1` change can still let it land on its own.
 
 A feature whose API or behavior is not settled yet lives under `exp/`, in a
 package of its own, such as `exp/appinfo`. Anything there may change or be
-removed in a later minor version without notice, and [`exp/doc.go`](exp/doc.go)
-tells users so.
+removed in a later version without notice, and [`exp/doc.go`](exp/doc.go) tells
+users so.
 
-Use `exp/` when a feature has to ship before its design is final: it ports an
-adk-python feature marked experimental, it serves an outside contract that is
-still being agreed, or its API needs real use before anyone can commit to it. A
-feature ready for the compatibility promise goes straight into the stable
-packages, and a helper only ADK itself uses goes in `internal/`.
+Use `exp/` when a feature has to ship before its design is final: it serves an
+outside contract that is still being agreed, or its API needs real use before
+anyone can commit to it. A feature ready for the compatibility promise goes
+straight into the stable packages, and a helper only ADK itself uses goes in
+`internal/`.
 
 A package under `exp/`:
 
@@ -181,9 +181,6 @@ A package under `exp/`:
     needs in a stable package is ordinary API there, under the normal
     compatibility rules, and it stays when the experiment goes. Add only what is
     useful on its own.
--   **Warns on first use.** It logs adk-python's experimental notice once, the
-    first time the feature is used, as `exp/appinfo` does. The wording comes
-    from adk-python's `src/google/adk/utils/feature_decorator.py`.
 -   **Has no `Experimental` or `X` in its names.** The import path already says
     it. Name things as they will be named once stable, so that graduating is a
     move rather than a rename.
@@ -198,8 +195,8 @@ users of the feature find out. Do not mark it with `!` or a `BREAKING CHANGE:`
 footer, because release-please reads either as a new major version.
 
 A feature that proves itself moves out of `exp/` into the stable packages, and
-the compatibility rules apply to it from then on. One that does not is removed,
-at the latest by the next major version.
+the compatibility rules apply to it from then on. One that does not may be
+removed.
 
 ## Before you begin
 

@@ -14,9 +14,7 @@
 
 // Package appinfo implements GET /apps/{app_name}/app-info, which describes an
 // ADK app without running it: its root agent, and every LLM agent reachable
-// from that root with its description, instruction, tools and sub-agents. It is
-// the Go counterpart of the experimental endpoint of the same name in
-// adk-python's API server.
+// from that root with its description, instruction, tools and sub-agents.
 //
 // The endpoint is experimental. Its response may change, or the endpoint may be
 // removed, in a later version without notice, and [Handler] logs a warning
@@ -104,9 +102,8 @@ type AppInfo struct {
 // are described in [AppInfo.Agents], but this agent hands off to the agent in
 // between rather than to them.
 //
-// Neither Tools nor SubAgents carries omitempty. adk-python emits both on every
-// agent, the empty list included, and a client that reads a field by index
-// rather than by lookup fails on a key that is simply absent.
+// Tools and SubAgents are present on every agent, as [] when there is nothing
+// to report, so a client can read them without checking that the key exists.
 type AgentInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
@@ -299,8 +296,7 @@ func instruction(state *llminternal.State) string {
 }
 
 // toolDeclarations describes the tools an LLM agent exposes to the model, as
-// function declarations. Tools without a declaration are omitted, as adk-python
-// omits them.
+// function declarations. Tools without a declaration are omitted.
 func toolDeclarations(tools []tool.Tool) []*genai.Tool {
 	infos := make([]*genai.Tool, 0, len(tools))
 	for _, t := range tools {

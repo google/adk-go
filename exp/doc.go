@@ -15,10 +15,9 @@
 // Package exp holds ADK Go features that are not yet stable API, one
 // subpackage per feature.
 //
-// Anything under exp may change, or be removed, in a later minor version
-// without notice. A feature that proves itself moves out of exp into the
-// stable packages; one that does not is removed, at the latest by the next
-// major version.
+// Anything under exp may change, or be removed, in a later version without
+// notice. A feature that proves itself moves out of exp into the stable
+// packages; one that does not may be removed.
 //
 // The subpackages are:
 //

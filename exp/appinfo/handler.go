@@ -26,9 +26,6 @@ import (
 )
 
 // experimentalWarning is logged the first time the endpoint serves a request.
-// Its text is the notice adk-python's experimental decorator attaches to a
-// feature (src/google/adk/utils/feature_decorator.py), so the two runtimes warn
-// in the same words.
 const experimentalWarning = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feature is experimental and may change or be removed in future versions without notice. It may introduce breaking changes at any time."
 
 // Handler returns the handler for GET /apps/{app_name}/app-info. It takes the
@@ -38,8 +35,7 @@ const experimentalWarning = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feat
 // It answers 404 for an app loader does not serve and 503 when loader is nil.
 //
 // The first request it serves logs a warning that the endpoint is
-// experimental, once per returned handler, as adk-python warns the first time
-// an experimental feature is used. Mounted behind authentication, as
+// experimental, once per returned handler. Mounted behind authentication, as
 // [NewLauncher] mounts it, a request that is refused never reaches it and does
 // not use up the warning.
 //
