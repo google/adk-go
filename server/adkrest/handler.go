@@ -50,6 +50,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	})
 
 	router := mux.NewRouter().StrictSlash(true)
+
+	// Apply request-body size limit to mitigate memory-exhaustion DoS before
+	// any routes (including /health) are registered. A MaxPayloadSize of 0 or
+	// less selects defaultMaxPayloadSize.
+	router.Use(MaxBytesMiddleware(cfg.MaxPayloadSize))
+
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
@@ -142,6 +148,10 @@ type ServerConfig struct {
 	// browser on this machine from a sidecar proxy or an nginx proxy_pass to
 	// 127.0.0.1.
 	BindHost string
+
+	// MaxPayloadSize limits request body size in bytes. If <= 0,
+	// defaultMaxPayloadSize is used.
+	MaxPayloadSize int64
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.

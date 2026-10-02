@@ -276,6 +276,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		MemoryService:   config.MemoryService,
 		AgentLoader:     config.AgentLoader,
 		ArtifactService: config.ArtifactService,
+		MaxPayloadSize:  config.MaxPayloadSize,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 		PluginConfig:    config.PluginConfig,
 		BindHost:        config.BindHost,
