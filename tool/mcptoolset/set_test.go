@@ -279,6 +279,74 @@ func TestReservedToolNameRefused(t *testing.T) {
 	}
 }
 
+func TestReservedToolNames(t *testing.T) {
+	// Framework-internal dispatch names and the in-model built-ins this port
+	// actually registers. Both classes must be refused.
+	refused := []string{
+		"set_model_response",
+		"transfer_to_agent",
+		"finish_task",
+		"task_completed",
+		"exit_loop",
+		"load_artifacts",
+		"load_memory",
+		"google_search",
+		"google_maps_grounding",
+		"url_context",
+	}
+	for _, name := range refused {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			if _, err = ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			)); err == nil {
+				t.Fatalf("Tools() accepted the reserved name %q; want an error", name)
+			}
+		})
+	}
+
+	// The other direction: a name from another port (or one ADK Go does not
+	// define) must still be accepted. Refusing these would be a port that
+	// rejects names its own implementation never had a problem with.
+	accepted := []string{"google_maps", "vertex_ai_search", "code_execution", "web_search"}
+	for _, name := range accepted {
+		t.Run("accepts/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			tools, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			))
+			if err != nil {
+				t.Fatalf("Tools() refused %q, which this framework does not define: %v", name, err)
+			}
+			if len(tools) != 1 || tools[0].Name() != name {
+				t.Fatalf("Tools() = %v, want the single tool %q", tools, name)
+			}
+		})
+	}
+}
+
 func TestListToolsReconnection(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"}, weatherFunc)
