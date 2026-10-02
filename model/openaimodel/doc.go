@@ -46,8 +46,8 @@
 //	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
-//	            HTTPOptions apart from Timeout and Headers, and on Responses
-//	            also StopSequences, the penalties and Seed
+//	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
+//	            and on Responses also StopSequences, the penalties and Seed
 //	Ignored     HTTPOptions.Headers, and on Chat Completions
 //	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
