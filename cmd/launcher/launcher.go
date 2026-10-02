@@ -69,4 +69,13 @@ type Config struct {
 	// base router and the ADK REST API sublauncher. If <= 0, the adkrest
 	// default (10 MiB) is used.
 	MaxPayloadSize int64
+
+	// BindHost is the address the server is bound to, as the web launcher
+	// resolved it from -host. A loopback value arms the Host check in
+	// [adkrest.ServerConfig.BindHost], which refuses a rebound page's
+	// same-origin GET: a browser sends no Origin on one, so Host is the only
+	// thing that gives it away.
+	//
+	// Empty means no bind was declared and that check stays off.
+	BindHost string
 }
