@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package skillregistry
+package simplecache
 
 import (
 	"fmt"
 	"io"
 	"log"
 	"strings"
+
+	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
 type resources struct {
-	client Client
+	client skillregistry.Client
 	// loaded keeps information whether the resources have been loaded - it may happen that a skill has no resources.
 	loaded    bool
 	res       []*resource
@@ -34,7 +36,7 @@ type resource struct {
 	content []byte
 }
 
-func newResources(client Client) *resources {
+func newResources(client skillregistry.Client) *resources {
 	return &resources{
 		client: client,
 	}
