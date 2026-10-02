@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 	"gorm.io/gorm"
 
 	"google.golang.org/adk/platform"
@@ -160,6 +162,42 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestDatabaseService_AppendEvent_TranscriptionsRoundTrip guards that live
+// audio transcriptions survive storage, matching the input_transcription and
+// output_transcription columns of adk-python's events table.
+func TestDatabaseService_AppendEvent_TranscriptionsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	event := &session.Event{ID: "live_event", Author: "agent"}
+	event.InputTranscription = &genai.Transcription{Text: "what time is it", Finished: true}
+	event.OutputTranscription = &genai.Transcription{Text: "it is noon"}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if diff := cmp.Diff(event.InputTranscription, ev.InputTranscription); diff != "" {
+		t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(event.OutputTranscription, ev.OutputTranscription); diff != "" {
+		t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
 	}
 }
 
