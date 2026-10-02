@@ -29,8 +29,8 @@ import (
 // ErrInvalidResumeResponse is returned by Workflow.Resume when a
 // response payload does not match its corresponding
 // RequestInput.ResponseSchema. The waiting node is left in
-// NodeWaiting with PendingRequest intact so the caller can retry
-// with a corrected payload.
+// NodeWaiting with its interrupt still recorded so the caller can
+// retry with a corrected payload.
 var ErrInvalidResumeResponse = errors.New("workflow: resume response does not match request schema")
 
 // ErrNothingToResume is returned by Workflow.Resume when the
@@ -43,20 +43,33 @@ var ErrInvalidResumeResponse = errors.New("workflow: resume response does not ma
 var ErrNothingToResume = errors.New("workflow: no waiting node matched the supplied responses")
 
 // Resume continues a previously paused workflow run. state is the
-// RunState loaded from session storage; responses maps
+// RunState reconstructed from session event history (see
+// ReconstructRunState); responses maps
 // RequestInput.InterruptID to the user-supplied response payload.
 //
 // For each waiting node whose InterruptID has a matching entry in
 // responses, Resume:
 //
-//  1. Validates the payload against PendingRequest.ResponseSchema,
-//     if non-nil. A mismatch surfaces as ErrInvalidResumeResponse
-//     via the iterator and leaves the node in NodeWaiting with
-//     PendingRequest intact.
+//  1. Validates the payload against the interrupt's declared
+//     response schema, if it declared one. A mismatch surfaces as
+//     ErrInvalidResumeResponse via the iterator and leaves the node
+//     in NodeWaiting with its interrupt still recorded.
 //
-//  2. Consumes the pending request (clears PendingRequest, sets
-//     Status = NodePending) before re-scheduling, so a duplicate
-//     Resume call with the same InterruptID becomes a no-op.
+//  2. Records the response and re-activates the node. What that means
+//     depends on how the node asked:
+//
+//     - A re-entry node (RerunOnResume) is set to NodePending and
+//     scheduled again with the response delivered via
+//     ctx.ResumedInput, so a duplicate Resume re-runs it a second
+//     time.
+//     - A handoff node is set to NodeCompleted and its response is
+//     routed to its successors without re-running the asker; a
+//     duplicate Resume then matches no waiting node and yields
+//     ErrNothingToResume.
+//
+//     A caller that must treat a double-submit as success therefore
+//     has to tolerate ErrNothingToResume. It is never a no-op in the
+//     re-entry case.
 //
 //  3. Routes the response to the asker's successors as if the
 //     asker had emitted it as its output (handoff mode). The

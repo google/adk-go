@@ -115,8 +115,9 @@ func TestWorkflowAgent_Resume_Idempotent(t *testing.T) {
 	runFreshTurn(t, sess, a, "x")
 	// First resume: matches the waiting node, runs the handler.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
-	// Second resume with the same payload: PendingRequest was
-	// consumed by the first call, so no waiting node matches and
+	// Second resume with the same payload: the handoff completed the
+	// asker and cleared its interrupts on the first call, so no
+	// waiting node matches and
 	// Resume yields ErrNothingToResume rather than re-running.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), workflow.ErrNothingToResume)
 
