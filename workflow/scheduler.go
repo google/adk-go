@@ -803,8 +803,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 // long-running interrupt (the nodeRun collects these from
 // Event.LongRunningToolIDs), the node transitions to NodeWaiting
 // instead of NodeCompleted, the interrupt IDs are recorded on
-// NodeState.Interrupts, and successors are not scheduled. The scheduler's main loop terminates naturally when
-// every live node has either completed or moved into NodeWaiting,
+// NodeState.Interrupts, and successors are not scheduled. The
+// scheduler's main loop terminates naturally when every live node
+// has either completed or moved into NodeWaiting,
 // at which point Workflow.Run's iterator exhausts and the caller
 // observes the pause by inspecting RunState.
 //
