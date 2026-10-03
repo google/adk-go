@@ -37,6 +37,7 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		}
 
 		state := llmAgent.internal()
+		schema := OutputSchemaFor(ctx, ctx.Agent().Name(), state)
 
 		req.Config = clone(state.GenerateContentConfig)
 		if req.Config == nil {
@@ -50,8 +51,8 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// structured output for tasks is collected via the FinishTaskTool's
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
-		if state.Mode != ModeTask && state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
-			req.Config.ResponseSchema = state.OutputSchema
+		if state.Mode != ModeTask && schema != nil && !needOutputSchemaProcessor(state) {
+			req.Config.ResponseSchema = schema
 			req.Config.ResponseMIMEType = "application/json"
 		}
 
