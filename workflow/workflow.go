@@ -225,12 +225,10 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 
 // New creates a new Workflow engine with the given name and edges.
 //
-// The name namespaces this workflow's nodes within the session's
-// event history: Run prefixes the node path it records with it,
-// except for a root wrapper, and that path is what ReconstructRunState
-// matches on when it attributes history back to nodes. RunNode and
-// Resume add no prefix. The same workflow may safely share a name
-// across different sessions.
+// The name labels this workflow's nodes on the paths Run records: Run
+// prefixes the node path it records with it, except for a root
+// wrapper. RunNode and Resume add no prefix. The same workflow may
+// safely share a name across different sessions.
 //
 // The prefix is a label, not a namespace. ReconstructRunState scopes
 // history to a run by invocation ID; attributing an event to a node
