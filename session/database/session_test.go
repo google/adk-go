@@ -17,8 +17,11 @@ package database
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/session"
 )
@@ -85,4 +88,104 @@ func TestLocalSessionEventsConcurrentAppend(t *testing.T) {
 	if got := s.Events().Len(); got != count {
 		t.Errorf("final event count = %d, want %d", got, count)
 	}
+}
+
+// TestAppendEventConcurrentAppenders runs two appenders on one session object,
+// which tail-retention compaction does when it stores its summary while
+// sub-agents are still producing events. Neither may be refused as stale. That
+// happens if updatedAt is set only after the commit: in between, the session
+// holds an older update time than storage, and the sibling's check reads it.
+func TestAppendEventConcurrentAppenders(t *testing.T) {
+	s := emptyService(t)
+	ctx := t.Context()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	sess := created.Session
+
+	const perWriter = 200
+	var appended, stale atomic.Int32
+	var wg sync.WaitGroup
+	for w := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range perWriter {
+				err := s.AppendEvent(ctx, sess, &session.Event{
+					ID:           fmt.Sprintf("w%d-e%d", w, i),
+					Author:       "user",
+					InvocationID: "inv1",
+					Timestamp:    time.Now(),
+				})
+				switch {
+				case err == nil:
+					appended.Add(1)
+				case strings.Contains(err.Error(), "stale session"):
+					// Matched on text: the package has no sentinel for it.
+					stale.Add(1)
+				default:
+					// SQLite refusing one of the two concurrent transactions
+					// with a lock error, which is not under test.
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if appended.Load() == 0 {
+		t.Fatal("no append committed, so nothing exercised the updatedAt write")
+	}
+	if n := stale.Load(); n > 0 {
+		t.Errorf("%d appends refused as stale by a sibling append on the same session", n)
+	}
+}
+
+// TestAppendEventStaleCheckReadsUnderLock covers the stale-session check's read
+// of updatedAt. SQLite never lets the two transactions in
+// TestAppendEventConcurrentAppenders overlap — it aborts one with a lock error
+// — so a sibling's commit never writes updatedAt during that read there. A
+// backend that runs transactions concurrently does, so this stands in for that
+// commit by setting updatedAt from another goroutine. Run under -race.
+func TestAppendEventStaleCheckReadsUnderLock(t *testing.T) {
+	s := emptyService(t)
+	ctx := t.Context()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	sess := created.Session.(*localSession)
+
+	// Ahead of every append, so a write landing late never leaves the session
+	// behind storage and the check never refuses an append as stale.
+	ahead := time.Now().Add(time.Hour)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			sess.mu.Lock()
+			sess.updatedAt = ahead
+			sess.mu.Unlock()
+		}
+	}()
+
+	for i := range 50 {
+		if err := s.AppendEvent(ctx, sess, &session.Event{
+			ID:           fmt.Sprintf("e%d", i),
+			Author:       "user",
+			InvocationID: "inv1",
+			Timestamp:    time.Now(),
+		}); err != nil {
+			t.Errorf("AppendEvent() error = %v", err)
+			break
+		}
+	}
+	close(done)
+	wg.Wait()
 }

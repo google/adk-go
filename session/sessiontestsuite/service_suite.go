@@ -20,6 +20,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -951,6 +952,81 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			if diff := cmp.Diff(event, gotEvent, cmpOpts...); diff != "" {
 				t.Errorf("Event mismatch (-want +got):\n%s", diff)
 			}
+		})
+
+		// Concurrent agents (parallelagent, the workflow scheduler) share one
+		// session.Session: a sub-agent goroutine can read it while the runner
+		// goroutine appends an event produced by a sibling. A Session
+		// implementation must therefore guard everything a reader can reach —
+		// its events, its state and its update time. Run under -race, as CI does.
+		t.Run("concurrent_reads_during_append", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			curSession := created.Session
+
+			const appends = 30
+			// The reader runs until the writer is done rather than for a fixed
+			// count: an append may hit a real backend and take orders of
+			// magnitude longer than a read, and a reader that finished early
+			// would leave most of the writes unobserved.
+			done := make(chan struct{})
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Writer: the runner goroutine committing events.
+			go func() {
+				defer wg.Done()
+				defer close(done)
+				for i := range appends {
+					err := s.AppendEvent(ctx, curSession, &session.Event{
+						ID:           "event" + strconv.Itoa(i),
+						Author:       "user",
+						InvocationID: "inv1",
+					})
+					if err != nil {
+						t.Errorf("AppendEvent() error = %v", err)
+						return
+					}
+				}
+			}()
+
+			// Reader: a sibling sub-agent goroutine.
+			go func() {
+				defer wg.Done()
+				// Read before checking done, so a backend fast enough to finish
+				// every append before this goroutine is scheduled is still read.
+				for {
+					_ = curSession.LastUpdateTime()
+
+					if st := curSession.State(); st != nil {
+						for range st.All() {
+						}
+					}
+
+					if evs := curSession.Events(); evs != nil {
+						for e := range evs.All() {
+							if e == nil {
+								t.Errorf("Events().All() yielded a nil event")
+								return
+							}
+						}
+					}
+
+					select {
+					case <-done:
+						return
+					default:
+					}
+				}
+			}()
+
+			wg.Wait()
 		})
 	})
 

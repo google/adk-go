@@ -394,15 +394,9 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 
 	// Trim temp state before persisting
 	event = trimTempDeltaState(event)
-	// applyChanges and persist them
-	err := s.applyEvent(ctx, sess, event)
-	if err != nil {
-		return err
-	}
-
-	// update local session last update time
-	sess.updatedAt = event.Timestamp
-	return nil
+	// applyChanges and persist them. applyEvent also sets the session's
+	// updatedAt, before it commits.
+	return s.applyEvent(ctx, sess, event)
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -424,7 +418,7 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.updatedAt.UnixMicro()
+		sessionUpdateTime := sess.LastUpdateTime().UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
@@ -483,7 +477,10 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
-		sess.updatedAt = storageSess.UpdateTime
+		// Set here, before the commit, and not again after it. Set any later and
+		// the session can hold an older UpdateTime than storage, which a
+		// concurrent append's stale check refuses.
+		sess.setUpdatedAt(storageSess.UpdateTime)
 
 		return nil // Returning nil commits the transaction.
 	})
