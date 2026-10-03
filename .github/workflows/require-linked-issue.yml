@@ -1,0 +1,138 @@
+name: Require linked issue
+
+# Hourly sweep over recently opened PRs. Comments once on any that has no
+# linked issue, which CONTRIBUTING.md asks for. Doc and typo fixes are exempt,
+# so docs-only PRs are skipped.
+#
+# A schedule rather than pull_request_target: commenting needs a write token,
+# which a pull_request run from a fork does not get, and pull_request_target
+# and workflow_run are both blocked by the Actions security scan.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: require-linked-issue
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write    # post the comment
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const MARKER = '<!-- require-linked-issue -->';
+            const WINDOW_HOURS = 24;   // how far back to look
+            const MAX_COMMENTS = 5;    // stampede guard, per run
+
+            // A linking phrase in front of the number. A bare "#123" anywhere
+            // in the body used to count, which let "split out of #1424" and
+            // "discovered while validating #1547" read as linked issues.
+            // Keep the two halves separate: a phrase added mid-alternation
+            // would otherwise silently break the `|` chain across the join.
+            // `[\s:]*` rather than `\s*:?\s*`, which backtracks quadratically
+            // — 65k spaces after "closes" cost 5.3s per body, and a sweep
+            // tests up to 50.
+            const PHRASES = String.raw`close[sd]?|fix(?:e[sd])?|resolve[sd]?|address(?:e[sd])?`
+                          + String.raw`|implements?|related(?:\s+to)?|part\s+of|towards?|refs?|issues?`;
+            const TARGET = String.raw`(?:[\w.-]+/[\w.-]+)?#\d+|GH-\d+`
+                         + String.raw`|https://github\.com/[\w.-]+/[\w.-]+/issues/\d+`;
+            const LINKED = new RegExp(String.raw`\b(?:${PHRASES})\b[\s:]*(?:${TARGET})\b`, 'i');
+
+            const cutoff = Date.now() - WINDOW_HOURS * 3600 * 1000;
+
+            const { data: prs } = await github.rest.pulls.list({
+              ...context.repo, state: 'open',
+              sort: 'created', direction: 'desc', per_page: 50,
+            });
+
+            let commented = 0;
+            for (const pr of prs) {
+              if (commented >= MAX_COMMENTS) break;
+              if (Date.parse(pr.created_at) < cutoff) break;  // newest first
+              if (pr.draft || pr.user.type === 'Bot') continue;
+
+              // Only the default branch. A v1 backport cites the PR it replays
+              // rather than an issue, and GitHub resolves closing keywords
+              // against the default branch only, so the check below cannot see
+              // a link that is really there.
+              if (pr.base.ref !== pr.base.repo.default_branch) continue;
+
+              // Maintainers link their own issues. author_association misses
+              // members whose org membership is private, so fall back to the
+              // permission API, which 404s for everyone else. Anything other
+              // than that 404 — a 403 from the rate limiter, say — leaves the
+              // author unclassified, so skip rather than risk nagging a
+              // maintainer.
+              if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association)) continue;
+              const perm = await github.rest.repos
+                .getCollaboratorPermissionLevel({ ...context.repo, username: pr.user.login })
+                .then(r => r.data)
+                .catch(e => (e.status === 404 ? { permission: 'none' } : null));
+              if (!perm) {
+                core.warning(`#${pr.number}: permission lookup failed, skipping`);
+                continue;
+              }
+              // GitHub reports the triage role as read, so check the role too.
+              if (['admin', 'maintain', 'write'].includes(perm.permission)
+                  || perm.role_name === 'triage') continue;
+
+              const body = pr.body ?? '';
+
+              // The template's "Closes: #123" and "Related: #123" both count.
+              if (LINKED.test(body)) continue;
+              // GitHub's own view of the link, which catches what the regexp
+              // does not, such as a reference attached through the sidebar.
+              const res = await github.graphql(`
+                query($owner:String!, $repo:String!, $number:Int!) {
+                  repository(owner:$owner, name:$repo) {
+                    pullRequest(number:$number) {
+                      closingIssuesReferences(first:1) { totalCount }
+                    }
+                  }
+                }`, { owner: context.repo.owner, repo: context.repo.repo, number: pr.number });
+              if (res.repository.pullRequest.closingIssuesReferences.totalCount > 0) continue;
+
+              // CONTRIBUTING exempts small documentation and typo fixes.
+              const files = await github.paginate(github.rest.pulls.listFiles,
+                { ...context.repo, pull_number: pr.number, per_page: 100 });
+              if (files.length > 0 && files.every(
+                    f => f.filename.endsWith('.md') || f.filename.startsWith('docs/'))) continue;
+
+              // The marker is what keeps an hourly sweep from asking twice.
+              const existing = await github.paginate(github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 });
+              if (existing.some(c => (c.body ?? '').includes(MARKER))) continue;
+
+              const newIssue = new URL(
+                `https://github.com/${context.repo.owner}/${context.repo.repo}/issues/new`);
+              newIssue.searchParams.set('template', 'bug_report.md');
+              newIssue.searchParams.set('title', pr.title);
+              newIssue.searchParams.set('body', `Found while preparing #${pr.number}.\n\n`);
+
+              await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
+                body:
+                  `Thanks for the PR, @${pr.user.login}.\n\n` +
+                  'One thing before review. Our [contribution guide]' +
+                  '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#requirement-for-prs) ' +
+                  'asks for an issue behind each change, and I could not find one linked here.\n\n' +
+                  '- If an issue already exists, add `Closes: #<number>` or ' +
+                  '`Related: #<number>` to the description.\n' +
+                  `- If not, [open one](${newIssue}) — the link prefills the bug template ` +
+                  'with your PR title — then reference it the same way.\n\n' +
+                  'If this is a small doc or typo fix, ignore me. ' +
+                  'A maintainer can open the issue for you if you would rather.\n\n' +
+                  MARKER });
+
+              commented++;
+              core.info(`nudged #${pr.number}`);
+            }
+            core.info(`commented on ${commented} PR(s)`);
