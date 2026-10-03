@@ -81,6 +81,14 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
 
+// Agent returns the agent this node runs.
+//
+// It lets a caller inspect what a workflow is built from — describing an app,
+// drawing its graph — without running it. The agents a workflow reaches through
+// its edges are not among the workflow agent's [agent.Agent.SubAgents], so
+// walking sub-agents alone never finds them.
+func (n *AgentNode) Agent() agent.Agent { return n.agent }
+
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {

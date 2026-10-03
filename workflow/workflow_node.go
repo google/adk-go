@@ -42,6 +42,10 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 	}, nil
 }
 
+// Workflow returns the nested workflow this node runs, so a caller walking a
+// graph can descend into it. See [AgentNode.Agent].
+func (n *WorkflowNode) Workflow() *Workflow { return n.subWorkflow }
+
 // Run executes the sub-workflow with the given input.
 //
 // The sub-workflow's output is the output of its terminal node(s) —
