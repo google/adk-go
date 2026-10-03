@@ -15,14 +15,17 @@
 package agenttool_test
 
 import (
+	"context"
 	"iter"
 	"testing"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/agenttool"
@@ -91,6 +94,10 @@ func testAgentToolArtifacts(t *testing.T, nested bool) {
 					yield(nil, saveErr)
 					return
 				}
+				if _, userSaveErr := cb.Artifacts().Save(ctx, "user:prefs.txt", genai.NewPartFromText("user-scoped")); userSaveErr != nil {
+					yield(nil, userSaveErr)
+					return
+				}
 				event.Content = genai.NewContentFromText("done", "model")
 				yield(event, nil)
 			}
@@ -133,7 +140,79 @@ func testAgentToolArtifacts(t *testing.T, nested bool) {
 	if loadErr != nil || output.Part.Text != "output" {
 		t.Error("parent cannot load child's saved artifact")
 	}
+	userOutput, userLoadErr := store.Load(t.Context(), &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "other_session", FileName: "user:prefs.txt",
+	})
+	if userLoadErr != nil || userOutput.Part.Text != "user-scoped" {
+		t.Error("parent cannot load child's user-scoped artifact across sessions")
+	}
 	if !parentDelta {
 		t.Error("parent event lacks child's artifact delta")
+	}
+}
+
+type staticJSONModel struct {
+	text string
+}
+
+func (m staticJSONModel) Name() string { return "static-json" }
+
+func (m staticJSONModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content: genai.NewContentFromText(m.text, genai.RoleModel),
+		}, nil)
+	}
+}
+
+func TestAgentTool_Run_OutputArtifactWithOutputSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"title": {Type: genai.TypeString},
+		},
+		Required: []string{"title"},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:           "spec_writer",
+		Model:          staticJSONModel{text: `{"title":"v1"}`},
+		OutputSchema:   schema,
+		OutputArtifact: "spec.json",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	store := artifact.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             artifactParent(t, "parent", child),
+		SessionService:    session.InMemoryService(),
+		ArtifactService:   store,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	var deltaVer int64
+	for ev, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("run", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+		if ev != nil && ev.Actions.ArtifactDelta["spec.json"] > 0 {
+			deltaVer = ev.Actions.ArtifactDelta["spec.json"]
+		}
+	}
+	if deltaVer != 1 {
+		t.Errorf("parent ArtifactDelta[\"spec.json\"] = %d, want 1", deltaVer)
+	}
+	loaded, err := store.Load(t.Context(), &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "spec.json", Version: 1,
+	})
+	if err != nil || loaded.Part.Text != `{"title":"v1"}` {
+		t.Errorf("loaded spec.json = (%v, %v), want {\"title\":\"v1\"}", loaded, err)
 	}
 }

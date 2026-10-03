@@ -281,7 +281,8 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
-	if state.OutputSchema != nil {
+	artifactSaved := state.OutputArtifact != "" && ev.Actions.ArtifactDelta[state.OutputArtifact] > 0
+	if state.OutputSchema != nil && !artifactSaved {
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
@@ -291,11 +292,15 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 			}
 			output = parsed
 		}
+	} else if artifactSaved && ev.Output != nil {
+		output = ev.Output
+	} else if artifactSaved && state.OutputSchema != nil && state.OutputKey != "" {
+		output = ev.Actions.StateDelta[state.OutputKey]
 	} else {
 		output = text
 	}
 
-	if state.OutputKey != "" && output != nil {
+	if state.OutputKey != "" && output != nil && !artifactSaved {
 		if ev.Actions.StateDelta == nil {
 			ev.Actions.StateDelta = map[string]any{}
 		}

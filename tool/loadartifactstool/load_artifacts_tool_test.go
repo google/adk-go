@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
@@ -110,6 +112,79 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			name: "any slice with non-string",
 			args: map[string]any{
 				"artifact_names": []any{"fileA", 123},
+			},
+			wantErr: true,
+		},
+		{
+			name: "specific version as float64 from JSON",
+			args: map[string]any{
+				"artifact_names": []any{"design.md"},
+				"version":        float64(2),
+			},
+			want: map[string]any{
+				"artifact_names": []string{"design.md"},
+				"version":        2,
+			},
+		},
+		{
+			name: "artifact_versions selector list",
+			args: map[string]any{
+				"artifact_versions": []any{
+					map[string]any{"name": "design.md", "version": float64(1)},
+					map[string]any{"name": "design.md", "version": float64(2)},
+				},
+			},
+			want: map[string]any{
+				"artifact_names": []string{},
+				"artifact_versions": []map[string]any{
+					{"name": "design.md", "version": 1},
+					{"name": "design.md", "version": 2},
+				},
+			},
+		},
+		{
+			name: "list_versions boolean",
+			args: map[string]any{
+				"artifact_names": []any{"design.md"},
+				"list_versions":  true,
+			},
+			want: map[string]any{
+				"artifact_names": []string{"design.md"},
+				"list_versions":  true,
+			},
+		},
+		{
+			name: "list_versions string slice",
+			args: map[string]any{
+				"list_versions": []any{"design.md"},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"design.md"},
+				"list_versions":  true,
+			},
+		},
+		{
+			name: "negative version is rejected",
+			args: map[string]any{
+				"artifact_names": []any{"design.md"},
+				"version":        -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "fractional version is rejected",
+			args: map[string]any{
+				"artifact_names": []any{"design.md"},
+				"version":        1.5,
+			},
+			wantErr: true,
+		},
+		{
+			name: "artifact_versions entry missing name is rejected",
+			args: map[string]any{
+				"artifact_versions": []any{
+					map[string]any{"version": 1},
+				},
 			},
 			wantErr: true,
 		},
@@ -569,4 +644,152 @@ func createToolContext(t *testing.T) agent.Context {
 	})
 
 	return agent.NewToolContext(ctx, "", nil, nil)
+}
+
+func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	loadArtifactsTool := loadartifactstool.New()
+	requestProcessor := loadArtifactsTool.(toolinternal.RequestProcessor)
+
+	svc := artifact.InMemoryService()
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: &artifactinternal.Artifacts{
+			Service:   svc,
+			AppName:   "app",
+			UserID:    "user",
+			SessionID: "session",
+		},
+	})
+	tc := agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)
+
+	if _, err := tc.Artifacts().Save(t.Context(), "design.md", genai.NewPartFromText("draft v1")); err != nil {
+		t.Fatalf("Save v1: %v", err)
+	}
+	reqAfterOneRevision := &model.LLMRequest{}
+	if err := requestProcessor.ProcessRequest(tc, reqAfterOneRevision); err != nil {
+		t.Fatalf("ProcessRequest after 1 revision: %v", err)
+	}
+	instructionAfterOne := reqAfterOneRevision.Config.SystemInstruction.Parts[0].Text
+
+	for _, body := range []string{"draft v2", "draft v3"} {
+		if _, err := tc.Artifacts().Save(t.Context(), "design.md", genai.NewPartFromText(body)); err != nil {
+			t.Fatalf("Save(%q): %v", body, err)
+		}
+	}
+
+	t.Run("default instruction size is unchanged when multiple revisions exist", func(t *testing.T) {
+		reqAfterThree := &model.LLMRequest{}
+		if err := requestProcessor.ProcessRequest(tc, reqAfterThree); err != nil {
+			t.Fatalf("ProcessRequest after 3 revisions: %v", err)
+		}
+		got := reqAfterThree.Config.SystemInstruction.Parts[0].Text
+		if got != instructionAfterOne {
+			t.Errorf("instruction after 3 revisions = %q, want unchanged %q", got, instructionAfterOne)
+		}
+	})
+
+	t.Run("loads a specific revision via top-level version", func(t *testing.T) {
+		llmReq := &model.LLMRequest{
+			Contents: []*genai.Content{{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []any{"design.md"},
+						"version":        float64(1),
+					}),
+				},
+			}},
+		}
+		if err := requestProcessor.ProcessRequest(tc, llmReq); err != nil {
+			t.Fatalf("ProcessRequest: %v", err)
+		}
+		if len(llmReq.Contents) != 2 {
+			t.Fatalf("len(Contents) = %d, want 2", len(llmReq.Contents))
+		}
+		parts := llmReq.Contents[1].Parts
+		if got, want := parts[0].Text, "Artifact design.md (version 1) is:"; got != want {
+			t.Errorf("header = %q, want %q", got, want)
+		}
+		if got, want := parts[1].Text, "draft v1"; got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("loads multiple specific revisions via artifact_versions", func(t *testing.T) {
+		llmReq := &model.LLMRequest{
+			Contents: []*genai.Content{{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_versions": []any{
+							map[string]any{"name": "design.md", "version": float64(1)},
+							map[string]any{"name": "design.md", "version": float64(3)},
+						},
+					}),
+				},
+			}},
+		}
+		if err := requestProcessor.ProcessRequest(tc, llmReq); err != nil {
+			t.Fatalf("ProcessRequest: %v", err)
+		}
+		if len(llmReq.Contents) != 3 {
+			t.Fatalf("len(Contents) = %d, want 3", len(llmReq.Contents))
+		}
+		if got, want := llmReq.Contents[1].Parts[1].Text, "draft v1"; got != want {
+			t.Errorf("first loaded body = %q, want %q", got, want)
+		}
+		if got, want := llmReq.Contents[2].Parts[1].Text, "draft v3"; got != want {
+			t.Errorf("second loaded body = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("enumerates revisions with metadata when list_versions is true", func(t *testing.T) {
+		llmReq := &model.LLMRequest{
+			Contents: []*genai.Content{{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []any{"design.md"},
+						"list_versions":  true,
+					}),
+				},
+			}},
+		}
+		if err := requestProcessor.ProcessRequest(tc, llmReq); err != nil {
+			t.Fatalf("ProcessRequest: %v", err)
+		}
+		if len(llmReq.Contents) != 2 {
+			t.Fatalf("len(Contents) = %d, want 2", len(llmReq.Contents))
+		}
+		parts := llmReq.Contents[1].Parts
+		if got, want := parts[0].Text, "Versions of artifact design.md:"; got != want {
+			t.Errorf("header = %q, want %q", got, want)
+		}
+		var summaries []struct {
+			Version    int64  `json:"version"`
+			CreateTime string `json:"create_time"`
+			MimeType   string `json:"mime_type"`
+		}
+		if err := json.Unmarshal([]byte(parts[1].Text), &summaries); err != nil {
+			t.Fatalf("json.Unmarshal(%q): %v", parts[1].Text, err)
+		}
+		if strings.Contains(parts[1].Text, "canonical_uri") || strings.Contains(parts[1].Text, "custom_metadata") {
+			t.Errorf("version summary exposed internal URI or custom metadata: %s", parts[1].Text)
+		}
+		if len(summaries) != 3 {
+			t.Fatalf("len(summaries) = %d, want 3", len(summaries))
+		}
+		for i, wantVer := range []int64{1, 2, 3} {
+			if summaries[i].Version != wantVer {
+				t.Errorf("summaries[%d].Version = %d, want %d", i, summaries[i].Version, wantVer)
+			}
+			if summaries[i].MimeType != "text/plain" {
+				t.Errorf("summaries[%d].MimeType = %q, want \"text/plain\"", i, summaries[i].MimeType)
+			}
+			if summaries[i].CreateTime == "" {
+				t.Errorf("summaries[%d] missing create_time: %+v", i, summaries[i])
+			}
+		}
+	})
 }
