@@ -17,6 +17,7 @@ package vertexai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -57,7 +58,17 @@ func NewService(ctx context.Context, config *ServiceConfig) (memory.Service, err
 	}, nil
 }
 
-var _ memory.Service = &vertexAIService{}
+var (
+	_ memory.Service             = &vertexAIService{}
+	_ memory.AddEventsToMemoryer = &vertexAIService{}
+)
+
+// ErrAddEventsToMemoryUnsupported is returned by
+// [vertexAIService.AddEventsToMemory] to signal that incremental ingestion is not
+// yet implemented for the Vertex AI Memory Bank backend. Callers that want to
+// fall back to [memory.Service.AddSessionToMemory] can match it with
+// [errors.Is].
+var ErrAddEventsToMemoryUnsupported = errors.New("vertexai: AddEventsToMemory is not yet supported")
 
 // AddSessionToMemory implements [memory.Service].
 func (v *vertexAIService) AddSessionToMemory(ctx context.Context, s session.Session) error {
@@ -87,6 +98,12 @@ func (v *vertexAIService) AddSessionToMemory(ctx context.Context, s session.Sess
 	}
 
 	return err
+}
+
+// AddEventsToMemory is not yet supported by the Vertex AI Memory Bank service;
+// use AddSessionToMemory to ingest a full session instead.
+func (v *vertexAIService) AddEventsToMemory(ctx context.Context, req *memory.AddEventsToMemoryRequest) error {
+	return ErrAddEventsToMemoryUnsupported
 }
 
 // SearchMemory implements [memory.Service].
