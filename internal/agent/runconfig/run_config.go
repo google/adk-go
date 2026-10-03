@@ -16,6 +16,7 @@ package runconfig
 
 import (
 	"context"
+	"sync/atomic"
 
 	"google.golang.org/adk/v2/agent"
 )
@@ -28,9 +29,22 @@ const (
 	StreamingModeBidi StreamingMode = "bidi"
 )
 
+// RunConfig carries the per-invocation runtime settings that the flow needs but
+// that are not part of any single agent's configuration. It is stored on the Go
+// context by the runner and must be used by pointer: it holds the invocation's
+// model-call counter.
 type RunConfig struct {
 	StreamingMode StreamingMode
 	Live          *agent.LiveRunConfig
+
+	// MaxLLMCalls is the resolved model-call budget for this invocation. See
+	// ResolveMaxLLMCalls. Non-positive means no limit.
+	MaxLLMCalls int
+
+	// llmCalls counts model calls made during this invocation, across every
+	// agent it runs, so one budget covers the whole invocation rather than one
+	// budget per agent.
+	llmCalls atomic.Int64
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {
