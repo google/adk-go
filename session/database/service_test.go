@@ -16,9 +16,11 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,6 +339,383 @@ func emptyServiceFromDB(t *testing.T) *databaseService {
 	return dbSvc
 }
 
+// TestDatabaseService_AppendEvent_RefreshesStaleHandle exercises the OCC
+// retry: a second writer advancing the lease should not fail the first
+// writer's append, it should refresh the handle and retry once.
+func TestDatabaseService_AppendEvent_RefreshesStaleHandle(t *testing.T) {
+	createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+	if err := EnableStaleRetry(s); err != nil {
+		t.Fatalf("EnableStaleRetry: %v", err)
+	}
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(a): %v", err)
+	}
+	b, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(b): %v", err)
+	}
+	retainedState := a.Session.State()
+
+	base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.AppendEvent(ctx, a.Session, &session.Event{
+		ID: "event-temp", Timestamp: base,
+		Actions: session.EventActions{StateDelta: map[string]any{"temp:review": "keep-me"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(temp): %v", err)
+	}
+	eventB := &session.Event{ID: "event-b", Timestamp: base.Add(2 * time.Second), Actions: session.EventActions{StateDelta: map[string]any{"from-b": true}}}
+	eventA := &session.Event{ID: "event-a", Timestamp: base.Add(time.Second), Actions: session.EventActions{StateDelta: map[string]any{"from-a": true}}}
+	if err := s.AppendEvent(ctx, b.Session, eventB); err != nil {
+		t.Fatalf("AppendEvent(b): %v", err)
+	}
+	if err := s.AppendEvent(ctx, a.Session, eventA); err != nil {
+		t.Fatalf("AppendEvent(a) after another writer: %v", err)
+	}
+
+	if got := a.Session.Events().Len(); got != 3 {
+		t.Fatalf("refreshed handle has %d events, want 3", got)
+	}
+	if got, err := retainedState.Get("temp:review"); err != nil || got != "keep-me" {
+		t.Errorf("refresh dropped local temp state from retained State: got %v, err %v", got, err)
+	}
+	if got, err := retainedState.Get("from-a"); err != nil || got != true {
+		t.Errorf("retained State missing own state after refresh: got %v, err %v", got, err)
+	}
+	if got, err := retainedState.Get("from-b"); err != nil || got != true {
+		t.Errorf("retained State missing second writer state after refresh: got %v, err %v", got, err)
+	}
+	if got := a.Session.LastUpdateTime(); !got.Equal(base.Add(2 * time.Second)) {
+		t.Errorf("LastUpdateTime() = %v, want %v", got, base.Add(2*time.Second))
+	}
+	if diff := cmp.Diff([]string{"event-temp", "event-a", "event-b"}, eventIDs(a.Session)); diff != "" {
+		t.Errorf("refreshed handle events not in chronological order (-want +got):\n%s", diff)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get(final): %v", err)
+	}
+	if got.Session.Events().Len() != 3 {
+		t.Fatalf("database has %d events, want 3", got.Session.Events().Len())
+	}
+}
+
+func TestDatabaseService_AppendEvent_StaleRetryStopsAfterOneRetry(t *testing.T) {
+	createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+	if err := EnableStaleRetry(s); err != nil {
+		t.Fatalf("EnableStaleRetry: %v", err)
+	}
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const callbackName = "test:force-stale-session"
+	sessionQueries := 0
+	if err := s.db.Callback().Query().After("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		stored, ok := tx.Statement.Dest.(*storageSession)
+		if !ok {
+			return
+		}
+		sessionQueries++
+		// The first and third session reads are the two apply attempts. The
+		// second is refreshSession's Get and must remain the real snapshot.
+		if sessionQueries == 1 || sessionQueries == 3 {
+			stored.UpdateTime = stored.UpdateTime.Add(time.Hour)
+		}
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.db.Callback().Query().Remove(callbackName); err != nil {
+			t.Errorf("remove query callback: %v", err)
+		}
+	})
+
+	err = s.AppendEvent(ctx, created.Session, &session.Event{
+		ID: "event", Timestamp: createdAt.Add(time.Second),
+	})
+	if !errors.Is(err, errStaleSession) {
+		t.Fatalf("AppendEvent error = %v, want errStaleSession", err)
+	}
+	if sessionQueries != 3 {
+		t.Errorf("session query count = %d, want 3 (apply, refresh, apply)", sessionQueries)
+	}
+}
+
+func TestDatabaseService_AppendEvent_DoesNotRetryNonStaleError(t *testing.T) {
+	createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+	if err := EnableStaleRetry(s); err != nil {
+		t.Fatalf("EnableStaleRetry: %v", err)
+	}
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	injectedErr := errors.New("injected storage event failure")
+	const callbackName = "test:fail-storage-event-create"
+	createAttempts := 0
+	if err := s.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*storageEvent); !ok {
+			return
+		}
+		createAttempts++
+		if err := tx.AddError(injectedErr); !errors.Is(err, injectedErr) {
+			t.Errorf("AddError() = %v, want injected error", err)
+		}
+	}); err != nil {
+		t.Fatalf("register create callback: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.db.Callback().Create().Remove(callbackName); err != nil {
+			t.Errorf("remove create callback: %v", err)
+		}
+	})
+
+	err = s.AppendEvent(ctx, created.Session, &session.Event{
+		ID: "event", Timestamp: createdAt.Add(time.Second),
+	})
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("AppendEvent error = %v, want injected error", err)
+	}
+	if createAttempts != 1 {
+		t.Errorf("storage event create attempts = %d, want 1", createAttempts)
+	}
+}
+
+type pauseRefreshKey struct{}
+
+func TestDatabaseService_ConcurrentRefreshDoesNotInstallOlderSnapshot(t *testing.T) {
+	t0 := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return t0 })
+	s := emptyService(t)
+	if err := EnableStaleRetry(s); err != nil {
+		t.Fatalf("EnableStaleRetry: %v", err)
+	}
+	if _, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	get := func() session.Session {
+		resp, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return resp.Session
+	}
+
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var fired atomic.Bool
+	const callbackName = "test:pause-refresh-events-query"
+	if err := s.db.Callback().Query().After("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Context.Value(pauseRefreshKey{}) != nil &&
+			tx.Statement.Table == "events" &&
+			fired.CompareAndSwap(false, true) {
+			close(paused)
+			<-release
+		}
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.db.Callback().Query().Remove(callbackName); err != nil {
+			t.Errorf("remove query callback: %v", err)
+		}
+	})
+
+	base := t0.Add(24 * time.Hour)
+	handle := get()
+	if err := s.AppendEvent(ctx, get(), &session.Event{ID: "outside", Timestamp: base.Add(time.Second)}); err != nil {
+		t.Fatalf("AppendEvent(outside): %v", err)
+	}
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondCtx := context.WithValue(ctx, pauseRefreshKey{}, true)
+		secondErr <- s.AppendEvent(secondCtx, handle, &session.Event{ID: "second", Timestamp: base.Add(3 * time.Second)})
+	}()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the second refresh")
+	}
+
+	if err := s.AppendEvent(ctx, handle, &session.Event{ID: "first", Timestamp: base.Add(2 * time.Second)}); err != nil {
+		t.Fatalf("AppendEvent(first): %v", err)
+	}
+	before := handle.LastUpdateTime()
+	close(release)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("AppendEvent(second): %v", err)
+	}
+
+	found := false
+	for event := range handle.Events().All() {
+		found = found || event.ID == "first"
+	}
+	if !found {
+		t.Error("handle lost committed event first")
+	}
+	if got := handle.LastUpdateTime(); got.Before(before) {
+		t.Errorf("LastUpdateTime moved backwards: %v -> %v", before, got)
+	}
+}
+
+func TestDatabaseService_StaleRetryRejectsRecreatedSession(t *testing.T) {
+	var tick atomic.Int64
+	t0 := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time {
+		return t0.Add(time.Duration(tick.Add(1)) * time.Millisecond)
+	})
+	s := emptyService(t)
+	if err := EnableStaleRetry(s); err != nil {
+		t.Fatalf("EnableStaleRetry: %v", err)
+	}
+
+	req := &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"}
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatalf("Create(original): %v", err)
+	}
+	original, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Get(original): %v", err)
+	}
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "session"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatalf("Create(replacement): %v", err)
+	}
+
+	err = s.AppendEvent(ctx, original.Session, &session.Event{ID: "old-turn", Timestamp: t0.Add(time.Second)})
+	if err == nil {
+		t.Fatal("AppendEvent through old handle succeeded after session recreation")
+	}
+
+	replacement, getErr := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if getErr != nil {
+		t.Fatalf("Get(replacement): %v", getErr)
+	}
+	if got := replacement.Session.Events().Len(); got != 0 {
+		t.Errorf("replacement session has %d events, want 0", got)
+	}
+}
+
+func TestDatabaseService_AppendEvent_PreservesEventWindowOnRefresh(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		filter session.GetRequest
+		want   []string
+	}{
+		{
+			name:   "recent event limit",
+			filter: session.GetRequest{NumRecentEvents: 2},
+			want:   []string{"e4", "writer", "own"},
+		},
+		{
+			name:   "after timestamp",
+			filter: session.GetRequest{After: time.Date(2026, time.December, 1, 0, 0, 3, 0, time.UTC)},
+			want:   []string{"e3", "e4", "writer", "own"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+			s := emptyService(t)
+			if err := EnableStaleRetry(s); err != nil {
+				t.Fatalf("EnableStaleRetry: %v", err)
+			}
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+			for i := range 5 {
+				if err := s.AppendEvent(ctx, created.Session, &session.Event{
+					ID: fmt.Sprintf("e%d", i), Timestamp: base.Add(time.Duration(i) * time.Second),
+				}); err != nil {
+					t.Fatalf("AppendEvent(e%d): %v", i, err)
+				}
+			}
+
+			test.filter.AppName = "app"
+			test.filter.UserID = "user"
+			test.filter.SessionID = "session"
+			bounded, err := s.Get(ctx, &test.filter)
+			if err != nil {
+				t.Fatalf("Get(bounded): %v", err)
+			}
+			writer, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+			if err != nil {
+				t.Fatalf("Get(writer): %v", err)
+			}
+
+			if err := s.AppendEvent(ctx, writer.Session, &session.Event{ID: "writer", Timestamp: base.Add(5 * time.Second)}); err != nil {
+				t.Fatalf("AppendEvent(writer): %v", err)
+			}
+			if err := s.AppendEvent(ctx, bounded.Session, &session.Event{ID: "own", Timestamp: base.Add(6 * time.Second)}); err != nil {
+				t.Fatalf("AppendEvent(own): %v", err)
+			}
+
+			if diff := cmp.Diff(test.want, eventIDs(bounded.Session)); diff != "" {
+				t.Errorf("events after stale refresh (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func eventIDs(sess session.Session) []string {
+	var ids []string
+	for ev := range sess.Events().All() {
+		ids = append(ids, ev.ID)
+	}
+	return ids
+}
+
+// TestDatabaseService_AppendEvent_StaleRetryIsOptIn guards the default
+// behaviour: without EnableStaleRetry, a stale handle keeps failing instead
+// of silently retrying and overwriting whatever the caller wanted to
+// recompute against the newer state.
+func TestDatabaseService_AppendEvent_StaleRetryIsOptIn(t *testing.T) {
+	createdAt := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createdAt })
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stale, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	base := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.AppendEvent(ctx, created.Session, &session.Event{ID: "e1", Timestamp: base}); err != nil {
+		t.Fatalf("AppendEvent (fresh handle): %v", err)
+	}
+	err = s.AppendEvent(ctx, stale.Session, &session.Event{ID: "e2", Timestamp: base.Add(time.Second)})
+	if !errors.Is(err, errStaleSession) {
+		t.Fatalf("AppendEvent through stale handle without EnableStaleRetry: err = %v, want errStaleSession", err)
+	}
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
@@ -445,6 +824,35 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestDatabaseService_AppendEvent_TempStateReachesLocalHandle guards that a
+// temp: key from an event's StateDelta is visible on the live session handle
+// after AppendEvent returns. instruction_processor.go resolves {temp:x}
+// placeholders against exactly this state, so a regression here turns a
+// working instruction template into a hard failure instead of just an
+// unpersisted key.
+func TestDatabaseService_AppendEvent_TempStateReachesLocalHandle(t *testing.T) {
+	t0 := time.Date(2026, time.November, 30, 0, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return t0 })
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "sess"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ev := &session.Event{
+		ID: "e1", Timestamp: t0.Add(time.Second),
+		Actions: session.EventActions{StateDelta: map[string]any{"temp:k": "v", "plain": "p"}},
+	}
+	if err := s.AppendEvent(ctx, created.Session, ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	if _, err := created.Session.State().Get("temp:k"); err != nil {
+		t.Errorf("temp: key not visible on the live handle: %v", err)
+	}
+	if got, err := created.Session.State().Get("plain"); err != nil || got != "p" {
+		t.Errorf("plain key not visible on the live handle: got %v, err %v", got, err)
 	}
 }
 
