@@ -24,15 +24,16 @@ import (
 )
 
 // ImageBytes returns the bytes and MIME type of the first usable image in a
-// generation response. If the response contains no generated images, it returns
-// an error reporting that no images were returned. If the entries contain no
-// usable image data but include RAI filtering reasons, the error includes the
-// first reason that remains non-empty after trimming surrounding whitespace.
+// generation response. A nil response is accepted and returns the same error as
+// a response containing no generated images. If the entries contain no usable
+// image data but include RAI filtering reasons, the error includes the first
+// reason that remains non-empty after trimming surrounding whitespace.
 // Whitespace-only reasons are ignored. Otherwise, an error reports that the
 // entries contain no usable image data.
 //
 // ImageBytes assumes the image is delivered as inline bytes (Image.ImageBytes);
-// an entry carrying only a GCS URI is treated as having no usable image data.
+// zero-length bytes and entries carrying only a GCS URI are treated as having no
+// usable image data.
 //
 // On error, ImageBytes returns nil bytes and an empty MIME type. On success,
 // the returned bytes alias the image data in the SDK response; they are not
