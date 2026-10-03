@@ -250,7 +250,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 
 			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
 				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
-			}, toolsToResumeConfirmation, nil)
+			}, toolsToResumeConfirmation, nil, nil)
 			if !yield(ev, err) {
 				return
 			}

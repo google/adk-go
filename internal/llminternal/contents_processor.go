@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -834,12 +835,6 @@ func stringify(v any) string {
 	return string(s)
 }
 
-// requestEUCFunctionCallName is a special function to handle credential
-// request.
-const (
-	requestEUCFunctionCallName = "adk_request_credential"
-)
-
 func shouldExcludeEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
 	if c == nil {
@@ -848,13 +843,13 @@ func shouldExcludeEvent(ev *session.Event) bool {
 	for _, p := range c.Parts {
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case authconsent.FunctionCallName, toolconfirmation.FunctionCallName:
 				return true
 			}
 		}
 		if p.FunctionResponse != nil {
 			switch p.FunctionResponse.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case authconsent.FunctionCallName, toolconfirmation.FunctionCallName:
 				return true
 			}
 		}

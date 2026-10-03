@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -255,6 +256,13 @@ type EventActions struct {
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+
+	// RequestedCredentials holds interactive (3-legged) OAuth consent requests
+	// raised during tool execution, keyed by the paused tool call's id. It is
+	// the credential analog of RequestedToolConfirmations and drives the
+	// adk_request_credential round-trip (see tool/authconsent). The JSON name
+	// is adk-python's requested_auth_configs.
+	RequestedCredentials map[string]authconsent.AuthConfig `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.

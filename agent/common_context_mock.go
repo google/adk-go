@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -187,6 +188,16 @@ func (c *ContextMock) SubScheduler() DynamicSubScheduler {
 
 // ToolConfirmation implements [Context].
 func (c *ContextMock) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	return nil
+}
+
+// AuthResponse implements [Context].
+func (c *ContextMock) AuthResponse() *authconsent.AuthConfig {
+	return nil
+}
+
+// RequestCredential implements [Context].
+func (c *ContextMock) RequestCredential(cfg authconsent.AuthConfig) error {
 	return nil
 }
 

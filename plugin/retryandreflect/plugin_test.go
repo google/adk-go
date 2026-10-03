@@ -16,10 +16,12 @@ package retryandreflect
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTool struct {
@@ -235,5 +237,35 @@ func TestRetryAndReflect_Scopes(t *testing.T) {
 	_, _ = rGlobal.onToolError(ctx2, tl, nil, err)
 	if rGlobal.scopedFailureCounters[globalScopeKey]["test-tool"] != 2 {
 		t.Errorf("expected 2 failures in global scope")
+	}
+}
+
+// TestRetryAndReflect_SkipsHITLSentinels pins that a tool paused for human input
+// is not counted as a failure and not retried. Retrying would burn the retry
+// budget and, worse, re-run the tool while the user is still deciding.
+func TestRetryAndReflect_SkipsHITLSentinels(t *testing.T) {
+	sentinels := map[string]error{
+		"confirmation required": tool.ErrConfirmationRequired,
+		"confirmation rejected": tool.ErrConfirmationRejected,
+		"credential required":   tool.ErrCredentialRequired,
+	}
+	for name, sentinel := range sentinels {
+		t.Run(name, func(t *testing.T) {
+			r := &retryAndReflect{
+				maxRetries:            3,
+				scope:                 Invocation,
+				scopedFailureCounters: make(map[string]map[string]int),
+			}
+			ctx := &mockContext{invocationID: "inv1"}
+			tl := &mockTool{name: "test-tool"}
+
+			res, err := r.onToolError(ctx, tl, map[string]any{}, fmt.Errorf("tool %q: %w", tl.name, sentinel))
+			if res != nil || err != nil {
+				t.Errorf("onToolError() = (%v, %v), want (nil, nil): the plugin must not reflect on a pause", res, err)
+			}
+			if count := r.scopedFailureCounters["inv1"]["test-tool"]; count != 0 {
+				t.Errorf("failure count = %d, want 0: a pause is not a failure", count)
+			}
+		})
 	}
 }

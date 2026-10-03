@@ -145,8 +145,9 @@ func (r *retryAndReflect) onToolError(ctx agent.Context, tool tool.Tool, args ma
 }
 
 func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
-	// skip if the error is tool.ErrConfirmationRequired.
-	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
+	// Skip the human-in-the-loop sentinels: these pause the run for user input,
+	// so retrying and reflecting on them accomplishes nothing.
+	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) || errors.Is(err, tool.ErrCredentialRequired) {
 		return nil, nil
 	}
 

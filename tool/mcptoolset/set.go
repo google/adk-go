@@ -59,6 +59,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		auth:                        cfg.Auth,
 	}, nil
 }
 
@@ -119,6 +120,19 @@ type Config struct {
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
 	// would fight over the same request.
+	//
+	// A provider that needs interactive 3-legged consent (one that can return
+	// auth.ConsentRequiredError) is driven only during tool execution, which can
+	// pause the run to ask the user. Tool listing runs before any tool call and
+	// cannot pause, so a server that also authenticates listing needs a
+	// credential that resolves without consent — non-interactive, or already
+	// consented and cached. Otherwise Tools fails.
+	//
+	// An interactive provider also cannot be combined with RequireConfirmation
+	// or RequireConfirmationProvider on the same toolset: two human-in-the-loop
+	// round-trips on one call are not supported, and a call that needs both
+	// fails with an error saying so rather than pausing on a prompt no client
+	// receives.
 	Auth auth.CredentialProvider
 
 	// Deprecated: use tool.FilterToolset instead.
@@ -150,6 +164,7 @@ type set struct {
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
+	auth                        auth.CredentialProvider
 }
 
 func (*set) Name() string {
@@ -173,7 +188,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

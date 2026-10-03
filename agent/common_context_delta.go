@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/adkcontext"
+	"google.golang.org/adk/v2/tool/authconsent"
 )
 
 // CommonContextDelta holds all the changes which should be applied to a new child context based on agent.Context.
@@ -36,6 +37,11 @@ type CommonContextDelta struct {
 	RunID                  *string
 	SubScheduler           *DynamicSubScheduler
 	OutputForAncestors     *[]string
+	// CredentialResponse, when non-nil, sets the tool call's interactive OAuth
+	// consent response, read back through Context.AuthResponse. It is the
+	// resume-path seam for threading a consent response into a tool context,
+	// since NewToolContext's signature is public API.
+	CredentialResponse *authconsent.AuthConfig
 }
 
 // InvocationContextDelta holds all the changes which should be applied to a new child context based on agent.InvocationContext
@@ -75,6 +81,9 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	}
 	if d.OutputForAncestors != nil {
 		res.outputForAncestors = *d.OutputForAncestors
+	}
+	if d.CredentialResponse != nil {
+		res.credentialResponse = d.CredentialResponse
 	}
 
 	return &res

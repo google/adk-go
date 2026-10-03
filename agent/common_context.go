@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -150,6 +151,13 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // always reported the enclosing invocation on the same shape — but a decorator
 // author reading this rule needs to know the credential is not the only thing
 // scoped to a user.
+//
+// [Context.AuthResponse] is a third shape. It returns no handle and reaches
+// nothing — it hands back a field set on the tool context when the run resumed —
+// but the value is an interactive OAuth consent response, so it can carry the
+// enclosing user's authorization code and a consent URI naming them. A promoted
+// one therefore hands a decorator material a credential for that user is minted
+// from. Override it alongside the six above.
 //
 // So an invocation written outside the module reports its own user only where it
 // answers for itself:
@@ -355,6 +363,10 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	res.actions = actions
 	res.functionCallID = functionCallID
 	res.toolConfirmation = confirmation
+	// res was copied from ic, which may itself be a resumed tool context. A
+	// consent response belongs to the call it was granted for, and AuthResponse
+	// is exactly the signal a tool reads as "I was resumed, proceed".
+	res.credentialResponse = nil
 	res.artifacts = newTrackedArtifacts(ic.Artifacts(), actions)
 
 	wrapper := &toolContextWrapper{
@@ -390,6 +402,12 @@ type commonContext struct {
 	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
+
+	// credentialResponse carries the end user's interactive OAuth consent
+	// response on a resumed tool call. It is threaded in via WithDelta rather
+	// than a NewToolContext parameter, because NewToolContext's signature is
+	// public API.
+	credentialResponse *authconsent.AuthConfig
 
 	// Fields below are used by node contexts.
 	// resumeInputs are keyed by InterruptID. Nil on fresh activations
@@ -709,6 +727,11 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	if c.functionCallID == "" {
 		return fmt.Errorf("error function call id not set when requesting confirmation for tool")
 	}
+	// Only a consent round-trip on the same call is refused here. A second
+	// confirmation is long-standing behavior this change leaves alone.
+	if c.credentialResponse != nil || len(c.actions.RequestedCredentials) > 0 {
+		return c.secondRoundTrip("confirmation")
+	}
 	if c.actions.RequestedToolConfirmations == nil {
 		c.actions.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
 	}
@@ -720,6 +743,80 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// SkipSummarization stops the agent loop after this tool call. Without it,
 	// the function response event becomes lastEvent and IsFinalResponse() returns
 	// false (hasFunctionResponses == true), causing the loop to continue.
+	c.actions.SkipSummarization = true
+	return nil
+}
+
+// AuthResponse returns the interactive OAuth consent response for the current
+// tool call, or nil if none. It is populated only on a resumed call.
+func (c *commonContext) AuthResponse() *authconsent.AuthConfig {
+	return c.credentialResponse
+}
+
+// secondRoundTrip reports why a tool call may not start a human-in-the-loop
+// round-trip of the given kind, or nil if it may.
+//
+// One call gets at most one round-trip. ADK emits the request event only after
+// the model's own function calls, not when a paused call is resumed, so a
+// request raised during a resume is recorded and reaches no client. Two raised
+// on one call fare no better: on the reply the first processor to run re-runs
+// the tool without the other's answer. Either way the tool would be told its
+// request was enqueued while the run stalls, so it is refused instead.
+func (c *commonContext) secondRoundTrip(kind string) error {
+	switch {
+	case kind == "credential" && len(c.actions.RequestedToolConfirmations) > 0:
+		return fmt.Errorf("cannot request credential on a tool call that already requested confirmation")
+	case kind == "confirmation" && len(c.actions.RequestedCredentials) > 0:
+		return fmt.Errorf("cannot request confirmation on a tool call that already requested credential")
+	case c.credentialResponse != nil:
+		return fmt.Errorf("cannot request %s on a tool call already resumed after consent", kind)
+	case c.toolConfirmation != nil:
+		return fmt.Errorf("cannot request %s on a tool call already resumed after confirmation", kind)
+	}
+	return nil
+}
+
+// WithCredentialResponse returns a copy of ctx carrying resp as the current
+// tool call's interactive OAuth consent response, readable through
+// [Context.AuthResponse]. A nil resp returns ctx unchanged.
+//
+// It exists because [Context.WithDelta] on a tool context returns the inner
+// context rather than the tool-context wrapper, so threading the response
+// through a delta alone would hand a resumed tool a different context
+// implementation from the one its first call saw — with a live Session, Agent
+// and EndInvocation where the wrapper deliberately withholds them.
+// [NewToolContext] cannot take the response instead: its signature is public
+// API.
+func WithCredentialResponse(ctx Context, resp *authconsent.AuthConfig) Context {
+	if resp == nil {
+		return ctx
+	}
+	d := &CommonContextDelta{CredentialResponse: resp}
+	if w, ok := ctx.(*toolContextWrapper); ok {
+		return &toolContextWrapper{context: w.context.WithDelta(d)}
+	}
+	return ctx.WithDelta(d)
+}
+
+// RequestCredential starts the interactive (3-legged) OAuth consent flow for
+// the current tool call. Like RequestConfirmation, it records the request in
+// the underlying EventActions keyed by the function call id and sets
+// SkipSummarization so the agent loop halts until the user responds. On the
+// standard run loop the flow then emits the adk_request_credential function
+// call; see Context.RequestCredential for when it does not.
+func (c *commonContext) RequestCredential(cfg authconsent.AuthConfig) error {
+	if c.functionCallID == "" {
+		return fmt.Errorf("error function call id not set when requesting credential for tool")
+	}
+	if err := c.secondRoundTrip("credential"); err != nil {
+		return err
+	}
+	if c.actions.RequestedCredentials == nil {
+		c.actions.RequestedCredentials = make(map[string]authconsent.AuthConfig)
+	}
+	c.actions.RequestedCredentials[c.functionCallID] = cfg
+	// See RequestConfirmation: without this the agent loop continues past the
+	// tool call we are pausing.
 	c.actions.SkipSummarization = true
 	return nil
 }

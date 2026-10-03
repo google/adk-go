@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -102,6 +103,14 @@ func confirmationEvent(id, invocationID string, ts int, callID string) *session.
 	ev := newEvent(id, invocationID, ts, "model")
 	ev.Actions.RequestedToolConfirmations = map[string]toolconfirmation.ToolConfirmation{
 		callID: {Hint: "approve?"},
+	}
+	return ev
+}
+
+func consentEvent(id, invocationID string, ts int, callID string) *session.Event {
+	ev := newEvent(id, invocationID, ts, "model")
+	ev.Actions.RequestedCredentials = map[string]authconsent.AuthConfig{
+		callID: authconsent.OAuth2Consent("https://consent.example/auth", "n", "k"),
 	}
 	return ev
 }
