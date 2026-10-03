@@ -71,9 +71,10 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     has to tolerate ErrNothingToResume. It is never a no-op in the
 //     re-entry case.
 //
-//  3. Routes the response to the asker's successors as if the
-//     asker had emitted it as its output (handoff mode). The
-//     asker itself does NOT re-execute.
+//  3. Routes the response to the asker's successors as if the asker
+//     had emitted it as its output. In handoff mode the asker itself
+//     does not re-execute; in the re-entry case described in step 2
+//     it re-runs with the response as its input.
 //
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
