@@ -164,6 +164,33 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
+// reservedToolNames are names this framework itself puts on the wire, in two classes.
+//
+// Dispatch names are resolved back out of the request by the framework rather than by
+// the model, so a server tool holding one of them changes which implementation runs.
+//
+// In-model built-ins (google_search and the rest) are registered through
+// RegisterToolFactory in internal/configurable and append to the request's config
+// tools; they are listed here because a second tool answering to the same name leaves
+// the model, not the framework, choosing between them.
+//
+// Only names this repository actually defines belong here. google_maps is the Java
+// spelling (the Go tool is google_maps_grounding), and vertex_ai_search and
+// code_execution appear in no Go tool, so listing them would refuse names this port
+// never had a problem with.
+var reservedToolNames = map[string]struct{}{
+	"set_model_response":    {},
+	"transfer_to_agent":     {},
+	"finish_task":           {},
+	"task_completed":        {},
+	"exit_loop":             {},
+	"load_artifacts":        {},
+	"load_memory":           {},
+	"google_search":         {},
+	"google_maps_grounding": {},
+	"url_context":           {},
+}
+
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	mcpTools, err := s.mcpClient.ListTools(ctx)
@@ -173,6 +200,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
+		if _, reserved := reservedToolNames[mcpTool.Name]; reserved {
+			return nil, fmt.Errorf("mcp toolset: refusing reserved tool name %q advertised by the server", mcpTool.Name)
+		}
+
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
