@@ -150,9 +150,12 @@ func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 type Workflow struct {
 	graph *graph
 
-	// name namespaces this workflow's nodes within the session's
-	// event history: Run prefixes the node path it records with it,
-	// except for a root wrapper. RunNode and Resume add no prefix.
+	// name labels this workflow's nodes on the paths Run records: Run
+	// prefixes the node path with it, except for a root wrapper.
+	// RunNode and Resume add no prefix. The prefix is a label, not a
+	// namespace - history is attributed to a run by invocation ID, not
+	// by this name, so two workflows sharing a node name do not
+	// collide only because their runs carry different invocation IDs.
 	// Empty leaves the workflow unnamed. Set at construction by New.
 	name string
 
@@ -226,14 +229,20 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 // event history: Run prefixes the node path it records with it,
 // except for a root wrapper, and that path is what ReconstructRunState
 // matches on when it attributes history back to nodes. RunNode and
-// Resume add no prefix. Give each workflow that can run in one
-// session a distinct name so the node paths recorded on their events
-// remain distinguishable. The same workflow may safely share a name
+// Resume add no prefix. The same workflow may safely share a name
 // across different sessions.
 //
-// An empty name adds no prefix, so this workflow's nodes share the
-// session's root namespace. Give a workflow a name whenever more
-// than one can run in the same session.
+// The prefix is a label, not a namespace. ReconstructRunState scopes
+// history to a run by invocation ID; attributing an event to a node
+// goes through eventNodeName, which matches the first path segment
+// naming one of this workflow's nodes and ignores the workflow-name
+// segment. A name therefore does not keep two workflows' histories
+// apart, and two workflows that share a node name resolve to that
+// name regardless of what they are called. With an empty invocation
+// ID they collide whatever their names are.
+//
+// An empty name adds no prefix, so this workflow's nodes are recorded
+// under the bare node path.
 //
 // Optional Option values configure engine behaviour
 // (concurrency cap, etc.); see WithMaxConcurrency.
