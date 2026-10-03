@@ -795,6 +795,10 @@ type trackedArtifacts struct {
 	actions *session.EventActions
 }
 
+// Unwrap lets internal adapters reach the backing service without adding methods
+// to the public Artifacts interface.
+func (a *trackedArtifacts) Unwrap() Artifacts { return a.Artifacts }
+
 func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
 	resp, err := a.Artifacts.Save(ctx, name, data)
 	if err != nil {

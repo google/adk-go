@@ -19,11 +19,16 @@ import (
 	"errors"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
+
+	"google.golang.org/adk/v2/auth"
 )
 
 // TestResolveClientBuildsDefaultClient drives the lazy ADC path end to end:
@@ -187,8 +192,10 @@ func TestResolveClientPublishesLateClient(t *testing.T) {
 
 // TestRunInitSurvivesAbruptBuilder pins that a builder which does not return
 // normally still releases the waiters and the in-flight slot. Without the
-// deferred publish, pending stays set with its goroutine dead and every later
-// caller waits out initTimeout, forever.
+// deferred publish, pending stays set with its goroutine dead and nothing ever
+// clears it, so every later call fails for the rest of the process — each
+// waiting out what is left of the attempt's bound, then failing on arrival once
+// that has passed.
 func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -231,7 +238,7 @@ func TestRunInitSurvivesAbruptBuilder(t *testing.T) {
 			pending := p.pending
 			p.mu.Unlock()
 			if pending != nil {
-				t.Error("provider kept the dead attempt; the next caller would wait on it forever")
+				t.Error("provider kept the dead attempt; every later call would fail on it instead of retrying")
 			}
 		})
 	}
@@ -367,9 +374,16 @@ func TestNewProviderKeepsWiringContextValuesNotCancellation(t *testing.T) {
 	}
 }
 
-// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that a provider given a
-// Client does not pin its caller's context — and with it the caller's whole
-// session and event graph — for the life of the process.
+// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that initCtx — the field
+// that retains the caller's context, and with it the caller's whole session and
+// event graph — is left nil when a Client is supplied.
+//
+// That is narrower than "a provider given a Client retains nothing". The
+// builder closure is installed unconditionally, so one that also closed over
+// NewProvider's ctx would retain the graph with this test still green, and
+// nothing else pins it either. TestDefaultBuilderPassesItsArgumentToNewClient
+// catches a builder that uses that ctx in place of its argument, which is a
+// different thing from one that merely keeps it reachable.
 func TestNewProviderKeepsWiringContextOnlyWhenLazy(t *testing.T) {
 	client, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
 	if err != nil {
@@ -469,10 +483,17 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 //
 // Go picks uniformly among ready select arms, so an implementation that races
 // the two fails about half the time — undetectable in one pass, which is why
-// this loops. It pins the pair of re-checks rather than either alone: the two
-// are mutually redundant, so deleting one leaves the other to answer and the
-// test stays green, and deleting both turns it red. That is the honest scope.
-// Either one surviving is enough for the caller, who only ever sees the result.
+// this loops.
+//
+// It reaches one case only: a result that landed before the caller arrived,
+// which the pre-check answers. Either that check or the timer arm's re-check
+// alone keeps this green, so deleting one leaves the test passing — which is
+// not a licence to delete the timer-arm one. It is the only cover for the case
+// this test cannot arrange, a result landing after the pre-check has fallen
+// through while the caller waits on the timer arm. Nothing pins that, so
+// removing it loses the window silently. The select's third arm carries a
+// re-check of its own for the same reason on the caller-cancelled path, which
+// this test does not reach.
 func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
 	// 200 trials puts the odds of an unguarded implementation passing at 2^-200.
@@ -481,7 +502,8 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	for i := range 200 {
 		p := newTestProvider(t)
 		// The attempt has already landed and its bound has already passed, so both
-		// select arms are ready the moment the caller reaches them.
+		// of the arms this arranges — in.done and the expired timer — are ready the
+		// moment the caller reaches them.
 		in := &clientInit{done: make(chan struct{}), client: built, deadline: time.Now().Add(-time.Hour)}
 		close(in.done)
 		p.pending = in
@@ -490,5 +512,235 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 		if err != nil || got != built {
 			t.Fatalf("trial %d: resolveClient() = %v, %v; want the landed client, because a result that is already there beats a bound that has already passed", i, got, err)
 		}
+	}
+}
+
+// TestDefaultBuilderPassesItsArgumentToNewClient pins two links in the chain
+// that carries the wiring context into the token exchange: runInit calls the
+// builder with initCtx, and the builder NewProvider installs hands that
+// argument to NewClient rather than a context of its own.
+//
+// TestResolveClientBuildsDefaultClient drives this closure too, and
+// TestNewProviderKeepsWiringContextValuesNotCancellation replaces it with a stub
+// to watch what runInit hands in. Neither looks at what the closure passes on.
+// Before this test,
+// replacing that closure's ctx with context.Background() left the whole package
+// green while silently dropping an oauth2.HTTPClient a caller put on the wiring
+// context, which is the documented way to give the token exchange its own
+// transport.
+//
+// Two sentinels rather than one, because initCtx is derived from the context
+// NewProvider was handed: with the same marker on both, a builder that ignored
+// its parameter and closed over NewProvider's own ctx would deliver that marker
+// and pass. That version is not harmless — the closure is installed even when
+// cfg.Client is set, so it would keep the caller's context reachable for the
+// provider's whole lifetime, which is what NewProvider's comment on capturing
+// initCtx says the code avoids.
+//
+// Observed through the transport oauth2.NewClient puts on the client it
+// returns, which names the context that reached it. That copy is an
+// implementation detail: NewClient's own doc says a context client is used
+// "only for token acquisition", while the code assigns it to Transport.Base. So
+// a failure here after an x/oauth2 bump is that bump, not the builder.
+//
+// fakeADC supplies an authorized_user file, which needs no key parsing and no
+// network, and points the token endpoint at a local server, so nothing here can
+// reach Google even if something later makes the lazy token source fetch.
+func TestDefaultBuilderPassesItsArgumentToNewClient(t *testing.T) {
+	fakeADC(t)
+
+	captured := &markerTransport{name: "the context NewProvider was handed"}
+	argument := &markerTransport{name: "the builder's own argument"}
+	// The assertion below compares pointers, so it is worth nothing unless the
+	// two markers differ. See markerTransport for what could make them not.
+	if captured == argument {
+		t.Fatal("the two markers compare equal, so the assertion below cannot fail")
+	}
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, &http.Client{Transport: captured})
+
+	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	prov := p.(*provider)
+	// Shadows the value on initCtx alone, so the two contexts the builder could
+	// use no longer carry the same transport.
+	prov.initCtx = context.WithValue(prov.initCtx, oauth2.HTTPClient, &http.Client{Transport: argument})
+
+	// The real builder, not a stub: that is the point of this test.
+	got, err := prov.resolveClient(t.Context())
+	if err != nil {
+		t.Fatalf("resolveClient() error = %v", err)
+	}
+	oauthTransport, ok := got.httpClient.Transport.(*oauth2.Transport)
+	if !ok {
+		t.Fatalf("built client Transport = %T, want *oauth2.Transport", got.httpClient.Transport)
+	}
+	base, ok := oauthTransport.Base.(*markerTransport)
+	if !ok {
+		t.Fatalf("built client base Transport = %T, want %s: the builder must pass its context to NewClient", oauthTransport.Base, argument.name)
+	}
+	if base != argument {
+		t.Errorf("built client base Transport came from %s, want %s: the builder must pass its own argument to NewClient, not a context it closed over", base.name, argument.name)
+	}
+}
+
+// markerTransport is recognised by pointer identity and never used to send
+// anything.
+//
+// The name field names the marker in a failure, and it is also what keeps the
+// type non-zero-size. Two pointers to distinct zero-size values are free to
+// share an address, and on this toolchain they do, so dropping the field would
+// leave every identity comparison on a marker unable to fail — measured: the
+// builder test goes green under a mutant it is there to catch. That is why the
+// caller checks rather than trusting this note.
+type markerTransport struct{ name string }
+
+func (*markerTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("markerTransport must not be used to send a request")
+}
+
+// Two Clients left to Application Default Credentials are still two cache
+// dimensions. NewClient resolves ADC afresh on every call and the transport
+// underneath it can come from the context, so this package cannot know that two
+// of them authenticate as the same principal — and a false miss costs a round
+// trip where a false hit discloses one principal's token to another.
+func TestADCClientsDoNotShareACacheSlot(t *testing.T) {
+	fakeADC(t)
+	newADCClient := func() *Client {
+		t.Helper()
+		c, err := NewClient(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		return c
+	}
+	first, second := newADCClient(), newADCClient()
+	if first.cacheSlot == second.cacheSlot {
+		t.Error("two ADC-built Clients share a cache slot, so one would be served the other's credential")
+	}
+}
+
+// A Client's cache slot must not repeat in another process. A store can outlive
+// the process that wrote to it, or be shared by two, and an entry written by a
+// Client that no longer exists names an identity nothing can check.
+func TestClientCacheSlotIsProcessUnique(t *testing.T) {
+	// The width is spelled out rather than derived from nonceBytes: a test that
+	// measures the constant against itself moves with it, and a nonce narrowed to
+	// a byte would collide between two processes once in 256 while still passing
+	// an inequality check almost every run. 128 bits, hex-encoded.
+	if len(clientNonce) < 32 {
+		t.Fatalf("clientNonce is %d hex characters, want at least 32 (128 bits)", len(clientNonce))
+	}
+	if clientNonce == newClientNonce() {
+		t.Fatal("clientNonce is fixed; two processes constructing Clients in the same order would collide")
+	}
+	c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if !strings.Contains(c.cacheSlot, clientNonce) {
+		t.Errorf("cache slot %q does not carry the per-process nonce", c.cacheSlot)
+	}
+}
+
+// joinFields must be injective: no two distinct field lists may encode alike,
+// whatever characters the fields contain. This is what stands between a scope
+// holding a delimiter and a cross-provider cache hit, and the cache-dimension
+// cases in provider_test.go do not pin it on their own — none of the pairs they
+// compare uses ":" as a field value, so a ":"-separated join tells them apart.
+func TestJoinFieldsIsInjective(t *testing.T) {
+	// Every field list that can be built from this alphabet, at every length up to
+	// 3. A separator-joining encoding collides inside the set whatever separator
+	// it picks, because each separator is itself a field value. The long entries
+	// are load-bearing too: with every field under ten bytes the length prefix is
+	// a single digit and is self-punctuating, so dropping the ":" would survive.
+	long := strings.Repeat("a", 19)
+	alphabet := []string{"", "a", ",", "|", ":", "0", "1:", "a,b", "a|b", "23", long, "319" + long}
+	var lists [][]string
+	var build func(prefix []string, depth int)
+	build = func(prefix []string, depth int) {
+		lists = append(lists, slices.Clone(prefix))
+		if depth == 0 {
+			return
+		}
+		for _, f := range alphabet {
+			build(append(prefix, f), depth-1)
+		}
+	}
+	build(nil, 3)
+
+	seen := make(map[string][]string, len(lists))
+	for _, l := range lists {
+		enc := joinFields(l...)
+		if prev, ok := seen[enc]; ok {
+			t.Fatalf("joinFields(%q) and joinFields(%q) both encode to %q", prev, l, enc)
+		}
+		seen[enc] = l
+	}
+	t.Logf("%d distinct field lists, %d distinct encodings", len(lists), len(seen))
+}
+
+// NewClient is called concurrently in production — two providers on the lazy
+// path build their default clients on goroutines they own — and a slot handed
+// out twice is a cross-principal cache hit.
+func TestNewClientSlotsAreUniqueUnderConcurrency(t *testing.T) {
+	const n = 32
+	slots := make([]string, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
+			if err != nil {
+				t.Errorf("NewClient() error = %v", err)
+				return
+			}
+			slots[i] = c.cacheSlot
+		}()
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool, n)
+	for _, s := range slots {
+		if s == "" {
+			t.Fatal("a Client was built with an empty cache slot")
+		}
+		if seen[s] {
+			t.Fatalf("cache slot %q was handed to two Clients", s)
+		}
+		seen[s] = true
+	}
+}
+
+// TestCacheUntilBoundary pins the caching floor at a fixed clock, equality
+// included. It is the complement of the store's expired test: exactly
+// auth.ExpirySkew left is too close to write, because the store would never
+// serve it.
+func TestCacheUntilBoundary(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		expiresAt time.Time
+		wantOK    bool
+		want      time.Time
+	}{
+		{"no expiry", time.Time{}, false, time.Time{}},
+		{"already past", now.Add(-time.Nanosecond), false, time.Time{}},
+		{"a nanosecond inside the margin", now.Add(auth.ExpirySkew - time.Nanosecond), false, time.Time{}},
+		{"exactly the margin", now.Add(auth.ExpirySkew), false, time.Time{}},
+		{"a nanosecond beyond the margin", now.Add(auth.ExpirySkew + time.Nanosecond), true, now.Add(auth.ExpirySkew + time.Nanosecond)},
+		{"exactly the cap", now.Add(maxCachedLifetime), true, now.Add(maxCachedLifetime)},
+		{"a nanosecond beyond the cap", now.Add(maxCachedLifetime + time.Nanosecond), true, now.Add(maxCachedLifetime)},
+		{"far future", time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), true, now.Add(maxCachedLifetime)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := cacheUntil(now, tc.expiresAt)
+			if ok != tc.wantOK || !got.Equal(tc.want) {
+				t.Errorf("cacheUntil() = (%v, %v), want (%v, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
 }
