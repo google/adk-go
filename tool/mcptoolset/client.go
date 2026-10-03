@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/semaphore"
 
 	"google.golang.org/adk/v2/internal/version"
 )
@@ -40,7 +40,9 @@ type connectionRefresher struct {
 	client    *mcp.Client
 	transport mcp.Transport
 
-	mu      sync.Mutex
+	// Session initialization and refresh perform network I/O. Waiters must be
+	// able to leave when their own context ends without interrupting the owner.
+	mu      *semaphore.Weighted
 	session *mcp.ClientSession
 }
 
@@ -61,6 +63,7 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 	return &connectionRefresher{
 		client:    client,
 		transport: transport,
+		mu:        semaphore.NewWeighted(1),
 	}
 }
 
@@ -146,8 +149,10 @@ func shouldRefreshConnection(err error) bool {
 }
 
 func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSession, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.mu.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.mu.Release(1)
 
 	if c.session != nil {
 		return c.session, nil
@@ -163,8 +168,10 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 }
 
 func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.ClientSession, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.mu.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.mu.Release(1)
 
 	// Ping to verify the connection is actually dead before reconnecting.
 	// This handles the case where another goroutine already reconnected.
