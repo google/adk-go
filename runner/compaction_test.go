@@ -482,7 +482,7 @@ func TestPostInvocationCompactionPanicIsReportedNotUnwound(t *testing.T) {
 // A compaction record tells prompt assembly to drop a span of history and put
 // content in its place. EventActions is writable by tool code, and the REST
 // create-session body reaches the stored event, so a record can arrive from
-// outside the framework. If prompt assembly honoured any record it found, a
+// outside the framework. If prompt assembly honored any record it found, a
 // caller could erase a conversation and inject text into it as a model turn --
 // against an application that never enabled compaction at all.
 func TestCompactionRecordIsIgnoredWhenDisabled(t *testing.T) {
@@ -1188,7 +1188,7 @@ func TestRunnerBothStrategiesCoexist(t *testing.T) {
 	}
 
 	// Whatever mix of summaries accumulated, the prompt must stay coherent:
-	// every surviving compaction range is honoured and nothing is duplicated.
+	// every surviving compaction range is honored and nothing is duplicated.
 	var events []*session.Event
 	for ev := range sess.Events().All() {
 		events = append(events, ev)
@@ -1226,7 +1226,7 @@ func (s *cancelingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Ev
 // TestTailRetentionCancelledSummarizerLeavesTheTurnIntact covers the case that
 // used to produce the worst possible outcome.
 //
-// A summarizer failing on a cancelled context yielded an error whose chain
+// A summarizer failing on a canceled context yielded an error whose chain
 // contained context.Canceled, and the workflow scheduler drops those, so the
 // turn ended with no answer, no events and no error either. Mid-turn compaction
 // failures are no longer yielded at all, so the turn simply runs on.
@@ -1653,7 +1653,7 @@ func TestPluginCannotSmuggleAFunctionCallIntoASummary(t *testing.T) {
 //
 // A plugin appending is the reliable way to reach the window, not the only one.
 // An event carries the timestamp it was created at rather than the one it was
-// stored at, so parallel tool responses and sub-agent events funnelled through
+// stored at, so parallel tool responses and sub-agent events funneled through
 // a channel are routinely created before a range ends and stored after it.
 func TestStragglerInThePluginWindowIsNotLost(t *testing.T) {
 	t.Parallel()

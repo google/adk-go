@@ -134,7 +134,7 @@ func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext
 // working path gives each one a copy. That is the one cost a reader cannot
 // recover by inspecting a value: EndInvocation on any child now ends the parent
 // and its siblings, and the write races their Ended. #1135 makes that
-// propagation deliberate and synchronises the flag, and until it lands this
+// propagation deliberate and synchronizes the flag, and until it lands this
 // branch has the sharing without either.
 func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationContext {
 	if ic == nil {
@@ -149,7 +149,7 @@ func withICDelta(ic InvocationContext, d *InvocationContextDelta) InvocationCont
 	//
 	// "Nothing to say" is emptiness, not a nil pointer. A caller that allocates
 	// the delta and then fills it conditionally hands over an empty one whenever
-	// no condition fires, and keying on nil alone made that one-token neighbour
+	// no condition fires, and keying on nil alone made that one-token neighbor
 	// drop the decorator where the nil case did not.
 	//
 	// Ours are still asked, because for them an empty delta is not a no-op: the

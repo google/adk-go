@@ -17,8 +17,16 @@ linters:
   enable:
     - goheader
     - revive
+    - misspell
 
   settings:
+
+    misspell:
+      locale: US
+      # mode: restricted limits checks to comments only, preventing automatic
+      # rewriting of string literals in test prompts (e.g. favourite colour, summarise,
+      # recieve) that are bound to recorded HTTP test cassettes.
+      mode: restricted
 
     revive:
       rules:
@@ -78,3 +86,6 @@ linters:
         linters:
           - revive
         text: '^(exported|package-comments):'
+      - linters:
+          - misspell
+        text: '`CANCELLED` is a misspelling of `CANCELED`'
