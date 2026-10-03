@@ -57,7 +57,7 @@ func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Reque
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		// ignore the error
-		log.Printf("SetWriteDeadline failed: %v", err)
+		log.Printf("SetWriteDeadline failed: %v", err) //nolint:forbidigo // pre-slog call site
 	}
 	query := models.Query{}
 	var payload []byte
@@ -81,7 +81,7 @@ func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Reque
 
 	err = c.handleQuery(req.Context(), rw, payload, query.ClassMethod)
 	if err != nil {
-		log.Printf("handleQuery failed: %v", err)
+		log.Printf("handleQuery failed: %v", err) //nolint:forbidigo // pre-slog call site
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
