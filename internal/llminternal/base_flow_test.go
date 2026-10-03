@@ -1253,21 +1253,23 @@ func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
 		},
 	}
 
-	agentState := &State{Toolsets: []tool.Toolset{ts}}
+	baseTool := &mockFunctionTool{name: "base_tool"}
+	agentState := &State{Tools: []tool.Tool{baseTool}, Toolsets: []tool.Toolset{ts}}
 	mockAgent := &mockLLMAgent{s: agentState}
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent})
 
 	f := &Flow{}
 
-	// First call: toolset returns nil — f.Tools should be empty.
+	// First call: toolset returns nil, so f.Tools holds only the static tool.
+	// A non-nil f.Tools is what would trip a per-run cache guard.
 	req1 := &model.LLMRequest{}
 	for _, err := range toolProcessor(ctx, req1, f) {
 		if err != nil {
 			t.Fatalf("toolProcessor call 1 error: %v", err)
 		}
 	}
-	if len(f.Tools) != 0 {
-		t.Errorf("after call 1: got %d tools, want 0", len(f.Tools))
+	if len(f.Tools) != 1 {
+		t.Errorf("after call 1: got %d tools, want 1", len(f.Tools))
 	}
 
 	// Second call: toolset now returns extraTool — f.Tools must be updated.
@@ -1277,11 +1279,63 @@ func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
 			t.Fatalf("toolProcessor call 2 error: %v", err)
 		}
 	}
-	if len(f.Tools) != 1 || f.Tools[0].Name() != extraTool.Name() {
-		t.Errorf("after call 2: got tools %v, want [%s]", f.Tools, extraTool.Name())
+	if len(f.Tools) != 2 || f.Tools[1].Name() != extraTool.Name() {
+		t.Errorf("after call 2: got tools %v, want [%s %s]", f.Tools, baseTool.Name(), extraTool.Name())
 	}
 
 	if ts.callCount != 2 {
 		t.Errorf("toolset.Tools() called %d times, want 2", ts.callCount)
+	}
+}
+
+func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
+	tests := []struct {
+		name          string
+		responses     []*model.LLMResponse
+		wantResponses int
+	}{
+		{
+			name:          "nil only",
+			responses:     []*model.LLMResponse{nil},
+			wantResponses: 0,
+		},
+		{
+			name: "nil then final",
+			responses: []*model.LLMResponse{
+				nil,
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "done"}}}},
+			},
+			wantResponses: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, resp := range tc.responses {
+							if !yield(resp, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+
+			gotResponses := 0
+			for _, err := range f.callLLM(ctx, &model.LLMRequest{}, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() returned unexpected error: %v", err)
+				}
+				gotResponses++
+			}
+			if gotResponses != tc.wantResponses {
+				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
 	}
 }
