@@ -119,8 +119,9 @@ type NodeState struct {
 	// and also while Status is NodePending for a partially resumed
 	// re-entry node, where some interrupts are resolved and others are
 	// not and the node runs again to re-interrupt for the rest. A node
-	// parked by WaitForOutput also reaches NodeWaiting, but that park
-	// does not clear this field.
+	// parked by WaitForOutput also reaches NodeWaiting, but with this
+	// field empty: that park creates no interrupt ID, so there is
+	// nothing here to match a response against.
 	Interrupts []string `json:"interrupts,omitempty"`
 
 	// interruptSchemas maps an interrupt ID to its declared response
