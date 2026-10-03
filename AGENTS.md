@@ -182,7 +182,9 @@ most of this repo does, or `TODO(#1234)` when an issue tracks it. A bare
 
 - **Add a tool:** wrap a Go function with
   `functiontool.New[Args, Results](cfg, handler)` (Args/Results are structs), or
-  implement the `tool.Tool` interface for full control.
+  implement `tool.FunctionTool` or `tool.StreamingFunctionTool` for full control.
+  Decorators implement `tool.Wrapper`; resolve capabilities with `tool.As` so
+  wrapping preserves capabilities added in later releases.
 - **Add a toolset:** implement `tool.Toolset`; its `Tools(ctx)` may return
   different tools per invocation.
 - **Add an agent type:** follow the `agent/workflowagents/*` packages; construct
