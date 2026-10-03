@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -51,16 +52,30 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	// The wrapped agent's Run already emits an invoke_agent span, so
-	// the scheduler must not add a redundant invoke_node wrapper —
-	// whether this node is activated by a static edge or delegated to
-	// via RunNode. Mirrors runner.newAgentNode.
-	cfg.EmitsOwnSpan = true
+	cfg = applyAgentNodeDefaults(a, cfg)
 
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
 	}, nil
+}
+
+// applyAgentNodeDefaults fills in AgentNode config defaults. An LlmAgent node
+// defaults to re-entry on resume so it can finish the long-running tool call
+// that paused it, instead of handing the raw reply to its successor. Other
+// kinds keep the engine default, and an explicit caller value always wins.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+	// The wrapped agent's Run already emits an invoke_agent span, so the
+	// scheduler must not add a redundant invoke_node wrapper.
+	cfg.EmitsOwnSpan = true
+	if _, ok := a.(llminternal.Agent); !ok {
+		return cfg
+	}
+	if cfg.RerunOnResume == nil {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+	return cfg
 }
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
@@ -99,6 +114,14 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		if ctx == nil {
 			yield(nil, fmt.Errorf("AgentNode.Run: nil context for agent %q", n.agent.Name()))
 			return
+		}
+
+		// An LlmAgent resumes from session history. Re-feeding its original
+		// node input would create a synthetic turn and make it issue the same
+		// pending tool call again instead of consuming the user's reply.
+		if _, ok := n.agent.(llminternal.Agent); ok && n.isResuming(ctx) {
+			input = nil
+			userContent = ctx.UserContent()
 		}
 
 		// A graph node is a one-shot placement: an agent that declares no
@@ -191,6 +214,56 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			}
 		}
 	}
+}
+
+// isResuming reports whether this activation is consuming a reply for an
+// interrupt raised by this node. The per-activation ResumedInput map is the
+// freshness signal: stale events in session history do not match it on a
+// later loop-back, retry, or parallel activation.
+func (n *AgentNode) isResuming(ctx agent.Context) bool {
+	if ctx == nil || ctx.Session() == nil {
+		return false
+	}
+	nodePath := ctx.Path()
+	if nodePath == "" {
+		nodePath = n.Name()
+	}
+	events := ctx.Session().Events()
+	if events == nil {
+		return false
+	}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
+			continue
+		}
+		if invocationID := ctx.InvocationID(); invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		evPath := ""
+		if ev.NodeInfo != nil {
+			evPath = ev.NodeInfo.Path
+		}
+		if evPath == "" {
+			evPath = ev.Author
+		}
+		if !pathMatchesNode(evPath, nodePath) {
+			continue
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			if _, ok := ctx.ResumedInput(id); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathMatchesNode(eventPath, nodePath string) bool {
+	if eventPath == nodePath || strings.HasSuffix(eventPath, "/"+nodePath) {
+		return true
+	}
+	return strings.Contains(eventPath, "/"+nodePath+"/")
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model

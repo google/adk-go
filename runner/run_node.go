@@ -16,7 +16,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"iter"
 	"log"
@@ -329,7 +328,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 	}
 	pending := map[string]struct{}{}
 	if state != nil {
-		for id := range waitingInterruptIDs(state) {
+		for id := range resumableInterruptIDs(state) {
 			pending[id] = struct{}{}
 		}
 	}
@@ -352,7 +351,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 			out = map[string]any{}
 		}
 		// Opaque payload; Workflow.Resume validates against any schema.
-		out[fr.ID] = decodeResumeResponse(fr)
+		out[fr.ID] = utils.UnwrapResponse(fr.Response)
 	}
 	return out
 }
@@ -384,38 +383,24 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	return open
 }
 
-// decodeResumeResponse extracts the user payload from a function
-// response, accepting {"response": v}, {"payload": v}, or the raw map. A
-// string under "response" is JSON-parsed when possible.
-func decodeResumeResponse(fr *genai.FunctionResponse) any {
-	if fr.Response == nil {
-		return nil
-	}
-	if raw, ok := fr.Response["response"]; ok {
-		if s, isStr := raw.(string); isStr {
-			var decoded any
-			if err := json.Unmarshal([]byte(s), &decoded); err == nil {
-				return decoded
-			}
-			return s
-		}
-		return raw
-	}
-	if payload, ok := fr.Response["payload"]; ok {
-		return payload
-	}
-	return fr.Response
-}
-
-// waitingInterruptIDs returns the set of interrupt IDs for every node
-// in state that is currently paused on a long-running interrupt.
-func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
+// resumableInterruptIDs returns interrupt IDs that can be carried into
+// Workflow.Resume: open interrupts on waiting nodes and answers already folded
+// into a rehydrated node. The latter is how an inner RunNode sees the current
+// reply that caused its enclosing AgentNode to re-enter.
+func resumableInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	ids := map[string]struct{}{}
 	for _, ns := range state.Nodes {
-		if ns == nil || ns.Status != workflow.NodeWaiting {
+		if ns == nil {
 			continue
 		}
-		for _, id := range ns.Interrupts {
+		if ns.Status == workflow.NodeWaiting {
+			for _, id := range ns.Interrupts {
+				if id != "" {
+					ids[id] = struct{}{}
+				}
+			}
+		}
+		for id := range ns.ResumedInputs {
 			if id != "" {
 				ids[id] = struct{}{}
 			}

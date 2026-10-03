@@ -107,14 +107,6 @@ func (w *Workflow) Resume(
 				continue
 			}
 
-			// Which of this node's interrupts were answered this turn?
-			answeredNow := false
-			for id := range ns.ResumedInputs {
-				if _, ok := responses[id]; ok {
-					answeredNow = true
-					break
-				}
-			}
 			// WAITING nodes whose response arrived this turn but is not
 			// yet in history (the runner node path passes responses
 			// directly): fold it into ResumedInputs after validation.
@@ -143,7 +135,7 @@ func (w *Workflow) Resume(
 					continue
 				}
 			}
-			if !answeredNow && len(freshMatched) == 0 {
+			if !ns.answeredThisTurn && len(freshMatched) == 0 {
 				continue
 			}
 
@@ -181,9 +173,9 @@ func (w *Workflow) Resume(
 				// when terminal (no successors to count in Pass 2):
 				// without this a single-asker workflow would wrongly
 				// report ErrNothingToResume. answeredThisTurn gates on
-				// the response being new this turn (rehydration sets it
-				// from resolvedCount), so a duplicate resume stays a
-				// no-op. freshMatched covers the runner-direct path
+				// the response differing from the previous one
+				// (rehydration sets it during history scanning), so an
+				// identical replay stays a no-op. freshMatched covers the runner-direct path
 				// where the response is not yet in history.
 				if ns.answeredThisTurn || len(freshMatched) > 0 {
 					scheduled++
