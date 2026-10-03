@@ -80,8 +80,10 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			shouldExit := false
 			for _, subAgent := range ctx.Agent().SubAgents() {
 				for event, err := range subAgent.Run(ctx) {
-					// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
-					if !yield(event, err) {
+					// A failed sub-agent ends the loop, as in adk-python. Retrying
+					// it would repeat the same failure, forever when there is no
+					// MaxIterations.
+					if !yield(event, err) || err != nil {
 						return
 					}
 
