@@ -491,6 +491,64 @@ func TestInMemoryService_AppendEvent_MultipleEventsAllStripped(t *testing.T) {
 	}
 }
 
+// TestInMemoryService_Create_StripsTempKeysFromInitialState covers the Create
+// half of the temp: contract that
+// TestInMemoryService_AppendEvent_StripsTempKeysFromCanonicalRecord pins for
+// AppendEvent: a temp: key in the initial state must not reach the stored
+// session. ExtractStateDeltas already splits it out on this path, but Create
+// merges the caller's raw state into the record rather than the session-scoped
+// delta it computed, so the key survives every later Get. adk-python stores
+// only the session-scoped delta here, and the database backend stores
+// sessionState for the same reason — a state that differs by backend is a bug
+// on one of them, and the session record is the wrong place to keep an
+// invocation-scoped key.
+func TestInMemoryService_Create_StripsTempKeysFromInitialState(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+		State: map[string]any{
+			"temp:scratch": "x",
+			"keep":         "y",
+			"app:shared":   "a",
+			"user:shared":  "u",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// The create-time handle is a clone of the canonical record.
+	if _, err := createResp.Session.State().Get("temp:scratch"); err == nil {
+		t.Error("created handle holds temp:scratch after Create")
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: createResp.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	for k := range getResp.Session.State().All() {
+		if strings.HasPrefix(k, session.KeyPrefixTemp) {
+			t.Errorf("temp key %q leaked into the stored session state: %v", k, getResp.Session.State())
+		}
+	}
+	for key, want := range map[string]string{
+		"keep":        "y",
+		"app:shared":  "a",
+		"user:shared": "u",
+	} {
+		if got, _ := getResp.Session.State().Get(key); got != want {
+			t.Errorf("stored session lost key %q: got %v, want %q", key, got, want)
+		}
+	}
+}
+
 // TestInMemoryService_AppendEvent_CopiesCompaction pins that a stored
 // compaction cannot be edited through the pointer the caller passed in.
 //
