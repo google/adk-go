@@ -52,8 +52,8 @@ func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 
 // WithAgentTimeout implements [Context].
 func (c *toolContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for tool context")
-	return nil, nil
+	// this one is needed for tool context, same as WithAgentCancel.
+	return c.context.WithAgentTimeout(timeout)
 }
 
 // InvocationContext implements [Context].
