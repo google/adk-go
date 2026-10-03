@@ -1198,3 +1198,133 @@ func TestTailRetentionWindowStaysInsideTheTurnsScope(t *testing.T) {
 		t.Errorf("window (-want +got):\n%s", diff)
 	}
 }
+
+// TestTailRetentionAmortizesWhenTheSummaryAloneExceedsTheThreshold pins the
+// across-turn half of the futility check.
+//
+// The ProgressGate covers one invocation. It lives on the compaction runtime,
+// which is built per invocation, so a new turn always arrives with it cleared.
+// A standing summary larger than the threshold therefore re-triggered
+// compaction on every single turn, forever, and none of those calls could
+// succeed: the summary is already over the line before any new events are
+// counted.
+func TestTailRetentionAmortizesWhenTheSummaryAloneExceedsTheThreshold(t *testing.T) {
+	t.Parallel()
+
+	// 400 characters of summary is 100 tokens through the estimator, against a
+	// threshold of 50. Compacting cannot get under that however much it folds
+	// in.
+	oversized := compactionEvent("s1", 1, 1, 2, strings.Repeat("x", 400))
+
+	tests := []struct {
+		name        string
+		tail        []*session.Event
+		wantSummary bool
+	}{
+		{
+			// One short turn since the last compaction. Summarizing it buys a
+			// handful of tokens against a prompt already far over the line.
+			name: "little new material, so no call",
+			tail: []*session.Event{
+				textEvent("a", "inv2", 3, "q"), modelTextEvent("b", "inv2", 4, "a"),
+				textEvent("c", "inv3", 5, "q"),
+				// An observed prompt count, so the threshold is crossed on the
+				// strength of the materialized summary rather than of the tail.
+				// Without this the estimator never sees the summary at all --
+				// a compaction event renders as nothing -- the prompt reads as
+				// a handful of tokens, and the pass declines for being under
+				// the threshold, which would let this case pass with the guard
+				// deleted.
+				withUsage(modelTextEvent("d", "inv3", 6, "a"), 120),
+			},
+			wantSummary: false,
+		},
+		{
+			// Enough has accumulated to be worth folding in, so the strategy
+			// resumes rather than letting the tail grow without limit.
+			name: "enough new material, so it runs",
+			tail: []*session.Event{
+				textEvent("a", "inv2", 3, strings.Repeat("y", 200)),
+				modelTextEvent("b", "inv2", 4, strings.Repeat("y", 200)),
+				textEvent("c", "inv3", 5, "q"),
+				withUsage(modelTextEvent("d", "inv3", 6, "a"), 220),
+			},
+			wantSummary: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := append([]*session.Event{oversized}, tc.tail...)
+			cfg := &compaction.Config{
+				TokenThreshold:     50,
+				EventRetentionSize: 2,
+				Summarizer:         &fakeSummarizer{summary: "sum"},
+			}
+			got, err := tailRetentionStored(context.Background(), cfg,
+				&staticSession{events: events}, TurnScope{},
+				estimateFromEvents, &recordingGate{allow: true})
+			if err != nil {
+				t.Fatalf("tailRetentionStored() error = %v", err)
+			}
+			if (got != nil) != tc.wantSummary {
+				t.Errorf("compaction ran = %t, want %t: a standing summary over the threshold must not buy a model call every turn, but must still run once the tail is worth folding in", got != nil, tc.wantSummary)
+			}
+		})
+	}
+}
+
+// estimateFromEvents is a character-based TokenCounter matching the estimator
+// the runner installs, so the proportions in the test above mean what they say.
+func estimateFromEvents(events []*session.Event) int {
+	contents := make([]*genai.Content, 0, len(events))
+	for _, ev := range events {
+		if c := utils.Content(ev); c != nil {
+			contents = append(contents, c)
+		}
+	}
+	return EstimateTokensFromContents(contents)
+}
+
+// TestTailRetentionAmortizationDoesNotStallOnAnUndercountedTail pins the
+// backstop on the amortized gate.
+//
+// The size rule rests on the token estimator, which is documented as a floor:
+// it counts text, tool calls and tool responses, but not inline data. A tail of
+// images therefore reads as almost nothing while costing the real prompt a
+// great deal. Holding compaction off on the strength of that reading would let
+// the prompt grow without limit, which is a worse failure than the wasted calls
+// the gate exists to prevent.
+func TestTailRetentionAmortizationDoesNotStallOnAnUndercountedTail(t *testing.T) {
+	t.Parallel()
+
+	oversized := compactionEvent("s1", 1, 1, 2, strings.Repeat("x", 400))
+
+	// Events the estimator cannot see: inline data only, no text and no tool
+	// traffic. Enough of them to pass the count backstop.
+	events := []*session.Event{oversized}
+	for i := range rearmMaxPendingEvents*2 + 6 {
+		ev := modelTextEvent("blob", "inv2", i+3, "")
+		ev.LLMResponse.Content = &genai.Content{Role: "model", Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("payload")}},
+		}}
+		events = append(events, ev)
+	}
+	events = append(events, withUsage(modelTextEvent("last", "inv3", 99, "a"), 5000))
+
+	cfg := &compaction.Config{
+		TokenThreshold:     50,
+		EventRetentionSize: 2,
+		Summarizer:         &fakeSummarizer{summary: "sum"},
+	}
+	got, err := tailRetentionStored(context.Background(), cfg,
+		&staticSession{events: events}, TurnScope{}, estimateFromEvents, &recordingGate{allow: true})
+	if err != nil {
+		t.Fatalf("tailRetentionStored() error = %v", err)
+	}
+	if got == nil {
+		t.Error("compaction never ran behind the amortized gate for a tail the estimator cannot measure, so the prompt would grow without limit")
+	}
+}
