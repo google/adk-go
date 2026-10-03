@@ -23,10 +23,12 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
@@ -295,48 +297,79 @@ func TestListToolsReconnection(t *testing.T) {
 	}
 }
 
-func TestCallToolReconnection(t *testing.T) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"}, weatherFunc)
-
-	rt := &reconnectableTransport{server: server}
-	spyTransport := &spyTransport{Transport: rt}
-
-	ts, err := mcptoolset.New(mcptoolset.Config{
-		Transport: spyTransport,
-	})
-	if err != nil {
-		t.Fatalf("Failed to create MCP tool set: %v", err)
+func TestCallToolDoesNotReplayAfterConnectionFailure(t *testing.T) {
+	// Each error makes the client refresh its connection. Arriving after the
+	// request was sent, none tells the client whether the server ran the
+	// call, so none may cause the call to be resent. ErrSessionMissing is
+	// included because the SDK reports it to every call in flight when any
+	// request on the connection gets a 404.
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "closed pipe", err: io.ErrClosedPipe},
+		{name: "session missing", err: mcp.ErrSessionMissing},
 	}
 
-	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	ctx := icontext.NewReadonlyContext(invCtx)
-	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+			var callCount atomic.Int32
+			mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"},
+				func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+					callCount.Add(1)
+					return weatherFunc(ctx, req, input)
+				})
 
-	// Get tools first to establish a session.
-	tools, err := ts.Tools(ctx)
-	if err != nil {
-		t.Fatalf("Tools call failed: %v", err)
-	}
+			rt := &reconnectableTransport{server: server}
+			failingTransport := &failToolResponseOnceTransport{Transport: rt, err: tc.err}
+			spyTransport := &spyTransport{Transport: failingTransport}
 
-	// Kill the transport by closing the connection.
-	if err := spyTransport.lastConn.Close(); err != nil {
-		t.Fatalf("Failed to close connection: %v", err)
-	}
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: spyTransport,
+			})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
 
-	// Call the tool - should reconnect and succeed.
-	fnTool := tools[0].(toolinternal.FunctionTool)
-	result, err := fnTool.Run(toolCtx, map[string]any{"city": "Paris"})
-	if err != nil {
-		t.Fatalf("Tool call after reconnect failed: %v", err)
-	}
-	if result == nil {
-		t.Fatal("Expected non-nil result after reconnect")
-	}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
-	// Verify that we reconnected (should have 2 connections).
-	if spyTransport.connectCount != 2 {
-		t.Errorf("Expected 2 Connect calls (reconnect after close), got %d", spyTransport.connectCount)
+			// Get tools first to establish a session.
+			tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+			if err != nil {
+				t.Fatalf("Tools call failed: %v", err)
+			}
+
+			// The server runs the call, but the client receives a connection
+			// failure instead of the result.
+			fnTool := tools[0].(toolinternal.FunctionTool)
+			if _, err := fnTool.Run(toolCtx, map[string]any{"city": "Paris"}); !errors.Is(err, tc.err) {
+				t.Fatalf("Tool call with a failed response: got error %v, want one wrapping %v", err, tc.err)
+			}
+			if got := callCount.Load(); got != 1 {
+				t.Fatalf("Server tool executions after failed response = %d, want 1", got)
+			}
+
+			// The failed call repairs the connection for the next invocation.
+			if spyTransport.connectCount != 2 {
+				t.Fatalf("Connect calls after failed response = %d, want 2", spyTransport.connectCount)
+			}
+			result, err := fnTool.Run(toolCtx, map[string]any{"city": "Paris"})
+			if err != nil {
+				t.Fatalf("Tool call on refreshed connection failed: %v", err)
+			}
+			if result == nil {
+				t.Fatal("Tool call on refreshed connection returned a nil result")
+			}
+			if got := callCount.Load(); got != 2 {
+				t.Errorf("Server tool executions after second call = %d, want 2", got)
+			}
+			if spyTransport.connectCount != 2 {
+				t.Errorf("Connect calls after second call = %d, want 2", spyTransport.connectCount)
+			}
+		})
 	}
 }
 
@@ -364,6 +397,48 @@ func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, 
 		return nil, err
 	}
 	return ct.Connect(ctx)
+}
+
+// failToolResponseOnceTransport lets the first tools/call reach the server,
+// then replaces its response with err, as when a connection fails after the
+// server has run the call.
+type failToolResponseOnceTransport struct {
+	mcp.Transport
+	err    error
+	failed atomic.Bool
+}
+
+func (t *failToolResponseOnceTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := t.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &failToolResponseOnceConnection{Connection: conn, transport: t}, nil
+}
+
+type failToolResponseOnceConnection struct {
+	mcp.Connection
+	transport    *failToolResponseOnceTransport
+	failNextRead atomic.Bool
+}
+
+func (c *failToolResponseOnceConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
+	req, ok := msg.(*jsonrpc.Request)
+	if ok && req.Method == "tools/call" && c.transport.failed.CompareAndSwap(false, true) {
+		c.failNextRead.Store(true)
+	}
+	return c.Connection.Write(ctx, msg)
+}
+
+func (c *failToolResponseOnceConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	msg, err := c.Connection.Read(ctx)
+	if err == nil && c.failNextRead.Swap(false) {
+		if closeErr := c.Connection.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, c.transport.err
+	}
+	return msg, err
 }
 
 func TestMCPToolSetConfirmation(t *testing.T) {
