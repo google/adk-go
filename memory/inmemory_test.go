@@ -91,6 +91,24 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 		},
 		{
+			name: "matches punctuation and non-space whitespace",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-punctuation", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Error: connection\ntimeout! Please\tretry.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "error timeout retry",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{Content: genai.NewContentFromText("Error: connection\ntimeout! Please\tretry.", genai.RoleModel)},
+				},
+			},
+		},
+		{
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
