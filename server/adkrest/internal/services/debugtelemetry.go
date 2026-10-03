@@ -151,13 +151,15 @@ type DebugSpan struct {
 //
 // Body is normalised by [normalizeLogBody] when the record is stored, so it
 // always marshals and always carries the shape the ADK web UI expects for the
-// event name.
+// event name. Attributes is where the UI reads a
+// gen_ai.client.inference.operation.details event from.
 type DebugLog struct {
-	Body              any    `json:"body"`
-	ObservedTimestamp string `json:"observed_timestamp"`
-	TraceID           string `json:"trace_id"`
-	SpanID            string `json:"span_id"`
-	EventName         string `json:"event_name"`
+	Body              any            `json:"body"`
+	Attributes        map[string]any `json:"attributes,omitempty"`
+	ObservedTimestamp string         `json:"observed_timestamp"`
+	TraceID           string         `json:"trace_id"`
+	SpanID            string         `json:"span_id"`
+	EventName         string         `json:"event_name"`
 }
 
 // normalizeLogBody returns a log body the ADK web UI can validate, staying as
@@ -243,6 +245,81 @@ func textParts(v any) []any {
 		text = fmt.Sprint(v)
 	}
 	return []any{map[string]any{textKey: text}}
+}
+
+// Names the web UI reads a gen_ai.client.inference.operation.details event by.
+const (
+	inferenceDetailsEventName = "gen_ai.client.inference.operation.details"
+	inputMessagesKey          = "gen_ai.input.messages"
+	outputMessagesKey         = "gen_ai.output.messages"
+	systemInstructionsKey     = "gen_ai.system_instructions"
+)
+
+// normalizeLogAttributes returns log attributes the ADK web UI can validate,
+// or nil when there are none or they cannot be marshalled.
+//
+// The UI rejects the whole Traces panel on one message part it does not know,
+// and knows fewer than the semantic conventions define: it has no reasoning or
+// uri part, wants blob content under "data" with a mime type, and wants tool
+// arguments and responses to be objects. Parts are rewritten into those shapes;
+// everything else passes through.
+func normalizeLogAttributes(eventName string, attrs map[string]any) map[string]any {
+	if eventName == inferenceDetailsEventName {
+		for _, key := range []string{inputMessagesKey, outputMessagesKey} {
+			msgs, _ := attrs[key].([]any)
+			for _, m := range msgs {
+				if msg, ok := m.(map[string]any); ok {
+					msg[partsKey] = uiParts(msg[partsKey])
+				}
+			}
+		}
+		if parts, ok := attrs[systemInstructionsKey]; ok {
+			attrs[systemInstructionsKey] = uiParts(parts)
+		}
+	}
+	if _, err := json.Marshal(attrs); err != nil {
+		return nil
+	}
+	return attrs
+}
+
+func uiParts(v any) any {
+	parts, ok := v.([]any)
+	if !ok {
+		return v
+	}
+	for i, p := range parts {
+		if part, ok := p.(map[string]any); ok {
+			parts[i] = uiPart(part)
+		}
+	}
+	return parts
+}
+
+func uiPart(p map[string]any) map[string]any {
+	mimeType, _ := p["mime_type"].(string)
+	switch p["type"] {
+	case "reasoning":
+		return map[string]any{"type": "text", "content": p["content"]}
+	case "blob":
+		return map[string]any{"type": "blob", "mime_type": mimeType, "data": p["content"]}
+	case "uri":
+		return map[string]any{"type": "file_data", "mime_type": mimeType, "uri": p["uri"]}
+	case "tool_call":
+		p["arguments"] = uiObject(p["arguments"])
+	case "tool_call_response":
+		p["response"] = uiObject(p["response"])
+	}
+	return p
+}
+
+// uiObject wraps a tool payload that is not an object, as adk-python's
+// _to_optional_mapping does.
+func uiObject(v any) any {
+	if _, ok := v.(map[string]any); ok || v == nil {
+		return v
+	}
+	return map[string]any{"value": v}
 }
 
 // spanRecord stores a span and its associated logs.
@@ -406,8 +483,17 @@ func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) erro
 			record = &spanRecord{}
 			s.recordsBySpanID[spanID] = record
 		}
+		var attrs map[string]any
+		log.WalkAttributes(func(kv attribute.KeyValue) bool {
+			if attrs == nil {
+				attrs = make(map[string]any, log.AttributesLen())
+			}
+			attrs[string(kv.Key)] = telemetry.FromLogValue(kv.Value)
+			return true
+		})
 		record.Logs = append(record.Logs, DebugLog{
 			Body:              normalizeLogBody(log.EventName(), telemetry.FromLogValue(log.Body())),
+			Attributes:        normalizeLogAttributes(log.EventName(), attrs),
 			ObservedTimestamp: log.ObservedTimestamp().Format(time.RFC3339Nano),
 			TraceID:           log.TraceID().String(),
 			SpanID:            log.SpanID().String(),

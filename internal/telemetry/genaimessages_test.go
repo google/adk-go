@@ -29,6 +29,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 // cloudTraceAttributeValueLimit is the largest attribute value Cloud Trace
@@ -47,14 +48,33 @@ func captureContent(t *testing.T) {
 	ApplyEnv()
 }
 
-// attrString returns the value of the named attribute, and whether it was set.
-func attrString(attrs []attribute.KeyValue, key attribute.Key) (string, bool) {
+// attrJSON returns the named attribute, and whether it was set. A structured
+// value is returned encoded as JSON, so assertions hold for both encodings.
+func attrJSON(attrs []attribute.KeyValue, key attribute.Key) (string, bool) {
 	for _, kv := range attrs {
-		if kv.Key == key {
+		if kv.Key != key {
+			continue
+		}
+		if kv.Value.Type() == attribute.STRING {
 			return kv.Value.AsString(), true
 		}
+		b, err := json.Marshal(FromLogValue(kv.Value))
+		return string(b), err == nil
 	}
 	return "", false
+}
+
+// jsonDiff compares two JSON documents by value, not by field order.
+func jsonDiff(t *testing.T, want, got string) string {
+	t.Helper()
+	var w, g any
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("want is not JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(got), &g); err != nil {
+		t.Fatalf("got is not JSON: %v", err)
+	}
+	return cmp.Diff(w, g)
 }
 
 // --- Schema conformance ------------------------------------------------
@@ -215,14 +235,14 @@ func TestRequestContentAttributes_TextPartShape(t *testing.T) {
 			{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Rainy."}}},
 		},
 	}
-	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	got, ok := attrJSON(spanContentAttributes(requestContent(req)), genAIInputMessages)
 	if !ok {
 		t.Fatal("gen_ai.input.messages was not set")
 	}
 	want := `[{"role":"user","parts":[{"type":"text","content":"Weather in Paris?"}]},` +
 		`{"role":"assistant","parts":[{"type":"text","content":"Rainy."}]}]`
-	if got != want {
-		t.Errorf("gen_ai.input.messages =\n%s\nwant\n%s", got, want)
+	if diff := jsonDiff(t, want, got); diff != "" {
+		t.Errorf("gen_ai.input.messages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -287,7 +307,7 @@ func TestRequestContentAttributes_ToolTurnRole(t *testing.T) {
 			}}}},
 		},
 	}
-	encoded, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	encoded, ok := attrJSON(spanContentAttributes(requestContent(req)), genAIInputMessages)
 	if !ok {
 		t.Fatal("gen_ai.input.messages was not set")
 	}
@@ -312,40 +332,19 @@ func TestRequestContentAttributes_SystemInstructions(t *testing.T) {
 			}},
 		},
 	}
-	attrs := requestContentAttributes(req)
-	got, ok := attrString(attrs, genAISystemInstructions)
+	attrs := spanContentAttributes(requestContent(req))
+	got, ok := attrJSON(attrs, genAISystemInstructions)
 	if !ok {
 		t.Fatalf("gen_ai.system_instructions was not set; got %v", attrs)
 	}
 	validateParts(t, got)
 	want := `[{"type":"text","content":"You are a translator."},` +
 		`{"type":"text","content":"Translate English to French."}]`
-	if got != want {
-		t.Errorf("gen_ai.system_instructions =\n%s\nwant\n%s", got, want)
+	if diff := jsonDiff(t, want, got); diff != "" {
+		t.Errorf("gen_ai.system_instructions mismatch (-want +got):\n%s", diff)
 	}
-	if _, present := attrString(attrs, genAIInputMessages); present {
+	if _, present := attrJSON(attrs, genAIInputMessages); present {
 		t.Error("gen_ai.input.messages must not be set when there are no contents")
-	}
-}
-
-// --- Opt-in ------------------------------------------------------------
-
-func TestContentAttributes_OptInIsOffByDefault(t *testing.T) {
-	t.Setenv(captureMessageContentEnvVar, "")
-	ApplyEnv()
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "secret prompt"}}}},
-		Config: &genai.GenerateContentConfig{
-			SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "secret instruction"}}},
-		},
-	}
-	if attrs := requestContentAttributes(req); len(attrs) != 0 {
-		t.Errorf("request attributes with capture off = %v, want none", attrs)
-	}
-	resp := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "secret answer"}}}}
-	if attrs := responseContentAttributes(resp, nil); len(attrs) != 0 {
-		t.Errorf("response attributes with capture off = %v, want none", attrs)
 	}
 }
 
@@ -358,14 +357,14 @@ func TestResponseContentAttributes(t *testing.T) {
 		Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is rainy."}}},
 		FinishReason: genai.FinishReasonStop,
 	}
-	got, ok := attrString(responseContentAttributes(resp, nil), genAIOutputMessages)
+	got, ok := attrJSON(spanContentAttributes(responseContent(resp, nil)), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set")
 	}
 	validateMessages(t, got, true)
 	want := `[{"role":"assistant","parts":[{"type":"text","content":"It is rainy."}],"finish_reason":"stop"}]`
-	if got != want {
-		t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", got, want)
+	if diff := jsonDiff(t, want, got); diff != "" {
+		t.Errorf("gen_ai.output.messages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -379,7 +378,7 @@ func TestResponseContentAttributes_SkipsStreamingChunks(t *testing.T) {
 		Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is ra"}}},
 		Partial: true,
 	}
-	if attrs := responseContentAttributes(partial, nil); len(attrs) != 0 {
+	if attrs := spanContentAttributes(responseContent(partial, nil)); len(attrs) != 0 {
 		t.Errorf("attributes for a partial chunk = %v, want none", attrs)
 	}
 
@@ -387,7 +386,7 @@ func TestResponseContentAttributes_SkipsStreamingChunks(t *testing.T) {
 		Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is rainy."}}},
 		FinishReason: genai.FinishReasonStop,
 	}
-	got, ok := attrString(responseContentAttributes(settled, nil), genAIOutputMessages)
+	got, ok := attrJSON(spanContentAttributes(responseContent(settled, nil)), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set for the settled response")
 	}
@@ -403,14 +402,14 @@ func TestResponseContentAttributes_EmptyContent(t *testing.T) {
 	captureContent(t)
 
 	resp := &model.LLMResponse{FinishReason: genai.FinishReasonSafety}
-	got, ok := attrString(responseContentAttributes(resp, nil), genAIOutputMessages)
+	got, ok := attrJSON(spanContentAttributes(responseContent(resp, nil)), genAIOutputMessages)
 	if !ok {
 		t.Fatal("gen_ai.output.messages was not set")
 	}
 	validateMessages(t, got, true)
 	want := `[{"role":"assistant","parts":[],"finish_reason":"content_filter"}]`
-	if got != want {
-		t.Errorf("gen_ai.output.messages =\n%s\nwant\n%s", got, want)
+	if diff := jsonDiff(t, want, got); diff != "" {
+		t.Errorf("gen_ai.output.messages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -512,10 +511,10 @@ func TestGenerateContentSpan_ContentAttributes(t *testing.T) {
 			SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "be brief"}}},
 		},
 	}
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{
 		ModelName: "test-model", InvocationID: "inv-1", Request: req,
 	})
-	TraceGenerateContentResult(span, TraceGenerateContentResultParams{
+	traceGenerateContentResult(span, generateContentResult{
 		Response: &model.LLMResponse{
 			Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "ok"}}},
 			FinishReason: genai.FinishReasonStop,
@@ -532,10 +531,14 @@ func TestGenerateContentSpan_ContentAttributes(t *testing.T) {
 		genAIInputMessages:      `[{"role":"user","parts":[{"type":"text","content":"hi"}]}]`,
 		genAIOutputMessages:     `[{"role":"assistant","parts":[{"type":"text","content":"ok"}],"finish_reason":"stop"}]`,
 	}
-	got := attributesToMap(spans[0].Attributes)
 	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("attribute %s =\n%s\nwant\n%s", k, got[k], v)
+		got, ok := attrJSON(spans[0].Attributes, k)
+		if !ok {
+			t.Errorf("attribute %s was not set", k)
+			continue
+		}
+		if diff := jsonDiff(t, v, got); diff != "" {
+			t.Errorf("attribute %s mismatch (-want +got):\n%s", k, diff)
 		}
 	}
 }
@@ -549,10 +552,10 @@ func TestGenerateContentSpan_ErrorStillCarriesThePrompt(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hi"}}}},
 	}
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{
 		ModelName: "test-model", Request: req,
 	})
-	TraceGenerateContentResult(span, TraceGenerateContentResultParams{Error: errTest})
+	traceGenerateContentResult(span, generateContentResult{Error: errTest})
 	span.End()
 
 	spans := exporter.GetSpans()
@@ -572,7 +575,7 @@ func TestGenerateContentSpan_NilRequest(t *testing.T) {
 	captureContent(t)
 	exporter := setupTestTracer(t)
 
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "test-model"})
 	span.End()
 
 	spans := exporter.GetSpans()
@@ -615,29 +618,46 @@ func TestStartGenerateContentSpan_ConvertsAfterTheSamplingDecision(t *testing.T)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("a question worth capturing", genai.RoleUser)},
 	}
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{
 		ModelName: "mock", InvocationID: "inv-1", Request: req,
 	})
 	span.End()
 
-	if _, ok := attrString(rec.atStart, genAIInputMessages); ok {
+	if _, ok := attrJSON(rec.atStart, genAIInputMessages); ok {
 		t.Error("content was converted before the sampler could decide")
 	}
 	// Sanity: the span-creation attributes are there, so the recorder works.
-	if _, ok := attrString(rec.atStart, semconv.GenAIRequestModelKey); !ok {
+	if _, ok := attrJSON(rec.atStart, semconv.GenAIRequestModelKey); !ok {
 		t.Fatalf("recorder saw no creation attributes at all: %v", rec.atStart)
 	}
 }
 
-// TestOversizedAttributeIsDropped covers the size guard. A request carries the
-// whole conversation and is rebuilt on every model call, so the attribute grows
-// with the session. An attribute over the backend's limit is discarded at
-// ingestion in full, so this drops it rather than emitting something that
-// cannot be delivered.
+// TestStartExecuteToolSpan_ArgumentsAfterTheSamplingDecision is the same order
+// for the tool arguments.
+func TestStartExecuteToolSpan_ArgumentsAfterTheSamplingDecision(t *testing.T) {
+	captureContent(t)
+	t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+	rec := &startAttrRecorder{}
+	OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+
+	_, span := StartExecuteToolSpan(t.Context(), StartExecuteToolSpanParams{ToolName: "t", Args: map[string]any{"a": 1}})
+	span.End()
+
+	if _, ok := attrJSON(rec.atStart, genAIToolCallArguments); ok {
+		t.Error("tool arguments were converted before the sampler could decide")
+	}
+	if _, ok := attrJSON(rec.atStart, semconv.GenAIToolNameKey); !ok {
+		t.Fatalf("recorder saw no creation attributes at all: %v", rec.atStart)
+	}
+}
+
+// TestOversizedAttributeIsDropped covers the span size guard, under both
+// schemas. A request carries the whole conversation and is rebuilt on every
+// model call, so the attribute grows with the session. telemetry.googleapis.com
+// rejects the whole export request carrying one over its limit, so this drops
+// the attribute rather than lose the batch.
 func TestOversizedAttributeIsDropped(t *testing.T) {
 	captureContent(t)
-
-	// A conversation well past the limit.
 	var contents []*genai.Content
 	for range 200 {
 		contents = append(contents, &genai.Content{
@@ -645,22 +665,28 @@ func TestOversizedAttributeIsDropped(t *testing.T) {
 			Parts: []*genai.Part{{Text: strings.Repeat("x", 1000)}},
 		})
 	}
-	attrs := requestContentAttributes(&model.LLMRequest{Contents: contents})
-	if got, ok := attrString(attrs, genAIInputMessages); ok {
-		t.Errorf("an attribute of %d bytes was recorded, want it dropped", len(got))
-	}
+	for _, schema := range []string{otelSemconv136, "otel_semconv_1_44"} {
+		t.Run(schema, func(t *testing.T) {
+			t.Setenv(adkTelemetrySchemaVersionOptIn, schema)
 
-	// An ordinary conversation is unaffected, and comfortably inside the limit
-	// the implementation exists to respect.
-	attrs = requestContentAttributes(&model.LLMRequest{
-		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello"}}}},
-	})
-	got, ok := attrString(attrs, genAIInputMessages)
-	if !ok {
-		t.Fatal("an ordinary conversation was dropped")
-	}
-	if len(got) > cloudTraceAttributeValueLimit {
-		t.Errorf("attribute is %d bytes, over the %d the backend accepts", len(got), cloudTraceAttributeValueLimit)
+			attrs := spanContentAttributes(requestContent(&model.LLMRequest{Contents: contents}))
+			if got, ok := attrJSON(attrs, genAIInputMessages); ok {
+				t.Errorf("an attribute of %d bytes was recorded, want it dropped", len(got))
+			}
+
+			// An ordinary conversation is unaffected, and comfortably inside
+			// the limit the implementation exists to respect.
+			attrs = spanContentAttributes(requestContent(&model.LLMRequest{
+				Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello"}}}},
+			}))
+			got, ok := attrJSON(attrs, genAIInputMessages)
+			if !ok {
+				t.Fatal("an ordinary conversation was dropped")
+			}
+			if len(got) > cloudTraceAttributeValueLimit {
+				t.Errorf("attribute is %d bytes, over the %d the backend accepts", len(got), cloudTraceAttributeValueLimit)
+			}
+		})
 	}
 }
 
@@ -678,7 +704,7 @@ func TestMediaParts(t *testing.T) {
 		},
 	}}}
 
-	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	got, ok := attrJSON(spanContentAttributes(requestContent(req)), genAIInputMessages)
 	if !ok {
 		t.Fatal("gen_ai.input.messages was not set")
 	}
@@ -686,8 +712,8 @@ func TestMediaParts(t *testing.T) {
 		`{"type":"blob","mime_type":"image/png","modality":"image","content":"` +
 		base64.StdEncoding.EncodeToString(small) + `"},` +
 		`{"type":"uri","mime_type":"VIDEO/MP4","modality":"video","uri":"gs://bucket/clip.mp4"}]}]`
-	if got != want {
-		t.Errorf("got\n%s\nwant\n%s", got, want)
+	if diff := jsonDiff(t, want, got); diff != "" {
+		t.Errorf("gen_ai.input.messages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -705,7 +731,7 @@ func TestInlineDataIsCappedPerPayload(t *testing.T) {
 		},
 	}}}
 
-	got, ok := attrString(requestContentAttributes(req), genAIInputMessages)
+	got, ok := attrJSON(spanContentAttributes(requestContent(req)), genAIInputMessages)
 	if !ok {
 		t.Fatal("a turn with one large payload dropped the whole attribute")
 	}
@@ -779,17 +805,54 @@ func TestContentCaptureModes(t *testing.T) {
 // span capture behind that value would have started shipping full conversations
 // to a tracing backend nobody opted into.
 func TestTruthyValueDoesNotPutContentOnSpans(t *testing.T) {
-	t.Setenv(captureMessageContentEnvVar, "true")
-	ApplyEnv()
+	setEnvForTesting(t, map[string]string{captureMessageContentEnvVar: "true", adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44"})
+	exporter := setupTestTracer(t)
 
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "canary"}}}},
 	}
-	for _, attr := range requestContentAttributes(req) {
-		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "m", Request: req})
+	traceGenerateContentResult(span, generateContentResult{
+		Response: &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "canary"}}}},
+	})
+	span.End()
+	_, span = StartExecuteToolSpan(t.Context(), StartExecuteToolSpanParams{ToolName: "t", Args: map[string]any{"a": "canary"}})
+	TraceToolResult(span, TraceToolResultParams{ResponseEvent: &session.Event{LLMResponse: model.LLMResponse{
+		Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Response: map[string]any{"r": "canary"}}}}},
+	}}})
+	span.End()
+
+	for _, s := range exporter.GetSpans() {
+		for _, attr := range s.Attributes {
+			if strings.Contains(attr.Value.Emit(), "canary") {
+				t.Errorf("a truthy value put %s on span %q", attr.Key, s.Name)
+			}
+		}
 	}
-	resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "canary"}}}}
-	for _, attr := range responseContentAttributes(resp, nil) {
-		t.Errorf("a truthy value put %s on the span: %s", attr.Key, attr.Value.AsString())
+}
+
+// TestEventContentAttributes pins the two ways event content differs from a
+// legacy span's JSON string: it is not held to the Cloud Trace size cap, and
+// tool argument numbers keep their type.
+func TestEventContentAttributes(t *testing.T) {
+	long := strings.Repeat("x", cloudTraceAttributeValueLimit)
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: long}}},
+		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "f", Args: map[string]any{"n": 3, "f": 1.5}}}}},
+	}}
+
+	attrs := eventContentAttributes(requestContent(req))
+
+	if len(attrs) != 1 || attrs[0].Key != genAIInputMessages {
+		t.Fatalf("attributes = %v, want only %s", attrs, genAIInputMessages)
+	}
+	msgs := attrs[0].Value.AsSlice()
+	text := FromLogValue(msgs[0]).(map[string]any)["parts"].([]any)[0].(map[string]any)["content"]
+	if text != long {
+		t.Errorf("the long message was not recorded in full")
+	}
+	args := FromLogValue(msgs[1]).(map[string]any)["parts"].([]any)[0].(map[string]any)["arguments"]
+	if diff := cmp.Diff(map[string]any{"n": int64(3), "f": 1.5}, args); diff != "" {
+		t.Errorf("tool arguments mismatch (-want +got):\n%s", diff)
 	}
 }

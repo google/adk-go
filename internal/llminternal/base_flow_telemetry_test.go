@@ -33,6 +33,7 @@ import (
 	"google.golang.org/genai"
 
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -300,6 +301,9 @@ func (e *inMemoryLogExporter) Shutdown(ctx context.Context) error   { return nil
 func (e *inMemoryLogExporter) ForceFlush(ctx context.Context) error { return nil }
 
 func TestLoggingSpanIDPropagation(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	telemetry.ApplyEnv()
 	setupTestTracer(t)
 	logExporter := setupLoggerProvider(t)
 
@@ -350,14 +354,9 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 	for range generateContent(ctx, modelMock, req, true) {
 	}
 
-	if len(logExporter.records) != 3 {
-		t.Fatalf("expected 3 log records, got %d", len(logExporter.records))
-	}
-
-	wantEvents := []string{
-		"gen_ai.system.message",
-		"gen_ai.user.message",
-		"gen_ai.choice",
+	wantEvents := []string{"gen_ai.client.inference.operation.details"}
+	if len(logExporter.records) != len(wantEvents) {
+		t.Fatalf("expected %d log records, got %d", len(wantEvents), len(logExporter.records))
 	}
 
 	for i, record := range logExporter.records {
@@ -386,4 +385,55 @@ func setupLoggerProvider(t *testing.T) *inMemoryLogExporter {
 		testLogExporter.records = nil
 	})
 	return testLogExporter
+}
+
+// TestInferenceEventDescribesTheRequestTheSpanDoes pins that a model appending
+// to the request while handling it, as the Gemini model does to keep turns
+// alternating, changes neither the span's input messages nor the event's.
+func TestInferenceEventDescribesTheRequestTheSpanDoes(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	t.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "SPAN_AND_EVENT")
+	telemetry.ApplyEnv()
+	spanExporter := tracetest.NewInMemoryExporter()
+	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter)))
+	logExporter := &inMemoryLogExporter{}
+	telemetry.OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter))))
+
+	modelMock := &mockModelForTest{
+		name: "test-model",
+		generateContent: func(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+			req.Contents = append(req.Contents, genai.NewContentFromText("appended by the model", genai.RoleUser))
+			return func(yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{Content: genai.NewContentFromText("Response", genai.RoleModel)}, nil)
+			}
+		},
+	}
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Hello", genai.RoleUser)}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	for range generateContent(ctx, modelMock, req, false) {
+	}
+
+	var spanMessages int
+	for _, kv := range spanExporter.GetSpans()[0].Attributes {
+		if kv.Key == "gen_ai.input.messages" {
+			spanMessages = len(kv.Value.AsSlice())
+		}
+	}
+	if spanMessages != 1 {
+		t.Errorf("span gen_ai.input.messages holds %d messages, want 1", spanMessages)
+	}
+	if len(logExporter.records) != 1 {
+		t.Fatalf("expected 1 log record, got %d", len(logExporter.records))
+	}
+	var eventMessages int
+	logExporter.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+		if kv.Key == "gen_ai.input.messages" {
+			eventMessages = len(kv.Value.AsSlice())
+		}
+		return true
+	})
+	if eventMessages != 1 {
+		t.Errorf("event gen_ai.input.messages holds %d messages, want 1", eventMessages)
+	}
 }

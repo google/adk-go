@@ -36,6 +36,31 @@ import (
 // https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+// adkTelemetrySchemaVersionOptIn selects the telemetry format: otel_semconv_1_36
+// restores the legacy one, and otel_semconv_1_44, the default, selects the
+// experimental GenAI semantic conventions. Values are case-insensitive, and
+// adk-python's "1" and "2" (telemetry/_schema_version.py) are accepted for
+// them. The default is not adk-python's: it still defaults to "1" outside
+// Agent Engine, and gates its experimental events on
+// OTEL_SEMCONV_STABILITY_OPT_IN. Go goes straight to the end state of the
+// migration plan in that file, with this one knob. The legacy format is a
+// rollback, removed no earlier than March 2027.
+const adkTelemetrySchemaVersionOptIn = "ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN"
+
+// otelSemconv136 is the ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN value selecting the
+// legacy format.
+const otelSemconv136 = "otel_semconv_1_36"
+
+// inferenceOperationDetailsEventName is the experimental GenAI semconv event
+// describing one model call.
+// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-events.md
+const inferenceOperationDetailsEventName = "gen_ai.client.inference.operation.details"
+
+// genAIProviderName supersedes gen_ai.system in the experimental conventions.
+var genAIProviderName = attribute.Key("gen_ai.provider.name")
+
+const elidedContent = "<elided>"
+
 // contentCaptureMode says which signals may carry message content.
 //
 // The variable was a boolean here before spans could carry content, and
@@ -73,6 +98,18 @@ func parseContentCaptureMode(s string) contentCaptureMode {
 	return captureNone
 }
 
+// useLegacySchema reports whether ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN selects
+// the legacy format. Read on every call, like adk-python's
+// resolve_schema_version, so no state outlives the environment it came from.
+func useLegacySchema() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(adkTelemetrySchemaVersionOptIn))) {
+	case otelSemconv136, "1":
+		return true
+	}
+	// otel_semconv_1_44 or "2", unset, or unrecognized: the default.
+	return false
+}
+
 func contentCapture() contentCaptureMode {
 	once.Do(func() {
 		ApplyEnv()
@@ -95,8 +132,6 @@ func captureContentOnSpans() bool {
 	return mode == captureSpanOnly || mode == captureSpanAndEvent
 }
 
-const elidedContent = "<elided>"
-
 var otelLogger = global.GetLoggerProvider().Logger(
 	systemName,
 	log.WithSchemaURL(semconv.SchemaURL),
@@ -116,10 +151,15 @@ func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvi
 	t.Cleanup(func() { otelLogger = original })
 }
 
-// LogRequest logs the request to the model - the system message and user messages.
+// logRequest logs the request to the model - the system message and user messages.
 // It iterates over the request contents and logs each as a separate event.
 // Check [logSystemMessage] and [logUserMessage] for emitted event details.
-func LogRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backend) {
+//
+// Legacy schema only; see [logInferenceOperationDetails] for the default one.
+func logRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backend) {
+	if !useLegacySchema() {
+		return
+	}
 	genAISystem := variantToGenAISystem(backend)
 	logSystemMessage(ctx, req, genAISystem)
 	for _, content := range req.Contents {
@@ -127,12 +167,17 @@ func LogRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backen
 	}
 }
 
-// LogResponse logs the inference result.
+// logResponse logs the inference result.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aichoice.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec embeds the "content" field to be under the "message" key, but it's added directly in body.
 // * The "tool_calls" field is required if available in the spec, but it's omitted.
-func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Backend) {
+//
+// Legacy schema only; see [logInferenceOperationDetails] for the default one.
+func logResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Backend) {
+	if !useLegacySchema() {
+		return
+	}
 	record := log.Record{}
 	record.SetEventName("gen_ai.choice")
 
@@ -161,6 +206,35 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Bac
 		record.AddAttributes(*genAISystem)
 	}
 
+	otelLogger.Emit(ctx, record)
+}
+
+// logInferenceOperationDetails emits the gen_ai.client.inference.operation.details
+// event for a model call. ctx must carry the call's generate_content span.
+//
+// The event is emitted whatever the capture mode, so usage and finish reasons
+// reach logs; messages are added only when content capture on events is on.
+// No-op under the legacy schema, which logs through [logRequest] and
+// [logResponse] instead.
+func logInferenceOperationDetails(ctx context.Context, params GenerateContentParams, result generateContentResult) {
+	if useLegacySchema() {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		semconv.GenAIOperationNameGenerateContent,
+		semconv.GenAIRequestModel(params.ModelName),
+		gcpVertexAgentInvocationID.String(params.InvocationID),
+	}
+	if sys, ok := GenAISystemAttr(params.Backend); ok {
+		attrs = append(attrs, genAIProviderName.String(sys.Value.AsString()))
+	}
+	attrs = append(attrs, generateContentResultAttributes(result)...)
+	if getGenAICaptureMessageContent() {
+		attrs = append(attrs, eventContentAttributes(append(requestContent(params.Request), responseContent(result.Response, result.Error)...))...)
+	}
+	record := log.Record{}
+	record.SetEventName(inferenceOperationDetailsEventName)
+	record.AddAttributes(attrs...)
 	otelLogger.Emit(ctx, record)
 }
 
