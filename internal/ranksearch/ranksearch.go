@@ -23,6 +23,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -74,6 +75,8 @@ type Config struct {
 //
 //   - "select:a,b" loads items by exact name (no cap, reports unknown names).
 //   - A query with regex metacharacters matches names/descriptions as a regex.
+//     If it matches nothing and contains whitespace, it is treated as prose
+//     that happens to contain punctuation and ranked by BM25 instead.
 //   - Anything else is ranked by BM25 over each item's token bag.
 func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Config) ([]Match, string) {
 	query = strings.TrimSpace(query)
@@ -98,22 +101,35 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 	}
 
 	var all []Match
-	if looksLikeRegex(query) {
-		all = regexMatches(eligible, query, cfg)
-	} else {
+	var note string
+	switch {
+	case !looksLikeRegex(query):
 		all = bm25Matches(eligible, query, cfg)
+	default:
+		all = regexMatches(eligible, query, cfg)
+		// A pattern rarely contains whitespace, and a question such as "how do
+		// I list books?" does. Ranking a real pattern by its words would return
+		// items the pattern excluded.
+		if len(all) == 0 && strings.ContainsFunc(query, unicode.IsSpace) {
+			all = bm25Matches(eligible, query, cfg)
+			note = "no matches as a pattern, showing keyword matches"
+		}
 	}
 	if len(all) == 0 {
 		return nil, fmt.Sprintf("no %ss matched; try broader keywords or a different term", cfg.ItemNoun)
 	}
 
 	if cfg.MaxResults > 0 && len(all) > cfg.MaxResults {
-		return all[:cfg.MaxResults], fmt.Sprintf(
+		capped := fmt.Sprintf(
 			"showing %d of %d matches — use a more specific keyword to narrow results",
 			cfg.MaxResults, len(all),
 		)
+		if note != "" {
+			capped = note + ". " + capped
+		}
+		return all[:cfg.MaxResults], capped
 	}
-	return all, ""
+	return all, note
 }
 
 // selectByName loads items by exact name, skipping already-available and
