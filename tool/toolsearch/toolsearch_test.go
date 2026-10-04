@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"google.golang.org/genai"
 
@@ -37,6 +38,9 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// testAgent is the agent name the stub contexts report.
+const testAgent = "test_agent"
 
 // stubTool is a minimal tool.Tool for testing.
 type stubTool struct {
@@ -110,7 +114,7 @@ type stubReadonlyContext struct {
 
 func (c *stubReadonlyContext) UserContent() *genai.Content          { return nil }
 func (c *stubReadonlyContext) InvocationID() string                 { return "" }
-func (c *stubReadonlyContext) AgentName() string                    { return "" }
+func (c *stubReadonlyContext) AgentName() string                    { return testAgent }
 func (c *stubReadonlyContext) ReadonlyState() session.ReadonlyState { return c.state }
 func (c *stubReadonlyContext) UserID() string                       { return "" }
 func (c *stubReadonlyContext) AppName() string                      { return "" }
@@ -127,9 +131,11 @@ func newCtx(state *fakeState) agent.ReadonlyContext {
 // never exercises panics loudly instead of silently returning a zero value.
 type fakeToolContext struct {
 	agent.StrictContextMock
-	state *fakeState
+	state     *fakeState
+	agentName string
 }
 
+func (c *fakeToolContext) AgentName() string                                    { return c.agentName }
 func (c *fakeToolContext) ReadonlyState() session.ReadonlyState                 { return c.state }
 func (c *fakeToolContext) State() session.State                                 { return c.state }
 func (c *fakeToolContext) Artifacts() agent.Artifacts                           { return nil }
@@ -145,7 +151,15 @@ func (c *fakeToolContext) SearchMemory(_ context.Context, _ string) (*memory.Sea
 var _ agent.Context = (*fakeToolContext)(nil)
 
 func newToolCtx(state *fakeState) agent.Context {
-	return &fakeToolContext{StrictContextMock: agent.NewStrictContextMock(context.Background()), state: state}
+	return newAgentToolCtx(state, testAgent)
+}
+
+func newAgentToolCtx(state *fakeState, agentName string) agent.Context {
+	return &fakeToolContext{
+		StrictContextMock: agent.NewStrictContextMock(context.Background()),
+		state:             state,
+		agentName:         agentName,
+	}
 }
 
 // packableStubTool packs itself into the request, recording how many times its
@@ -229,7 +243,7 @@ func checkNames(t *testing.T, got, want, notWant []string) {
 func discoveredState(t *testing.T, names ...string) *fakeState {
 	t.Helper()
 	state := newFakeState(nil)
-	if err := RevealTools(state, "test_agent", names...); err != nil {
+	if err := RevealTools(newToolCtx(state), names...); err != nil {
 		t.Fatalf("RevealTools() error = %v", err)
 	}
 	return state
@@ -255,7 +269,7 @@ func mustToolNames(t *testing.T, ts tool.Toolset, ctx agent.ReadonlyContext) []s
 
 func mustSearch(t *testing.T, ctx agent.Context, query string, base tool.Toolset, gts *gatingToolset, maxResults int) searchOutput {
 	t.Helper()
-	out, err := executeSearch(ctx, searchArgs{Query: query}, base, "test_agent", gts.coreNames, gts.skillAnnotations, maxResults)
+	out, err := executeSearch(ctx, searchArgs{Query: query}, base, gts.coreNames, gts.skillAnnotations, maxResults)
 	if err != nil {
 		t.Fatalf("executeSearch(%q) error = %v", query, err)
 	}
@@ -278,7 +292,6 @@ func TestGatingToolset_EmptyState(t *testing.T) {
 		toolDef{"get_author", "get an author"},
 	)}
 	ts := mustNew(t, base, Config{
-		AgentName:     "test_agent",
 		CoreToolNames: []string{"get_current_time"},
 	})
 
@@ -295,7 +308,6 @@ func TestGatingToolset_WithDiscoveredState(t *testing.T) {
 		toolDef{"get_author", "get an author"},
 	)}
 	ts := mustNew(t, base, Config{
-		AgentName:     "test_agent",
 		CoreToolNames: []string{"get_current_time"},
 	})
 
@@ -310,8 +322,7 @@ func TestRevealTools_AppendsUniqueNamesInOrder(t *testing.T) {
 	state := discoveredState(t, "zeta_tool", "shared_tool")
 
 	if err := RevealTools(
-		state,
-		"test_agent",
+		newToolCtx(state),
 		"shared_tool",
 		"skill_tool_b",
 		"skill_tool_a",
@@ -321,7 +332,7 @@ func TestRevealTools_AppendsUniqueNamesInOrder(t *testing.T) {
 	}
 
 	want := []string{"zeta_tool", "shared_tool", "skill_tool_b", "skill_tool_a"}
-	if diff := cmp.Diff(want, discoveredNames(state, "test_agent")); diff != "" {
+	if diff := cmp.Diff(want, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -332,7 +343,7 @@ func TestSearch_ExcludesPreviouslyRevealedTools(t *testing.T) {
 		toolDef{"list_books", "list books"},
 	)}
 	state := newFakeState(nil)
-	if err := RevealTools(state, "test_agent", "list_notes"); err != nil {
+	if err := RevealTools(newToolCtx(state), "list_notes"); err != nil {
 		t.Fatalf("RevealTools() error = %v", err)
 	}
 
@@ -340,7 +351,6 @@ func TestSearch_ExcludesPreviouslyRevealedTools(t *testing.T) {
 		newToolCtx(state),
 		searchArgs{Query: "select:list_notes,list_books"},
 		base,
-		"test_agent",
 		nil,
 		nil,
 		8,
@@ -364,7 +374,6 @@ func TestGatingToolset_DiscoveredToolsInDiscoveryOrder(t *testing.T) {
 		toolDef{"z_tool", "catalog-last tool"},
 	)}
 	ts := mustNew(t, base, Config{
-		AgentName:     "test_agent",
 		CoreToolNames: []string{"get_current_time"},
 	})
 
@@ -385,7 +394,6 @@ func TestGatingToolset_DegenerateGuard(t *testing.T) {
 		toolDef{"show_help", "show help"},
 	)}
 	ts := mustNew(t, base, Config{
-		AgentName:     "test_agent",
 		CoreToolNames: []string{"get_current_time", "show_help"},
 	})
 
@@ -403,7 +411,7 @@ func TestProcessRequest_LeavesToolPackingToTheFlow(t *testing.T) {
 		&packableStubTool{stubTool: stubTool{name: "list_books", desc: "list"}, packCount: &packs},
 		&packableStubTool{stubTool: stubTool{name: "get_author", desc: "get"}},
 	}}
-	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+	gts := mustNew(t, base, Config{})
 
 	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
 	mustProcessRequest(t, gts, discoveredState(t, "list_books"), req)
@@ -425,7 +433,7 @@ func TestProcessRequest_ForwardsToBase(t *testing.T) {
 		)},
 		packCount: &basePacks,
 	}
-	gts := mustNew(t, base, Config{AgentName: "test_agent", CoreToolNames: []string{"get_current_time"}})
+	gts := mustNew(t, base, Config{CoreToolNames: []string{"get_current_time"}})
 
 	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
 	mustProcessRequest(t, gts, newFakeState(nil), req)
@@ -448,7 +456,6 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 		toolDef{"list_publishers", "list publishers"},
 	)}
 	ts := mustNew(t, base, Config{
-		AgentName:      "test_agent",
 		CoreToolNames:  []string{"get_current_time"},
 		GatedToolNames: []string{"list_publishers", "list_books"},
 	})
@@ -485,7 +492,6 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 		},
 	)}
 	gts := mustNew(t, base, Config{
-		AgentName:     "test_agent",
 		CoreToolNames: []string{"get_current_time"},
 		SkillAnnotations: map[string]string{
 			"list_recent_files": "file-browser",
@@ -502,7 +508,7 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 	if got := out.Matches[0]; got.Name != "list_recent_files" || got.ConnectedSkill != "file-browser" {
 		t.Errorf("match = %+v, want list_recent_files with connected_skill file-browser", got)
 	}
-	if diff := cmp.Diff([]string{"list_recent_files"}, discoveredNames(state, "test_agent")); diff != "" {
+	if diff := cmp.Diff([]string{"list_recent_files"}, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
 	for _, want := range []string{"could be relevant to your task", "load only the most relevant one"} {
@@ -522,7 +528,7 @@ func TestSearch_CappedResultsIncludeNote(t *testing.T) {
 		toolDef{"tool_b", "some tool"},
 		toolDef{"tool_c", "some tool"},
 	)}
-	gts := mustNew(t, base, Config{AgentName: "test_agent", MaxResults: 2})
+	gts := mustNew(t, base, Config{MaxResults: 2})
 
 	out := mustSearch(t, newToolCtx(newFakeState(nil)), "tool", base, gts, 2)
 	if len(out.Matches) != 2 {
@@ -542,7 +548,7 @@ func TestSearch_SelectByName(t *testing.T) {
 		toolDef{"update_book", "update a book"},
 		toolDef{"list_books", "list books"},
 	)}
-	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+	gts := mustNew(t, base, Config{})
 
 	state := newFakeState(nil)
 	out := mustSearch(t, newToolCtx(state), "select:patch_book,update_book,unknown_tool", base, gts, 8)
@@ -550,7 +556,7 @@ func TestSearch_SelectByName(t *testing.T) {
 	if !strings.Contains(out.Note, "unknown_tool") {
 		t.Errorf("note = %q, want the missing tool name %q in it", out.Note, "unknown_tool")
 	}
-	if diff := cmp.Diff([]string{"patch_book", "update_book"}, discoveredNames(state, "test_agent")); diff != "" {
+	if diff := cmp.Diff([]string{"patch_book", "update_book"}, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("selected tools must be persisted to discovered state (-want +got):\n%s", diff)
 	}
 }
@@ -583,7 +589,7 @@ func TestSearch_IndexesArguments(t *testing.T) {
 		updateNote,
 		&stubTool{name: "list_images", desc: "list all images"},
 	}}
-	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+	gts := mustNew(t, base, Config{})
 
 	// "comment" appears only in the body argument's description, nowhere in the
 	// tool name, description, or argument names.
@@ -629,7 +635,6 @@ func TestSearch_AnnotatesBaseToolWithSkillAnnotation(t *testing.T) {
 		toolDef{"list_notes", "list notes"},
 	)}
 	gts := mustNew(t, base, Config{
-		AgentName: "test_agent",
 		SkillAnnotations: map[string]string{
 			"list_folders":  "folder-browser",
 			"create_folder": "folder-browser",
@@ -698,7 +703,7 @@ func TestSearch_ParallelCallsKeepAllDiscoveries(t *testing.T) {
 		return ft
 	}
 	gated, err := New(&staticToolset{tools: []tool.Tool{newTool("add_numbers"), newTool("multiply_numbers")}},
-		Config{AgentName: "calculator"})
+		Config{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -740,16 +745,33 @@ func TestDiscoveredNames_OrderAndFiltering(t *testing.T) {
 		"unrelated": 0,
 	})
 	want := []string{"z_tool", "a_tool", "b_tool", "c_tool", "d_tool", "e_tool", "bad_value"}
-	if diff := cmp.Diff(want, discoveredNames(state, "test_agent")); diff != "" {
+	if diff := cmp.Diff(want, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestAgentNameWithColonIsRejected(t *testing.T) {
-	if _, err := New(&staticToolset{}, Config{AgentName: "a:b"}); err == nil {
-		t.Error("New() error = nil, want error for an agent name with a colon")
-	}
-	if err := RevealTools(newFakeState(nil), "a:b", "tool"); err == nil {
-		t.Error("RevealTools() error = nil, want error for an agent name with a colon")
+// TestRevealTools_KeepsDiscoveriesPerAgent checks that agents sharing a session
+// see only their own discoveries. Agent and tool names may both contain a
+// colon, so agent "a" revealing "b:t" must not hand agent "a:b" the tool "t".
+func TestRevealTools_KeepsDiscoveriesPerAgent(t *testing.T) {
+	agents := []string{"a", "a:b", "other"}
+	for _, tc := range []struct{ agent, tool string }{
+		{"a", "b:t"},
+		{"a:b", "t"},
+		{"other", "github:create_issue"},
+	} {
+		state := newFakeState(nil)
+		if err := RevealTools(newAgentToolCtx(state, tc.agent), tc.tool); err != nil {
+			t.Fatalf("RevealTools(%q) error = %v", tc.agent, err)
+		}
+		for _, agentName := range agents {
+			var want []string
+			if agentName == tc.agent {
+				want = []string{tc.tool}
+			}
+			if diff := cmp.Diff(want, discoveredNames(state, agentName), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("after %q revealed %q, discoveredNames(%q) mismatch (-want +got):\n%s", tc.agent, tc.tool, agentName, diff)
+			}
+		}
 	}
 }
