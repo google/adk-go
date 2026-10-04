@@ -16,6 +16,7 @@ package toolsearch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -421,6 +422,25 @@ func TestProcessRequest_LeavesToolPackingToTheFlow(t *testing.T) {
 	}
 }
 
+// TestSearch_CatalogErrorIsReturned checks that a failing base toolset surfaces
+// as an error from search_tools rather than as an empty result.
+func TestSearch_CatalogErrorIsReturned(t *testing.T) {
+	errCatalog := errors.New("catalog down")
+	base := &failingToolset{err: errCatalog}
+	gts := mustNew(t, base, Config{})
+
+	_, err := executeSearch(newToolCtx(newFakeState(nil)), searchArgs{Query: "books"}, base, gts.coreNames, nil, 8)
+	if !errors.Is(err, errCatalog) {
+		t.Errorf("executeSearch() error = %v, want it to wrap %v", err, errCatalog)
+	}
+}
+
+// failingToolset returns err from Tools.
+type failingToolset struct{ err error }
+
+func (f *failingToolset) Name() string                                       { return "failing" }
+func (f *failingToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) { return nil, f.err }
+
 // TestProcessRequest_ForwardsToBase verifies that ProcessRequest is forwarded to
 // the base toolset when it implements requestProcessor, so the base can inject
 // its own state.
@@ -774,4 +794,18 @@ func TestRevealTools_KeepsDiscoveriesPerAgent(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestGatingToolset_SkipsDiscoveredToolsTheFlowCannotPack checks that a revealed
+// tool without ProcessRequest stays out of Tools. The flow rejects such a tool
+// and fails the whole step, and RevealTools accepts any name.
+func TestGatingToolset_SkipsDiscoveredToolsTheFlowCannotPack(t *testing.T) {
+	base := &staticToolset{tools: []tool.Tool{
+		&stubTool{name: "packable_tool", desc: "can be called"},
+		&nonPackableStubTool{name: "non_packable_tool", desc: "cannot be called"},
+	}}
+	ts := mustNew(t, base, Config{})
+
+	names := mustToolNames(t, ts, newCtx(discoveredState(t, "packable_tool", "non_packable_tool")))
+	checkNames(t, names, []string{"packable_tool"}, []string{"non_packable_tool"})
 }

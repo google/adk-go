@@ -122,7 +122,8 @@ func nameSet(names []string) map[string]bool {
 // so they become visible on the calling agent's next model step. During a live
 // session they appear only in a later session. Discoveries are kept per agent,
 // keyed by ctx.AgentName(). Empty and already revealed names are ignored. A
-// name is callable only while the base toolset returns a tool by that name.
+// name is callable only while the base toolset returns a tool by that name
+// that the flow can pack into a request.
 //
 // Each tool is stored under its own key, so reveals from several function calls
 // in one model response are all kept: each call writes its own state delta and
@@ -215,7 +216,7 @@ func executeSearch(
 ) (searchOutput, error) {
 	baseTools, err := base.Tools(ctx)
 	if err != nil {
-		return searchOutput{Note: "tool catalog unavailable"}, nil //nolint:nilerr
+		return searchOutput{}, fmt.Errorf("toolsearch: list base tools: %w", err)
 	}
 
 	// Already-discovered tools and core tools are both excluded from results —
@@ -397,7 +398,10 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		if g.coreNames[name] {
 			continue
 		}
-		if t, ok := byName[name]; ok {
+		// The flow rejects a tool that cannot pack itself, and RevealTools
+		// accepts any name, so skip those as buildItems does for search.
+		t, ok := byName[name]
+		if _, packable := t.(requestProcessor); ok && packable {
 			visible = append(visible, t)
 		}
 	}
