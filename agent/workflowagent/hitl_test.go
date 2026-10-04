@@ -76,7 +76,7 @@ func TestWorkflowAgent_Resume_RestoresStateFromSession(t *testing.T) {
 	var handlerCalled atomic.Bool
 
 	// makeNodes returns fresh node instances per agent so the test
-	// proves resume goes through session.State, not through any
+	// proves resume works from session event history, not through any
 	// shared in-memory references between a1 and a2.
 	makeNodes := func() (workflow.Node, workflow.Node) {
 		return newAskerNode("human_approval", "approve?", nil),
