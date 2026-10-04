@@ -1,0 +1,712 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package toolsearch
+
+import (
+	"context"
+	"fmt"
+	"iter"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/ranksearch"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
+)
+
+// stubTool is a minimal tool.Tool for testing.
+type stubTool struct {
+	name string
+	desc string
+}
+
+func (t *stubTool) Name() string        { return t.name }
+func (t *stubTool) Description() string { return t.desc }
+func (t *stubTool) IsLongRunning() bool { return false }
+
+func (t *stubTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	if req.Tools == nil {
+		req.Tools = map[string]any{}
+	}
+	req.Tools[t.name] = t
+	return nil
+}
+
+// nonPackableStubTool implements tool.Tool but deliberately omits ProcessRequest,
+// simulating a tool that cannot be packed into an LLM request.
+type nonPackableStubTool struct {
+	name string
+	desc string
+}
+
+func (t *nonPackableStubTool) Name() string        { return t.name }
+func (t *nonPackableStubTool) Description() string { return t.desc }
+func (t *nonPackableStubTool) IsLongRunning() bool { return false }
+
+// fakeState implements both session.ReadonlyState and session.State.
+type fakeState struct {
+	data map[string]any
+}
+
+func newFakeState(data map[string]any) *fakeState {
+	if data == nil {
+		data = map[string]any{}
+	}
+	return &fakeState{data: data}
+}
+
+func (s *fakeState) Get(key string) (any, error) {
+	v, ok := s.data[key]
+	if !ok {
+		return nil, fmt.Errorf("key not found: %s", key)
+	}
+	return v, nil
+}
+
+func (s *fakeState) Set(key string, val any) error {
+	s.data[key] = val
+	return nil
+}
+
+func (s *fakeState) All() iter.Seq2[string, any] {
+	return func(yield func(string, any) bool) {
+		for k, v := range s.data {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
+// stubReadonlyContext implements agent.ReadonlyContext backed by fakeState.
+type stubReadonlyContext struct {
+	context.Context
+	state *fakeState
+}
+
+func (c *stubReadonlyContext) UserContent() *genai.Content          { return nil }
+func (c *stubReadonlyContext) InvocationID() string                 { return "" }
+func (c *stubReadonlyContext) AgentName() string                    { return "" }
+func (c *stubReadonlyContext) ReadonlyState() session.ReadonlyState { return c.state }
+func (c *stubReadonlyContext) UserID() string                       { return "" }
+func (c *stubReadonlyContext) AppName() string                      { return "" }
+func (c *stubReadonlyContext) SessionID() string                    { return "" }
+func (c *stubReadonlyContext) Branch() string                       { return "" }
+
+func newCtx(state *fakeState) agent.ReadonlyContext {
+	return &stubReadonlyContext{Context: context.Background(), state: state}
+}
+
+// fakeToolContext satisfies agent.Context, which ProcessRequest requires. It
+// embeds StrictContextMock (rather than composing stubReadonlyContext, which
+// would ambiguously promote overlapping methods) so any v2 method this test
+// never exercises panics loudly instead of silently returning a zero value.
+type fakeToolContext struct {
+	agent.StrictContextMock
+	state *fakeState
+}
+
+func (c *fakeToolContext) ReadonlyState() session.ReadonlyState                 { return c.state }
+func (c *fakeToolContext) State() session.State                                 { return c.state }
+func (c *fakeToolContext) Artifacts() agent.Artifacts                           { return nil }
+func (c *fakeToolContext) FunctionCallID() string                               { return "" }
+func (c *fakeToolContext) Actions() *session.EventActions                       { return nil }
+func (c *fakeToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (c *fakeToolContext) RequestConfirmation(_ string, _ any) error            { return nil }
+
+func (c *fakeToolContext) SearchMemory(_ context.Context, _ string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+
+var _ agent.Context = (*fakeToolContext)(nil)
+
+func newToolCtx(state *fakeState) agent.Context {
+	return &fakeToolContext{StrictContextMock: agent.NewStrictContextMock(context.Background()), state: state}
+}
+
+// packableStubTool packs itself into the request, recording how many times its
+// ProcessRequest was invoked and, when packOrder is set, in what order.
+type packableStubTool struct {
+	stubTool
+	packCount *int
+	packOrder *[]string
+}
+
+func (t *packableStubTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	if req.Tools == nil {
+		req.Tools = map[string]any{}
+	}
+	req.Tools[t.name] = t
+	if t.packCount != nil {
+		*t.packCount++
+	}
+	if t.packOrder != nil {
+		*t.packOrder = append(*t.packOrder, t.name)
+	}
+	return nil
+}
+
+// staticToolset always returns the same tools.
+type staticToolset struct {
+	tools []tool.Tool
+}
+
+func (s *staticToolset) Name() string                                       { return "static" }
+func (s *staticToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) { return s.tools, nil }
+
+// packableBaseToolset is a staticToolset that also implements requestProcessor,
+// simulating a base toolset that injects its own state
+// into the LLM request.
+type packableBaseToolset struct {
+	staticToolset
+	packCount *int
+}
+
+func (b *packableBaseToolset) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	if req.Tools == nil {
+		req.Tools = map[string]any{}
+	}
+	req.Tools["base_injected"] = struct{}{}
+	if b.packCount != nil {
+		*b.packCount++
+	}
+	return nil
+}
+
+type toolDef struct {
+	name, desc string
+}
+
+func makeTools(defs ...toolDef) []tool.Tool {
+	tools := make([]tool.Tool, len(defs))
+	for i, d := range defs {
+		tools[i] = &stubTool{name: d.name, desc: d.desc}
+	}
+	return tools
+}
+
+// checkNames reports names in want that are missing from got and names in
+// notWant that are present in got.
+func checkNames(t *testing.T, got, want, notWant []string) {
+	t.Helper()
+	for _, n := range want {
+		if !slices.Contains(got, n) {
+			t.Errorf("names = %v, want %q included", got, n)
+		}
+	}
+	for _, n := range notWant {
+		if slices.Contains(got, n) {
+			t.Errorf("names = %v, want %q excluded", got, n)
+		}
+	}
+}
+
+func mustNew(t *testing.T, base tool.Toolset, cfg Config) *gatingToolset {
+	t.Helper()
+	ts, err := New(base, cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return ts.(*gatingToolset)
+}
+
+func mustToolNames(t *testing.T, ts tool.Toolset, ctx agent.ReadonlyContext) []string {
+	t.Helper()
+	tools, err := ts.Tools(ctx)
+	if err != nil {
+		t.Fatalf("Tools() error = %v", err)
+	}
+	return toolNames(tools)
+}
+
+func mustSearch(t *testing.T, ctx agent.Context, query string, base tool.Toolset, gts *gatingToolset, maxResults int) searchOutput {
+	t.Helper()
+	out, err := executeSearch(ctx, searchArgs{Query: query}, base, "test_agent", gts.coreNames, gts.skillAnnotations, maxResults)
+	if err != nil {
+		t.Fatalf("executeSearch(%q) error = %v", query, err)
+	}
+	return out
+}
+
+func mustProcessRequest(t *testing.T, gts *gatingToolset, state *fakeState, req *model.LLMRequest) {
+	t.Helper()
+	if err := gts.ProcessRequest(newToolCtx(state), req); err != nil {
+		t.Fatalf("ProcessRequest() error = %v", err)
+	}
+}
+
+// TestGatingToolset_EmptyState verifies that only search_tools + core tools
+// are advertised when no tools have been discovered yet.
+func TestGatingToolset_EmptyState(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"get_current_time", "get time"},
+		toolDef{"list_books", "list all books"},
+		toolDef{"get_author", "get an author"},
+	)}
+	ts := mustNew(t, base, Config{
+		AgentName:     "test_agent",
+		CoreToolNames: []string{"get_current_time"},
+	})
+
+	names := mustToolNames(t, ts, newCtx(newFakeState(nil)))
+	checkNames(t, names, []string{ToolName, "get_current_time"}, []string{"list_books", "get_author"})
+}
+
+// TestGatingToolset_WithDiscoveredState verifies that tools written to session
+// state appear in the next Tools() call.
+func TestGatingToolset_WithDiscoveredState(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"get_current_time", "get time"},
+		toolDef{"list_books", "list all books"},
+		toolDef{"get_author", "get an author"},
+	)}
+	ts := mustNew(t, base, Config{
+		AgentName:     "test_agent",
+		CoreToolNames: []string{"get_current_time"},
+	})
+
+	// Simulate what search_tools writes: discovered key = comma-joined names.
+	state := newFakeState(map[string]any{
+		stateKeyPrefix + "test_agent": "list_books",
+	})
+
+	names := mustToolNames(t, ts, newCtx(state))
+	checkNames(t, names, []string{ToolName, "get_current_time", "list_books"}, []string{"get_author"})
+}
+
+func TestRevealTools_AppendsUniqueNamesInOrder(t *testing.T) {
+	state := newFakeState(map[string]any{
+		stateKeyPrefix + "test_agent": "existing_tool,shared_tool",
+	})
+
+	if err := RevealTools(
+		state,
+		"test_agent",
+		"shared_tool",
+		"skill_tool_a",
+		"skill_tool_b",
+		"skill_tool_a",
+	); err != nil {
+		t.Fatalf("RevealTools() error = %v", err)
+	}
+
+	want := "existing_tool,shared_tool,skill_tool_a,skill_tool_b"
+	if got := state.data[stateKeyPrefix+"test_agent"]; got != want {
+		t.Errorf("discovered = %v, want %q", got, want)
+	}
+}
+
+func TestSearch_ExcludesPreviouslyRevealedTools(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"list_notes", "list notes"},
+		toolDef{"list_books", "list books"},
+	)}
+	state := newFakeState(nil)
+	if err := RevealTools(state, "test_agent", "list_notes"); err != nil {
+		t.Fatalf("RevealTools() error = %v", err)
+	}
+
+	out, err := executeSearch(
+		newToolCtx(state),
+		searchArgs{Query: "select:list_notes,list_books"},
+		base,
+		"test_agent",
+		nil,
+		nil,
+		8,
+	)
+	if err != nil {
+		t.Fatalf("executeSearch() error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"list_books"}, matchNames(out.Matches)); diff != "" {
+		t.Errorf("executeSearch() matches mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGatingToolset_DiscoveredToolsInDiscoveryOrder verifies that discovered
+// tools are appended after core tools in discovery order, not catalog order.
+// This keeps the serialized tool list append-only across turns, which is what
+// preserves the provider's prompt-cache prefix.
+func TestGatingToolset_DiscoveredToolsInDiscoveryOrder(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"a_tool", "catalog-first tool"},
+		toolDef{"get_current_time", "get time"},
+		toolDef{"z_tool", "catalog-last tool"},
+	)}
+	ts := mustNew(t, base, Config{
+		AgentName:     "test_agent",
+		CoreToolNames: []string{"get_current_time"},
+	})
+
+	// z_tool was discovered before a_tool.
+	state := newFakeState(map[string]any{
+		stateKeyPrefix + "test_agent": "z_tool,a_tool",
+	})
+
+	want := []string{ToolName, "get_current_time", "z_tool", "a_tool"}
+	if diff := cmp.Diff(want, mustToolNames(t, ts, newCtx(state))); diff != "" {
+		t.Errorf("Tools() must follow discovery order, not catalog order (-want +got):\n%s", diff)
+	}
+}
+
+// TestGatingToolset_DegenerateGuard verifies that search_tools is omitted when
+// all base tools fit in the core set.
+func TestGatingToolset_DegenerateGuard(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"get_current_time", "get time"},
+		toolDef{"show_help", "show help"},
+	)}
+	ts := mustNew(t, base, Config{
+		AgentName:     "test_agent",
+		CoreToolNames: []string{"get_current_time", "show_help"},
+	})
+
+	names := mustToolNames(t, ts, newCtx(newFakeState(nil)))
+	checkNames(t, names, []string{"get_current_time", "show_help"}, []string{ToolName})
+}
+
+// TestProcessRequest_PacksDiscoveredTools verifies that tools discovered via
+// search_tools are packed into the request on a later step, while non-discovered
+// tools stay gated and already-packed tools are not packed twice. This guards
+// the core fix: ADK caches Tools() per invocation, so discovered tools can only
+// be surfaced through the per-step ProcessRequest hook.
+func TestProcessRequest_PacksDiscoveredTools(t *testing.T) {
+	corePacks, discoveredPacks, otherPacks := 0, 0, 0
+	base := &staticToolset{tools: []tool.Tool{
+		&packableStubTool{stubTool: stubTool{name: "get_current_time", desc: "ask"}, packCount: &corePacks},
+		&packableStubTool{stubTool: stubTool{name: "list_books", desc: "list"}, packCount: &discoveredPacks},
+		&packableStubTool{stubTool: stubTool{name: "get_author", desc: "get"}, packCount: &otherPacks},
+	}}
+	gts := mustNew(t, base, Config{AgentName: "test_agent", CoreToolNames: []string{"get_current_time"}})
+
+	state := newFakeState(map[string]any{stateKeyPrefix + "test_agent": "list_books"})
+	// Simulate ADK having already packed search_tools + the core tool before the
+	// toolset hook runs.
+	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}, "get_current_time": struct{}{}}}
+
+	mustProcessRequest(t, gts, state, req)
+
+	if _, ok := req.Tools["list_books"]; !ok {
+		t.Error("discovered tool list_books was not packed")
+	}
+	if _, ok := req.Tools["get_author"]; ok {
+		t.Error("non-discovered tool get_author was packed")
+	}
+	if discoveredPacks != 1 {
+		t.Errorf("discovered tool packed %d times, want 1", discoveredPacks)
+	}
+	if corePacks != 0 {
+		t.Errorf("already-packed core tool packed %d times, want 0", corePacks)
+	}
+}
+
+// TestProcessRequest_PacksInDiscoveryOrder verifies discovered tools are packed
+// in discovery order, matching the order Tools() advertises them on later
+// turns — a mismatch would churn the serialized tool list and break the
+// provider's prompt-cache prefix.
+func TestProcessRequest_PacksInDiscoveryOrder(t *testing.T) {
+	var order []string
+	base := &staticToolset{tools: []tool.Tool{
+		&packableStubTool{stubTool: stubTool{name: "a_tool", desc: "catalog-first"}, packOrder: &order},
+		&packableStubTool{stubTool: stubTool{name: "z_tool", desc: "catalog-last"}, packOrder: &order},
+	}}
+	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+
+	// z_tool was discovered before a_tool.
+	state := newFakeState(map[string]any{stateKeyPrefix + "test_agent": "z_tool,a_tool"})
+	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
+
+	mustProcessRequest(t, gts, state, req)
+
+	if diff := cmp.Diff([]string{"z_tool", "a_tool"}, order); diff != "" {
+		t.Errorf("tools must be packed in discovery order, not catalog order (-want +got):\n%s", diff)
+	}
+}
+
+// TestProcessRequest_NotGatingIsNoop verifies ProcessRequest does nothing when
+// search_tools is absent (the degenerate, non-gating case).
+func TestProcessRequest_NotGatingIsNoop(t *testing.T) {
+	packs := 0
+	base := &staticToolset{tools: []tool.Tool{
+		&packableStubTool{stubTool: stubTool{name: "list_books", desc: "list"}, packCount: &packs},
+	}}
+	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+
+	req := &model.LLMRequest{Tools: map[string]any{"list_books": struct{}{}}}
+	mustProcessRequest(t, gts, newFakeState(map[string]any{
+		stateKeyPrefix + "test_agent": "list_books",
+	}), req)
+
+	if packs != 0 {
+		t.Errorf("tool packed %d times, want 0", packs)
+	}
+}
+
+// TestProcessRequest_ForwardsToBase verifies that ProcessRequest is forwarded to
+// the base toolset when it implements requestProcessor, so the base can inject
+// its own state.
+func TestProcessRequest_ForwardsToBase(t *testing.T) {
+	basePacks := 0
+	base := &packableBaseToolset{
+		staticToolset: staticToolset{tools: makeTools(
+			toolDef{"get_current_time", "ask"},
+			toolDef{"list_books", "list"},
+		)},
+		packCount: &basePacks,
+	}
+	gts := mustNew(t, base, Config{AgentName: "test_agent", CoreToolNames: []string{"get_current_time"}})
+
+	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
+	mustProcessRequest(t, gts, newFakeState(nil), req)
+
+	if _, ok := req.Tools["base_injected"]; !ok {
+		t.Error("base toolset ProcessRequest was not forwarded")
+	}
+	if basePacks != 1 {
+		t.Errorf("base ProcessRequest called %d times, want 1", basePacks)
+	}
+}
+
+// TestSearchTool_AdvertisesGatedToolsInDescription verifies that the gated tool
+// names passed in Config are listed in the search_tools description the model
+// receives, so it knows what it can search for and select: by name.
+func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"get_current_time", "ask"},
+		toolDef{"list_books", "list books"},
+		toolDef{"list_publishers", "list publishers"},
+	)}
+	ts := mustNew(t, base, Config{
+		AgentName:      "test_agent",
+		CoreToolNames:  []string{"get_current_time"},
+		GatedToolNames: []string{"list_publishers", "list_books"},
+	})
+
+	tools, err := ts.Tools(newCtx(newFakeState(nil)))
+	if err != nil {
+		t.Fatalf("Tools() error = %v", err)
+	}
+
+	var desc string
+	for _, tl := range tools {
+		if tl.Name() == ToolName {
+			desc = tl.Description()
+		}
+	}
+	if desc == "" {
+		t.Fatal("search_tools is missing or has an empty description")
+	}
+	for _, want := range []string{"list_publishers", "list_books"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("search_tools description does not advertise gated tool %q", want)
+		}
+	}
+	if strings.Contains(desc, "get_current_time") {
+		t.Error("search_tools description lists core tool get_current_time")
+	}
+}
+
+func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
+	base := &staticToolset{tools: append(makeTools(toolDef{"get_current_time", "ask"}),
+		&stubTool{
+			name: "list_recent_files",
+			desc: "list recently modified files",
+		},
+	)}
+	gts := mustNew(t, base, Config{
+		AgentName:     "test_agent",
+		CoreToolNames: []string{"get_current_time"},
+		SkillAnnotations: map[string]string{
+			"list_recent_files": "file-browser",
+		},
+	})
+
+	checkNames(t, mustToolNames(t, gts, newCtx(newFakeState(nil))), []string{ToolName}, nil)
+
+	state := newFakeState(nil)
+	out := mustSearch(t, newToolCtx(state), "recent files", base, gts, 8)
+	if len(out.Matches) != 1 {
+		t.Fatalf("executeSearch() returned %d matches, want 1", len(out.Matches))
+	}
+	if got := out.Matches[0]; got.Name != "list_recent_files" || got.ConnectedSkill != "file-browser" {
+		t.Errorf("match = %+v, want list_recent_files with connected_skill file-browser", got)
+	}
+	if got := state.data[gts.discoveredKey]; got != "list_recent_files" {
+		t.Errorf("discovered = %v, want %q", got, "list_recent_files")
+	}
+	for _, want := range []string{"could be relevant to your task", "load only the most relevant one"} {
+		if !strings.Contains(out.NextStep, want) {
+			t.Errorf("next_step = %q, want it to contain %q", out.NextStep, want)
+		}
+	}
+
+	checkNames(t, mustToolNames(t, gts, newCtx(state)), []string{"list_recent_files"}, nil)
+
+	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
+	mustProcessRequest(t, gts, state, req)
+	if _, ok := req.Tools["list_recent_files"]; !ok {
+		t.Error("revealed tool list_recent_files was not packed")
+	}
+}
+
+// TestSearch_CappedResultsIncludeNote verifies that executeSearch plumbs the
+// MaxResults cap through to the ranker and surfaces the truncation note.
+func TestSearch_CappedResultsIncludeNote(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"tool_a", "some tool"},
+		toolDef{"tool_b", "some tool"},
+		toolDef{"tool_c", "some tool"},
+	)}
+	gts := mustNew(t, base, Config{AgentName: "test_agent", MaxResults: 2})
+
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "tool", base, gts, 2)
+	if len(out.Matches) != 2 {
+		t.Errorf("executeSearch() returned %d matches, want 2", len(out.Matches))
+	}
+	if out.Note == "" {
+		t.Error("executeSearch() note is empty, want a truncation note")
+	}
+}
+
+// TestSearch_SelectByName verifies executeSearch handles the "select:a,b" form
+// and persists the selected tools to the discovered-state so later turns surface
+// them.
+func TestSearch_SelectByName(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"patch_book", "patch a book"},
+		toolDef{"update_book", "update a book"},
+		toolDef{"list_books", "list books"},
+	)}
+	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+
+	state := newFakeState(nil)
+	out := mustSearch(t, newToolCtx(state), "select:patch_book,update_book,unknown_tool", base, gts, 8)
+	checkNames(t, matchNames(out.Matches), []string{"patch_book", "update_book"}, []string{"list_books"})
+	if !strings.Contains(out.Note, "unknown_tool") {
+		t.Errorf("note = %q, want the missing tool name %q in it", out.Note, "unknown_tool")
+	}
+	if got := state.data[gts.discoveredKey]; got != "patch_book,update_book" {
+		t.Errorf("discovered = %v, want %q", got, "patch_book,update_book")
+	}
+}
+
+// TestBuildItems_SkipsNonPackableTools verifies that tools without ProcessRequest
+// are excluded from the searchable set — the model would discover them but
+// receive an "unknown tool" error when trying to call them.
+func TestBuildItems_SkipsNonPackableTools(t *testing.T) {
+	catalog := []tool.Tool{
+		&stubTool{name: "packable_tool", desc: "can be called"},
+		&nonPackableStubTool{name: "non_packable_tool", desc: "cannot be called"},
+	}
+	checkNames(t, itemNames(buildItems(catalog)), []string{"packable_tool"}, []string{"non_packable_tool"})
+}
+
+// TestSearch_IndexesArguments verifies a tool is discoverable when the query
+// matches only an argument's description — not its name, description, or argument
+// names. It uses a real functiontool so the argument schema is exposed the same
+// way functiontool exposes it (ParametersJsonSchema).
+func TestSearch_IndexesArguments(t *testing.T) {
+	updateNote, err := functiontool.New(
+		functiontool.Config{Name: "update_note", Description: "modify a note"},
+		func(_ agent.Context, _ updateNoteArgs) (struct{}, error) { return struct{}{}, nil },
+	)
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+
+	base := &staticToolset{tools: []tool.Tool{
+		updateNote,
+		&stubTool{name: "list_images", desc: "list all images"},
+	}}
+	gts := mustNew(t, base, Config{AgentName: "test_agent"})
+
+	// "comment" appears only in the body argument's description, nowhere in the
+	// tool name, description, or argument names.
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "comment", base, gts, 8)
+	checkNames(t, matchNames(out.Matches), []string{"update_note"}, []string{"list_images"})
+}
+
+// updateNoteArgs is the argument struct for the functiontool used in
+// TestSearch_IndexesArguments; the jsonschema tag becomes the property
+// description that the search must index.
+type updateNoteArgs struct {
+	Body string `json:"body" jsonschema:"the comment text to attach"`
+}
+
+func toolNames(tools []tool.Tool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name()
+	}
+	return names
+}
+
+func itemNames(items []ranksearch.Item) []string {
+	names := make([]string, len(items))
+	for i, it := range items {
+		names[i] = it.Name
+	}
+	return names
+}
+
+func matchNames(matches []searchMatch) []string {
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		names[i] = m.Name
+	}
+	return names
+}
+
+func TestSearch_AnnotatesBaseToolWithSkillAnnotation(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"list_folders", "list folders in the workspace"},
+		toolDef{"create_folder", "create a new folder"},
+		toolDef{"list_notes", "list notes"},
+	)}
+	gts := mustNew(t, base, Config{
+		AgentName: "test_agent",
+		SkillAnnotations: map[string]string{
+			"list_folders":  "folder-browser",
+			"create_folder": "folder-browser",
+		},
+	})
+
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "folders", base, gts, 8)
+	if len(out.Matches) == 0 {
+		t.Fatal("executeSearch() returned no matches")
+	}
+	for _, match := range out.Matches {
+		switch match.Name {
+		case "list_folders", "create_folder":
+			if match.ConnectedSkill != "folder-browser" {
+				t.Errorf("%s connected_skill = %q, want folder-browser", match.Name, match.ConnectedSkill)
+			}
+		case "list_notes":
+			if match.ConnectedSkill != "" {
+				t.Errorf("unannotated tool list_notes has connected_skill %q", match.ConnectedSkill)
+			}
+		}
+	}
+}
