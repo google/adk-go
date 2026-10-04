@@ -393,78 +393,23 @@ func TestGatingToolset_DegenerateGuard(t *testing.T) {
 	checkNames(t, names, []string{"get_current_time", "show_help"}, []string{ToolName})
 }
 
-// TestProcessRequest_PacksDiscoveredTools verifies that tools discovered via
-// search_tools are packed into the request on a later step, while non-discovered
-// tools stay gated and already-packed tools are not packed twice. This guards
-// the core fix: ADK caches Tools() per invocation, so discovered tools can only
-// be surfaced through the per-step ProcessRequest hook.
-func TestProcessRequest_PacksDiscoveredTools(t *testing.T) {
-	corePacks, discoveredPacks, otherPacks := 0, 0, 0
-	base := &staticToolset{tools: []tool.Tool{
-		&packableStubTool{stubTool: stubTool{name: "get_current_time", desc: "ask"}, packCount: &corePacks},
-		&packableStubTool{stubTool: stubTool{name: "list_books", desc: "list"}, packCount: &discoveredPacks},
-		&packableStubTool{stubTool: stubTool{name: "get_author", desc: "get"}, packCount: &otherPacks},
-	}}
-	gts := mustNew(t, base, Config{AgentName: "test_agent", CoreToolNames: []string{"get_current_time"}})
-
-	state := discoveredState(t, "list_books")
-	// Simulate ADK having already packed search_tools + the core tool before the
-	// toolset hook runs.
-	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}, "get_current_time": struct{}{}}}
-
-	mustProcessRequest(t, gts, state, req)
-
-	if _, ok := req.Tools["list_books"]; !ok {
-		t.Error("discovered tool list_books was not packed")
-	}
-	if _, ok := req.Tools["get_author"]; ok {
-		t.Error("non-discovered tool get_author was packed")
-	}
-	if discoveredPacks != 1 {
-		t.Errorf("discovered tool packed %d times, want 1", discoveredPacks)
-	}
-	if corePacks != 0 {
-		t.Errorf("already-packed core tool packed %d times, want 0", corePacks)
-	}
-}
-
-// TestProcessRequest_PacksInDiscoveryOrder verifies discovered tools are packed
-// in discovery order, matching the order Tools() advertises them on later
-// turns — a mismatch would churn the serialized tool list and break the
-// provider's prompt-cache prefix.
-func TestProcessRequest_PacksInDiscoveryOrder(t *testing.T) {
-	var order []string
-	base := &staticToolset{tools: []tool.Tool{
-		&packableStubTool{stubTool: stubTool{name: "a_tool", desc: "catalog-first"}, packOrder: &order},
-		&packableStubTool{stubTool: stubTool{name: "z_tool", desc: "catalog-last"}, packOrder: &order},
-	}}
-	gts := mustNew(t, base, Config{AgentName: "test_agent"})
-
-	// z_tool was discovered before a_tool.
-	state := discoveredState(t, "z_tool", "a_tool")
-	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
-
-	mustProcessRequest(t, gts, state, req)
-
-	if diff := cmp.Diff([]string{"z_tool", "a_tool"}, order); diff != "" {
-		t.Errorf("tools must be packed in discovery order, not catalog order (-want +got):\n%s", diff)
-	}
-}
-
-// TestProcessRequest_NotGatingIsNoop verifies ProcessRequest does nothing when
-// search_tools is absent (the degenerate, non-gating case).
-func TestProcessRequest_NotGatingIsNoop(t *testing.T) {
+// TestProcessRequest_LeavesToolPackingToTheFlow checks that ProcessRequest
+// does not pack discovered tools itself. Tools already returns them and the
+// flow packs everything Tools returns, so packing here too would fail the run
+// with a duplicate-tool error.
+func TestProcessRequest_LeavesToolPackingToTheFlow(t *testing.T) {
 	packs := 0
 	base := &staticToolset{tools: []tool.Tool{
 		&packableStubTool{stubTool: stubTool{name: "list_books", desc: "list"}, packCount: &packs},
+		&packableStubTool{stubTool: stubTool{name: "get_author", desc: "get"}},
 	}}
 	gts := mustNew(t, base, Config{AgentName: "test_agent"})
 
-	req := &model.LLMRequest{Tools: map[string]any{"list_books": struct{}{}}}
+	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
 	mustProcessRequest(t, gts, discoveredState(t, "list_books"), req)
 
 	if packs != 0 {
-		t.Errorf("tool packed %d times, want 0", packs)
+		t.Errorf("discovered tool packed %d times by ProcessRequest, want 0", packs)
 	}
 }
 
@@ -567,12 +512,6 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 	}
 
 	checkNames(t, mustToolNames(t, gts, newCtx(state)), []string{"list_recent_files"}, nil)
-
-	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
-	mustProcessRequest(t, gts, state, req)
-	if _, ok := req.Tools["list_recent_files"]; !ok {
-		t.Error("revealed tool list_recent_files was not packed")
-	}
 }
 
 // TestSearch_CappedResultsIncludeNote verifies that executeSearch plumbs the

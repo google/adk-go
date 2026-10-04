@@ -355,10 +355,12 @@ type requestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
 
-// Tools provides the initial tool set: search_tools plus the core tools. ADK
-// resolves a toolset's Tools() exactly once per invocation and caches the
-// result for every subsequent step, so tools discovered mid-invocation cannot
-// be surfaced here — that is handled per-step in ProcessRequest.
+// Tools returns search_tools, the core tools, and the tools discovered so far
+// under Config.AgentName. The flow calls Tools before every model step, so a tool
+// discovered by search_tools is callable on the next step of the same
+// invocation. A live session is the exception: it resolves its tools once,
+// before it first connects, and its reconnects reuse that list, so tools
+// discovered during it appear only in a later session.
 //
 // Discovered tools are appended after the core tools in discovery order (the
 // order they were persisted to state) rather than catalog order. The tool list
@@ -405,57 +407,13 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	return visible, nil
 }
 
-// ProcessRequest runs on every model step (unlike Tools, which is cached for
-// the whole invocation). It packs the declarations of tools the model has
-// discovered via search_tools into the request, making them callable on the
-// very next step after discovery. Tools already packed by ADK (search_tools
-// and the core tools) are skipped.
-//
-// Packing follows discovery order — the same order Tools uses — so the
-// declarations retain a stable order. Actual prompt-cache behavior depends on
-// the provider and the rest of the request; cache hit rates are not guaranteed.
+// ProcessRequest forwards to the base toolset when it implements the hook, so
+// the base can still inject its own request state, such as instructions.
+// Tools needs no help here: the flow packs whatever it returns.
 func (g *gatingToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	// Forward to the base toolset so it can inject its own request state
-	// (e.g. additional system instructions).
 	if rp, ok := g.base.(requestProcessor); ok {
 		if err := rp.ProcessRequest(ctx, req); err != nil {
 			return fmt.Errorf("toolsearch: base toolset ProcessRequest: %w", err)
-		}
-	}
-
-	// search_tools is only packed (via the cached Tools result) when this
-	// toolset is actively gating. If it is absent there is nothing to pack.
-	if _, gating := req.Tools[ToolName]; !gating {
-		return nil
-	}
-
-	discovered := discoveredNames(ctx.ReadonlyState(), g.agentName)
-	if len(discovered) == 0 {
-		return nil
-	}
-
-	baseTools, err := g.base.Tools(ctx)
-	if err != nil {
-		return fmt.Errorf("toolsearch: list base tools: %w", err)
-	}
-	byName := make(map[string]tool.Tool, len(baseTools))
-	for _, t := range baseTools {
-		byName[t.Name()] = t
-	}
-	for _, name := range discovered {
-		t, ok := byName[name]
-		if !ok {
-			continue
-		}
-		if _, alreadyPacked := req.Tools[name]; alreadyPacked {
-			continue
-		}
-		rp, ok := t.(requestProcessor)
-		if !ok {
-			continue
-		}
-		if err := rp.ProcessRequest(ctx, req); err != nil {
-			return fmt.Errorf("toolsearch: pack discovered tool %q: %w", name, err)
 		}
 	}
 	return nil
