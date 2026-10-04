@@ -1223,3 +1223,119 @@ func captureLog(t *testing.T, fn func()) string {
 	fn()
 	return buf.String()
 }
+
+// dynamicToolset returns different tools on each call to simulate a toolset
+// whose output depends on session state written by an earlier tool in the run.
+type dynamicToolset struct {
+	callCount   int
+	toolsByCall map[int][]tool.Tool
+}
+
+func (d *dynamicToolset) Name() string { return "dynamic" }
+func (d *dynamicToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
+	tools := d.toolsByCall[d.callCount]
+	d.callCount++
+	return tools, nil
+}
+
+// TestToolProcessorReEvaluatesToolsetsEachStep verifies that toolProcessor
+// calls Toolset.Tools() on every step, not just the first. This ensures that
+// tools activated by session-state changes in an earlier step are visible to
+// subsequent model calls within the same Runner.Run().
+func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
+	extraTool := &mockFunctionTool{name: "extra_tool"}
+
+	// Call 0: no tools yet. Call 1+: return extraTool.
+	ts := &dynamicToolset{
+		toolsByCall: map[int][]tool.Tool{
+			0: nil,
+			1: {extraTool},
+		},
+	}
+
+	baseTool := &mockFunctionTool{name: "base_tool"}
+	agentState := &State{Tools: []tool.Tool{baseTool}, Toolsets: []tool.Toolset{ts}}
+	mockAgent := &mockLLMAgent{s: agentState}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent})
+
+	f := &Flow{}
+
+	// First call: toolset returns nil, so f.Tools holds only the static tool.
+	// A non-nil f.Tools is what would trip a per-run cache guard.
+	req1 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req1, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 1 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 1 {
+		t.Errorf("after call 1: got %d tools, want 1", len(f.Tools))
+	}
+
+	// Second call: toolset now returns extraTool — f.Tools must be updated.
+	req2 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req2, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 2 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 2 || f.Tools[1].Name() != extraTool.Name() {
+		t.Errorf("after call 2: got tools %v, want [%s %s]", f.Tools, baseTool.Name(), extraTool.Name())
+	}
+
+	if ts.callCount != 2 {
+		t.Errorf("toolset.Tools() called %d times, want 2", ts.callCount)
+	}
+}
+
+func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
+	tests := []struct {
+		name          string
+		responses     []*model.LLMResponse
+		wantResponses int
+	}{
+		{
+			name:          "nil only",
+			responses:     []*model.LLMResponse{nil},
+			wantResponses: 0,
+		},
+		{
+			name: "nil then final",
+			responses: []*model.LLMResponse{
+				nil,
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "done"}}}},
+			},
+			wantResponses: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, resp := range tc.responses {
+							if !yield(resp, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+
+			gotResponses := 0
+			for _, err := range f.callLLM(ctx, &model.LLMRequest{}, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() returned unexpected error: %v", err)
+				}
+				gotResponses++
+			}
+			if gotResponses != tc.wantResponses {
+				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
