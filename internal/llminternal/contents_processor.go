@@ -771,6 +771,11 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if event.IsolationScope != isolationScope {
 			continue
 		}
+		// An event discarded by foreign conversion cannot start a visible
+		// turn: keep searching so it does not slice out the preceding input.
+		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
+			continue
+		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
 			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
@@ -786,9 +791,10 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 
 // ConvertForeignEvent converts an event authored by another agent as
 // a user-content event.
-// This is to provide another aget's output as context to the current agent,
+// This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
+// Thought parts are omitted; a non-empty event containing only thoughts returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {

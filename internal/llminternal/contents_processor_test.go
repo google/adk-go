@@ -1004,13 +1004,30 @@ func TestConvertForeignEvent(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			// Retain the two-thought regression from nuthalapativarun's #1104.
+			name: "MultipleThoughtsOnlyDropped",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "internal reasoning", Thought: true},
+						{Text: "more thoughts", Thought: true},
+					},
+				}},
+				Branch: "b",
+			},
+			want: nil,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := llminternal.ConvertForeignEvent(tc.event)
-			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(genai.FunctionCall{}, genai.FunctionResponse{})); diff != "" {
-				t.Errorf("convertForeignEvent() mismatch (-want +got):\n%s", diff)
+			if !cmp.Equal(tc.want, got, cmp.AllowUnexported(genai.FunctionCall{}, genai.FunctionResponse{})) {
+				t.Error("converted event does not match the expected public content and metadata")
 			}
 		})
 	}
