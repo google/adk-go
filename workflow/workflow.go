@@ -154,8 +154,9 @@ type Workflow struct {
 	// prefixes the node path with it, except for a root wrapper.
 	// RunNode and Resume add no prefix. The prefix is a label, not a
 	// namespace - history is attributed to a run by invocation ID, not
-	// by this name, so two workflows sharing a node name do not
-	// collide only because their runs carry different invocation IDs.
+	// by this name, so the only thing keeping two workflows that
+	// share a node name apart is that their runs carry different
+	// invocation IDs.
 	// Empty leaves the workflow unnamed. Set at construction by New.
 	name string
 
