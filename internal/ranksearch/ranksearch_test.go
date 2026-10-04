@@ -295,3 +295,59 @@ func TestDescribeSearch_NoNamesIsBaseDescription(t *testing.T) {
 		t.Errorf("DescribeSearch() = %q, want %q", got, "base.")
 	}
 }
+
+// TestRank_NaturalLanguageWithRegexCharacters verifies a natural-language query
+// that happens to contain a regex metacharacter, such as a trailing question
+// mark, still finds items when it matches nothing as a pattern.
+func TestRank_NaturalLanguageWithRegexCharacters(t *testing.T) {
+	items := makeItems(
+		[2]string{"list_books", "list all books"},
+		[2]string{"get_author", "get author"},
+	)
+	for _, query := range []string{"how do I list books?", "list the books.", "books (all of them)", "list 2*3 books"} {
+		matches, _ := Rank(items, query, nil, testCfg())
+		checkNames(t, names(matches), []string{"list_books"}, []string{"get_author"})
+	}
+}
+
+// TestRank_PatternThatMatchesNothingStaysEmpty verifies a deliberate pattern
+// with no match returns nothing, rather than keyword matches for the words in it
+// that the pattern itself excluded.
+func TestRank_PatternThatMatchesNothingStaysEmpty(t *testing.T) {
+	items := makeItems(
+		[2]string{"get_user_file", "fetch a user's file"},
+		[2]string{"delete_user_record", "delete a record"},
+	)
+	matches, note := Rank(items, `^get_.*_record$`, nil, testCfg())
+	if len(matches) != 0 {
+		t.Errorf("Rank() = %v, want no matches", names(matches))
+	}
+	if note == "" {
+		t.Error("Rank() note is empty, want a no-match note")
+	}
+}
+
+// TestRank_FallbackIsAnnounced verifies the note tells the model when a query
+// it may have meant as a pattern was ranked by keywords instead.
+func TestRank_FallbackIsAnnounced(t *testing.T) {
+	items := makeItems([2]string{"list_books", "list all books"})
+	_, note := Rank(items, "how do I list books?", nil, testCfg())
+	const fallbackNote = "no matches as a pattern"
+	if !strings.Contains(note, fallbackNote) {
+		t.Errorf("Rank() note = %q, want it to contain %q", note, fallbackNote)
+	}
+
+	cfg := testCfg()
+	cfg.MaxResults = 2
+	items = makeItems(
+		[2]string{"tool_a", "some tool"},
+		[2]string{"tool_b", "some tool"},
+		[2]string{"tool_c", "some tool"},
+	)
+	_, note = Rank(items, "which tool?", nil, cfg)
+	for _, want := range []string{fallbackNote, "showing 2 of 3"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("capped fallback note = %q, want it to contain %q", note, want)
+		}
+	}
+}
