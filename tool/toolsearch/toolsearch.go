@@ -17,8 +17,11 @@
 package toolsearch
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
+	"math"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -55,8 +58,8 @@ const (
 
 // Config tunes the gating toolset.
 type Config struct {
-	// AgentName namespaces the discovered-set state key so multiple agents in a
-	// session don't share their discovery sets.
+	// AgentName namespaces the discovered-set state keys so multiple agents in a
+	// session don't share their discovery sets. It must not contain a colon.
 	AgentName string
 	// CoreToolNames are always advertised alongside search_tools; everything
 	// else in the base toolset is gated until the model discovers it.
@@ -77,13 +80,15 @@ type Config struct {
 // New exposes CoreToolNames up front and gates other tools behind search_tools.
 // search_tools is omitted only when every base tool is already core.
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
+	if strings.Contains(cfg.AgentName, ":") {
+		return nil, fmt.Errorf("toolsearch: agent name %q must not contain a colon", cfg.AgentName)
+	}
 	maxResults := cfg.MaxResults
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
 	}
 
 	coreNames := nameSet(cfg.CoreToolNames)
-	discoveredKey := stateKeyPrefix + cfg.AgentName
 
 	searchTool, err := functiontool.New(
 		functiontool.Config{
@@ -106,7 +111,7 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	return &gatingToolset{
 		base:             base,
 		coreNames:        coreNames,
-		discoveredKey:    discoveredKey,
+		agentName:        cfg.AgentName,
 		searchTool:       searchTool,
 		skillAnnotations: cfg.SkillAnnotations,
 	}, nil
@@ -122,24 +127,67 @@ func nameSet(names []string) map[string]bool {
 }
 
 // RevealTools adds tools to the same session discovery state used by search_tools.
+//
+// Each tool is stored under its own key, so reveals from several function calls
+// in one model response are all kept: each call writes its own state delta and
+// does not see the others'.
 func RevealTools(state session.State, agentName string, names ...string) error {
-	discoveredKey := stateKeyPrefix + agentName
-	discovered := stateStringSlice(state, discoveredKey)
+	if strings.Contains(agentName, ":") {
+		return fmt.Errorf("toolsearch: agent name %q must not contain a colon", agentName)
+	}
+	discovered := discoveredNames(state, agentName)
 	seen := nameSet(discovered)
-	originalCount := len(discovered)
-
+	next := len(discovered)
 	for _, name := range names {
 		if name == "" || seen[name] {
 			continue
 		}
-		discovered = append(discovered, name)
+		if err := state.Set(discoveredKeyPrefix(agentName)+name, next); err != nil {
+			return err
+		}
 		seen[name] = true
+		next++
 	}
-	if len(discovered) == originalCount {
-		return nil
-	}
+	return nil
+}
 
-	return state.Set(discoveredKey, strings.Join(discovered, ","))
+func discoveredKeyPrefix(agentName string) string { return stateKeyPrefix + agentName + ":" }
+
+// discoveredNames returns the agent's discovered tools in discovery order.
+// Calls in one model response that each saw the same prior state can store
+// equal positions, and those ties are broken by name.
+func discoveredNames(state session.ReadonlyState, agentName string) []string {
+	type entry struct {
+		name  string
+		order float64
+	}
+	prefix := discoveredKeyPrefix(agentName)
+	var entries []entry
+	for key, value := range state.All() {
+		name, ok := strings.CutPrefix(key, prefix)
+		if !ok || name == "" {
+			continue
+		}
+		// The database session service decodes state with encoding/json, so the
+		// stored int comes back as a float64. A custom service may return another
+		// type, and such a tool is kept, sorted last, rather than dropped.
+		order := math.Inf(1)
+		switch v := value.(type) {
+		case int:
+			order = float64(v)
+		case float64:
+			order = v
+		}
+		entries = append(entries, entry{name, order})
+	}
+	slices.SortFunc(entries, func(a, b entry) int {
+		return cmp.Or(cmp.Compare(a.order, b.order), strings.Compare(a.name, b.name))
+	})
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.name
+	}
+	return names
 }
 
 type searchArgs struct {
@@ -174,7 +222,7 @@ func executeSearch(
 
 	// Already-discovered tools and core tools are both excluded from results —
 	// core tools are always visible, so returning them wastes result slots.
-	already := stateStringSlice(ctx.ReadonlyState(), stateKeyPrefix+agentName)
+	already := discoveredNames(ctx.ReadonlyState(), agentName)
 	alreadyAvailable := make(map[string]bool, len(already)+len(coreNames))
 	for _, n := range already {
 		alreadyAvailable[n] = true
@@ -292,7 +340,7 @@ func argTokens(t tool.Tool) []string {
 type gatingToolset struct {
 	base             tool.Toolset
 	coreNames        map[string]bool
-	discoveredKey    string
+	agentName        string
 	searchTool       tool.Tool
 	skillAnnotations map[string]string
 }
@@ -346,7 +394,7 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			visible = append(visible, t)
 		}
 	}
-	for _, name := range stateStringSlice(ctx.ReadonlyState(), g.discoveredKey) {
+	for _, name := range discoveredNames(ctx.ReadonlyState(), g.agentName) {
 		if g.coreNames[name] {
 			continue
 		}
@@ -381,7 +429,7 @@ func (g *gatingToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 		return nil
 	}
 
-	discovered := stateStringSlice(ctx.ReadonlyState(), g.discoveredKey)
+	discovered := discoveredNames(ctx.ReadonlyState(), g.agentName)
 	if len(discovered) == 0 {
 		return nil
 	}
@@ -411,16 +459,4 @@ func (g *gatingToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 		}
 	}
 	return nil
-}
-
-func stateStringSlice(state session.ReadonlyState, key string) []string {
-	value, err := state.Get(key)
-	if err != nil {
-		return nil
-	}
-	text, ok := value.(string)
-	if !ok || text == "" {
-		return nil
-	}
-	return strings.Split(text, ",")
 }

@@ -27,9 +27,11 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/ranksearch"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -223,6 +225,16 @@ func checkNames(t *testing.T, got, want, notWant []string) {
 	}
 }
 
+// discoveredState returns state in which test_agent discovered names in order.
+func discoveredState(t *testing.T, names ...string) *fakeState {
+	t.Helper()
+	state := newFakeState(nil)
+	if err := RevealTools(state, "test_agent", names...); err != nil {
+		t.Fatalf("RevealTools() error = %v", err)
+	}
+	return state
+}
+
 func mustNew(t *testing.T, base tool.Toolset, cfg Config) *gatingToolset {
 	t.Helper()
 	ts, err := New(base, cfg)
@@ -287,34 +299,30 @@ func TestGatingToolset_WithDiscoveredState(t *testing.T) {
 		CoreToolNames: []string{"get_current_time"},
 	})
 
-	// Simulate what search_tools writes: discovered key = comma-joined names.
-	state := newFakeState(map[string]any{
-		stateKeyPrefix + "test_agent": "list_books",
-	})
+	state := discoveredState(t, "list_books")
 
 	names := mustToolNames(t, ts, newCtx(state))
 	checkNames(t, names, []string{ToolName, "get_current_time", "list_books"}, []string{"get_author"})
 }
 
 func TestRevealTools_AppendsUniqueNamesInOrder(t *testing.T) {
-	state := newFakeState(map[string]any{
-		stateKeyPrefix + "test_agent": "existing_tool,shared_tool",
-	})
+	// Discovery order deliberately differs from name order.
+	state := discoveredState(t, "zeta_tool", "shared_tool")
 
 	if err := RevealTools(
 		state,
 		"test_agent",
 		"shared_tool",
-		"skill_tool_a",
 		"skill_tool_b",
 		"skill_tool_a",
+		"skill_tool_b",
 	); err != nil {
 		t.Fatalf("RevealTools() error = %v", err)
 	}
 
-	want := "existing_tool,shared_tool,skill_tool_a,skill_tool_b"
-	if got := state.data[stateKeyPrefix+"test_agent"]; got != want {
-		t.Errorf("discovered = %v, want %q", got, want)
+	want := []string{"zeta_tool", "shared_tool", "skill_tool_b", "skill_tool_a"}
+	if diff := cmp.Diff(want, discoveredNames(state, "test_agent")); diff != "" {
+		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -361,9 +369,7 @@ func TestGatingToolset_DiscoveredToolsInDiscoveryOrder(t *testing.T) {
 	})
 
 	// z_tool was discovered before a_tool.
-	state := newFakeState(map[string]any{
-		stateKeyPrefix + "test_agent": "z_tool,a_tool",
-	})
+	state := discoveredState(t, "z_tool", "a_tool")
 
 	want := []string{ToolName, "get_current_time", "z_tool", "a_tool"}
 	if diff := cmp.Diff(want, mustToolNames(t, ts, newCtx(state))); diff != "" {
@@ -401,7 +407,7 @@ func TestProcessRequest_PacksDiscoveredTools(t *testing.T) {
 	}}
 	gts := mustNew(t, base, Config{AgentName: "test_agent", CoreToolNames: []string{"get_current_time"}})
 
-	state := newFakeState(map[string]any{stateKeyPrefix + "test_agent": "list_books"})
+	state := discoveredState(t, "list_books")
 	// Simulate ADK having already packed search_tools + the core tool before the
 	// toolset hook runs.
 	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}, "get_current_time": struct{}{}}}
@@ -435,7 +441,7 @@ func TestProcessRequest_PacksInDiscoveryOrder(t *testing.T) {
 	gts := mustNew(t, base, Config{AgentName: "test_agent"})
 
 	// z_tool was discovered before a_tool.
-	state := newFakeState(map[string]any{stateKeyPrefix + "test_agent": "z_tool,a_tool"})
+	state := discoveredState(t, "z_tool", "a_tool")
 	req := &model.LLMRequest{Tools: map[string]any{ToolName: struct{}{}}}
 
 	mustProcessRequest(t, gts, state, req)
@@ -455,9 +461,7 @@ func TestProcessRequest_NotGatingIsNoop(t *testing.T) {
 	gts := mustNew(t, base, Config{AgentName: "test_agent"})
 
 	req := &model.LLMRequest{Tools: map[string]any{"list_books": struct{}{}}}
-	mustProcessRequest(t, gts, newFakeState(map[string]any{
-		stateKeyPrefix + "test_agent": "list_books",
-	}), req)
+	mustProcessRequest(t, gts, discoveredState(t, "list_books"), req)
 
 	if packs != 0 {
 		t.Errorf("tool packed %d times, want 0", packs)
@@ -553,8 +557,8 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 	if got := out.Matches[0]; got.Name != "list_recent_files" || got.ConnectedSkill != "file-browser" {
 		t.Errorf("match = %+v, want list_recent_files with connected_skill file-browser", got)
 	}
-	if got := state.data[gts.discoveredKey]; got != "list_recent_files" {
-		t.Errorf("discovered = %v, want %q", got, "list_recent_files")
+	if diff := cmp.Diff([]string{"list_recent_files"}, discoveredNames(state, "test_agent")); diff != "" {
+		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
 	for _, want := range []string{"could be relevant to your task", "load only the most relevant one"} {
 		if !strings.Contains(out.NextStep, want) {
@@ -607,8 +611,8 @@ func TestSearch_SelectByName(t *testing.T) {
 	if !strings.Contains(out.Note, "unknown_tool") {
 		t.Errorf("note = %q, want the missing tool name %q in it", out.Note, "unknown_tool")
 	}
-	if got := state.data[gts.discoveredKey]; got != "patch_book,update_book" {
-		t.Errorf("discovered = %v, want %q", got, "patch_book,update_book")
+	if diff := cmp.Diff([]string{"patch_book", "update_book"}, discoveredNames(state, "test_agent")); diff != "" {
+		t.Errorf("selected tools must be persisted to discovered state (-want +got):\n%s", diff)
 	}
 }
 
@@ -708,5 +712,105 @@ func TestSearch_AnnotatesBaseToolWithSkillAnnotation(t *testing.T) {
 				t.Errorf("unannotated tool list_notes has connected_skill %q", match.ConnectedSkill)
 			}
 		}
+	}
+}
+
+// parallelCallModel returns all calls in its first response and records the
+// tools declared in the second request.
+type parallelCallModel struct {
+	calls    []*genai.FunctionCall
+	step     int
+	declared []string
+}
+
+func (*parallelCallModel) Name() string { return "parallel-call-model" }
+
+func (m *parallelCallModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		defer func() { m.step++ }()
+		if m.step == 0 {
+			parts := make([]*genai.Part, len(m.calls))
+			for i, c := range m.calls {
+				parts[i] = &genai.Part{FunctionCall: c}
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}, nil)
+			return
+		}
+		m.declared = nil
+		for _, t := range req.Config.Tools {
+			for _, d := range t.FunctionDeclarations {
+				m.declared = append(m.declared, d.Name)
+			}
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}, nil)
+	}
+}
+
+// TestSearch_ParallelCallsKeepAllDiscoveries runs two search_tools calls from
+// one model response through the real runner. Each call gets its own state
+// delta, so a discovery written by one must survive the other.
+func TestSearch_ParallelCallsKeepAllDiscoveries(t *testing.T) {
+	newTool := func(name string) tool.Tool {
+		ft, err := functiontool.New(functiontool.Config{Name: name, Description: name},
+			func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+		if err != nil {
+			t.Fatalf("functiontool.New(%q) error = %v", name, err)
+		}
+		return ft
+	}
+	gated, err := New(&staticToolset{tools: []tool.Tool{newTool("add_numbers"), newTool("multiply_numbers")}},
+		Config{AgentName: "calculator"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	llm := &parallelCallModel{calls: []*genai.FunctionCall{
+		{ID: "1", Name: ToolName, Args: map[string]any{"query": "select:add_numbers"}},
+		{ID: "2", Name: ToolName, Args: map[string]any{"query": "select:multiply_numbers"}},
+	}}
+	a, err := llmagent.New(llmagent.Config{Name: "calculator", Model: llm, Toolsets: []tool.Toolset{gated}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+	checkNames(t, llm.declared, []string{"add_numbers", "multiply_numbers"}, nil)
+}
+
+// TestDiscoveredNames_OrderAndFiltering covers state read back from the database
+// session service, where the stored int arrives as a float64, ties from calls in
+// one response, a value of an unexpected type, and keys that belong to something
+// else.
+func TestDiscoveredNames_OrderAndFiltering(t *testing.T) {
+	state := newFakeState(map[string]any{
+		stateKeyPrefix + "test_agent:z_tool":       float64(0),
+		stateKeyPrefix + "test_agent:e_tool":       1,
+		stateKeyPrefix + "test_agent:c_tool":       1,
+		stateKeyPrefix + "test_agent:b_tool":       1,
+		stateKeyPrefix + "test_agent:d_tool":       1,
+		stateKeyPrefix + "test_agent:a_tool":       1,
+		stateKeyPrefix + "test_agent:bad_value":    "1",
+		stateKeyPrefix + "test_agent:":             0,
+		stateKeyPrefix + "test_agent_2:other_tool": 0,
+		"unrelated": 0,
+	})
+	want := []string{"z_tool", "a_tool", "b_tool", "c_tool", "d_tool", "e_tool", "bad_value"}
+	if diff := cmp.Diff(want, discoveredNames(state, "test_agent")); diff != "" {
+		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAgentNameWithColonIsRejected(t *testing.T) {
+	if _, err := New(&staticToolset{}, Config{AgentName: "a:b"}); err == nil {
+		t.Error("New() error = nil, want error for an agent name with a colon")
+	}
+	if err := RevealTools(newFakeState(nil), "a:b", "tool"); err == nil {
+		t.Error("RevealTools() error = nil, want error for an agent name with a colon")
 	}
 }
