@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -58,9 +59,6 @@ const (
 
 // Config tunes the gating toolset.
 type Config struct {
-	// AgentName namespaces the discovered-set state keys so multiple agents in a
-	// session don't share their discovery sets. It must not contain a colon.
-	AgentName string
 	// CoreToolNames are always advertised alongside search_tools; everything
 	// else in the base toolset is gated until the model discovers it.
 	CoreToolNames []string
@@ -80,9 +78,6 @@ type Config struct {
 // New exposes CoreToolNames up front and gates other tools behind search_tools.
 // search_tools is omitted only when every base tool is already core.
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
-	if strings.Contains(cfg.AgentName, ":") {
-		return nil, fmt.Errorf("toolsearch: agent name %q must not contain a colon", cfg.AgentName)
-	}
 	maxResults := cfg.MaxResults
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
@@ -99,9 +94,7 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 			),
 		},
 		func(ctx agent.Context, args searchArgs) (searchOutput, error) {
-			return executeSearch(
-				ctx, args, base, cfg.AgentName, coreNames, cfg.SkillAnnotations, maxResults,
-			)
+			return executeSearch(ctx, args, base, coreNames, cfg.SkillAnnotations, maxResults)
 		},
 	)
 	if err != nil {
@@ -111,7 +104,6 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	return &gatingToolset{
 		base:             base,
 		coreNames:        coreNames,
-		agentName:        cfg.AgentName,
 		searchTool:       searchTool,
 		skillAnnotations: cfg.SkillAnnotations,
 	}, nil
@@ -126,15 +118,17 @@ func nameSet(names []string) map[string]bool {
 	return set
 }
 
-// RevealTools adds tools to the same session discovery state used by search_tools.
+// RevealTools adds tools to the session discovery state used by search_tools,
+// so they become visible on the calling agent's next model step. During a live
+// session they appear only in a later session. Discoveries are kept per agent,
+// keyed by ctx.AgentName(). Empty and already revealed names are ignored. A
+// name is callable only while the base toolset returns a tool by that name.
 //
 // Each tool is stored under its own key, so reveals from several function calls
 // in one model response are all kept: each call writes its own state delta and
 // does not see the others'.
-func RevealTools(state session.State, agentName string, names ...string) error {
-	if strings.Contains(agentName, ":") {
-		return fmt.Errorf("toolsearch: agent name %q must not contain a colon", agentName)
-	}
+func RevealTools(ctx agent.Context, names ...string) error {
+	state, agentName := ctx.State(), ctx.AgentName()
 	discovered := discoveredNames(state, agentName)
 	seen := nameSet(discovered)
 	next := len(discovered)
@@ -151,7 +145,12 @@ func RevealTools(state session.State, agentName string, names ...string) error {
 	return nil
 }
 
-func discoveredKeyPrefix(agentName string) string { return stateKeyPrefix + agentName + ":" }
+// discoveredKeyPrefix escapes the agent name so it holds no colon. Both agent
+// and tool names may contain one, and an unescaped agent "a" revealing tool
+// "b:t" would write the key agent "a:b" reads as tool "t".
+func discoveredKeyPrefix(agentName string) string {
+	return stateKeyPrefix + url.QueryEscape(agentName) + ":"
+}
 
 // discoveredNames returns the agent's discovered tools in discovery order.
 // Calls in one model response that each saw the same prior state can store
@@ -210,7 +209,6 @@ func executeSearch(
 	ctx agent.Context,
 	args searchArgs,
 	base tool.Toolset,
-	agentName string,
 	coreNames map[string]bool,
 	skillAnnotations map[string]string,
 	maxResults int,
@@ -222,7 +220,7 @@ func executeSearch(
 
 	// Already-discovered tools and core tools are both excluded from results —
 	// core tools are always visible, so returning them wastes result slots.
-	already := discoveredNames(ctx.ReadonlyState(), agentName)
+	already := discoveredNames(ctx.ReadonlyState(), ctx.AgentName())
 	alreadyAvailable := make(map[string]bool, len(already)+len(coreNames))
 	for _, n := range already {
 		alreadyAvailable[n] = true
@@ -259,7 +257,7 @@ func executeSearch(
 			hasConnectedSkill = true
 		}
 	}
-	if err := RevealTools(ctx.State(), agentName, matchedNames...); err != nil {
+	if err := RevealTools(ctx, matchedNames...); err != nil {
 		return searchOutput{}, fmt.Errorf("toolsearch: persist discovered tools: %w", err)
 	}
 
@@ -340,7 +338,6 @@ func argTokens(t tool.Tool) []string {
 type gatingToolset struct {
 	base             tool.Toolset
 	coreNames        map[string]bool
-	agentName        string
 	searchTool       tool.Tool
 	skillAnnotations map[string]string
 }
@@ -355,8 +352,8 @@ type requestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
 
-// Tools returns search_tools, the core tools, and the tools discovered so far
-// under Config.AgentName. The flow calls Tools before every model step, so a tool
+// Tools returns search_tools, the core tools, and the tools the calling agent
+// has discovered. The flow calls Tools before every model step, so a tool
 // discovered by search_tools is callable on the next step of the same
 // invocation. A live session is the exception: it resolves its tools once,
 // before it first connects, and its reconnects reuse that list, so tools
@@ -396,7 +393,7 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			visible = append(visible, t)
 		}
 	}
-	for _, name := range discoveredNames(ctx.ReadonlyState(), g.agentName) {
+	for _, name := range discoveredNames(ctx.ReadonlyState(), ctx.AgentName()) {
 		if g.coreNames[name] {
 			continue
 		}
