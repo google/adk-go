@@ -71,11 +71,6 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     has to tolerate ErrNothingToResume. It is never a no-op in the
 //     re-entry case.
 //
-//  3. Routes the response to the asker's successors as if the asker
-//     had emitted it as its output. In handoff mode the asker itself
-//     does not re-execute; in the re-entry case described in step 2
-//     it re-runs with the response as its input.
-//
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
 //
@@ -111,9 +106,10 @@ func (w *Workflow) Resume(
 
 		// Act on each node the rehydration reconstructed, but only
 		// for interrupts answered in THIS turn (present in responses).
-		// Gating on the current turn's responses keeps Resume
-		// idempotent: a duplicate turn whose responses target an
-		// already-consumed interrupt reschedules nothing. Mirrors
+		// Gating on the current turn's responses keeps a duplicate
+		// Resume from acting on an already-consumed interrupt. For a
+		// handoff node that leaves nothing to reschedule; a re-entry
+		// node is rescheduled regardless, as step 2 describes. Mirrors
 		// adk-python gating _extract_resume_output on ctx.resume_inputs.
 		for name, ns := range state.Nodes {
 			node := s.nodesByName[name]
