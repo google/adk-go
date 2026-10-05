@@ -16,6 +16,7 @@ package simplecache
 
 import (
 	"fmt"
+	"sync"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
@@ -23,6 +24,7 @@ import (
 )
 
 type cachedSkill struct {
+	mu     sync.RWMutex
 	client skillregistry.Client
 
 	origSkill       agentregistry.Skill
@@ -51,6 +53,18 @@ func (s *cachedSkill) listResources(subpath string) ([]string, error) {
 }
 
 func (s *cachedSkill) getInstruction() (string, error) {
+	s.mu.Lock()
+
+	if s.gotInstructions {
+		s.mu.Unlock()
+		return s.instructions, nil
+	}
+
+	s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// recheck under write lock
 	if s.gotInstructions {
 		return s.instructions, nil
 	}
