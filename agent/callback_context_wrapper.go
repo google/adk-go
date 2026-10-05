@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -181,6 +182,20 @@ func (c *callbackContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfir
 	// ToolConfirmation() does not make any sense for a callback context
 	log.Print("ToolConfirmation() is not supported for callback context")
 	return nil
+}
+
+// AuthResponse implements [Context].
+func (c *callbackContextWrapper) AuthResponse() *authconsent.AuthConfig {
+	// A callback context has no tool call to carry a consent response for.
+	log.Print("AuthResponse() is not supported for callback context")
+	return nil
+}
+
+// RequestCredential implements [Context].
+func (c *callbackContextWrapper) RequestCredential(cfg authconsent.AuthConfig) error {
+	// A callback context has no function call id to key the request on.
+	log.Print("RequestCredential() is not supported for callback context")
+	return fmt.Errorf("RequestCredential() is not supported for callback context")
 }
 
 func (c *callbackContextWrapper) OutputForAncestors() []string {

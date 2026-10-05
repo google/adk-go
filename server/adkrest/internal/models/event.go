@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -32,6 +33,7 @@ type EventActions struct {
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	RequestedCredentials       map[string]authconsent.AuthConfig            `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 }
 
@@ -98,6 +100,7 @@ func ToSessionEvent(event Event) *session.Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedCredentials:       event.Actions.RequestedCredentials,
 			// Actions.Compaction is deliberately not mapped inbound. A
 			// compaction record tells prompt assembly to drop a span of history
 			// and substitute content in its place, so honouring one from a
@@ -142,6 +145,7 @@ func FromSessionEvent(event session.Event) Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedCredentials:       event.Actions.RequestedCredentials,
 			Compaction:                 event.Actions.Compaction,
 		},
 	}

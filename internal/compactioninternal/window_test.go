@@ -100,6 +100,27 @@ func TestLongestSelfContainedPrefix(t *testing.T) {
 			want: []string{"a"},
 		},
 		{
+			// A pending consent is an open obligation exactly as a pending
+			// confirmation is: cutting here would summarize away the tool call the
+			// user is being asked to authorize, so the resumed response arrives
+			// with nothing to attach to.
+			name: "unresolved credential consent blocks the prefix",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "hi"),
+				consentEvent("b", "inv1", 2, "c1"),
+			},
+			want: []string{"a"},
+		},
+		{
+			name: "resolved credential consent is fine",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "hi"),
+				consentEvent("b", "inv1", 2, "c1"),
+				responseEvent("c", "inv1", 3, "c1"),
+			},
+			want: []string{"a", "b", "c"},
+		},
+		{
 			name: "resolved tool confirmation is fine",
 			events: []*session.Event{
 				textEvent("a", "inv1", 1, "hi"),
@@ -583,6 +604,29 @@ func TestSelectSlidingWindowSurvivesBlockedHead(t *testing.T) {
 			interval: 3,
 			events: []*session.Event{
 				confirmationEvent("stuck", "inv1", 1, "c1"),
+				textEvent("a", "inv2", 2, "q2"),
+				textEvent("b", "inv3", 3, "q3"),
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			// The tail must not be compacted while the consent that unblocks the
+			// head is still open: the resumed tool response would then answer a
+			// call that has been summarized away.
+			name:     "tail answering a head consent is not compacted",
+			interval: 3,
+			events: []*session.Event{
+				consentEvent("stuck", "inv1", 1, "c1"),
+				textEvent("a", "inv2", 2, "q2"),
+				responseEvent("b", "inv2", 3, "c1"),
+			},
+			want: nil,
+		},
+		{
+			name:     "unanswered consent at the head is stepped over",
+			interval: 3,
+			events: []*session.Event{
+				consentEvent("stuck", "inv1", 1, "c1"),
 				textEvent("a", "inv2", 2, "q2"),
 				textEvent("b", "inv3", 3, "q3"),
 			},

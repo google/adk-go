@@ -25,13 +25,17 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
+// convertTool builds the ADK tool for an MCP tool, taking the toolset's own
+// client and per-tool settings from s.
+func convertTool(t *mcp.Tool, s *set) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -39,9 +43,10 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 			Name:        t.Name,
 			Description: t.Description,
 		},
-		mcpClient:                   client,
-		requireConfirmation:         requireConfirmation,
-		requireConfirmationProvider: requireConfirmationProvider,
+		mcpClient:                   s.mcpClient,
+		requireConfirmation:         s.requireConfirmation,
+		requireConfirmationProvider: s.requireConfirmationProvider,
+		auth:                        s.auth,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -68,6 +73,13 @@ type mcpTool struct {
 	requireConfirmation bool
 
 	requireConfirmationProvider tool.ConfirmationProvider
+
+	// auth is the same provider wired into the transport's RoundTripper. It is
+	// resolved once here, before the call, because only this layer can start an
+	// interactive consent flow: the RoundTripper has no function call id to key
+	// the request on, and the MCP SDK does not preserve the error chain a
+	// *auth.ConsentRequiredError would have to travel back through.
+	auth auth.CredentialProvider
 }
 
 // Name implements the tool.Tool.
@@ -119,6 +131,10 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}
 	}
 
+	if err := t.consentPreflight(ctx); err != nil {
+		return nil, err
+	}
+
 	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
@@ -149,6 +165,53 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{
 		"output": content,
 	}, nil
+}
+
+// consentPreflight resolves the credential before the MCP call so that a
+// provider asking for interactive (3-legged) OAuth consent can pause the run.
+// It returns nil when no provider is configured or the credential resolves.
+//
+// The resolved credential is discarded: the transport's RoundTripper resolves
+// again on the call below. A provider that answers from memory (auth.StaticToken,
+// auth.APIKey, a caching oauth2.TokenSource) pays nothing for that. One that
+// reaches a service on every call pays twice, and the GCP provider is one —
+// "Nothing is cached", auth/gcp's NewProvider doc.
+func (t *mcpTool) consentPreflight(ctx agent.Context) error {
+	if t.auth == nil {
+		return nil
+	}
+	_, err := t.auth.Credential(ctx)
+	if err == nil {
+		return nil
+	}
+
+	var consent *auth.ConsentRequiredError
+	// A typed-nil *ConsentRequiredError satisfies errors.As, so check the value
+	// too rather than dereferencing nil below.
+	if !errors.As(err, &consent) || consent == nil {
+		// The RoundTripper would fail the same way on the call below, but the MCP
+		// SDK does not preserve the cause, so report it here while it is intact.
+		return fmt.Errorf("mcp tool %q: resolve credential: %w", t.Name(), err)
+	}
+	if ctx.AuthResponse() != nil {
+		// The user already consented on this call and the provider still cannot
+		// mint a credential. Asking again would loop.
+		return fmt.Errorf("mcp tool %q: consent completed but credential unavailable: %w", t.Name(), err)
+	}
+	if t.requireConfirmation || t.requireConfirmationProvider != nil {
+		// Two human-in-the-loop round-trips on one call do not compose today.
+		// ADK emits the request event from the model-response path only, so the
+		// second one — whichever it is — is recorded and never reaches the
+		// client, leaving a run paused on a prompt nobody can answer. Report it
+		// rather than producing that state.
+		return fmt.Errorf("mcp tool %q: interactive credential consent cannot be combined with "+
+			"tool confirmation on the same call; set one of Config.Auth's interactive provider or "+
+			"Config.RequireConfirmation", t.Name())
+	}
+	if rerr := ctx.RequestCredential(authconsent.OAuth2Consent(consent.AuthURI, consent.Nonce, consent.Key)); rerr != nil {
+		return fmt.Errorf("mcp tool %q: request credential: %w", t.Name(), rerr)
+	}
+	return fmt.Errorf("error tool %q %w", t.Name(), tool.ErrCredentialRequired)
 }
 
 type formattedMCPContent struct {

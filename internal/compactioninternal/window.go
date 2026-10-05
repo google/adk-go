@@ -48,17 +48,7 @@ func longestSelfContainedPrefix(events []*session.Event) []*session.Event {
 	openIDs := make(map[string]struct{})
 	safeLength := 0
 	for i, ev := range events {
-		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
-			delete(openIDs, resp.ID)
-		}
-		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
-			openIDs[callObligationKey(call, i)] = struct{}{}
-		}
-		for id := range ev.Actions.RequestedToolConfirmations {
-			openIDs[id] = struct{}{}
-		}
-		// TODO: track outstanding authentication requests here too once
-		// adk-go models them on EventActions.
+		applyObligations(openIDs, ev, i)
 		// A cut here is valid only if it is balanced and does not split a
 		// group of events sharing a timestamp. Both conditions are checked at
 		// the same point, and the longest such cut wins.
@@ -477,7 +467,8 @@ func skipBlockedHead(window []*session.Event) []*session.Event {
 		prev := window[start-1]
 		if len(utils.FunctionCalls(utils.Content(prev))) == 0 &&
 			len(utils.FunctionResponses(utils.Content(prev))) == 0 &&
-			len(prev.Actions.RequestedToolConfirmations) == 0 {
+			len(prev.Actions.RequestedToolConfirmations) == 0 &&
+			len(prev.Actions.RequestedCredentials) == 0 {
 			continue
 		}
 		tail := longestSelfContainedPrefix(window[start:])
@@ -496,17 +487,34 @@ func skipBlockedHead(window []*session.Event) []*session.Event {
 func openCallIDs(events []*session.Event) map[string]struct{} {
 	open := make(map[string]struct{})
 	for i, ev := range events {
-		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
-			delete(open, resp.ID)
-		}
-		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
-			open[callObligationKey(call, i)] = struct{}{}
-		}
-		for id := range ev.Actions.RequestedToolConfirmations {
-			open[id] = struct{}{}
-		}
+		applyObligations(open, ev, i)
 	}
 	return open
+}
+
+// applyObligations folds the obligations ev settles and opens into open, where
+// i is ev's index in the sequence being walked.
+//
+// An obligation is anything that must be answered before the events around it
+// can be summarized away: an unanswered function call, a pending tool
+// confirmation, or a pending interactive-consent request. adk-python keeps the
+// same three in one set (apps/compaction.py:326-330). This lives in one
+// function because both callers must agree on what counts — a kind tracked by
+// only one of them produces a window that one check calls balanced and the
+// other does not.
+func applyObligations(open map[string]struct{}, ev *session.Event, i int) {
+	for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+		delete(open, resp.ID)
+	}
+	for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+		open[callObligationKey(call, i)] = struct{}{}
+	}
+	for id := range ev.Actions.RequestedToolConfirmations {
+		open[id] = struct{}{}
+	}
+	for id := range ev.Actions.RequestedCredentials {
+		open[id] = struct{}{}
+	}
 }
 
 // answersAnyOf reports whether events answer any of the given call IDs.

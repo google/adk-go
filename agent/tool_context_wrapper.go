@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -168,6 +169,16 @@ func (c *toolContextWrapper) SearchMemory(ctx context.Context, query string) (*m
 // ToolConfirmation implements [Context].
 func (c *toolContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmation {
 	return c.context.ToolConfirmation()
+}
+
+// AuthResponse implements [Context].
+func (c *toolContextWrapper) AuthResponse() *authconsent.AuthConfig {
+	return c.context.AuthResponse()
+}
+
+// RequestCredential implements [Context].
+func (c *toolContextWrapper) RequestCredential(cfg authconsent.AuthConfig) error {
+	return c.context.RequestCredential(cfg)
 }
 
 // Node-context methods: call embedded context.

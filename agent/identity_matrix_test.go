@@ -560,6 +560,7 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		"Err":                 "cancellation cause",
 		"OutputForAncestors":  "node names",
 		"RequestConfirmation": "reports an error, returns no object",
+		"RequestCredential":   "reports an error, returns no object",
 		"ResumedInput":        "caller-supplied resume payload",
 		"RunConfig":           "run configuration, shared across the whole run",
 		"ToolConfirmation":    "the confirmation for this one call",
@@ -591,6 +592,12 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		"State":         "reaches the invocation's Session().State(), so a promoted one writes the enclosing user's state",
 		"ReadonlyState": "reaches the invocation's Session().State(), so a promoted one reads the enclosing user's state",
 		"Actions":       "the event actions of the invocation the context holds, whose StateDelta commits to that user's session",
+		// Reaches nothing — it is a field on the context struct, set on the resume
+		// path — but the value is the enclosing user's OAuth consent response,
+		// whose authResponseUri carries an authorization code and whose authUri
+		// names them. UserContent sits in holdsNothing because it carries no
+		// identity a credential is minted from; this one does.
+		"AuthResponse": "the OAuth consent response for the enclosing call, from which a credential for that user is minted",
 	}
 	// Returns something holding a context outright.
 	holdsContext := map[string]string{

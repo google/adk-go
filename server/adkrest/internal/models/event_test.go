@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -40,6 +41,9 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		Actions: session.EventActions{
 			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
 				"call-1": {Hint: "please confirm"},
+			},
+			RequestedCredentials: map[string]authconsent.AuthConfig{
+				"call-2": authconsent.OAuth2Consent("https://consent.example/auth", "n", "key-1"),
 			},
 		},
 	}
@@ -60,6 +64,20 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 	if got, ok := back.Actions.RequestedToolConfirmations["call-1"]; !ok || got.Hint != "please confirm" {
 		t.Errorf("RequestedToolConfirmations = %+v, want call-1 hint", back.Actions.RequestedToolConfirmations)
+	}
+	// A pending consent request that does not survive the REST round-trip strands
+	// the run: the client is told to collect consent for a call ADK no longer
+	// knows is waiting on one.
+	got, ok := back.Actions.RequestedCredentials["call-2"]
+	if !ok {
+		t.Fatalf("RequestedCredentials = %+v, want call-2", back.Actions.RequestedCredentials)
+	}
+	if got.CredentialKey != "key-1" {
+		t.Errorf("RequestedCredentials[call-2].CredentialKey = %q, want %q", got.CredentialKey, "key-1")
+	}
+	if got.ExchangedAuthCredential == nil || got.ExchangedAuthCredential.OAuth2 == nil ||
+		got.ExchangedAuthCredential.OAuth2.AuthURI != "https://consent.example/auth" {
+		t.Errorf("RequestedCredentials[call-2] = %+v, want the consent URL preserved", got)
 	}
 }
 
