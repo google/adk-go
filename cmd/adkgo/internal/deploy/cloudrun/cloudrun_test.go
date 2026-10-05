@@ -427,3 +427,87 @@ func TestComputeFlags_RejectsUnsafeTriggerOIDCValues(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeFlags_RejectsLoneTriggerOIDCFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*deployCloudRunFlags)
+		want string
+	}{
+		{"pubsub audience only", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app" }, "--pubsub_oidc_service_accounts"},
+		{"pubsub service accounts only", func(f *deployCloudRunFlags) {
+			f.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+		}, "--pubsub_oidc_audience"},
+		{"eventarc audience only", func(f *deployCloudRunFlags) { f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app" }, "--eventarc_oidc_service_accounts"},
+		{"eventarc service accounts only", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+		}, "--eventarc_oidc_audience"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			tc.set(&flags)
+
+			err := flags.computeFlags()
+			if err == nil {
+				t.Fatal("computeFlags() = nil, want an error for the missing half of the pair")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("computeFlags() error = %v, want it to name %s", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeFlags_AcceptsCompleteTriggerOIDCPairs(t *testing.T) {
+	resetFlags(t, "main.go", "http://127.0.0.1:8081")
+	flags.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
+	flags.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+	flags.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
+	flags.cloudRun.eventarcTrigger.oidcServiceAccounts = "b@p.iam.gserviceaccount.com"
+
+	if err := flags.computeFlags(); err != nil {
+		t.Errorf("computeFlags() = %v, want no error", err)
+	}
+}
+
+// With several unsafe values the error must name the same flag every time, so
+// fixing the one it names is progress.
+func TestComputeFlags_ReportsUnsafeTriggerOIDCValuesInFixedOrder(t *testing.T) {
+	const payload = `x"`
+	for range 20 {
+		resetFlags(t, "main.go", "http://127.0.0.1:8081")
+		flags.cloudRun.pubsubTrigger.oidcAudience = payload
+		flags.cloudRun.pubsubTrigger.oidcServiceAccounts = payload
+		flags.cloudRun.eventarcTrigger.oidcAudience = payload
+		flags.cloudRun.eventarcTrigger.oidcServiceAccounts = payload
+
+		err := flags.computeFlags()
+		if err == nil || !strings.Contains(err.Error(), "--pubsub_oidc_audience") {
+			t.Fatalf("computeFlags() error = %v, want it to name --pubsub_oidc_audience first", err)
+		}
+	}
+}
+
+func TestCloudRunCommandBindsTriggerOIDCFlags(t *testing.T) {
+	resetFlags(t, "main.go", "http://127.0.0.1:8081")
+
+	if err := cloudrunCmd.ParseFlags([]string{
+		"--pubsub_oidc_audience=pubsub-aud",
+		"--pubsub_oidc_service_accounts=pubsub-sa",
+		"--eventarc_oidc_audience=eventarc-aud",
+		"--eventarc_oidc_service_accounts=eventarc-sa",
+	}); err != nil {
+		t.Fatalf("ParseFlags() = %v", err)
+	}
+
+	for _, c := range []struct{ name, got, want string }{
+		{"pubsub audience", flags.cloudRun.pubsubTrigger.oidcAudience, "pubsub-aud"},
+		{"pubsub service accounts", flags.cloudRun.pubsubTrigger.oidcServiceAccounts, "pubsub-sa"},
+		{"eventarc audience", flags.cloudRun.eventarcTrigger.oidcAudience, "eventarc-aud"},
+		{"eventarc service accounts", flags.cloudRun.eventarcTrigger.oidcServiceAccounts, "eventarc-sa"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}

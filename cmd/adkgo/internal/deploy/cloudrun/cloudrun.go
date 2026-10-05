@@ -149,14 +149,24 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			if err := util.ValidateDockerfileSafe(f.cloudRun.a2aAgentCardURL, "--a2a_agent_url"); err != nil {
 				return err
 			}
-			for label, v := range map[string]string{
-				"--pubsub_oidc_audience":           f.cloudRun.pubsubTrigger.oidcAudience,
-				"--pubsub_oidc_service_accounts":   f.cloudRun.pubsubTrigger.oidcServiceAccounts,
-				"--eventarc_oidc_audience":         f.cloudRun.eventarcTrigger.oidcAudience,
-				"--eventarc_oidc_service_accounts": f.cloudRun.eventarcTrigger.oidcServiceAccounts,
+			for _, t := range []struct {
+				name    string
+				trigger triggerConfigFlags
+			}{
+				{"pubsub", f.cloudRun.pubsubTrigger},
+				{"eventarc", f.cloudRun.eventarcTrigger},
 			} {
-				if err := util.ValidateDockerfileSafe(v, label); err != nil {
+				audFlag, saFlag := "--"+t.name+"_oidc_audience", "--"+t.name+"_oidc_service_accounts"
+				if err := util.ValidateDockerfileSafe(t.trigger.oidcAudience, audFlag); err != nil {
 					return err
+				}
+				if err := util.ValidateDockerfileSafe(t.trigger.oidcServiceAccounts, saFlag); err != nil {
+					return err
+				}
+				// The sublauncher would refuse to start, but only after a full
+				// build and deploy.
+				if (t.trigger.oidcAudience == "") != (t.trigger.oidcServiceAccounts == "") {
+					return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
 				}
 			}
 
@@ -302,8 +312,8 @@ CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + s
 		})
 }
 
-// writeOIDCFlags emits the trigger's OIDC flags when set. The sublauncher
-// validates them when the container starts.
+// writeOIDCFlags emits the trigger's OIDC flags when set. computeFlags has
+// already checked that both or neither are set.
 func writeOIDCFlags(b *strings.Builder, t triggerConfigFlags) {
 	if t.oidcAudience != "" {
 		fmt.Fprintf(b, `, "-oidc_audience", "%s"`, t.oidcAudience)

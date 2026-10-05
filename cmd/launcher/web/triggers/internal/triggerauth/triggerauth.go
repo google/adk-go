@@ -19,6 +19,7 @@ package triggerauth
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"strings"
 
 	"google.golang.org/adk/v2/server/authn"
@@ -34,7 +35,9 @@ type Flags struct {
 func (f *Flags) Register(fs *flag.FlagSet) {
 	fs.StringVar(&f.audience, "oidc_audience", "", "Audience a Google-signed OIDC token must carry to call this "+
 		"trigger endpoint: the token audience configured on the push subscription or Eventarc trigger. "+
-		"Requires -oidc_service_accounts. When unset, the endpoint is unauthenticated.")
+		"Requires -oidc_service_accounts. When unset, the endpoint is unauthenticated. Like every flag of "+
+		"this trigger, it must follow the trigger's own keyword: in \"pubsub eventarc -oidc_audience=...\" "+
+		"it configures eventarc only.")
 	fs.StringVar(&f.serviceAccounts, "oidc_service_accounts", "", "Comma-separated service account emails "+
 		"allowed to call this trigger endpoint, matched against the token's verified email. "+
 		"Requires -oidc_audience.")
@@ -43,6 +46,17 @@ func (f *Flags) Register(fs *flag.FlagSet) {
 // Authenticator builds the authenticator the flags describe. It returns nil
 // when neither flag is set, which keeps the endpoint unauthenticated.
 func (f *Flags) Authenticator() (authn.Authenticator, error) {
+	cfg, err := f.config()
+	if err != nil || cfg == nil {
+		return nil, err
+	}
+	return authn.NewGoogleOIDC(*cfg)
+}
+
+// config validates the flags and returns the authenticator config, or nil when
+// neither flag is set. Split from Authenticator so tests can check exactly what
+// reaches NewGoogleOIDC, whose verifier they cannot reach.
+func (f *Flags) config() (*authn.GoogleOIDCConfig, error) {
 	if f.audience == "" && f.serviceAccounts == "" {
 		return nil, nil
 	}
@@ -52,13 +66,18 @@ func (f *Flags) Authenticator() (authn.Authenticator, error) {
 	if f.audience == "" {
 		return nil, errors.New("-oidc_service_accounts requires -oidc_audience")
 	}
+	// Tokens are matched on the exact audience, so a padded one would start
+	// cleanly and then reject every delivery.
+	if f.audience != strings.TrimSpace(f.audience) {
+		return nil, fmt.Errorf("-oidc_audience %q has surrounding whitespace", f.audience)
+	}
 	// Empty entries are kept so NewGoogleOIDC rejects a stray comma at startup.
 	accounts := strings.Split(f.serviceAccounts, ",")
 	for i := range accounts {
 		accounts[i] = strings.TrimSpace(accounts[i])
 	}
-	return authn.NewGoogleOIDC(authn.GoogleOIDCConfig{
+	return &authn.GoogleOIDCConfig{
 		Audience:               f.audience,
 		AllowedServiceAccounts: accounts,
-	})
+	}, nil
 }

@@ -276,6 +276,7 @@ func TestParseRejectsIncompleteAuthFlags(t *testing.T) {
 		{name: "audience without service accounts", args: []string{"-oidc_audience=" + testAudience}},
 		{name: "service accounts without audience", args: []string{"-oidc_service_accounts=" + testServiceAccount}},
 		{name: "trailing comma", args: []string{"-oidc_audience=" + testAudience, "-oidc_service_accounts=" + testServiceAccount + ","}},
+		{name: "padded audience", args: []string{"-oidc_audience=" + testAudience + " ", "-oidc_service_accounts=" + testServiceAccount}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewLauncher().Parse(tc.args); err == nil {
