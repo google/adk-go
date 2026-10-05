@@ -84,9 +84,10 @@ func TestAuthenticatorHandsFlagValuesToNewGoogleOIDC(t *testing.T) {
 	}
 }
 
-// triggerFlagAlphabet is the input domain of TestAuthenticatorMatchesReference:
-// letters of both cases, the list separator, and four characters that
-// strings.TrimSpace removes (space, tab, U+00A0 and U+3000).
+// triggerFlagAlphabet is the alphabet TestAuthenticatorMatchesReference builds
+// its generated inputs from: letters of both cases, the list separator, and
+// four characters that strings.TrimSpace removes (space, tab, U+00A0 and
+// U+3000).
 var triggerFlagAlphabet = []string{"a", "B", ",", " ", "\t", "\u00a0", "\u3000"}
 
 func isReferenceSpace(r rune) bool {
@@ -110,10 +111,10 @@ func allStrings(alphabet []string, n int) []string {
 	return out
 }
 
-// referenceAudiences returns every audience of up to two symbols from
+// generatedAudiences returns every audience of up to two symbols from
 // triggerFlagAlphabet, plus one with each space character between two letters,
 // which only a longer audience can show.
-func referenceAudiences() []string {
+func generatedAudiences() []string {
 	return append(allStrings(triggerFlagAlphabet, 2), "a B", "a\tB", "a\u00a0B", "a\u3000B")
 }
 
@@ -155,7 +156,7 @@ func referenceConfig(audience, accounts string) (cfg *authn.GoogleOIDCConfig, ok
 
 // Authenticator must reject exactly what the reference rejects, and otherwise
 // hand NewGoogleOIDC exactly the reference config. Checked for every pairing of
-// an audience from referenceAudiences with an allow-list of up to four symbols
+// an audience from generatedAudiences with an allow-list of up to four symbols
 // from triggerFlagAlphabet, and for every allow-list of up to five symbols with
 // two fixed audiences.
 func TestAuthenticatorMatchesReference(t *testing.T) {
@@ -183,7 +184,7 @@ func TestAuthenticatorMatchesReference(t *testing.T) {
 		}
 	}
 	lists := allStrings(triggerFlagAlphabet, 4)
-	for _, audience := range referenceAudiences() {
+	for _, audience := range generatedAudiences() {
 		for _, accounts := range lists {
 			check(audience, accounts)
 		}
