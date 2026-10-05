@@ -147,11 +147,12 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 			"the user ID the agent runs as. Set -oidc_audience and -oidc_service_accounts after the pubsub " +
 			"keyword to require a Google-signed OIDC token.")
 	}
-	// The run's user ID comes from the delivery metadata, as in adk-python. It is
-	// used unchanged unless empty, where adk-python strips surrounding whitespace
-	// and "/", falls back to its default when nothing is left, and replaces any
-	// remaining "/" with "--". With auth on, only an allow-listed service account
-	// reaches the handler to supply it.
+	// The run's user ID comes from the delivery metadata, as in adk-python.
+	// Empty metadata falls back to this endpoint's default, as in adk-python. A
+	// non-empty value is used unchanged, where adk-python strips surrounding
+	// whitespace and then "/", falls back to its default if nothing is left, and
+	// replaces any remaining "/" with "--". With auth on, only an allow-listed
+	// service account reaches the handler to supply it.
 	subrouter.Handle("/apps/{app_name}/trigger/pubsub", authn.Middleware(p.auth)(http.HandlerFunc(controller.PubSubTriggerHandler))).Methods(http.MethodPost)
 	return nil
 }

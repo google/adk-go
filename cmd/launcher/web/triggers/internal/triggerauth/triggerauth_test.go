@@ -58,8 +58,17 @@ func TestAuthenticatorHandsFlagValuesToNewGoogleOIDC(t *testing.T) {
 				AllowedServiceAccounts: []string{"c@p.iam.gserviceaccount.com", "d@p.iam.gserviceaccount.com"},
 			},
 		},
+		{
+			// Three entries, one mixed case: matching is exact.
+			audience:        "https://svc.run.app",
+			serviceAccounts: "E@p.iam.gserviceaccount.com,f@p.iam.gserviceaccount.com,g@p.iam.gserviceaccount.com",
+			want: authn.GoogleOIDCConfig{
+				Audience:               "https://svc.run.app",
+				AllowedServiceAccounts: []string{"E@p.iam.gserviceaccount.com", "f@p.iam.gserviceaccount.com", "g@p.iam.gserviceaccount.com"},
+			},
+		},
 	} {
-		t.Run(tc.audience, func(t *testing.T) {
+		t.Run(tc.serviceAccounts, func(t *testing.T) {
 			got := captureNewGoogleOIDC(t)
 			f := &Flags{audience: tc.audience, serviceAccounts: tc.serviceAccounts}
 
@@ -72,6 +81,69 @@ func TestAuthenticatorHandsFlagValuesToNewGoogleOIDC(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Compares every allow-list of one to six letters, commas and spaces with a
+// parser written independently, rather than relying on a few hand-picked
+// cases.
+func TestAuthenticatorAllowListMatchesReference(t *testing.T) {
+	got := captureNewGoogleOIDC(t)
+	var lists []string
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		lists = append(lists, prefix)
+		if n == 0 {
+			return
+		}
+		for _, c := range []string{"a", "B", ",", " "} {
+			gen(prefix+c, n-1)
+		}
+	}
+	gen("", 6)
+
+	for _, list := range lists[1:] {
+		for _, audience := range []string{"https://svc.run.app", "https://Other.example/a b"} {
+			*got = nil
+			_, err := (&Flags{audience: audience, serviceAccounts: list}).Authenticator()
+			want, ok := referenceAllowList(list)
+			switch {
+			case !ok && err == nil:
+				t.Fatalf("Authenticator() with -oidc_service_accounts %q succeeded, want an error for its empty entry", list)
+			case !ok:
+				continue
+			case err != nil:
+				t.Fatalf("Authenticator() with -oidc_service_accounts %q = %v, want no error", list, err)
+			}
+			wantCfg := []authn.GoogleOIDCConfig{{Audience: audience, AllowedServiceAccounts: want}}
+			if diff := cmp.Diff(wantCfg, *got); diff != "" {
+				t.Fatalf("-oidc_service_accounts %q: config handed to NewGoogleOIDC mismatch (-want +got):\n%s", list, diff)
+			}
+		}
+	}
+}
+
+// referenceAllowList splits s at each comma and trims spaces from both ends
+// of every entry, byte by byte. ok is false when an entry is left empty.
+func referenceAllowList(s string) (entries []string, ok bool) {
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && s[i] != ',' {
+			continue
+		}
+		lo, hi := start, i
+		for lo < hi && s[lo] == ' ' {
+			lo++
+		}
+		for hi > lo && s[hi-1] == ' ' {
+			hi--
+		}
+		if lo == hi {
+			return nil, false
+		}
+		entries = append(entries, s[lo:hi])
+		start = i + 1
+	}
+	return entries, true
 }
 
 func TestAuthenticatorNilWithoutFlags(t *testing.T) {

@@ -166,8 +166,8 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				// An enabled trigger's sublauncher refuses each of these at
 				// startup, which is only after a full build and deploy.
 				// triggerauth is internal to the launcher, so its checks are
-				// repeated here. A disabled trigger is checked too, for the
-				// reason given for --a2a_agent_url above.
+				// repeated here. A disabled trigger is checked too, since it
+				// can be enabled on a later deploy.
 				if (t.trigger.oidcAudience == "") != (t.trigger.oidcServiceAccounts == "") {
 					return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
 				}

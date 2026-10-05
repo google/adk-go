@@ -423,8 +423,8 @@ func TestPrepareDockerfile_OmitsUnsetTriggerOIDCFlags(t *testing.T) {
 	}
 }
 
-// dockerfileRejection is the part of the ValidateDockerfileSafe rejection
-// message that no other check in computeFlags produces.
+// dockerfileRejection is the part of ValidateDockerfileSafe's message for a
+// disallowed character that no other check in computeFlags produces.
 const dockerfileRejection = "(quote, backtick, backslash, or a control character)"
 
 // setValidTriggerOIDCPairs sets a valid OIDC pair on both triggers.
@@ -526,6 +526,65 @@ func TestComputeFlags_RejectsTriggerOIDCValuesTheSublauncherRefuses(t *testing.T
 			}
 		})
 	}
+}
+
+// Compares computeFlags with an independent statement of the sublauncher's
+// rules, for each audience below paired with every service-account list of up
+// to five letters, commas and spaces.
+func TestComputeFlags_TriggerOIDCChecksMatchReference(t *testing.T) {
+	var lists []string
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		lists = append(lists, prefix)
+		if n == 0 {
+			return
+		}
+		for _, c := range []string{"a", ",", " "} {
+			gen(prefix+c, n-1)
+		}
+	}
+	gen("", 5)
+
+	for _, audience := range []string{"", "x", " x", "x ", "x y"} {
+		for _, accounts := range lists {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			flags.cloudRun.pubsubTrigger.oidcAudience = audience
+			flags.cloudRun.pubsubTrigger.oidcServiceAccounts = accounts
+
+			err := flags.computeFlags()
+			if want := sublauncherAccepts(audience, accounts); (err == nil) != want {
+				t.Fatalf("computeFlags() with audience %q and service accounts %q = %v, want accepted = %v", audience, accounts, err, want)
+			}
+		}
+	}
+}
+
+// sublauncherAccepts states the trigger sublauncher's startup rules for input
+// made of letters, commas and spaces: both flags or neither, no space at either
+// end of the audience, and no entry of the comma-separated list that is empty
+// once spaces are removed.
+func sublauncherAccepts(audience, accounts string) bool {
+	if audience == "" && accounts == "" {
+		return true
+	}
+	if audience == "" || accounts == "" {
+		return false
+	}
+	if audience[0] == ' ' || audience[len(audience)-1] == ' ' {
+		return false
+	}
+	nonSpace := false
+	for i := 0; i <= len(accounts); i++ {
+		if i == len(accounts) || accounts[i] == ',' {
+			if !nonSpace {
+				return false
+			}
+			nonSpace = false
+		} else if accounts[i] != ' ' {
+			nonSpace = true
+		}
+	}
+	return true
 }
 
 func TestComputeFlags_AcceptsCompleteTriggerOIDCPairs(t *testing.T) {
