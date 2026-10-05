@@ -24,10 +24,11 @@ import (
 )
 
 // ImageBytes returns the bytes and MIME type of the first usable image in a
-// generation response. A nil response is accepted and returns the same error as
-// a response containing no generated images. If the entries contain no usable
-// image data but include RAI filtering reasons, the error includes the first
-// reason that remains non-empty after trimming surrounding whitespace.
+// generation response. If the response is nil or contains no generated images,
+// it returns an error reporting that no images were returned. If the entries
+// contain no usable image data but include RAI filtering reasons, the error
+// includes the first reason that remains non-empty after trimming surrounding
+// whitespace.
 // Whitespace-only reasons are ignored. Otherwise, an error reports that the
 // entries contain no usable image data.
 //
