@@ -127,7 +127,6 @@ func loadFrontmatters(c skillregistry.Client, nWorkers int, dc *dataCache) error
 // client to load frontmatter.
 func frontmatterWorker(i int, c skillregistry.Client, toProcess chan *cachedSkill, done chan frontmatterReadDone) {
 	for sk := range toProcess {
-		// log.Printf("frontmatterWorker %d processing %v", i, sk.origSkill.Name)
 		s, err := c.GetSkill(sk.origSkill.Name)
 		if err != nil {
 			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d failed: %w", i, err)}
@@ -135,8 +134,8 @@ func frontmatterWorker(i int, c skillregistry.Client, toProcess chan *cachedSkil
 		}
 
 		// we assume that the location is aligned with the client, so we can safely strip it.
-		// prefixedSkillName is by SkillRegistry build using the provider and the display name.
-		// for your own skills with name "SkillName" you will see private-SkillName.
+		// prefixedSkillName is by SkillRegistry built using the provider and the display name.
+		// for your own skills with name "akill-name" you will see private-skill-name.
 		_, _, prefixedSkillName, err := c.ParseSkillName(sk.origSkill.Name)
 		if err != nil {
 			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d failed to parse skillID: %w", i, err)}

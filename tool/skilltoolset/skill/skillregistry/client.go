@@ -218,9 +218,6 @@ func (c *client) FindSkills(searchType, query string) ([]*agentregistry.Frontmat
 		cont := true
 		for _, sk := range resp.Skills {
 			res = append(res, sk.Frontmatter)
-			if err != nil {
-				return nil, fmt.Errorf("acc failed: %w", err)
-			}
 
 			log.Printf("FindSkills got skill: %+v", sk)
 		}
