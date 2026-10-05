@@ -37,6 +37,10 @@ import (
 	"google.golang.org/adk/v2/session/compaction"
 )
 
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
+
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
 	sseTimeout        time.Duration
@@ -63,10 +67,13 @@ type RuntimeAPIController struct {
 // constructor; a struct absorbs both problems at once, and adding a field to it
 // breaks nobody.
 type RuntimeAPIControllerConfig struct {
-	SessionService    session.Service
-	MemoryService     memory.Service
-	AgentLoader       agent.Loader
-	ArtifactService   artifact.Service
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	// SSETimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
@@ -145,13 +152,17 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 	if authorizer == nil {
 		authorizer = authz.NewNoop()
 	}
+	sseTimeout := cfg.SSETimeout
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
 
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
 		agentLoader:            cfg.AgentLoader,
 		artifactService:        cfg.ArtifactService,
-		sseTimeout:             cfg.SSETimeout,
+		sseTimeout:             sseTimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
 		checkOrigin:            cfg.CheckOrigin,
@@ -226,7 +237,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
