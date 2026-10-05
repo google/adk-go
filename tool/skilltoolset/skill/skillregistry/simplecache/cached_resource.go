@@ -19,12 +19,14 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
 type resources struct {
 	client skillregistry.Client
+	mu     sync.RWMutex
 	// loaded keeps information whether the resources have been loaded - it may happen that a skill has no resources.
 	loaded    bool
 	res       []*resource
@@ -39,11 +41,13 @@ type resource struct {
 func newResources(client skillregistry.Client) *resources {
 	return &resources{
 		client: client,
+		mu:     sync.RWMutex{},
 	}
 }
 
 // loadResources cleans internal data and re-creates it using the provided rev
 func (r *resources) loadResources(rev string) error {
+
 	log.Printf("loadResources")
 	// clear first
 	r.loaded = false
@@ -76,12 +80,23 @@ func (r *resources) loadResources(rev string) error {
 }
 
 func (r *resources) listResources(rev, subpath string) ([]string, error) {
+	r.mu.RLock()
+
 	if !r.loaded {
-		err := r.loadResources(rev)
-		if err != nil {
-			return nil, err
+		r.mu.RUnlock()
+		r.mu.Lock()
+		// still not loaded?
+		if !r.loaded {
+			err := r.loadResources(rev)
+			if err != nil {
+				return nil, err
+			}
 		}
+		r.mu.Unlock()
+		r.mu.RLock()
 	}
+
+	defer r.mu.RUnlock()
 
 	res := make([]string, 0)
 	for _, r := range r.res {
@@ -89,15 +104,26 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 			res = append(res, r.path)
 		}
 	}
+
 	return res, nil
 }
 
 func (r *resources) getResource(rev, path string) (*resource, error) {
 	log.Printf("getResource %v", path)
-	if !r.loaded {
-		err := r.loadResources(rev)
-		if err != nil {
-			return nil, err
+	r.mu.RLock()
+	if r.loaded {
+		defer r.mu.RUnlock()
+	} else {
+		r.mu.RUnlock()
+		// even if the whole cache is swapped now for the new version continue with the values we have.
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// still not loaded?
+		if !r.loaded {
+			err := r.loadResources(rev)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	// loaded
