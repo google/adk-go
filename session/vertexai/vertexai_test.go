@@ -647,6 +647,48 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "executable code",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							genai.NewPartFromExecutableCode("print('hello')", genai.LanguagePython),
+						},
+						Role: genai.RoleModel,
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "code execution result",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "hello"),
+						},
+						Role: genai.RoleUser,
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "file data",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							genai.NewPartFromURI("gs://bucket/file.txt", "text/plain"),
+						},
+						Role: genai.RoleUser,
+					},
+				},
+			},
+			expectError: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -930,4 +972,53 @@ func newFakeVertexAiClient(t *testing.T, service aiplatformpb.SessionServiceServ
 		}
 	})
 	return client
+}
+
+func TestAiplatformToGenaiContent_OtherParts(t *testing.T) {
+	input := &aiplatformpb.SessionEvent{
+		Content: &aiplatformpb.Content{
+			Role: "model",
+			Parts: []*aiplatformpb.Part{
+				{
+					Data: &aiplatformpb.Part_ExecutableCode{
+						ExecutableCode: &aiplatformpb.ExecutableCode{
+							Code:     "print('hello')",
+							Language: aiplatformpb.ExecutableCode_PYTHON,
+						},
+					},
+				},
+				{
+					Data: &aiplatformpb.Part_CodeExecutionResult{
+						CodeExecutionResult: &aiplatformpb.CodeExecutionResult{
+							Outcome: aiplatformpb.CodeExecutionResult_OUTCOME_OK,
+							Output:  "hello",
+						},
+					},
+				},
+				{
+					Data: &aiplatformpb.Part_FileData{
+						FileData: &aiplatformpb.FileData{
+							MimeType: "text/plain",
+							FileUri:  "gs://bucket/file.txt",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got := aiplatformToGenaiContent(input)
+	if got == nil || len(got.Parts) != 3 {
+		t.Fatalf("expected 3 parts, got %v", got)
+	}
+
+	if got.Parts[0].ExecutableCode == nil || got.Parts[0].ExecutableCode.Code != "print('hello')" || got.Parts[0].ExecutableCode.Language != genai.LanguagePython {
+		t.Errorf("incorrect ExecutableCode: %+v", got.Parts[0].ExecutableCode)
+	}
+	if got.Parts[1].CodeExecutionResult == nil || got.Parts[1].CodeExecutionResult.Output != "hello" || got.Parts[1].CodeExecutionResult.Outcome != genai.OutcomeOK {
+		t.Errorf("incorrect CodeExecutionResult: %+v", got.Parts[1].CodeExecutionResult)
+	}
+	if got.Parts[2].FileData == nil || got.Parts[2].FileData.FileURI != "gs://bucket/file.txt" || got.Parts[2].FileData.MIMEType != "text/plain" {
+		t.Errorf("incorrect FileData: %+v", got.Parts[2].FileData)
+	}
 }
