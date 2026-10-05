@@ -193,7 +193,7 @@ func TestContinuation_Generate(t *testing.T) {
 			want: &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two three"}}},
 				FinishReason:  genai.FinishReasonStop,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 6, TotalTokenCount: 16},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 30, CandidatesTokenCount: 6, TotalTokenCount: 36},
 			},
 			wantTokens:      []string{"", "t1", "t2"},
 			wantOutputSoFar: []string{"", "one ", "one two "},
@@ -207,7 +207,7 @@ func TestContinuation_Generate(t *testing.T) {
 			want: &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
 				FinishReason:  genai.FinishReasonContinuation,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
 			},
 			wantTokens:      []string{"", "t1"},
 			wantOutputSoFar: []string{"", "one "},
@@ -223,7 +223,7 @@ func TestContinuation_Generate(t *testing.T) {
 			want: &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
 				FinishReason:  genai.FinishReasonContinuation,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
 			},
 			wantTokens:      []string{"", "t1"},
 			wantOutputSoFar: []string{"", "one "},
@@ -301,7 +301,7 @@ func TestContinuation_GenerateStream(t *testing.T) {
 	want := &model.LLMResponse{
 		Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two three"}}},
 		FinishReason:  genai.FinishReasonStop,
-		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
 	}
 	got := &model.LLMResponse{Content: final.Content, FinishReason: final.FinishReason, UsageMetadata: final.UsageMetadata, CustomMetadata: final.CustomMetadata}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -513,7 +513,7 @@ func TestContinuation_BlockedAfterResume(t *testing.T) {
 			want := &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
 				FinishReason:  genai.FinishReasonSafety,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
 			}
 			if stream {
 				want.ErrorCode = string(genai.FinishReasonSafety)
@@ -671,41 +671,21 @@ func TestAddUsage(t *testing.T) {
 		TotalTokenCount:            41,
 		TrafficType:                genai.TrafficTypeProvisionedThroughput,
 	}
-	// The prompt-side counts are total's, the generated ones summed, and the
-	// total recomputed from them.
 	want := &genai.GenerateContentResponseUsageMetadata{
-		CacheTokensDetails:         []*genai.ModalityTokenCount{text(1)},
-		CachedContentTokenCount:    1,
+		CacheTokensDetails:         []*genai.ModalityTokenCount{text(1), image(5)},
+		CachedContentTokenCount:    6,
 		CandidatesTokenCount:       8,
 		CandidatesTokensDetails:    []*genai.ModalityTokenCount{text(8)},
-		PromptTokenCount:           10,
-		PromptTokensDetails:        []*genai.ModalityTokenCount{text(8), image(2)},
+		PromptTokenCount:           30,
+		PromptTokensDetails:        []*genai.ModalityTokenCount{text(23), image(7)},
 		ThoughtsTokenCount:         10,
-		ToolUsePromptTokenCount:    4,
-		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(4)},
-		TotalTokenCount:            32,
+		ToolUsePromptTokenCount:    12,
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(12)},
+		TotalTokenCount:            60,
 		TrafficType:                genai.TrafficTypeProvisionedThroughput,
 	}
 	if diff := cmp.Diff(want, addUsage(total, next)); diff != "" {
-		t.Errorf("addUsage(total, next) (-want +got):\n%s", diff)
-	}
-	// Prompt-side counts the earlier requests did not report are next's.
-	generatedOnly := &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 2, CandidatesTokensDetails: []*genai.ModalityTokenCount{text(2)}}
-	want = &genai.GenerateContentResponseUsageMetadata{
-		CacheTokensDetails:         []*genai.ModalityTokenCount{image(5)},
-		CachedContentTokenCount:    5,
-		CandidatesTokenCount:       8,
-		CandidatesTokensDetails:    []*genai.ModalityTokenCount{text(8)},
-		PromptTokenCount:           20,
-		PromptTokensDetails:        []*genai.ModalityTokenCount{image(5), text(15)},
-		ThoughtsTokenCount:         7,
-		ToolUsePromptTokenCount:    8,
-		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(8)},
-		TotalTokenCount:            43,
-		TrafficType:                genai.TrafficTypeProvisionedThroughput,
-	}
-	if diff := cmp.Diff(want, addUsage(generatedOnly, next)); diff != "" {
-		t.Errorf("addUsage(generatedOnly, next) (-want +got):\n%s", diff)
+		t.Errorf("addUsage() (-want +got):\n%s", diff)
 	}
 	if got := addUsage(nil, next); got != next {
 		t.Errorf("addUsage(nil, next) = %+v, want next", got)

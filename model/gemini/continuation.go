@@ -29,10 +29,10 @@ import (
 // generation that reaches its per-request output limit with finish reason
 // CONTINUATION and a continuation token on the candidate. The model resends
 // the request with the output so far and the token until the generation
-// finishes, and returns one response with the joined content and the usage of
-// every request, as ADK Java and ADK Kotlin do. The response reads as if one
-// request had produced it. A response stopped by maxOutputTokens is not
-// resumed, since the API applies maxOutputTokens to the whole generation.
+// finishes, and returns one response with the joined content and the summed
+// usage of every request, as ADK Java and ADK Kotlin do. A response stopped by
+// maxOutputTokens is not resumed, since the API applies maxOutputTokens to the
+// whole generation.
 
 // maxResumes bounds the requests that resume one generation. A model that
 // pauses every 300 decoding steps takes about 150 of them for a 45K-token
@@ -251,15 +251,13 @@ func isEmpty(p *genai.Part) bool {
 	return reflect.ValueOf(rest).IsZero()
 }
 
-// addUsage returns the token usage of one generation's requests: total, for
-// those before next, combined with next's. Every request resends the prompt, so
-// the prompt-side counts (prompt, cached content and tool-use prompt tokens) are
-// the first request's that reports them. Summed, they would overstate the
-// prompt by a multiple of the resumes, and ADK reads PromptTokenCount as the
-// size of the prompt, to decide when to compact a session for one. The
-// generated counts are summed, per-modality counts by modality, the total is
-// recomputed from the rest, and anything else is next's. ADK Java and ADK
-// Kotlin sum every count.
+// addUsage returns the combined token usage of two requests: counts are
+// summed, per-modality counts summed by modality, and anything else is next's.
+// Every request is billed, so the result is what the generation used, as ADK
+// Java and ADK Kotlin report it. PromptTokenCount so counts the prompt of every
+// resend, each carrying the output so far, and exceeds the size of any one
+// prompt; compaction, which reads it as the prompt size, can compact a session
+// early after a resumed generation.
 func addUsage(total, next *genai.GenerateContentResponseUsageMetadata) *genai.GenerateContentResponseUsageMetadata {
 	if total == nil {
 		return next
@@ -268,25 +266,17 @@ func addUsage(total, next *genai.GenerateContentResponseUsageMetadata) *genai.Ge
 		return total
 	}
 	out := *next
-	out.PromptTokenCount = cmp.Or(total.PromptTokenCount, next.PromptTokenCount)
-	out.PromptTokensDetails = firstReported(total.PromptTokensDetails, next.PromptTokensDetails)
-	out.CachedContentTokenCount = cmp.Or(total.CachedContentTokenCount, next.CachedContentTokenCount)
-	out.CacheTokensDetails = firstReported(total.CacheTokensDetails, next.CacheTokensDetails)
-	out.ToolUsePromptTokenCount = cmp.Or(total.ToolUsePromptTokenCount, next.ToolUsePromptTokenCount)
-	out.ToolUsePromptTokensDetails = firstReported(total.ToolUsePromptTokensDetails, next.ToolUsePromptTokensDetails)
+	out.CacheTokensDetails = addModalityCounts(total.CacheTokensDetails, next.CacheTokensDetails)
+	out.CachedContentTokenCount = total.CachedContentTokenCount + next.CachedContentTokenCount
 	out.CandidatesTokenCount = total.CandidatesTokenCount + next.CandidatesTokenCount
 	out.CandidatesTokensDetails = addModalityCounts(total.CandidatesTokensDetails, next.CandidatesTokensDetails)
+	out.PromptTokenCount = total.PromptTokenCount + next.PromptTokenCount
+	out.PromptTokensDetails = addModalityCounts(total.PromptTokensDetails, next.PromptTokensDetails)
 	out.ThoughtsTokenCount = total.ThoughtsTokenCount + next.ThoughtsTokenCount
-	out.TotalTokenCount = out.PromptTokenCount + out.ToolUsePromptTokenCount + out.CandidatesTokenCount + out.ThoughtsTokenCount
+	out.ToolUsePromptTokenCount = total.ToolUsePromptTokenCount + next.ToolUsePromptTokenCount
+	out.ToolUsePromptTokensDetails = addModalityCounts(total.ToolUsePromptTokensDetails, next.ToolUsePromptTokensDetails)
+	out.TotalTokenCount = total.TotalTokenCount + next.TotalTokenCount
 	return &out
-}
-
-// firstReported returns first, or second if first is unset.
-func firstReported(first, second []*genai.ModalityTokenCount) []*genai.ModalityTokenCount {
-	if first != nil {
-		return first
-	}
-	return second
 }
 
 // addModalityCounts sums token counts that share a modality, keeping
