@@ -1103,6 +1103,36 @@ func TestMetadataProviderRejectsReservedKeys(t *testing.T) {
 	}
 }
 
+func TestMetadataProviderAllowsNonReservedKeys(t *testing.T) {
+	tests := []struct {
+		key string
+		val any
+	}{
+		{key: "com.example/tenant", val: "acme"},
+		{key: "io.modelcontextprotocolx", val: "custom"},
+		{key: "ProgressToken", val: "tok-1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			wantMeta := map[string]any{tc.key: tc.val}
+			ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+				return wantMeta, nil
+			})
+
+			if _, err := runSingleTool(t, t.Context(), ts); err != nil {
+				t.Fatalf("Run() err = %v, want nil", err)
+			}
+			if !got.called {
+				t.Fatal("the MCP tool was never invoked")
+			}
+			if diff := cmp.Diff(wantMeta, providerMeta(got.meta)); diff != "" {
+				t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestMetadataProviderKeepsClientMeta checks that the server receives both the
 // provider's metadata and the `_meta` entries the MCP client sets for itself,
 // including the adk-mcp-client implementation info.
