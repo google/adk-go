@@ -43,7 +43,8 @@
 //
 //   - An agent wrapped in an agent tool. It runs under its own runner inside the
 //     tool call, so none of its events reach the event stream. It is reported
-//     as a tool of the agent that calls it.
+//     as a tool of the LLM agent that has the tool, and not at all when a
+//     workflow ToolNode runs the tool.
 //   - An agent that a dynamic workflow node runs. Its body is Go code, so which
 //     agents it runs is known only once it runs.
 //   - An agent wrapped in a workflow ParallelWorker.
@@ -232,37 +233,11 @@ func llmSubAgents(a agent.Agent) []string {
 // SubAgents, so following SubAgents alone reports nothing for a graph-rooted
 // app.
 func children(a agent.Agent) []agent.Agent {
-	subAgents := a.SubAgents()
-	edges := workflowEdges(a)
-	if len(edges) == 0 {
-		return subAgents
-	}
-
-	out := slices.Clone(subAgents)
-	seen := make(map[workflow.Node]bool)
-	var walkEdges func(edges []workflow.Edge)
-	walkEdges = func(edges []workflow.Edge) {
-		for _, e := range edges {
-			for _, n := range []workflow.Node{e.From, e.To} {
-				if n == nil || seen[n] {
-					continue
-				}
-				seen[n] = true
-				switch node := n.(type) {
-				case *workflow.AgentNode:
-					out = append(out, node.Agent())
-				case *workflow.WorkflowNode:
-					// Edges come back in no particular order, so if two
-					// different agents share a name and one is in a nested
-					// workflow, which one is described can change from
-					// request to request. Sort them here if that matters.
-					walkEdges(node.Workflow().Edges())
-				}
-			}
-		}
-	}
-	walkEdges(edges)
-	return out
+	// The graph's agents come in no particular order, so if two different
+	// agents share a name and one is in a nested workflow, which one is
+	// described can change from request to request. Sort them here if that
+	// matters.
+	return slices.Concat(a.SubAgents(), workflow.WalkAgents(workflowEdges(a)))
 }
 
 // workflowEdges returns the edges of a's workflow graph, or nil when a is not

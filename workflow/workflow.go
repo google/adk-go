@@ -274,15 +274,6 @@ func (w *Workflow) Name() string {
 	return w.name
 }
 
-// Edges returns a copy of the workflow's edges, in no particular order, so a
-// caller can walk its graph without running it. See [AgentNode.Agent].
-func (w *Workflow) Edges() []Edge {
-	if w == nil || w.graph == nil {
-		return nil
-	}
-	return w.graph.allEdges()
-}
-
 // Run drives the workflow to completion or to a graceful pause
 // when any node enters NodeWaiting. It returns an iter.Seq2 that
 // yields events from per-node goroutines in arrival order; the
