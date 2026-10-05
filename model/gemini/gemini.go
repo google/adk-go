@@ -139,12 +139,15 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 			return nil, fmt.Errorf("empty response")
 		}
 		var parts []*genai.Part
-		if candidate := resp.Candidates[0]; candidate != nil && candidate.Content != nil {
-			parts = candidate.Content.Parts
+		if candidate := resp.Candidates[0]; candidate != nil {
+			if candidate.Content != nil {
+				parts = candidate.Content.Parts
+			}
+			c.keepMetadata(candidate)
 		}
 		var ok bool
 		if contents, config, ok = c.advance(continuationToken(resp), parts, resp.UsageMetadata); !ok {
-			return c.complete(converters.Genai2LLMResponse(resp)), nil
+			return converters.Genai2LLMResponse(c.complete(resp)), nil
 		}
 	}
 }

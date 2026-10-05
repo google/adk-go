@@ -16,24 +16,23 @@ package gemini
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"log"
 	"reflect"
 	"slices"
 
 	"google.golang.org/genai"
-
-	"google.golang.org/adk/v2/model"
 )
 
 // Decoding continuation. A model with decoding continuation pauses a
 // generation that reaches its per-request output limit with finish reason
 // CONTINUATION and a continuation token on the candidate. The model resends
 // the request with the output so far and the token until the generation
-// finishes, and returns one response with the joined content and the summed
-// usage, as ADK Java and ADK Kotlin do. A response stopped by
-// maxOutputTokens is not resumed, since the API applies maxOutputTokens to the
-// whole generation.
+// finishes, and returns one response with the joined content and the usage of
+// every request, as ADK Java and ADK Kotlin do. The response reads as if one
+// request had produced it. A response stopped by maxOutputTokens is not
+// resumed, since the API applies maxOutputTokens to the whole generation.
 
 // maxResumes bounds the requests that resume one generation. A model that
 // pauses every 300 decoding steps takes about 150 of them for a 45K-token
@@ -74,6 +73,9 @@ type continuation struct {
 	usage   *genai.GenerateContentResponseUsageMetadata
 	token   []byte
 	resumes int
+	// grounding and citation are the last a request reported.
+	grounding *genai.GroundingMetadata
+	citation  *genai.CitationMetadata
 }
 
 func newContinuation(contents []*genai.Content, config *genai.GenerateContentConfig, retry bool) *continuation {
@@ -124,19 +126,34 @@ func (c *continuation) content() *genai.Content {
 	return &genai.Content{Role: genai.RoleModel, Parts: slices.Clone(c.parts)}
 }
 
-// complete sets the content and usage of every request on resp, the last
-// request's response, if the generation was resumed. resp keeps the last
-// request's finish reason and error code, so a resumed generation that ends
-// blocked still reports why.
-func (c *continuation) complete(resp *model.LLMResponse) *model.LLMResponse {
-	if !c.resumed() {
+// keepMetadata records the grounding and citation metadata of a request's
+// candidate, so that the final response keeps the last reported even when its
+// own request reports none, as the streaming aggregator does.
+func (c *continuation) keepMetadata(candidate *genai.Candidate) {
+	c.grounding = cmp.Or(candidate.GroundingMetadata, c.grounding)
+	c.citation = cmp.Or(candidate.CitationMetadata, c.citation)
+}
+
+// complete returns resp, the last request's response, with the content, usage,
+// grounding and citation metadata of every request if the generation was
+// resumed, and resp itself otherwise. resp keeps the last request's finish
+// reason. Converting the result gives the error code a single response with the
+// same content would get: none, once any request produced content. ADK Java
+// keeps the last request's error code.
+func (c *continuation) complete(resp *genai.GenerateContentResponse) *genai.GenerateContentResponse {
+	if !c.resumed() || len(resp.Candidates) == 0 || resp.Candidates[0] == nil {
 		return resp
 	}
+	out := *resp
+	candidate := *resp.Candidates[0]
 	if len(c.parts) > 0 {
-		resp.Content = c.content()
+		candidate.Content = c.content()
 	}
-	resp.UsageMetadata = c.usage
-	return resp
+	candidate.GroundingMetadata = c.grounding
+	candidate.CitationMetadata = c.citation
+	out.Candidates = append([]*genai.Candidate{&candidate}, resp.Candidates[1:]...)
+	out.UsageMetadata = c.usage
+	return &out
 }
 
 func (c *continuation) nextRequest(token []byte) ([]*genai.Content, *genai.GenerateContentConfig) {
@@ -234,8 +251,15 @@ func isEmpty(p *genai.Part) bool {
 	return reflect.ValueOf(rest).IsZero()
 }
 
-// addUsage returns the combined token usage of two requests: counts are
-// summed, per-modality counts summed by modality, and anything else is next's.
+// addUsage returns the token usage of one generation's requests: total, for
+// those before next, combined with next's. Every request resends the prompt, so
+// the prompt-side counts (prompt, cached content and tool-use prompt tokens) are
+// the first request's that reports them. Summed, they would overstate the
+// prompt by a multiple of the resumes, and ADK reads PromptTokenCount as the
+// size of the prompt, to decide when to compact a session for one. The
+// generated counts are summed, per-modality counts by modality, the total is
+// recomputed from the rest, and anything else is next's. ADK Java and ADK
+// Kotlin sum every count.
 func addUsage(total, next *genai.GenerateContentResponseUsageMetadata) *genai.GenerateContentResponseUsageMetadata {
 	if total == nil {
 		return next
@@ -244,17 +268,25 @@ func addUsage(total, next *genai.GenerateContentResponseUsageMetadata) *genai.Ge
 		return total
 	}
 	out := *next
-	out.CacheTokensDetails = addModalityCounts(total.CacheTokensDetails, next.CacheTokensDetails)
-	out.CachedContentTokenCount = total.CachedContentTokenCount + next.CachedContentTokenCount
+	out.PromptTokenCount = cmp.Or(total.PromptTokenCount, next.PromptTokenCount)
+	out.PromptTokensDetails = firstReported(total.PromptTokensDetails, next.PromptTokensDetails)
+	out.CachedContentTokenCount = cmp.Or(total.CachedContentTokenCount, next.CachedContentTokenCount)
+	out.CacheTokensDetails = firstReported(total.CacheTokensDetails, next.CacheTokensDetails)
+	out.ToolUsePromptTokenCount = cmp.Or(total.ToolUsePromptTokenCount, next.ToolUsePromptTokenCount)
+	out.ToolUsePromptTokensDetails = firstReported(total.ToolUsePromptTokensDetails, next.ToolUsePromptTokensDetails)
 	out.CandidatesTokenCount = total.CandidatesTokenCount + next.CandidatesTokenCount
 	out.CandidatesTokensDetails = addModalityCounts(total.CandidatesTokensDetails, next.CandidatesTokensDetails)
-	out.PromptTokenCount = total.PromptTokenCount + next.PromptTokenCount
-	out.PromptTokensDetails = addModalityCounts(total.PromptTokensDetails, next.PromptTokensDetails)
 	out.ThoughtsTokenCount = total.ThoughtsTokenCount + next.ThoughtsTokenCount
-	out.ToolUsePromptTokenCount = total.ToolUsePromptTokenCount + next.ToolUsePromptTokenCount
-	out.ToolUsePromptTokensDetails = addModalityCounts(total.ToolUsePromptTokensDetails, next.ToolUsePromptTokensDetails)
-	out.TotalTokenCount = total.TotalTokenCount + next.TotalTokenCount
+	out.TotalTokenCount = out.PromptTokenCount + out.ToolUsePromptTokenCount + out.CandidatesTokenCount + out.ThoughtsTokenCount
 	return &out
+}
+
+// firstReported returns first, or second if first is unset.
+func firstReported(first, second []*genai.ModalityTokenCount) []*genai.ModalityTokenCount {
+	if first != nil {
+		return first
+	}
+	return second
 }
 
 // addModalityCounts sums token counts that share a modality, keeping

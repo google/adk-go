@@ -193,7 +193,7 @@ func TestContinuation_Generate(t *testing.T) {
 			want: &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two three"}}},
 				FinishReason:  genai.FinishReasonStop,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 30, CandidatesTokenCount: 6, TotalTokenCount: 36},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 6, TotalTokenCount: 16},
 			},
 			wantTokens:      []string{"", "t1", "t2"},
 			wantOutputSoFar: []string{"", "one ", "one two "},
@@ -207,7 +207,23 @@ func TestContinuation_Generate(t *testing.T) {
 			want: &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
 				FinishReason:  genai.FinishReasonContinuation,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
+		{
+			// The empty pause is no error, since an earlier request produced
+			// the output.
+			name: "gave up on an empty pause",
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {pausedWith("t1")},
+			},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
+				FinishReason:  genai.FinishReasonContinuation,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
 			},
 			wantTokens:      []string{"", "t1"},
 			wantOutputSoFar: []string{"", "one "},
@@ -245,7 +261,7 @@ func TestContinuation_Generate(t *testing.T) {
 				}
 				got = resp
 			}
-			got = &model.LLMResponse{Content: got.Content, FinishReason: got.FinishReason, UsageMetadata: got.UsageMetadata, CustomMetadata: got.CustomMetadata}
+			got = &model.LLMResponse{Content: got.Content, ErrorCode: got.ErrorCode, FinishReason: got.FinishReason, UsageMetadata: got.UsageMetadata, CustomMetadata: got.CustomMetadata}
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("GenerateContent(stream=false) (-want +got):\n%s", diff)
 			}
@@ -285,7 +301,7 @@ func TestContinuation_GenerateStream(t *testing.T) {
 	want := &model.LLMResponse{
 		Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two three"}}},
 		FinishReason:  genai.FinishReasonStop,
-		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
 	}
 	got := &model.LLMResponse{Content: final.Content, FinishReason: final.FinishReason, UsageMetadata: final.UsageMetadata, CustomMetadata: final.CustomMetadata}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -471,8 +487,10 @@ func TestContinuation_LeavesRequestUnchanged(t *testing.T) {
 }
 
 // TestContinuation_BlockedAfterResume checks that a resumed generation that
-// ends blocked reports the block reason as its error code, with the output
-// generated before it.
+// ends blocked reports the block as its finish reason, with the output
+// generated before it, and the error code a single response with that output
+// gets: none in unary mode, where only a response without content gets one,
+// and the last chunk's in streaming mode, as the aggregator gives any stream.
 func TestContinuation_BlockedAfterResume(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
@@ -494,13 +512,57 @@ func TestContinuation_BlockedAfterResume(t *testing.T) {
 			}
 			want := &model.LLMResponse{
 				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
-				ErrorCode:     string(genai.FinishReasonSafety),
 				FinishReason:  genai.FinishReasonSafety,
-				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 4, TotalTokenCount: 14},
+			}
+			if stream {
+				want.ErrorCode = string(genai.FinishReasonSafety)
 			}
 			got := &model.LLMResponse{Content: final.Content, ErrorCode: final.ErrorCode, FinishReason: final.FinishReason, UsageMetadata: final.UsageMetadata}
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("final response (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestContinuation_KeepsMetadata checks that a resumed generation keeps the
+// last grounding and citation metadata a request reported, though the last
+// request reports none.
+func TestContinuation_KeepsMetadata(t *testing.T) {
+	withMetadata := func(c map[string]any, query, uri string) map[string]any {
+		if query != "" {
+			c["groundingMetadata"] = map[string]any{"webSearchQueries": []any{query}}
+		}
+		if uri != "" {
+			c["citationMetadata"] = map[string]any{"citationSources": []any{map[string]any{"uri": uri}}}
+		}
+		return c
+	}
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
+				"":   {withMetadata(candidate("one ", "CONTINUATION", "t1"), "q1", "https://example.com/a")},
+				"t1": {withMetadata(candidate("two ", "CONTINUATION", "t2"), "q2", "")},
+				"t2": {candidate("three", "STOP", "")},
+			}}
+			var final *model.LLMResponse
+			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+				if !resp.Partial {
+					final = resp
+				}
+			}
+			if final == nil {
+				t.Fatal("no final response")
+			}
+			if diff := cmp.Diff(&genai.GroundingMetadata{WebSearchQueries: []string{"q2"}}, final.GroundingMetadata); diff != "" {
+				t.Errorf("final grounding metadata (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(&genai.CitationMetadata{Citations: []*genai.Citation{{URI: "https://example.com/a"}}}, final.CitationMetadata); diff != "" {
+				t.Errorf("final citation metadata (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -609,21 +671,41 @@ func TestAddUsage(t *testing.T) {
 		TotalTokenCount:            41,
 		TrafficType:                genai.TrafficTypeProvisionedThroughput,
 	}
+	// The prompt-side counts are total's, the generated ones summed, and the
+	// total recomputed from them.
 	want := &genai.GenerateContentResponseUsageMetadata{
-		CacheTokensDetails:         []*genai.ModalityTokenCount{text(1), image(5)},
-		CachedContentTokenCount:    6,
+		CacheTokensDetails:         []*genai.ModalityTokenCount{text(1)},
+		CachedContentTokenCount:    1,
 		CandidatesTokenCount:       8,
 		CandidatesTokensDetails:    []*genai.ModalityTokenCount{text(8)},
-		PromptTokenCount:           30,
-		PromptTokensDetails:        []*genai.ModalityTokenCount{text(23), image(7)},
+		PromptTokenCount:           10,
+		PromptTokensDetails:        []*genai.ModalityTokenCount{text(8), image(2)},
 		ThoughtsTokenCount:         10,
-		ToolUsePromptTokenCount:    12,
-		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(12)},
-		TotalTokenCount:            60,
+		ToolUsePromptTokenCount:    4,
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(4)},
+		TotalTokenCount:            32,
 		TrafficType:                genai.TrafficTypeProvisionedThroughput,
 	}
 	if diff := cmp.Diff(want, addUsage(total, next)); diff != "" {
-		t.Errorf("addUsage() (-want +got):\n%s", diff)
+		t.Errorf("addUsage(total, next) (-want +got):\n%s", diff)
+	}
+	// Prompt-side counts the earlier requests did not report are next's.
+	generatedOnly := &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 2, CandidatesTokensDetails: []*genai.ModalityTokenCount{text(2)}}
+	want = &genai.GenerateContentResponseUsageMetadata{
+		CacheTokensDetails:         []*genai.ModalityTokenCount{image(5)},
+		CachedContentTokenCount:    5,
+		CandidatesTokenCount:       8,
+		CandidatesTokensDetails:    []*genai.ModalityTokenCount{text(8)},
+		PromptTokenCount:           20,
+		PromptTokensDetails:        []*genai.ModalityTokenCount{image(5), text(15)},
+		ThoughtsTokenCount:         7,
+		ToolUsePromptTokenCount:    8,
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{text(8)},
+		TotalTokenCount:            43,
+		TrafficType:                genai.TrafficTypeProvisionedThroughput,
+	}
+	if diff := cmp.Diff(want, addUsage(generatedOnly, next)); diff != "" {
+		t.Errorf("addUsage(generatedOnly, next) (-want +got):\n%s", diff)
 	}
 	if got := addUsage(nil, next); got != next {
 		t.Errorf("addUsage(nil, next) = %+v, want next", got)
