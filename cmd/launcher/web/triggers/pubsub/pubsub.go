@@ -18,6 +18,7 @@ package pubsub
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -26,8 +27,10 @@ import (
 
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/cmd/launcher/web/triggers/internal/triggerauth"
 	"google.golang.org/adk/v2/internal/cli/util"
 	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
+	"google.golang.org/adk/v2/server/authn"
 )
 
 type pubsubConfig struct {
@@ -36,11 +39,14 @@ type pubsubConfig struct {
 	triggerBaseDelay  time.Duration
 	triggerMaxDelay   time.Duration
 	triggerMaxRuns    int
+	auth              triggerauth.Flags
 }
 
 type pubsubLauncher struct {
 	flags  *flag.FlagSet
 	config *pubsubConfig
+	// auth is built from the flags by Parse. Nil leaves the endpoint open.
+	auth authn.Authenticator
 }
 
 // NewLauncher creates a new pubsub launcher. It extends Web launcher.
@@ -53,6 +59,7 @@ func NewLauncher() web.Sublauncher {
 	fs.DurationVar(&config.triggerBaseDelay, "trigger_base_delay", 1*time.Second, "Base delay for trigger retry exponential backoff")
 	fs.DurationVar(&config.triggerMaxDelay, "trigger_max_delay", 10*time.Second, "Maximum delay for trigger retry exponential backoff")
 	fs.IntVar(&config.triggerMaxRuns, "trigger_max_concurrent_runs", 100, "Maximum concurrent trigger runs")
+	config.auth.Register(fs)
 
 	return &pubsubLauncher{
 		config: config,
@@ -89,6 +96,11 @@ func (p *pubsubLauncher) Parse(args []string) ([]string, error) {
 		prefix = "/" + prefix
 	}
 	p.config.pathPrefix = strings.TrimSuffix(prefix, "/")
+
+	p.auth, err = p.config.auth.Authenticator()
+	if err != nil {
+		return nil, err
+	}
 
 	return p.flags.Args(), nil
 }
@@ -130,7 +142,14 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 		subrouter = router.PathPrefix(p.config.pathPrefix).Subrouter()
 	}
 
-	subrouter.HandleFunc("/apps/{app_name}/trigger/pubsub", controller.PubSubTriggerHandler).Methods(http.MethodPost)
+	if p.auth == nil {
+		log.Printf("adk: the pubsub trigger endpoint is unauthenticated, so any caller that reaches it chooses " +
+			"the user ID the agent runs as. Set -oidc_audience and -oidc_service_accounts to require a " +
+			"Google-signed OIDC token.")
+	}
+	// The run's user ID stays the delivery metadata, as in adk-python. With auth
+	// on, only an allow-listed service account reaches the handler to supply it.
+	subrouter.Handle("/apps/{app_name}/trigger/pubsub", authn.Middleware(p.auth)(http.HandlerFunc(controller.PubSubTriggerHandler))).Methods(http.MethodPost)
 	return nil
 }
 

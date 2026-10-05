@@ -41,6 +41,9 @@ type triggerConfigFlags struct {
 	baseDelay  time.Duration
 	maxDelay   time.Duration
 	maxRuns    int
+
+	oidcAudience        string
+	oidcServiceAccounts string
 }
 
 type cloudRunServiceFlags struct {
@@ -120,11 +123,15 @@ func init() {
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.baseDelay, "pubsub_base_delay", 1*time.Second, "Base delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.maxDelay, "pubsub_max_delay", 10*time.Second, "Maximum delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRuns, "pubsub_max_concurrent_runs", 100, "Maximum concurrent PubSub trigger runs")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcAudience, "pubsub_oidc_audience", "", "Audience of the Google-signed OIDC token the PubSub push subscription attaches. Requires --pubsub_oidc_service_accounts. When unset, the PubSub endpoint is unauthenticated")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcServiceAccounts, "pubsub_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the PubSub endpoint. Requires --pubsub_oidc_audience")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.eventarc, "eventarc", false, "Enable Eventarc subrouter")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRetries, "eventarc_max_retries", 3, "Maximum retries for HTTP 429 errors from Eventarc triggers")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.baseDelay, "eventarc_base_delay", 1*time.Second, "Base delay for Eventarc trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.maxDelay, "eventarc_max_delay", 10*time.Second, "Maximum delay for Eventarc trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRuns, "eventarc_max_concurrent_runs", 100, "Maximum concurrent Eventarc trigger runs")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcAudience, "eventarc_oidc_audience", "", "Audience of the Google-signed OIDC token the Eventarc trigger attaches. Requires --eventarc_oidc_service_accounts. When unset, the Eventarc endpoint is unauthenticated")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcServiceAccounts, "eventarc_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the Eventarc endpoint. Requires --eventarc_oidc_audience")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -141,6 +148,16 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			// emitted safely is worth reporting either way.
 			if err := util.ValidateDockerfileSafe(f.cloudRun.a2aAgentCardURL, "--a2a_agent_url"); err != nil {
 				return err
+			}
+			for label, v := range map[string]string{
+				"--pubsub_oidc_audience":           f.cloudRun.pubsubTrigger.oidcAudience,
+				"--pubsub_oidc_service_accounts":   f.cloudRun.pubsubTrigger.oidcServiceAccounts,
+				"--eventarc_oidc_audience":         f.cloudRun.eventarcTrigger.oidcAudience,
+				"--eventarc_oidc_service_accounts": f.cloudRun.eventarcTrigger.oidcServiceAccounts,
+			} {
+				if err := util.ValidateDockerfileSafe(v, label); err != nil {
+					return err
+				}
 			}
 
 			// The raw flag value, kept for the rejection message below: what
@@ -270,6 +287,7 @@ CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + s
 				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, f.cloudRun.pubsubTrigger.baseDelay.String())
 				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, f.cloudRun.pubsubTrigger.maxDelay.String())
 				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, f.cloudRun.pubsubTrigger.maxRuns)
+				writeOIDCFlags(&b, f.cloudRun.pubsubTrigger)
 			}
 			if f.cloudRun.eventarc {
 				b.WriteString(`, "eventarc"`)
@@ -277,10 +295,22 @@ CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + s
 				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, f.cloudRun.eventarcTrigger.baseDelay.String())
 				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, f.cloudRun.eventarcTrigger.maxDelay.String())
 				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, f.cloudRun.eventarcTrigger.maxRuns)
+				writeOIDCFlags(&b, f.cloudRun.eventarcTrigger)
 			}
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
+}
+
+// writeOIDCFlags emits the trigger's OIDC flags when set. The sublauncher
+// validates them when the container starts.
+func writeOIDCFlags(b *strings.Builder, t triggerConfigFlags) {
+	if t.oidcAudience != "" {
+		fmt.Fprintf(b, `, "-oidc_audience", "%s"`, t.oidcAudience)
+	}
+	if t.oidcServiceAccounts != "" {
+		fmt.Fprintf(b, `, "-oidc_service_accounts", "%s"`, t.oidcServiceAccounts)
+	}
 }
 
 // gcloudDeployToCloudRun invokes gcloud to deploy source on CloudRun

