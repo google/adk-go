@@ -110,6 +110,13 @@ func allStrings(alphabet []string, n int) []string {
 	return out
 }
 
+// referenceAudiences returns every audience of up to two symbols from
+// triggerFlagAlphabet, plus one with each space character between two letters,
+// which only a longer audience can show.
+func referenceAudiences() []string {
+	return append(allStrings(triggerFlagAlphabet, 2), "a B", "a\tB", "a\u00a0B", "a\u3000B")
+}
+
 // referenceConfig states the flag rules independently of Authenticator. ok is
 // false when the flags must be rejected. cfg is nil when neither flag is set.
 func referenceConfig(audience, accounts string) (cfg *authn.GoogleOIDCConfig, ok bool) {
@@ -146,10 +153,11 @@ func referenceConfig(audience, accounts string) (cfg *authn.GoogleOIDCConfig, ok
 	return &authn.GoogleOIDCConfig{Audience: audience, AllowedServiceAccounts: entries}, true
 }
 
-// R1-a, bounded: over every audience of up to two symbols and every allow-list
-// of up to five symbols from triggerFlagAlphabet, Authenticator rejects exactly
-// what the reference rejects, and otherwise hands NewGoogleOIDC exactly the
-// reference config.
+// Authenticator must reject exactly what the reference rejects, and otherwise
+// hand NewGoogleOIDC exactly the reference config. Checked for every pairing of
+// an audience from referenceAudiences with an allow-list of up to four symbols
+// from triggerFlagAlphabet, and for every allow-list of up to five symbols with
+// two fixed audiences.
 func TestAuthenticatorMatchesReference(t *testing.T) {
 	got := captureNewGoogleOIDC(t)
 	check := func(audience, accounts string) {
@@ -174,9 +182,11 @@ func TestAuthenticatorMatchesReference(t *testing.T) {
 			}
 		}
 	}
-	for _, audience := range allStrings(triggerFlagAlphabet, 2) {
-		check(audience, "a")
-		check(audience, "")
+	lists := allStrings(triggerFlagAlphabet, 4)
+	for _, audience := range referenceAudiences() {
+		for _, accounts := range lists {
+			check(audience, accounts)
+		}
 	}
 	for _, accounts := range allStrings(triggerFlagAlphabet, 5) {
 		check("https://svc.run.app", accounts)

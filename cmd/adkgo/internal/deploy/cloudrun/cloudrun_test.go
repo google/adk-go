@@ -555,9 +555,10 @@ func allStrings(alphabet []string, n int) []string {
 }
 
 // referenceAccepts states, independently of validateTriggerOIDC, what a deploy
-// may forward: no control character (the Dockerfile rule), both flags or
-// neither, no space at either end of the audience, and no list entry that is
-// empty once spaces are removed (the sublauncher's startup rules).
+// may forward: no control character (the only part of the Dockerfile rule
+// triggerFlagAlphabet can reach), both flags or neither, no space at either end
+// of the audience, and no list entry that is empty once spaces are removed (the
+// sublauncher's startup rules).
 func referenceAccepts(audience, accounts string) bool {
 	for _, r := range audience + accounts {
 		if r < 0x20 {
@@ -589,12 +590,14 @@ func referenceAccepts(audience, accounts string) bool {
 	return true
 }
 
-// Over every audience of up to two symbols and every service-account list of up
-// to four symbols from triggerFlagAlphabet, validateTriggerOIDC rejects exactly
-// what the reference rejects.
+// For every pairing of an audience of up to two symbols from triggerFlagAlphabet,
+// or one with a space character between two letters, with a service-account
+// list of up to four symbols, validateTriggerOIDC rejects exactly what the
+// reference rejects.
 func TestValidateTriggerOIDCMatchesReference(t *testing.T) {
 	lists := allStrings(triggerFlagAlphabet, 4)
-	for _, audience := range allStrings(triggerFlagAlphabet, 2) {
+	audiences := append(allStrings(triggerFlagAlphabet, 2), "a B", "a\tB", "a\u00a0B", "a\u3000B")
+	for _, audience := range audiences {
 		for _, accounts := range lists {
 			err := validateTriggerOIDC("pubsub", triggerConfigFlags{oidcAudience: audience, oidcServiceAccounts: accounts})
 			if want := referenceAccepts(audience, accounts); (err == nil) != want {
