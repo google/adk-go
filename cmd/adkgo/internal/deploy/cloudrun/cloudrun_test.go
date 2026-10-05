@@ -377,12 +377,12 @@ func TestPrepareDockerfile_ForwardsTriggerOIDCFlags(t *testing.T) {
 	f.cloudRun.pubsub = true
 	f.cloudRun.pubsubTrigger = triggerConfigFlags{
 		maxRetries: 1, maxDelay: time.Second, maxRuns: 1,
-		oidcAudience: "https://svc.run.app/api/apps/a/trigger/pubsub", oidcServiceAccounts: "push@p.iam.gserviceaccount.com",
+		oidcAudience: "https://Svc.run.app/api/apps/A/trigger/pubsub", oidcServiceAccounts: "Push@p.iam.gserviceaccount.com",
 	}
 	f.cloudRun.eventarc = true
 	f.cloudRun.eventarcTrigger = triggerConfigFlags{
 		maxRetries: 1, maxDelay: time.Second, maxRuns: 1,
-		oidcAudience: "https://svc.run.app", oidcServiceAccounts: "a@p.iam.gserviceaccount.com,b@p.iam.gserviceaccount.com",
+		oidcAudience: "https://svc.run.app", oidcServiceAccounts: "a@p.iam.gserviceaccount.com,B@p.iam.gserviceaccount.com",
 	}
 
 	if err := f.prepareDockerfile(); err != nil {
@@ -395,8 +395,8 @@ func TestPrepareDockerfile_ForwardsTriggerOIDCFlags(t *testing.T) {
 	// Each pair must follow its own sublauncher keyword, since both sublaunchers
 	// accept the same flag names.
 	for _, want := range []string{
-		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://svc.run.app/api/apps/a/trigger/pubsub", "-oidc_service_accounts", "push@p.iam.gserviceaccount.com", "eventarc"`,
-		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://svc.run.app", "-oidc_service_accounts", "a@p.iam.gserviceaccount.com,b@p.iam.gserviceaccount.com"]`,
+		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://Svc.run.app/api/apps/A/trigger/pubsub", "-oidc_service_accounts", "Push@p.iam.gserviceaccount.com", "eventarc"`,
+		`"--trigger_max_concurrent_runs", "1", "-oidc_audience", "https://svc.run.app", "-oidc_service_accounts", "a@p.iam.gserviceaccount.com,B@p.iam.gserviceaccount.com"]`,
 	} {
 		if !strings.Contains(string(content), want) {
 			t.Errorf("Dockerfile CMD does not carry %s:\n%s", want, content)
@@ -528,63 +528,80 @@ func TestComputeFlags_RejectsTriggerOIDCValuesTheSublauncherRefuses(t *testing.T
 	}
 }
 
-// Compares computeFlags with an independent statement of the sublauncher's
-// rules, for each audience below paired with every service-account list of up
-// to five letters, commas and spaces.
-func TestComputeFlags_TriggerOIDCChecksMatchReference(t *testing.T) {
-	var lists []string
-	var gen func(prefix string, n int)
-	gen = func(prefix string, n int) {
-		lists = append(lists, prefix)
-		if n == 0 {
-			return
-		}
-		for _, c := range []string{"a", ",", " "} {
-			gen(prefix+c, n-1)
-		}
-	}
-	gen("", 5)
+// triggerFlagAlphabet is the input domain of TestValidateTriggerOIDCMatchesReference:
+// letters of both cases, the list separator, and four characters that
+// strings.TrimSpace removes (space, tab, U+00A0 and U+3000).
+var triggerFlagAlphabet = []string{"a", "B", ",", " ", "\t", "\u00a0", "\u3000"}
 
-	for _, audience := range []string{"", "x", " x", "x ", "x y"} {
-		for _, accounts := range lists {
-			resetFlags(t, "main.go", "http://127.0.0.1:8081")
-			flags.cloudRun.pubsubTrigger.oidcAudience = audience
-			flags.cloudRun.pubsubTrigger.oidcServiceAccounts = accounts
-
-			err := flags.computeFlags()
-			if want := sublauncherAccepts(audience, accounts); (err == nil) != want {
-				t.Fatalf("computeFlags() with audience %q and service accounts %q = %v, want accepted = %v", audience, accounts, err, want)
-			}
-		}
-	}
+func isReferenceSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\u00a0' || r == '\u3000'
 }
 
-// sublauncherAccepts states the trigger sublauncher's startup rules for input
-// made of letters, commas and spaces: both flags or neither, no space at either
-// end of the audience, and no entry of the comma-separated list that is empty
-// once spaces are removed.
-func sublauncherAccepts(audience, accounts string) bool {
+// allStrings returns every string of zero to n symbols from alphabet.
+func allStrings(alphabet []string, n int) []string {
+	out := []string{""}
+	last := []string{""}
+	for range n {
+		var next []string
+		for _, prefix := range last {
+			for _, c := range alphabet {
+				next = append(next, prefix+c)
+			}
+		}
+		out = append(out, next...)
+		last = next
+	}
+	return out
+}
+
+// referenceAccepts states, independently of validateTriggerOIDC, what a deploy
+// may forward: no control character (the Dockerfile rule), both flags or
+// neither, no space at either end of the audience, and no list entry that is
+// empty once spaces are removed (the sublauncher's startup rules).
+func referenceAccepts(audience, accounts string) bool {
+	for _, r := range audience + accounts {
+		if r < 0x20 {
+			return false
+		}
+	}
 	if audience == "" && accounts == "" {
 		return true
 	}
 	if audience == "" || accounts == "" {
 		return false
 	}
-	if audience[0] == ' ' || audience[len(audience)-1] == ' ' {
+	aud := []rune(audience)
+	if isReferenceSpace(aud[0]) || isReferenceSpace(aud[len(aud)-1]) {
 		return false
 	}
 	nonSpace := false
-	for i := 0; i <= len(accounts); i++ {
-		if i == len(accounts) || accounts[i] == ',' {
+	for _, r := range accounts + "," {
+		switch {
+		case r == ',':
 			if !nonSpace {
 				return false
 			}
 			nonSpace = false
-		} else if accounts[i] != ' ' {
+		case !isReferenceSpace(r):
 			nonSpace = true
 		}
 	}
 	return true
+}
+
+// Over every audience of up to two symbols and every service-account list of up
+// to four symbols from triggerFlagAlphabet, validateTriggerOIDC rejects exactly
+// what the reference rejects.
+func TestValidateTriggerOIDCMatchesReference(t *testing.T) {
+	lists := allStrings(triggerFlagAlphabet, 4)
+	for _, audience := range allStrings(triggerFlagAlphabet, 2) {
+		for _, accounts := range lists {
+			err := validateTriggerOIDC("pubsub", triggerConfigFlags{oidcAudience: audience, oidcServiceAccounts: accounts})
+			if want := referenceAccepts(audience, accounts); (err == nil) != want {
+				t.Fatalf("validateTriggerOIDC(%q, %q) = %v, want accepted = %v", audience, accounts, err, want)
+			}
+		}
+	}
 }
 
 func TestComputeFlags_AcceptsCompleteTriggerOIDCPairs(t *testing.T) {

@@ -149,38 +149,11 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			if err := util.ValidateDockerfileSafe(f.cloudRun.a2aAgentCardURL, "--a2a_agent_url"); err != nil {
 				return err
 			}
-			for _, t := range []struct {
-				name    string
-				trigger triggerConfigFlags
-			}{
-				{"pubsub", f.cloudRun.pubsubTrigger},
-				{"eventarc", f.cloudRun.eventarcTrigger},
-			} {
-				audFlag, saFlag := "--"+t.name+"_oidc_audience", "--"+t.name+"_oidc_service_accounts"
-				if err := util.ValidateDockerfileSafe(t.trigger.oidcAudience, audFlag); err != nil {
-					return err
-				}
-				if err := util.ValidateDockerfileSafe(t.trigger.oidcServiceAccounts, saFlag); err != nil {
-					return err
-				}
-				// An enabled trigger's sublauncher refuses each of these at
-				// startup, which is only after a full build and deploy.
-				// triggerauth is internal to the launcher, so its checks are
-				// repeated here. A disabled trigger is checked too, since it
-				// can be enabled on a later deploy.
-				if (t.trigger.oidcAudience == "") != (t.trigger.oidcServiceAccounts == "") {
-					return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
-				}
-				if t.trigger.oidcAudience != strings.TrimSpace(t.trigger.oidcAudience) {
-					return fmt.Errorf("%s %q has surrounding whitespace", audFlag, t.trigger.oidcAudience)
-				}
-				if t.trigger.oidcServiceAccounts != "" {
-					for _, account := range strings.Split(t.trigger.oidcServiceAccounts, ",") {
-						if strings.TrimSpace(account) == "" {
-							return fmt.Errorf("%s %q has an empty entry", saFlag, t.trigger.oidcServiceAccounts)
-						}
-					}
-				}
+			if err := validateTriggerOIDC("pubsub", f.cloudRun.pubsubTrigger); err != nil {
+				return err
+			}
+			if err := validateTriggerOIDC("eventarc", f.cloudRun.eventarcTrigger); err != nil {
+				return err
 			}
 
 			// The raw flag value, kept for the rejection message below: what
@@ -323,6 +296,35 @@ CMD ["/app/` + f.build.execFile + `", "web", "-host", "0.0.0.0", "-port", "` + s
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
+}
+
+// validateTriggerOIDC rejects the OIDC flags of the named trigger when a value
+// cannot be embedded in the generated Dockerfile, or when the trigger's
+// sublauncher would refuse it at startup, which is only after a full build and
+// deploy. triggerauth is internal to the trigger sublaunchers, so their checks
+// are repeated here.
+func validateTriggerOIDC(name string, t triggerConfigFlags) error {
+	audFlag, saFlag := "--"+name+"_oidc_audience", "--"+name+"_oidc_service_accounts"
+	if err := util.ValidateDockerfileSafe(t.oidcAudience, audFlag); err != nil {
+		return err
+	}
+	if err := util.ValidateDockerfileSafe(t.oidcServiceAccounts, saFlag); err != nil {
+		return err
+	}
+	if (t.oidcAudience == "") != (t.oidcServiceAccounts == "") {
+		return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
+	}
+	if t.oidcAudience != strings.TrimSpace(t.oidcAudience) {
+		return fmt.Errorf("%s %q has surrounding whitespace", audFlag, t.oidcAudience)
+	}
+	if t.oidcServiceAccounts != "" {
+		for _, account := range strings.Split(t.oidcServiceAccounts, ",") {
+			if strings.TrimSpace(account) == "" {
+				return fmt.Errorf("%s %q has an empty entry", saFlag, t.oidcServiceAccounts)
+			}
+		}
+	}
+	return nil
 }
 
 // writeOIDCFlags emits the trigger's OIDC flags when set. computeFlags has

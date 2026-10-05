@@ -15,6 +15,7 @@
 package triggerauth
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -83,67 +84,104 @@ func TestAuthenticatorHandsFlagValuesToNewGoogleOIDC(t *testing.T) {
 	}
 }
 
-// Compares every allow-list of one to six letters, commas and spaces with a
-// parser written independently, rather than relying on a few hand-picked
-// cases.
-func TestAuthenticatorAllowListMatchesReference(t *testing.T) {
-	got := captureNewGoogleOIDC(t)
-	var lists []string
-	var gen func(prefix string, n int)
-	gen = func(prefix string, n int) {
-		lists = append(lists, prefix)
-		if n == 0 {
-			return
-		}
-		for _, c := range []string{"a", "B", ",", " "} {
-			gen(prefix+c, n-1)
-		}
-	}
-	gen("", 6)
+// triggerFlagAlphabet is the input domain of TestAuthenticatorMatchesReference:
+// letters of both cases, the list separator, and four characters that
+// strings.TrimSpace removes (space, tab, U+00A0 and U+3000).
+var triggerFlagAlphabet = []string{"a", "B", ",", " ", "\t", "\u00a0", "\u3000"}
 
-	for _, list := range lists[1:] {
-		for _, audience := range []string{"https://svc.run.app", "https://Other.example/a b"} {
-			*got = nil
-			_, err := (&Flags{audience: audience, serviceAccounts: list}).Authenticator()
-			want, ok := referenceAllowList(list)
-			switch {
-			case !ok && err == nil:
-				t.Fatalf("Authenticator() with -oidc_service_accounts %q succeeded, want an error for its empty entry", list)
-			case !ok:
-				continue
-			case err != nil:
-				t.Fatalf("Authenticator() with -oidc_service_accounts %q = %v, want no error", list, err)
-			}
-			wantCfg := []authn.GoogleOIDCConfig{{Audience: audience, AllowedServiceAccounts: want}}
-			if diff := cmp.Diff(wantCfg, *got); diff != "" {
-				t.Fatalf("-oidc_service_accounts %q: config handed to NewGoogleOIDC mismatch (-want +got):\n%s", list, diff)
-			}
-		}
-	}
+func isReferenceSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\u00a0' || r == '\u3000'
 }
 
-// referenceAllowList splits s at each comma and trims spaces from both ends
-// of every entry, byte by byte. ok is false when an entry is left empty.
-func referenceAllowList(s string) (entries []string, ok bool) {
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i < len(s) && s[i] != ',' {
+// allStrings returns every string of zero to n symbols from alphabet.
+func allStrings(alphabet []string, n int) []string {
+	out := []string{""}
+	last := []string{""}
+	for range n {
+		var next []string
+		for _, prefix := range last {
+			for _, c := range alphabet {
+				next = append(next, prefix+c)
+			}
+		}
+		out = append(out, next...)
+		last = next
+	}
+	return out
+}
+
+// referenceConfig states the flag rules independently of Authenticator. ok is
+// false when the flags must be rejected. cfg is nil when neither flag is set.
+func referenceConfig(audience, accounts string) (cfg *authn.GoogleOIDCConfig, ok bool) {
+	if audience == "" && accounts == "" {
+		return nil, true
+	}
+	if audience == "" || accounts == "" {
+		return nil, false
+	}
+	aud := []rune(audience)
+	if isReferenceSpace(aud[0]) || isReferenceSpace(aud[len(aud)-1]) {
+		return nil, false
+	}
+	var entries []string
+	var entry []rune
+	for _, r := range append([]rune(accounts), ',') {
+		if r != ',' {
+			entry = append(entry, r)
 			continue
 		}
-		lo, hi := start, i
-		for lo < hi && s[lo] == ' ' {
+		lo, hi := 0, len(entry)
+		for lo < hi && isReferenceSpace(entry[lo]) {
 			lo++
 		}
-		for hi > lo && s[hi-1] == ' ' {
+		for hi > lo && isReferenceSpace(entry[hi-1]) {
 			hi--
 		}
 		if lo == hi {
 			return nil, false
 		}
-		entries = append(entries, s[lo:hi])
-		start = i + 1
+		entries = append(entries, string(entry[lo:hi]))
+		entry = entry[:0]
 	}
-	return entries, true
+	return &authn.GoogleOIDCConfig{Audience: audience, AllowedServiceAccounts: entries}, true
+}
+
+// R1-a, bounded: over every audience of up to two symbols and every allow-list
+// of up to five symbols from triggerFlagAlphabet, Authenticator rejects exactly
+// what the reference rejects, and otherwise hands NewGoogleOIDC exactly the
+// reference config.
+func TestAuthenticatorMatchesReference(t *testing.T) {
+	got := captureNewGoogleOIDC(t)
+	check := func(audience, accounts string) {
+		t.Helper()
+		*got = nil
+		a, err := (&Flags{audience: audience, serviceAccounts: accounts}).Authenticator()
+		want, ok := referenceConfig(audience, accounts)
+		switch {
+		case !ok:
+			if err == nil {
+				t.Fatalf("Authenticator(%q, %q) succeeded, want an error", audience, accounts)
+			}
+		case err != nil:
+			t.Fatalf("Authenticator(%q, %q) = %v, want no error", audience, accounts, err)
+		case want == nil:
+			if a != nil || len(*got) != 0 {
+				t.Fatalf("Authenticator(%q, %q) built an authenticator, want none", audience, accounts)
+			}
+		default:
+			if diff := cmp.Diff([]authn.GoogleOIDCConfig{*want}, *got); diff != "" {
+				t.Fatalf("Authenticator(%q, %q): config handed to NewGoogleOIDC mismatch (-want +got):\n%s", audience, accounts, diff)
+			}
+		}
+	}
+	for _, audience := range allStrings(triggerFlagAlphabet, 2) {
+		check(audience, "a")
+		check(audience, "")
+	}
+	for _, accounts := range allStrings(triggerFlagAlphabet, 5) {
+		check("https://svc.run.app", accounts)
+		check("B", accounts)
+	}
 }
 
 func TestAuthenticatorNilWithoutFlags(t *testing.T) {
@@ -168,5 +206,21 @@ func TestAuthenticatorRejectsPaddedAudience(t *testing.T) {
 	}
 	if len(*got) != 0 {
 		t.Errorf("NewGoogleOIDC called with %v, want the padded audience rejected before it", *got)
+	}
+}
+
+// A lone flag must name the missing one, not surface NewGoogleOIDC's error for
+// the empty value.
+func TestAuthenticatorNamesTheMissingFlag(t *testing.T) {
+	for _, tc := range []struct {
+		f    Flags
+		want string
+	}{
+		{Flags{audience: "https://svc.run.app"}, "requires -oidc_service_accounts"},
+		{Flags{serviceAccounts: "a@p.iam.gserviceaccount.com"}, "requires -oidc_audience"},
+	} {
+		if _, err := tc.f.Authenticator(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Authenticator() with %+v = %v, want an error containing %q", tc.f, err, tc.want)
+		}
 	}
 }
