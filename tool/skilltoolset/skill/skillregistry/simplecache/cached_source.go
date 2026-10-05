@@ -23,10 +23,12 @@ import (
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
+// CachedSkillRegistrySource serves skills straight from the Skill Registry.
 type CachedSkillRegistrySource struct {
 	cache skillregistry.Cache
 }
 
+// NewCachedSkillRegistrySource creates a [skill.Source] backed by the Skill Registry
 func NewCachedSkillRegistrySource(ctx context.Context, cache skillregistry.Cache) (*CachedSkillRegistrySource, error) {
 	return &CachedSkillRegistrySource{cache: cache}, nil
 }
@@ -37,7 +39,7 @@ func (c *CachedSkillRegistrySource) ListFrontmatters(ctx context.Context) ([]*sk
 }
 
 // ListResources implements [skill.Source].
-func (c *CachedSkillRegistrySource) ListResources(ctx context.Context, name string, subpath string) ([]string, error) {
+func (c *CachedSkillRegistrySource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
 	return c.cache.ListResources(name, subpath)
 }
 
@@ -52,7 +54,7 @@ func (c *CachedSkillRegistrySource) LoadInstructions(ctx context.Context, name s
 }
 
 // LoadResource implements [skill.Source].
-func (c *CachedSkillRegistrySource) LoadResource(ctx context.Context, name string, resourcePath string) (io.ReadCloser, error) {
+func (c *CachedSkillRegistrySource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
 	content, err := c.cache.LoadResource(name, resourcePath)
 	if err != nil {
 		return nil, err

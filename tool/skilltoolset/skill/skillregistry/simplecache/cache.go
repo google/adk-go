@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// simplecache provides cache functionality over SkillRegistry
+// Package simplecache provides cache functionality over SkillRegistry
 // Cache is handling updates and reads. Uses a mutex for the synchronization.
 // The SkillRegistry provides:
 //  1. the informative list of skills without Frontmatters
@@ -122,7 +122,7 @@ func (c *cache) ListFrontmatters() ([]*skill.Frontmatter, error) {
 }
 
 // ListResources implements [Cache].
-func (c *cache) ListResources(name string, subpath string) ([]string, error) {
+func (c *cache) ListResources(name, subpath string) ([]string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	s, ok := c.data.nameToSkill[name]
@@ -170,7 +170,7 @@ func (c *cache) LoadInstructions(name string) (string, error) {
 // LoadResource implements [Cache].
 // The resources are not preloaded. SkillRegistry provides a zip archive.
 // Zip has to be unpacked. All the content of the archive goes to the cache.
-func (c *cache) LoadResource(name string, resourcePath string) (string, error) {
+func (c *cache) LoadResource(name, resourcePath string) (string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
