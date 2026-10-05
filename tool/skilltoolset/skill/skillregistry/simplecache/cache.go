@@ -195,6 +195,7 @@ func (c *cache) WarmUp() error {
 
 // preload clears the cache, re-loading skills and frontmatters. The resources already in cache are forgotten.
 func (c *cache) preload() error {
+	// only one preload at the time
 	c.preloadMutex.Lock()
 	defer c.preloadMutex.Unlock()
 
