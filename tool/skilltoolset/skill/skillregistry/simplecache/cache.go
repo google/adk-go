@@ -77,7 +77,7 @@ func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
 		mu:                      sync.RWMutex{},
 		client:                  cfg.Client,
 		frontmattersParallelism: 15,
-		updateInterval:          cfg.UpdateInterval,
+		updateInterval:          updateInterval,
 		stop:                    make(chan struct{}),
 		preloadMutex:            sync.Mutex{},
 	}
