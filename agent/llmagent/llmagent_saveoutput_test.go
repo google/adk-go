@@ -432,6 +432,7 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		}
 		created, err := New(Config{
 			Name:           "writer",
+			Mode:           ModeSingleTurn,
 			OutputArtifact: "spec.json",
 			OutputKey:      "spec",
 			OutputSchema:   schema,
@@ -461,6 +462,9 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if err := a.maybeSaveOutput(ic, goodEv); err != nil {
 			t.Fatalf("maybeSaveOutput on valid JSON: %v", err)
 		}
+		if goodEv.Output != nil {
+			t.Errorf("goodEv.Output after maybeSaveOutput = %#v, want nil", goodEv.Output)
+		}
 		if err := ProcessLLMAgentOutput(created, goodEv); err != nil {
 			t.Fatalf("ProcessLLMAgentOutput after OutputArtifact save: %v", err)
 		}
@@ -468,9 +472,8 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if !ok || gotState["title"] != "v1" {
 			t.Errorf("StateDelta[\"spec\"] = %#v, want parsed map with title=v1", goodEv.Actions.StateDelta["spec"])
 		}
-		gotOutput, ok := goodEv.Output.(map[string]any)
-		if !ok || gotOutput["title"] != "v1" {
-			t.Errorf("goodEv.Output = %#v, want parsed map with title=v1", goodEv.Output)
+		if got, want := goodEv.Output, any(`Saved artifact "spec.json" (version 1).`); got != want {
+			t.Errorf("goodEv.Output = %#v, want %#v", got, want)
 		}
 	})
 

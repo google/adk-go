@@ -134,6 +134,9 @@ func New(cfg Config) (agent.Agent, error) {
 	if err := installTaskTools(a); err != nil {
 		return nil, err
 	}
+	if a.OutputArtifact != "" && llminternal.NeedsOutputSchemaProcessor(&a.State) {
+		return nil, fmt.Errorf("agent %q cannot combine OutputArtifact %q with OutputSchema and tools on model %q: set_model_response is not supported with OutputArtifact", cfg.Name, cfg.OutputArtifact, cfg.Model.Name())
+	}
 
 	return a, nil
 }
@@ -355,7 +358,9 @@ type Config struct {
 	// event's non-thought text parts are replaced with a short reference so the
 	// body is not persisted in the session or replayed on later turns. Saving
 	// requires an artifact service on the runner; the run fails if none is
-	// configured.
+	// configured. Live runs (RunLive) and models that require the
+	// set_model_response tool workaround for OutputSchema with tools are not
+	// supported when OutputArtifact is set and return an error.
 	OutputArtifact string
 
 	// Mode is the delegation mode for this agent.
@@ -496,6 +501,10 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 }
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if a.OutputArtifact != "" {
+		return nil, nil, fmt.Errorf("agent %q cannot use OutputArtifact %q in RunLive: live mode is not supported", a.Name(), a.OutputArtifact)
+	}
+
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:      ctx.Artifacts(),
 		Memory:         ctx.Memory(),
@@ -540,6 +549,9 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 }
 
 func (a *llmAgent) maybeSaveOutput(ctx agent.InvocationContext, event *session.Event) error {
+	if a.OutputArtifact != "" && event != nil && event.Actions.ArtifactDelta[a.OutputArtifact] > 0 {
+		return nil
+	}
 	a.maybeSaveOutputToState(event)
 	return a.maybeSaveOutputToArtifact(ctx, event)
 }
@@ -620,9 +632,6 @@ func (a *llmAgent) maybeSaveOutputToArtifact(ctx agent.InvocationContext, event 
 		parsed, err := utils.ValidateOutputSchema(result, a.OutputSchema)
 		if err != nil {
 			return fmt.Errorf("LlmAgent %q output validation failed", a.Name())
-		}
-		if mode == llminternal.ModeSingleTurn {
-			event.Output = parsed
 		}
 		if a.OutputKey != "" {
 			if event.Actions.StateDelta == nil {

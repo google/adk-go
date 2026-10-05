@@ -16,15 +16,20 @@ package llmagent_test
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
@@ -32,6 +37,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // TestDispatchTaskFC_IsolationScope exercises the full
@@ -1604,4 +1611,547 @@ func TestLlmAgent_OutputArtifact_MultiTurnDoesNotReplayBody(t *testing.T) {
 			t.Errorf("version %d text = %q, want %q", wantVer, loaded.Part.Text, wantBody)
 		}
 	}
+}
+
+func TestLlmAgent_OutputArtifact_SingleTurnSchemaBodyNotPersisted(t *testing.T) {
+	t.Parallel()
+
+	writer, err := llmagent.New(llmagent.Config{
+		Name: "spec_writer",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &scriptedLLM{
+			turns: []*model.LLMResponse{
+				{Content: genai.NewContentFromText(`{"title":"BODY"}`, genai.RoleModel)},
+			},
+		},
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"title": {Type: genai.TypeString}},
+		},
+		OutputArtifact: "spec.json",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(writer): %v", err)
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      "coord",
+		SubAgents: []agent.Agent{writer},
+		Model: &scriptedLLM{
+			turns: []*model.LLMResponse{
+				{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{{
+							FunctionCall: &genai.FunctionCall{
+								ID:   "1",
+								Name: "spec_writer",
+								Args: map[string]any{"request": "go"},
+							},
+						}},
+					},
+				},
+				{Content: genai.NewContentFromText("done", genai.RoleModel)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             coord,
+		SessionService:    sessions,
+		ArtifactService:   artifact.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+	got, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessions.Get: %v", err)
+	}
+	for ev := range got.Session.Events().All() {
+		if b, err := json.Marshal(ev.Content); err == nil && strings.Contains(string(b), "BODY") {
+			t.Errorf("persisted event by %s carries the artifact body: %s", ev.Author, b)
+		}
+	}
+}
+
+func TestLlmAgent_OutputArtifact_TransferBackReentry(t *testing.T) {
+	t.Parallel()
+
+	for _, withSchema := range []bool{false, true} {
+		final := "# Final Design"
+		if withSchema {
+			final = `{"title":"BODY"}`
+		}
+		helper, err := llmagent.New(llmagent.Config{
+			Name: "helper",
+			Model: &scriptedLLM{
+				turns: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: genai.RoleModel,
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "h1",
+									Name: "transfer_to_agent",
+									Args: map[string]any{"agent_name": "writer"},
+								},
+							}},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		cfg := llmagent.Config{
+			Name:      "writer",
+			SubAgents: []agent.Agent{helper},
+			Model: &scriptedLLM{
+				turns: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: genai.RoleModel,
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "w1",
+									Name: "transfer_to_agent",
+									Args: map[string]any{"agent_name": "helper"},
+								},
+							}},
+						},
+					},
+					{Content: genai.NewContentFromText(final, genai.RoleModel)},
+				},
+			},
+			OutputArtifact: "design.md",
+			OutputKey:      "latest_design",
+		}
+		if withSchema {
+			cfg.OutputSchema = &genai.Schema{
+				Type:       genai.TypeObject,
+				Properties: map[string]*genai.Schema{"title": {Type: genai.TypeString}},
+				Required:   []string{"title"},
+			}
+		}
+		writer, err := llmagent.New(cfg)
+		if err != nil {
+			t.Fatalf("llmagent.New(writer): %v", err)
+		}
+		arts := artifact.InMemoryService()
+		sessions := session.InMemoryService()
+		r, err := runner.New(runner.Config{
+			AppName:           "app",
+			Agent:             writer,
+			SessionService:    sessions,
+			ArtifactService:   arts,
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatalf("runner.New: %v", err)
+		}
+		for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("schema=%v: r.Run failed: %v", withSchema, err)
+			}
+		}
+		vers, err := arts.Versions(t.Context(), &artifact.VersionsRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md",
+		})
+		if err != nil {
+			t.Fatalf("schema=%v: arts.Versions: %v", withSchema, err)
+		}
+		if len(vers.Versions) != 1 {
+			t.Fatalf("schema=%v: got %d revisions, want 1", withSchema, len(vers.Versions))
+		}
+		loaded, err := arts.Load(t.Context(), &artifact.LoadRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: 1,
+		})
+		if err != nil {
+			t.Fatalf("schema=%v: arts.Load: %v", withSchema, err)
+		}
+		if loaded.Part.Text != final {
+			t.Errorf("schema=%v: version 1 text = %q, want %q", withSchema, loaded.Part.Text, final)
+		}
+		gotSess, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+		if err != nil {
+			t.Fatalf("schema=%v: sessions.Get: %v", withSchema, err)
+		}
+		gotState, err := gotSess.Session.State().Get("latest_design")
+		if err != nil {
+			t.Fatalf("schema=%v: State.Get(latest_design): %v", withSchema, err)
+		}
+		wantState := any(final)
+		if withSchema {
+			wantState = map[string]any{"title": "BODY"}
+		}
+		if diff := cmp.Diff(wantState, gotState); diff != "" {
+			t.Errorf("schema=%v: latest_design state mismatch (-want +got):\n%s", withSchema, diff)
+		}
+	}
+}
+
+type liveTestModel struct {
+	client *genai.Client
+}
+
+func (m *liveTestModel) Name() string { return "live-test-model" }
+
+func (m *liveTestModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(func(*model.LLMResponse, error) bool) {}
+}
+
+func (m *liveTestModel) Client() *genai.Client { return m.client }
+
+func TestLlmAgent_OutputArtifact_RunLiveRejected(t *testing.T) {
+	t.Parallel()
+
+	var upgrader websocket.Upgrader
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"modelTurn":{"parts":[{"text":"LIVE_BODY"}],"role":"model"},"turnComplete":true}}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		Backend:     genai.BackendGeminiAPI,
+		APIKey:      "test-api-key",
+		HTTPOptions: genai.HTTPOptions{BaseURL: strings.Replace(ts.URL, "http", "ws", 1)},
+	})
+	if err != nil {
+		t.Fatalf("genai.NewClient: %v", err)
+	}
+
+	writer, err := llmagent.New(llmagent.Config{
+		Name:           "writer",
+		Model:          &liveTestModel{client: client},
+		OutputArtifact: "reply.md",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             writer,
+		SessionService:    sessions,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	liveSess, events, err := r.RunLive(t.Context(), "u", "s", agent.LiveRunConfig{})
+	if err == nil {
+		defer func() { _ = liveSess.Close() }()
+		for ev, iterErr := range events {
+			if iterErr != nil {
+				err = iterErr
+				break
+			}
+			if ev != nil && ev.TurnComplete {
+				break
+			}
+		}
+	}
+	if err == nil {
+		t.Fatal("r.RunLive succeeded with OutputArtifact set and no ArtifactService, want error")
+	}
+	if !strings.Contains(err.Error(), "OutputArtifact") {
+		t.Errorf("r.RunLive error = %v, want mention of OutputArtifact", err)
+	}
+	got, getErr := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if getErr != nil {
+		t.Fatalf("sessions.Get: %v", getErr)
+	}
+	for ev := range got.Session.Events().All() {
+		if b, mErr := json.Marshal(ev.Content); mErr == nil && strings.Contains(string(b), "LIVE_BODY") {
+			t.Errorf("persisted live event by %s carries the artifact body: %s", ev.Author, b)
+		}
+	}
+}
+
+func TestLlmAgent_OutputArtifact_SequentialSingleTurnSchemaBodyNotPersisted(t *testing.T) {
+	t.Parallel()
+
+	w, err := llmagent.New(llmagent.Config{
+		Name: "writer",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &scriptedLLM{
+			turns: []*model.LLMResponse{
+				{Content: genai.NewContentFromText(`{"title":"BODY"}`, genai.RoleModel)},
+			},
+		},
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"title": {Type: genai.TypeString}},
+		},
+		OutputArtifact: "spec.json",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(writer): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{w}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             seq,
+		SessionService:    sessions,
+		ArtifactService:   artifact.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+	got, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessions.Get: %v", err)
+	}
+	for ev := range got.Session.Events().All() {
+		c, _ := json.Marshal(ev.Content)
+		o, _ := json.Marshal(ev.Output)
+		if strings.Contains(string(c), "BODY") || strings.Contains(string(o), "BODY") {
+			t.Errorf("persisted event by %s carries BODY: content=%s output=%s", ev.Author, c, o)
+		}
+	}
+}
+
+type namedVariantLLM struct {
+	*scriptedLLM
+	name                string
+	backend             genai.Backend
+	sawSetModelResponse bool
+}
+
+func (m *namedVariantLLM) Name() string { return m.name }
+
+func (m *namedVariantLLM) GetGoogleLLMVariant() genai.Backend { return m.backend }
+
+func (m *namedVariantLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if _, ok := req.Tools["set_model_response"]; ok {
+		m.sawSetModelResponse = true
+	}
+	return m.scriptedLLM.GenerateContent(ctx, req, stream)
+}
+
+func TestLlmAgent_OutputArtifact_SetModelResponseWorkaroundRejected(t *testing.T) {
+	t.Parallel()
+
+	type noopArgs struct{}
+	noopTool, err := functiontool.New(functiontool.Config{
+		Name:        "noop",
+		Description: "no-op tool",
+	}, func(_ agent.Context, _ noopArgs) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"title": {Type: genai.TypeString}},
+		Required:   []string{"title"},
+	}
+
+	_, err = llmagent.New(llmagent.Config{
+		Name: "writer",
+		Model: &namedVariantLLM{
+			scriptedLLM: &scriptedLLM{},
+			name:        "gemini-1.5-flash",
+			backend:     genai.BackendGeminiAPI,
+		},
+		Tools:          []tool.Tool{noopTool},
+		OutputSchema:   schema,
+		OutputArtifact: "design.md",
+	})
+	if err == nil {
+		t.Fatal("llmagent.New succeeded when set_model_response workaround would be injected with OutputArtifact, want error")
+	}
+	if !strings.Contains(err.Error(), "OutputArtifact") {
+		t.Errorf("llmagent.New error = %v, want mention of OutputArtifact", err)
+	}
+
+	// A model that supports OutputSchema + tools natively (Vertex AI Gemini 2.0+) must still succeed.
+	nativeWriter, err := llmagent.New(llmagent.Config{
+		Name: "native_writer",
+		Model: &namedVariantLLM{
+			scriptedLLM: &scriptedLLM{
+				turns: []*model.LLMResponse{
+					{Content: genai.NewContentFromText(`{"title":"NATIVE_BODY"}`, genai.RoleModel)},
+				},
+			},
+			name:    "gemini-2.5-flash",
+			backend: genai.BackendVertexAI,
+		},
+		Tools:          []tool.Tool{noopTool},
+		OutputSchema:   schema,
+		OutputArtifact: "design.md",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(native_writer) failed: %v", err)
+	}
+	sessions := session.InMemoryService()
+	arts := artifact.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             nativeWriter,
+		SessionService:    sessions,
+		ArtifactService:   arts,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+	got, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessions.Get: %v", err)
+	}
+	for ev := range got.Session.Events().All() {
+		if b, err := json.Marshal(ev.Content); err == nil && strings.Contains(string(b), "NATIVE_BODY") {
+			t.Errorf("persisted event by %s carries NATIVE_BODY: %s", ev.Author, b)
+		}
+	}
+}
+
+func runSequentialWithOptionalLive(t *testing.T, doLive bool, turn *model.LLMResponse) (*namedVariantLLM, int, error) {
+	t.Helper()
+
+	m := &namedVariantLLM{
+		scriptedLLM: &scriptedLLM{turns: []*model.LLMResponse{turn}},
+		name:        "gemini-2.5-flash",
+		backend:     genai.BackendGeminiAPI,
+	}
+	writer, err := llmagent.New(llmagent.Config{
+		Name:  "writer",
+		Model: m,
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"title": {Type: genai.TypeString}},
+			Required:   []string{"title"},
+		},
+		OutputArtifact: "design.md",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(writer): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{writer}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             seq,
+		SessionService:    sessions,
+		ArtifactService:   artifact.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	if doLive {
+		ls, evs, liveErr := r.RunLive(t.Context(), "u", "live", agent.LiveRunConfig{})
+		if liveErr == nil {
+			for _, iterErr := range evs {
+				if iterErr != nil {
+					liveErr = iterErr
+					break
+				}
+			}
+			if ls != nil {
+				_ = ls.Close()
+			}
+		}
+		if liveErr == nil {
+			t.Fatal("r.RunLive succeeded on sequential parent with OutputArtifact child, want error")
+		}
+	}
+	var runErr error
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			runErr = err
+			break
+		}
+	}
+	got, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessions.Get: %v", err)
+	}
+	persistedWithBody := 0
+	for ev := range got.Session.Events().All() {
+		if b, err := json.Marshal(ev.Content); err == nil && strings.Contains(string(b), "BODY") {
+			persistedWithBody++
+		}
+	}
+	return m, persistedWithBody, runErr
+}
+
+func TestLlmAgent_OutputArtifact_SequentialRunLiveThenRunNoSetModelResponse(t *testing.T) {
+	t.Parallel()
+
+	t.Run("control_no_live", func(t *testing.T) {
+		t.Parallel()
+		m, n, runErr := runSequentialWithOptionalLive(t, false, &model.LLMResponse{
+			Content: genai.NewContentFromText(`{"title":"BODY_TXT"}`, genai.RoleModel),
+		})
+		if m.sawSetModelResponse || n != 0 || runErr != nil {
+			t.Errorf("control: sawSetModelResponse=%v persistedWithBody=%d err=%v; want false, 0, nil", m.sawSetModelResponse, n, runErr)
+		}
+	})
+
+	t.Run("after_failed_live", func(t *testing.T) {
+		t.Parallel()
+		m, n, runErr := runSequentialWithOptionalLive(t, true, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "s1",
+						Name: "set_model_response",
+						Args: map[string]any{"title": "BODY_SMR"},
+					},
+				}},
+			},
+		})
+		if m.sawSetModelResponse || n != 0 {
+			t.Errorf("set_model_response injected=%v for an agent New accepted; %d persisted events carry the body", m.sawSetModelResponse, n)
+		}
+		if runErr == nil || !strings.Contains(runErr.Error(), "OutputArtifact") {
+			t.Errorf("after_failed_live runErr = %v, want error mentioning OutputArtifact", runErr)
+		}
+	})
 }

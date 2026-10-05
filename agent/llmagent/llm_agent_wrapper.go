@@ -292,10 +292,6 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 			}
 			output = parsed
 		}
-	} else if artifactSaved && ev.Output != nil {
-		output = ev.Output
-	} else if artifactSaved && state.OutputSchema != nil && state.OutputKey != "" {
-		output = ev.Actions.StateDelta[state.OutputKey]
 	} else {
 		output = text
 	}

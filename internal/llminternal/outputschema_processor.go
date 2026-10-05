@@ -47,7 +47,11 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 
 		state := llmAgent.internal()
 		// Check if we need the processor in the first place.
-		if state.OutputSchema == nil || !needOutputSchemaProcessor(state) {
+		if !NeedsOutputSchemaProcessor(state) {
+			return
+		}
+		if state.OutputArtifact != "" {
+			yield(nil, fmt.Errorf("agent %q cannot combine OutputArtifact %q with OutputSchema and tools on model %q: set_model_response is not supported with OutputArtifact", ctx.Agent().Name(), state.OutputArtifact, state.Model.Name()))
 			return
 		}
 
@@ -93,6 +97,12 @@ func retrieveStructuredModelResponse(ev *session.Event) (string, error) {
 	}
 
 	return "", nil
+}
+
+// NeedsOutputSchemaProcessor reports whether state requires the
+// set_model_response tool workaround to combine OutputSchema with tools.
+func NeedsOutputSchemaProcessor(state *State) bool {
+	return state != nil && state.OutputSchema != nil && needOutputSchemaProcessor(state)
 }
 
 func needOutputSchemaProcessor(state *State) bool {
