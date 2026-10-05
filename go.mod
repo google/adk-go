@@ -112,8 +112,4 @@ require (
 	modernc.org/sqlite v1.46.1 // indirect
 )
 
-require (
-	cloud.google.com/go/longrunning v1.2.0
-	github.com/gorilla/websocket v1.5.3
-	go.opentelemetry.io/otel/sdk/log v0.22.0
-)
+require go.opentelemetry.io/otel/sdk/log v0.22.0
