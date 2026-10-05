@@ -256,8 +256,8 @@ func TestRank_SelectSkipsAlreadyAvailable(t *testing.T) {
 	if diff := cmp.Diff([]string{"patch_book"}, names(matches)); diff != "" {
 		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
 	}
-	if note != "" {
-		t.Errorf("Rank() note = %q, want empty", note)
+	if want := "already available: list_books"; note != want {
+		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }
 
@@ -349,5 +349,48 @@ func TestRank_FallbackIsAnnounced(t *testing.T) {
 		if !strings.Contains(note, want) {
 			t.Errorf("capped fallback note = %q, want it to contain %q", note, want)
 		}
+	}
+}
+
+// TestRank_OnlyAlreadyAvailableMatchesSaySo checks that a query whose only
+// matches are already available names them rather than reporting no match, in
+// both the ranked and the select: forms.
+func TestRank_OnlyAlreadyAvailableMatchesSaySo(t *testing.T) {
+	items := makeItems(
+		[2]string{"list_books", "list books"},
+		[2]string{"get_author", "get an author"},
+	)
+	available := map[string]bool{"list_books": true}
+	for _, query := range []string{"books", "select:list_books"} {
+		matches, note := Rank(items, query, available, testCfg())
+		if len(matches) != 0 {
+			t.Errorf("Rank(%q) matches = %v, want none", query, names(matches))
+		}
+		if !strings.Contains(note, "already available") || !strings.Contains(note, "list_books") {
+			t.Errorf("Rank(%q) note = %q, want it to name list_books as already available", query, note)
+		}
+	}
+	// Control: with nothing available, the same query does match.
+	if matches, _ := Rank(items, "books", nil, testCfg()); len(matches) == 0 {
+		t.Error("Rank(\"books\") with nothing available returned no matches")
+	}
+	// A query that matches nothing at all still says so.
+	if _, note := Rank(items, "weather", available, testCfg()); strings.Contains(note, "already available") {
+		t.Errorf("Rank(\"weather\") note = %q, want the no-match note", note)
+	}
+	// MaxResults 0 means no cap, so the note still names the item.
+	unlimited := testCfg()
+	unlimited.MaxResults = 0
+	if _, note := Rank(items, "books", available, unlimited); !strings.Contains(note, "list_books") {
+		t.Errorf("Rank(\"books\") with MaxResults 0 note = %q, want it to name list_books", note)
+	}
+}
+
+// TestRank_SelectReportsUnknownNameOnce checks that a repeated unknown name is
+// reported once.
+func TestRank_SelectReportsUnknownNameOnce(t *testing.T) {
+	_, note := Rank(makeItems([2]string{"list_books", "list books"}), "select:ghost,ghost", nil, testCfg())
+	if want := "tools not found: ghost"; note != want {
+		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }

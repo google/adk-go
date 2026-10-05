@@ -48,7 +48,6 @@ type Item struct {
 
 // Match is a ranked result: name and (possibly truncated) description.
 type Match struct {
-	ID          string `json:"id,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
@@ -71,7 +70,9 @@ type Config struct {
 
 // Rank dispatches on the query form and returns ranked matches plus a UX note.
 // Items whose name is in alreadyAvailable are excluded — they are already
-// visible to the model, so returning them wastes result slots.
+// visible to the model, so returning them wastes result slots. When every
+// match is already available, the note names those items, at most MaxResults
+// of them for a ranked query, instead of reporting that nothing matched.
 //
 //   - "select:a,b" loads items by exact name (no cap, reports unknown names).
 //   - A query with regex metacharacters matches names/descriptions as a regex.
@@ -93,30 +94,21 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 		return selectByName(items, rest, alreadyAvailable, cfg)
 	}
 
-	eligible := make([]Item, 0, len(items))
+	var eligible, available []Item
 	for _, it := range items {
-		if !alreadyAvailable[it.Name] {
+		if alreadyAvailable[it.Name] {
+			available = append(available, it)
+		} else {
 			eligible = append(eligible, it)
 		}
 	}
 
-	var all []Match
-	var note string
-	switch {
-	case !looksLikeRegex(query):
-		all = bm25Matches(eligible, query, cfg)
-	default:
-		all = regexMatches(eligible, query, cfg)
-		// A pattern rarely contains whitespace, and a question such as "how do
-		// I list books?" does. Ranking a real pattern by its words would return
-		// items the pattern excluded.
-		if len(all) == 0 && strings.ContainsFunc(query, unicode.IsSpace) {
-			all = bm25Matches(eligible, query, cfg)
-			note = "no matches as a pattern, showing keyword matches"
-		}
-	}
+	all, note := matchQuery(eligible, query, cfg)
 	if len(all) == 0 {
-		return nil, fmt.Sprintf("no %ss matched; try broader keywords or a different term", cfg.ItemNoun)
+		if had, _ := matchQuery(available, query, cfg); len(had) > 0 {
+			return nil, alreadyAvailableNote(had, cfg)
+		}
+		return nil, noMatchNote(cfg)
 	}
 
 	if cfg.MaxResults > 0 && len(all) > cfg.MaxResults {
@@ -132,8 +124,41 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 	return all, note
 }
 
-// selectByName loads items by exact name, skipping already-available and
-// duplicate names and reporting names that match no item.
+// matchQuery runs a regex or BM25 query over items.
+func matchQuery(items []Item, query string, cfg Config) ([]Match, string) {
+	if !looksLikeRegex(query) {
+		return bm25Matches(items, query, cfg), ""
+	}
+	matches := regexMatches(items, query, cfg)
+	// A pattern rarely contains whitespace, and a question such as "how do
+	// I list books?" does. Ranking a real pattern by its words would return
+	// items the pattern excluded.
+	if len(matches) == 0 && strings.ContainsFunc(query, unicode.IsSpace) {
+		return bm25Matches(items, query, cfg), "no matches as a pattern, showing keyword matches"
+	}
+	return matches, ""
+}
+
+func noMatchNote(cfg Config) string {
+	return fmt.Sprintf("no %ss matched; try broader keywords or a different term", cfg.ItemNoun)
+}
+
+// alreadyAvailableNote tells the caller that the query did match, but only
+// items it can already use, so it does not conclude they are missing.
+func alreadyAvailableNote(had []Match, cfg Config) string {
+	names := make([]string, 0, len(had))
+	for _, m := range had {
+		names = append(names, m.Name)
+	}
+	if cfg.MaxResults > 0 && len(names) > cfg.MaxResults {
+		names = names[:cfg.MaxResults]
+	}
+	return fmt.Sprintf("no new %ss matched; these matching %ss are already available: %s",
+		cfg.ItemNoun, cfg.ItemNoun, strings.Join(names, ", "))
+}
+
+// selectByName loads items by exact name, skipping duplicate names, reporting
+// names that match no item, and reporting names that are already available.
 func selectByName(items []Item, names string, alreadyAvailable map[string]bool, cfg Config) ([]Match, string) {
 	byName := make(map[string]Item, len(items))
 	for _, it := range items {
@@ -141,11 +166,16 @@ func selectByName(items []Item, names string, alreadyAvailable map[string]bool, 
 	}
 
 	var matches []Match
-	var notFound []string
+	var notFound, had []string
 	seen := make(map[string]bool)
 	for raw := range strings.SplitSeq(names, ",") {
 		name := strings.TrimSpace(raw)
-		if name == "" || alreadyAvailable[name] || seen[name] {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if alreadyAvailable[name] {
+			had = append(had, name)
 			continue
 		}
 		it, ok := byName[name]
@@ -153,18 +183,20 @@ func selectByName(items []Item, names string, alreadyAvailable map[string]bool, 
 			notFound = append(notFound, name)
 			continue
 		}
-		seen[name] = true
 		matches = append(matches, Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)})
 	}
 
-	var note string
+	var notes []string
 	if len(notFound) > 0 {
-		note = fmt.Sprintf("%ss not found: %s", cfg.ItemNoun, strings.Join(notFound, ", "))
+		notes = append(notes, fmt.Sprintf("%ss not found: %s", cfg.ItemNoun, strings.Join(notFound, ", ")))
 	}
-	if len(matches) == 0 && note == "" {
-		note = fmt.Sprintf("no %ss matched; try broader keywords or a different term", cfg.ItemNoun)
+	if len(had) > 0 {
+		notes = append(notes, fmt.Sprintf("already available: %s", strings.Join(had, ", ")))
 	}
-	return matches, note
+	if len(matches) == 0 && len(notes) == 0 {
+		notes = append(notes, noMatchNote(cfg))
+	}
+	return matches, strings.Join(notes, ". ")
 }
 
 // bm25Matches ranks eligible items by BM25 relevance and trims the weak tail
@@ -251,10 +283,6 @@ func DescribeSearch(baseDescription string, itemNames []string) string {
 		"\n\nAvailable to load (not yet active — search or select: by name): " +
 		strings.Join(names, ", ")
 }
-
-// Tokenize exposes the package tokenizer for callers that need to pre-process
-// text the same way the ranker does.
-func Tokenize(s string) []string { return tokenize(s) }
 
 // looksLikeRegex reports whether query contains regex metacharacters, in which
 // case it is treated as a name pattern rather than a natural-language query.
