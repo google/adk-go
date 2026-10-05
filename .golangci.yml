@@ -39,8 +39,10 @@ linters:
         - pattern: ^fmt\.Print(f|ln)?$
           pkg: ^fmt$
           msg: library code must not write to stdout; see "Logging and error messages" in AGENTS.md
-        # An empty pkg matches only the builtins, not a local func or variable
-        # that happens to be called print.
+        # An empty pkg matches the builtins and the defining name of a := or
+        # range variable, which have no package in TypesInfo.Uses. It does not
+        # match a func, var, parameter, result, field or method, or calls
+        # through any of these.
         - pattern: ^print(ln)?$
           pkg: ^$
           msg: library code must not write to stderr; see "Logging and error messages" in AGENTS.md
