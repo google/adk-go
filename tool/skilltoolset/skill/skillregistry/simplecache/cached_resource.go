@@ -47,7 +47,6 @@ func newResources(client skillregistry.Client) *resources {
 
 // loadResources cleans internal data and re-creates it using the provided rev
 func (r *resources) loadResources(rev string) error {
-
 	log.Printf("loadResources")
 	// clear first
 	r.loaded = false
@@ -89,6 +88,7 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 		if !r.loaded {
 			err := r.loadResources(rev)
 			if err != nil {
+				r.mu.Unlock()
 				return nil, err
 			}
 		}
