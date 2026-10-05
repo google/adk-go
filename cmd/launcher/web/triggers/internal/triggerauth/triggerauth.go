@@ -43,20 +43,13 @@ func (f *Flags) Register(fs *flag.FlagSet) {
 		"Requires -oidc_audience.")
 }
 
+// newGoogleOIDC is replaced in tests to see the config Authenticator builds,
+// which the returned authenticator does not expose.
+var newGoogleOIDC = authn.NewGoogleOIDC
+
 // Authenticator builds the authenticator the flags describe. It returns nil
 // when neither flag is set, which keeps the endpoint unauthenticated.
 func (f *Flags) Authenticator() (authn.Authenticator, error) {
-	cfg, err := f.config()
-	if err != nil || cfg == nil {
-		return nil, err
-	}
-	return authn.NewGoogleOIDC(*cfg)
-}
-
-// config validates the flags and returns the authenticator config, or nil when
-// neither flag is set. Split from Authenticator so tests can check exactly what
-// reaches NewGoogleOIDC, whose verifier they cannot reach.
-func (f *Flags) config() (*authn.GoogleOIDCConfig, error) {
 	if f.audience == "" && f.serviceAccounts == "" {
 		return nil, nil
 	}
@@ -76,8 +69,8 @@ func (f *Flags) config() (*authn.GoogleOIDCConfig, error) {
 	for i := range accounts {
 		accounts[i] = strings.TrimSpace(accounts[i])
 	}
-	return &authn.GoogleOIDCConfig{
+	return newGoogleOIDC(authn.GoogleOIDCConfig{
 		Audience:               f.audience,
 		AllowedServiceAccounts: accounts,
-	}, nil
+	})
 }

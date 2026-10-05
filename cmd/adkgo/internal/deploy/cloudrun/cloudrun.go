@@ -163,10 +163,21 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				if err := util.ValidateDockerfileSafe(t.trigger.oidcServiceAccounts, saFlag); err != nil {
 					return err
 				}
-				// The sublauncher would refuse to start, but only after a full
-				// build and deploy.
+				// The sublauncher refuses each of these at startup, which is
+				// only after a full build and deploy. triggerauth is internal
+				// to the launcher, so its checks are repeated here.
 				if (t.trigger.oidcAudience == "") != (t.trigger.oidcServiceAccounts == "") {
 					return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
+				}
+				if t.trigger.oidcAudience != strings.TrimSpace(t.trigger.oidcAudience) {
+					return fmt.Errorf("%s %q has surrounding whitespace", audFlag, t.trigger.oidcAudience)
+				}
+				if t.trigger.oidcServiceAccounts != "" {
+					for _, account := range strings.Split(t.trigger.oidcServiceAccounts, ",") {
+						if strings.TrimSpace(account) == "" {
+							return fmt.Errorf("%s %q has an empty entry", saFlag, t.trigger.oidcServiceAccounts)
+						}
+					}
 				}
 			}
 

@@ -147,9 +147,10 @@ func (e *eventarcLauncher) SetupSubrouters(router *mux.Router, config *launcher.
 			"the user ID the agent runs as. Set -oidc_audience and -oidc_service_accounts after the eventarc " +
 			"keyword to require a Google-signed OIDC token.")
 	}
-	// The run's user ID comes from the delivery metadata, as in adk-python, which
-	// also normalizes it. With auth on, only an allow-listed service account
-	// reaches the handler to supply it.
+	// The run's user ID comes from the delivery metadata, as in adk-python, but
+	// is used unchanged, where adk-python strips surrounding whitespace and "/"
+	// and replaces any remaining "/" with "--". With auth on, only an
+	// allow-listed service account reaches the handler to supply it.
 	subrouter.Handle("/apps/{app_name}/trigger/eventarc", authn.Middleware(e.auth)(http.HandlerFunc(controller.EventarcTriggerHandler))).Methods(http.MethodPost)
 	return nil
 }
