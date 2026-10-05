@@ -199,15 +199,25 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 	return res, nil
 }
 
+// extractWords returns the lowercase word tokens of text.
+//
+// Words are maximal runs of letters, digits and underscores, so punctuation
+// only ever separates tokens and never becomes part of one. This matches
+// adk-python's re.findall(r'\w+', text), keeping the two SDKs searchable over
+// the same text.
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
-			continue
-		}
-		res[strings.ToLower(s)] = struct{}{}
+	for _, word := range strings.FieldsFunc(text, isWordSeparator) {
+		res[strings.ToLower(word)] = struct{}{}
 	}
 
 	return res
+}
+
+// isWordSeparator reports whether r separates two words instead of belonging to
+// one. Underscore is part of a word rather than a separator, so identifiers
+// such as error_code stay a single searchable token.
+func isWordSeparator(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
 }

@@ -190,6 +190,46 @@ func Test_inMemoryService_SearchMemory_NonASCII(t *testing.T) {
 	}
 }
 
+func Test_inMemoryService_SearchMemory_Tokenization(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		query string
+		want  int
+	}{
+		{name: "trailing punctuation", text: "The agent works great!", query: "great", want: 1},
+		{name: "leading punctuation", text: "Error: connection timeout", query: "error", want: 1},
+		{name: "comma separated", text: "error, timeout, retry", query: "error", want: 1},
+		{name: "comma separated trailing", text: "error, timeout, retry", query: "retry", want: 1},
+		{name: "quoted", text: `he said "great"`, query: "great", want: 1},
+		{name: "tab and newline separators", text: "Error: connection\ntimeout!\tPlease retry.", query: "retry", want: 1},
+		{name: "repeated spaces", text: "deploy    ready", query: "ready", want: 1},
+		// Tokenization is applied to stored text and query alike, so a
+		// hyphenated query still matches text that stores it hyphenated.
+		{name: "hyphenated query still matches", text: "use the built-in flag", query: "built-in", want: 1},
+		{name: "hyphenated identifier matches", text: "see CVE-2024-3094 for detail", query: "CVE-2024-3094", want: 1},
+		{name: "underscore is part of the token", text: "set error_code before retry", query: "error_code", want: 1},
+		{name: "digits stay searchable", text: "recovered after 30 seconds", query: "30", want: 1},
+		// A text with no word characters has no tokens, so nothing to match.
+		{name: "punctuation only text", text: "!!! ??? ...", query: "great"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := memory.InMemoryService()
+			e := memoryTextEvent("event", tt.text)
+			if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{e})); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: tt.query})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Memories) != tt.want {
+				t.Fatalf("SearchMemory(%q) over %q returned %d entries, want %d", tt.query, tt.text, len(got.Memories), tt.want)
+			}
+		})
+	}
+}
+
 func memoryTextEvent(id string, texts ...string) *session.Event {
 	var parts []*genai.Part
 	for _, text := range texts {
