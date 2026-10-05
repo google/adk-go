@@ -17,6 +17,7 @@ package services
 import (
 	"context"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/awalterschulze/gographviz"
@@ -689,4 +690,92 @@ func TestBuildGraph(t *testing.T) {
 	if lookupEdge(t, graph, "SubAgent1", "Tool1") == nil {
 		t.Error("Edge from SubAgent1 to Tool1 not found")
 	}
+}
+
+func parseGraph(t *testing.T, dot string) *gographviz.Graph {
+	t.Helper()
+	astGraph, err := gographviz.ParseString(dot)
+	if err != nil {
+		t.Fatalf("parse DOT: %v\n%s", err, dot)
+	}
+	g := gographviz.NewGraph()
+	if err := gographviz.Analyse(astGraph, g); err != nil {
+		t.Fatalf("analyse DOT: %v\n%s", err, dot)
+	}
+	return g
+}
+
+func TestNestedWorkflowGraph(t *testing.T) {
+	leaf := func(name string) agent.Agent {
+		return newTestAgent(t, name, "", agentinternal.TypeLLMAgent, nil, nil)
+	}
+
+	t.Run("sequential with nested parallel", func(t *testing.T) {
+		fanOut := newTestAgent(t, "fan_out", "", agentinternal.TypeParallelAgent, []agent.Agent{leaf("a"), leaf("b")}, nil)
+		pipeline := newTestAgent(t, "pipeline", "", agentinternal.TypeSequentialAgent, []agent.Agent{fanOut, leaf("merge")}, nil)
+
+		dot, err := GetAgentGraph(context.Background(), pipeline, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		if strings.HasPrefix(dot, "error:") {
+			t.Fatalf("GetAgentGraph: %s", dot)
+		}
+		g := parseGraph(t, dot)
+		if !g.IsSubGraph("cluster_pipeline") || !g.IsSubGraph("cluster_fan_out") {
+			t.Fatalf("missing nested clusters\n%s", dot)
+		}
+		if parents := g.Relations.ChildToParents["cluster_fan_out"]; !parents["cluster_pipeline"] {
+			t.Fatalf("cluster_fan_out parents = %v, want cluster_pipeline\n%s", parents, dot)
+		}
+		for _, name := range []string{"a", "b"} {
+			if parents := g.Relations.ChildToParents[name]; !g.IsNode(name) || !parents["cluster_fan_out"] {
+				t.Fatalf("node %s parents = %v, want cluster_fan_out\n%s", name, parents, dot)
+			}
+		}
+		if parents := g.Relations.ChildToParents["merge"]; !g.IsNode("merge") || !parents["cluster_pipeline"] {
+			t.Fatalf("merge parents = %v, want cluster_pipeline\n%s", parents, dot)
+		}
+		edge := lookupEdge(t, g, "b", "merge")
+		if edge == nil {
+			t.Fatalf("missing edge from the nested cluster to merge\n%s", dot)
+		}
+		if edge.Attrs["ltail"] != "cluster_fan_out" {
+			t.Fatalf("ltail = %q, want cluster_fan_out\n%s", edge.Attrs["ltail"], dot)
+		}
+		if g.IsNode("cluster_fan_out") {
+			t.Fatalf("cluster id was emitted as a node\n%s", dot)
+		}
+		if !strings.Contains(dot, "compound=true") {
+			t.Fatalf("missing compound=true\n%s", dot)
+		}
+	})
+
+	t.Run("loop with nested sequential", func(t *testing.T) {
+		inner := newTestAgent(t, "inner", "", agentinternal.TypeSequentialAgent, []agent.Agent{leaf("x"), leaf("y")}, nil)
+		cycle := newTestAgent(t, "cycle", "", agentinternal.TypeLoopAgent, []agent.Agent{inner, leaf("tail")}, nil)
+
+		dot, err := GetAgentGraph(context.Background(), cycle, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		if strings.HasPrefix(dot, "error:") {
+			t.Fatalf("GetAgentGraph: %s", dot)
+		}
+		g := parseGraph(t, dot)
+		forward := lookupEdge(t, g, "y", "tail")
+		if forward == nil || forward.Attrs["ltail"] != "cluster_inner" {
+			t.Fatalf("forward edge = %v, want y -> tail ltail=cluster_inner\n%s", forward, dot)
+		}
+		back := lookupEdge(t, g, "tail", "x")
+		if back == nil || back.Attrs["lhead"] != "cluster_inner" {
+			t.Fatalf("back edge = %v, want tail -> x lhead=cluster_inner\n%s", back, dot)
+		}
+		if lookupEdge(t, g, "x", "y") == nil {
+			t.Fatalf("missing edge x -> y inside nested sequential\n%s", dot)
+		}
+		if g.IsNode("cluster_inner") {
+			t.Fatalf("cluster id was emitted as a node\n%s", dot)
+		}
+	})
 }
