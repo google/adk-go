@@ -14,6 +14,10 @@
 
 // Package toolsearch provides a gating toolset that hides all but a small
 // core set of tools from the model until it calls search_tools to discover them.
+//
+// Gating decides which tools the model sees, not which tools a caller may use.
+// Pass a base toolset that is already filtered for the caller, since
+// search_tools can reveal any tool in it that the model can call.
 package toolsearch
 
 import (
@@ -67,7 +71,10 @@ type Config struct {
 	// set, they are listed in the search_tools description so the model knows what
 	// it can search for (and can select: them by exact name) instead of guessing
 	// blind. Names only — no schemas — so it stays cheap and fully static. Names
-	// that are also in CoreToolNames are left out, since those are already active.
+	// that are also in CoreToolNames are left out, since those are already active,
+	// and so is ToolName, which New reserves for the search tool. Entries should
+	// name callable base tools: any other name is still listed, and select: then
+	// reports it as not found.
 	GatedToolNames []string
 	// SkillAnnotations maps tool names to skill names so search results carry
 	// a connected_skill hint pointing the model at the relevant skill.
@@ -105,7 +112,7 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	}
 	var gated []string
 	for _, name := range cfg.GatedToolNames {
-		if !g.coreNames[name] {
+		if !g.coreNames[name] && name != ToolName {
 			gated = append(gated, name)
 		}
 	}

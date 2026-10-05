@@ -79,9 +79,18 @@ func (t *nonPackableStubTool) Name() string        { return t.name }
 func (t *nonPackableStubTool) Description() string { return t.desc }
 func (t *nonPackableStubTool) IsLongRunning() bool { return false }
 
-// fakeState implements both session.ReadonlyState and session.State.
+// declaringNonPackableStubTool declares a function but still cannot be packed.
+type declaringNonPackableStubTool struct{ nonPackableStubTool }
+
+func (t *declaringNonPackableStubTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name, Description: t.desc}
+}
+
+// fakeState implements both session.ReadonlyState and session.State. When
+// setErr is set, Set fails with it.
 type fakeState struct {
-	data map[string]any
+	data   map[string]any
+	setErr error
 }
 
 func newFakeState(data map[string]any) *fakeState {
@@ -100,6 +109,9 @@ func (s *fakeState) Get(key string) (any, error) {
 }
 
 func (s *fakeState) Set(key string, val any) error {
+	if s.setErr != nil {
+		return s.setErr
+	}
 	s.data[key] = val
 	return nil
 }
@@ -475,7 +487,8 @@ func TestProcessRequest_ForwardsToBase(t *testing.T) {
 
 // TestSearchTool_AdvertisesGatedToolsInDescription verifies that the gated tool
 // names passed in Config are listed in the search_tools description the model
-// receives, so it knows what it can search for and select: by name.
+// receives, so it knows what it can search for and select: by name. Core names
+// and the reserved ToolName are left out of that list.
 func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	base := &staticToolset{tools: makeTools(
 		toolDef{"get_current_time", "ask"},
@@ -484,7 +497,7 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	)}
 	ts := mustNew(t, base, Config{
 		CoreToolNames:  []string{"get_current_time"},
-		GatedToolNames: []string{"list_publishers", "list_books", "get_current_time"},
+		GatedToolNames: []string{"list_publishers", "list_books", "get_current_time", ToolName},
 	})
 
 	tools, err := ts.Tools(newCtx(newFakeState(nil)))
@@ -508,6 +521,31 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	}
 	if strings.Contains(desc, "get_current_time") {
 		t.Error("search_tools description lists core tool get_current_time")
+	}
+	// The base description mentions search_tools itself, so check only the list.
+	_, advertised, ok := strings.Cut(desc, "Available to load")
+	if !ok {
+		t.Fatalf("search_tools description = %q, want an Available to load list", desc)
+	}
+	if strings.Contains(advertised, ToolName) {
+		t.Errorf("search_tools description advertises %q as loadable: %q", ToolName, advertised)
+	}
+}
+
+// TestRevealTools_ReturnsStateError checks that a failed state write surfaces
+// from RevealTools and from search_tools instead of being dropped.
+func TestRevealTools_ReturnsStateError(t *testing.T) {
+	errSet := errors.New("state unavailable")
+	state := newFakeState(nil)
+	state.setErr = errSet
+	if err := RevealTools(newToolCtx(state), "list_books"); !errors.Is(err, errSet) {
+		t.Errorf("RevealTools() error = %v, want it to wrap %v", err, errSet)
+	}
+
+	base := &staticToolset{tools: makeTools(toolDef{"list_books", "list books"})}
+	_, err := executeSearch(newToolCtx(state), searchArgs{Query: "select:list_books"}, base, nil, nil, 8)
+	if !errors.Is(err, errSet) {
+		t.Errorf("executeSearch() error = %v, want it to wrap %v", err, errSet)
 	}
 }
 
@@ -595,8 +633,9 @@ func TestBuildItems_SkipsNonPackableTools(t *testing.T) {
 	catalog := []tool.Tool{
 		&stubTool{name: "packable_tool", desc: "can be called"},
 		&nonPackableStubTool{name: "non_packable_tool", desc: "cannot be called"},
+		&declaringNonPackableStubTool{nonPackableStubTool{name: "declaring_tool", desc: "declares but cannot be called"}},
 	}
-	checkNames(t, itemNames(buildItems(catalog)), []string{"packable_tool"}, []string{"non_packable_tool"})
+	checkNames(t, itemNames(buildItems(catalog)), []string{"packable_tool"}, []string{"non_packable_tool", "declaring_tool"})
 }
 
 // TestSearch_IndexesArguments verifies a tool is discoverable when the query
