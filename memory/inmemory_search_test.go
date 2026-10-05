@@ -211,6 +211,8 @@ func Test_inMemoryService_SearchMemory_Tokenization(t *testing.T) {
 		{name: "digits stay searchable", texts: []string{"recovered after 30 seconds"}, query: "30", want: []string{"0"}},
 		// A text with no word characters has no tokens, so nothing to match.
 		{name: "punctuation only text", texts: []string{"!!! ??? ..."}, query: "great"},
+		// Likewise for a query with no word characters.
+		{name: "punctuation only query", texts: []string{"the agent works great!"}, query: "!!!"},
 		// Underscore belongs to a word rather than separating two, so
 		// error_code is one token: searching it finds the event that names the
 		// identifier and not the unrelated one that merely says error.
