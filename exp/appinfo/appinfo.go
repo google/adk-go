@@ -38,8 +38,8 @@
 //
 // Only LLM agents are described, but the walk passes through agents of every
 // kind to find them: the sub-agents of a SequentialAgent, and the agents a
-// workflow graph runs, nested sub-workflows included. Some agents are not
-// found:
+// workflow graph runs, nested sub-workflows and ParallelWorkers included. Some
+// agents are not found:
 //
 //   - An agent wrapped in an agent tool. It runs under its own runner inside the
 //     tool call, so none of its events reach the event stream. It is reported
@@ -47,7 +47,6 @@
 //     workflow ToolNode runs the tool.
 //   - An agent that a dynamic workflow node runs. Its body is Go code, so which
 //     agents it runs is known only once it runs.
-//   - An agent wrapped in a workflow ParallelWorker.
 //
 // Tools are reported as function declarations. Every request resolves each
 // agent's toolsets, which for an MCP toolset can start a session with its

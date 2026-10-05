@@ -51,6 +51,15 @@ func newWalkWorkflowNode(t *testing.T, name string, edges []workflow.Edge) *work
 	return n
 }
 
+func newWalkParallelWorker(t *testing.T, wrapped workflow.Node) *workflow.ParallelWorker {
+	t.Helper()
+	n, err := workflow.NewParallelWorker("fan_out", wrapped, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewParallelWorker failed: %v", err)
+	}
+	return n
+}
+
 // walkedNames returns the names of the agents WalkAgents returns for edges,
 // sorted, since the walk promises no order.
 func walkedNames(edges []workflow.Edge) []string {
@@ -107,6 +116,23 @@ func TestWalkAgents(t *testing.T) {
 				return workflow.Chain(workflow.Start, newWalkAgentNode(t, newWalkAgent(t, "outer")), inner)
 			},
 			want: []string{"buried", "outer"},
+		},
+		{
+			name: "the agent a ParallelWorker runs",
+			edges: func(t *testing.T) []workflow.Edge {
+				worker := newWalkParallelWorker(t, newWalkAgentNode(t, newWalkAgent(t, "per_item")))
+				return workflow.Chain(workflow.Start, worker)
+			},
+			want: []string{"per_item"},
+		},
+		{
+			name: "agents in a sub-workflow a ParallelWorker runs",
+			edges: func(t *testing.T) []workflow.Edge {
+				perItem := newWalkWorkflowNode(t, "per_item_graph",
+					workflow.Chain(workflow.Start, newWalkAgentNode(t, newWalkAgent(t, "step"))))
+				return workflow.Chain(workflow.Start, newWalkParallelWorker(t, perItem))
+			},
+			want: []string{"step"},
 		},
 		{
 			// Each node is visited once, not each agent: the same agent behind

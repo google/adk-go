@@ -17,8 +17,9 @@ package workflow
 import "google.golang.org/adk/v2/agent"
 
 // WalkAgents returns the agents the nodes of edges run: the agent of each
-// [AgentNode], including those inside nested sub-workflows. It shows what a
-// graph is built from without running it. The agents a workflow agent reaches through its edges are not among its
+// [AgentNode], including those inside nested sub-workflows and inside the node
+// a [ParallelWorker] runs. It shows what a graph is built from without running
+// it. The agents a workflow agent reaches through its edges are not among its
 // [agent.Agent.SubAgents], so walking sub-agents alone never finds them.
 //
 // Each node is visited once, so an agent that two nodes run is returned twice.
@@ -45,6 +46,8 @@ func WalkAgents(edges []Edge) []agent.Agent {
 			agents = append(agents, n.agent)
 		case *WorkflowNode:
 			visitAll(n.subWorkflow.graph.allEdges())
+		case *ParallelWorker:
+			visit(n.wrapped)
 		}
 	}
 	visitAll(edges)

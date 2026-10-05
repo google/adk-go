@@ -647,9 +647,7 @@ func TestBuild(t *testing.T) {
 			wantAgents: nil,
 		},
 		{
-			// Documented as not found: the walk does not unwrap a
-			// ParallelWorker, which keeps the node it runs private.
-			name: "an agent wrapped in a ParallelWorker is not found",
+			name: "an agent wrapped in a ParallelWorker is described",
 			root: func(t *testing.T) agent.Agent {
 				wrapped, err := workflow.NewAgentNode(newLLMAgent(t, llmagent.Config{
 					Name:        "per_item",
@@ -673,7 +671,40 @@ func TestBuild(t *testing.T) {
 				}
 				return root
 			},
-			wantAgents: nil,
+			wantAgents: []string{"per_item"},
+		},
+		{
+			// A ParallelWorker can run any node, so the walk unwraps it the
+			// same way it handles a node found on an edge.
+			name: "an agent in a sub-workflow a ParallelWorker runs is described",
+			root: func(t *testing.T) agent.Agent {
+				stepNode, err := workflow.NewAgentNode(newLLMAgent(t, llmagent.Config{
+					Name:        "step",
+					Description: "Runs inside the per-item graph.",
+					Instruction: "Work.",
+				}), workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode failed: %v", err)
+				}
+				perItem, err := workflow.NewWorkflowNode("per_item_graph", workflow.Chain(workflow.Start, stepNode))
+				if err != nil {
+					t.Fatalf("workflow.NewWorkflowNode failed: %v", err)
+				}
+				worker, err := workflow.NewParallelWorker("fan_out", perItem, 0, workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewParallelWorker failed: %v", err)
+				}
+				root, err := workflowagent.New(workflowagent.Config{
+					Name:        "parallel_graph",
+					Description: "Fans out a graph over its input.",
+					Edges:       workflow.Chain(workflow.Start, worker),
+				})
+				if err != nil {
+					t.Fatalf("workflowagent.New failed: %v", err)
+				}
+				return root
+			},
+			wantAgents: []string{"step"},
 		},
 	}
 
