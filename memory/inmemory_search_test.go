@@ -193,38 +193,48 @@ func Test_inMemoryService_SearchMemory_NonASCII(t *testing.T) {
 func Test_inMemoryService_SearchMemory_Tokenization(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
-		text  string
+		texts []string
 		query string
-		want  int
+		want  []string
 	}{
-		{name: "trailing punctuation", text: "The agent works great!", query: "great", want: 1},
-		{name: "leading punctuation", text: "Error: connection timeout", query: "error", want: 1},
-		{name: "comma separated", text: "error, timeout, retry", query: "error", want: 1},
-		{name: "comma separated trailing", text: "error, timeout, retry", query: "retry", want: 1},
-		{name: "quoted", text: `he said "great"`, query: "great", want: 1},
-		{name: "tab and newline separators", text: "Error: connection\ntimeout!\tPlease retry.", query: "retry", want: 1},
-		{name: "repeated spaces", text: "deploy    ready", query: "ready", want: 1},
+		{name: "trailing punctuation", texts: []string{"The agent works great!"}, query: "great", want: []string{"0"}},
+		{name: "leading punctuation", texts: []string{"Error: connection timeout"}, query: "error", want: []string{"0"}},
+		{name: "comma separated", texts: []string{"error, timeout, retry"}, query: "error", want: []string{"0"}},
+		{name: "comma separated trailing", texts: []string{"error, timeout, retry"}, query: "retry", want: []string{"0"}},
+		{name: "quoted", texts: []string{`he said "great"`}, query: "great", want: []string{"0"}},
+		{name: "tab and newline separators", texts: []string{"Error: connection\ntimeout!\tPlease retry."}, query: "retry", want: []string{"0"}},
+		{name: "repeated spaces", texts: []string{"deploy    ready"}, query: "ready", want: []string{"0"}},
 		// Tokenization is applied to stored text and query alike, so a
 		// hyphenated query still matches text that stores it hyphenated.
-		{name: "hyphenated query still matches", text: "use the built-in flag", query: "built-in", want: 1},
-		{name: "hyphenated identifier matches", text: "see CVE-2024-3094 for detail", query: "CVE-2024-3094", want: 1},
-		{name: "underscore is part of the token", text: "set error_code before retry", query: "error_code", want: 1},
-		{name: "digits stay searchable", text: "recovered after 30 seconds", query: "30", want: 1},
+		{name: "hyphenated query still matches", texts: []string{"use the built-in flag"}, query: "built-in", want: []string{"0"}},
+		{name: "hyphenated identifier matches", texts: []string{"see CVE-2024-3094 for detail"}, query: "CVE-2024-3094", want: []string{"0"}},
+		{name: "digits stay searchable", texts: []string{"recovered after 30 seconds"}, query: "30", want: []string{"0"}},
 		// A text with no word characters has no tokens, so nothing to match.
-		{name: "punctuation only text", text: "!!! ??? ...", query: "great"},
+		{name: "punctuation only text", texts: []string{"!!! ??? ..."}, query: "great"},
+		// Underscore belongs to a word rather than separating two, so
+		// error_code is one token: searching it finds the event that names the
+		// identifier and not the unrelated one that merely says error.
+		{name: "underscore is part of the token", texts: []string{"set error_code first", "an error occurred"}, query: "error_code", want: []string{"0"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := memory.InMemoryService()
-			e := memoryTextEvent("event", tt.text)
-			if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{e})); err != nil {
+			var events []*session.Event
+			for i, text := range tt.texts {
+				events = append(events, memoryTextEvent(strconv.Itoa(i), text))
+			}
+			if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", events)); err != nil {
 				t.Fatal(err)
 			}
 			got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: tt.query})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got.Memories) != tt.want {
-				t.Fatalf("SearchMemory(%q) over %q returned %d entries, want %d", tt.query, tt.text, len(got.Memories), tt.want)
+			var ids []string
+			for _, entry := range got.Memories {
+				ids = append(ids, entry.ID)
+			}
+			if diff := cmp.Diff(tt.want, ids); diff != "" {
+				t.Errorf("SearchMemory(%q) over %q mismatch (-want +got):\n%s", tt.query, tt.texts, diff)
 			}
 		})
 	}
