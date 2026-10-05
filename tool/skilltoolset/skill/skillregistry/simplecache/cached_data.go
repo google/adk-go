@@ -134,6 +134,16 @@ func frontmatterWorker(i int, c skillregistry.Client, toProcess chan *cachedSkil
 			continue
 		}
 
+		if s == nil {
+			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d got nil from GetSkill", i)}
+			continue
+		}
+
+		if s.Frontmatter == nil {
+			done <- frontmatterReadDone{prefixedSkillName: "", skill: sk, err: fmt.Errorf("frontmatterWorker %d got nil as Frontmatter", i)}
+			continue
+		}
+
 		// we assume that the location is aligned with the client, so we can safely strip it.
 		// prefixedSkillName is by SkillRegistry built using the provider and the display name.
 		// for your own skills with name "akill-name" you will see private-skill-name.
