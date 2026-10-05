@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/genai"
 
@@ -37,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/geminitool"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -52,6 +54,11 @@ type stubTool struct {
 func (t *stubTool) Name() string        { return t.name }
 func (t *stubTool) Description() string { return t.desc }
 func (t *stubTool) IsLongRunning() bool { return false }
+
+// Declaration makes stubTool a function tool, which search requires.
+func (t *stubTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name, Description: t.desc}
+}
 
 func (t *stubTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
 	if req.Tools == nil {
@@ -477,7 +484,7 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	)}
 	ts := mustNew(t, base, Config{
 		CoreToolNames:  []string{"get_current_time"},
-		GatedToolNames: []string{"list_publishers", "list_books"},
+		GatedToolNames: []string{"list_publishers", "list_books", "get_current_time"},
 	})
 
 	tools, err := ts.Tools(newCtx(newFakeState(nil)))
@@ -808,4 +815,175 @@ func TestGatingToolset_SkipsDiscoveredToolsTheFlowCannotPack(t *testing.T) {
 
 	names := mustToolNames(t, ts, newCtx(discoveredState(t, "packable_tool", "non_packable_tool")))
 	checkNames(t, names, []string{"packable_tool"}, []string{"non_packable_tool"})
+}
+
+func TestNew_RejectsInvalidConfig(t *testing.T) {
+	if _, err := New(nil, Config{}); err == nil {
+		t.Error("New(nil) error = nil, want an error")
+	}
+	if _, err := New(&staticToolset{}, Config{CoreToolNames: []string{ToolName}}); err == nil {
+		t.Errorf("New() with core tool %q error = nil, want an error", ToolName)
+	}
+}
+
+// TestSearch_BaseToolNamedSearchToolsIsNeverExposed runs a base catalog that
+// contains a tool named search_tools through the real runner. Selecting it must
+// not reveal it, and a recorded name must not make Tools return a second
+// search_tools, which the framework rejects on every later step.
+func TestSearch_BaseToolNamedSearchToolsIsNeverExposed(t *testing.T) {
+	newTool := func(name string) tool.Tool {
+		ft, err := functiontool.New(functiontool.Config{Name: name, Description: name},
+			func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+		if err != nil {
+			t.Fatalf("functiontool.New(%q) error = %v", name, err)
+		}
+		return ft
+	}
+	base := &staticToolset{tools: []tool.Tool{newTool(ToolName), newTool("other_tool")}}
+	gated, err := New(base, Config{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	llm := &parallelCallModel{calls: []*genai.FunctionCall{
+		{ID: "1", Name: ToolName, Args: map[string]any{"query": "select:" + ToolName}},
+	}}
+	a, err := llmagent.New(llmagent.Config{Name: "agent", Model: llm, Toolsets: []tool.Toolset{gated}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for turn := 1; turn <= 2; turn++ {
+		for _, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("turn %d: Run() error = %v", turn, err)
+			}
+		}
+	}
+
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "select:"+ToolName, base, gated.(*gatingToolset), 8)
+	checkNames(t, matchNames(out.Matches), nil, []string{ToolName})
+
+	// A name recorded before, e.g. by RevealTools, must not duplicate it either.
+	names := mustToolNames(t, gated, newCtx(discoveredState(t, ToolName, "other_tool")))
+	if diff := cmp.Diff([]string{ToolName, "other_tool"}, names); diff != "" {
+		t.Errorf("Tools() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGatingToolset_ToolsReturnsBaseError(t *testing.T) {
+	errCatalog := errors.New("catalog down")
+	gts := mustNew(t, &failingToolset{err: errCatalog}, Config{})
+	if _, err := gts.Tools(newCtx(newFakeState(nil))); !errors.Is(err, errCatalog) {
+		t.Errorf("Tools() error = %v, want it to wrap %v", err, errCatalog)
+	}
+}
+
+// TestSearch_SkipsToolsWithoutFunctionDeclaration checks that a model-side
+// built-in, which packs but declares no function, is not offered by search: a
+// function call to it would be rejected as an unknown tool.
+func TestSearch_SkipsToolsWithoutFunctionDeclaration(t *testing.T) {
+	base := &staticToolset{tools: []tool.Tool{
+		geminitool.GoogleSearch{},
+		&stubTool{name: "web_lookup", desc: "search the web"},
+	}}
+	gts := mustNew(t, base, Config{})
+	for _, query := range []string{"select:google_search", "google search web"} {
+		out := mustSearch(t, newToolCtx(newFakeState(nil)), query, base, gts, 8)
+		checkNames(t, matchNames(out.Matches), nil, []string{"google_search"})
+	}
+}
+
+// typedNilSchemaTool declares a typed-nil *jsonschema.Schema.
+type typedNilSchemaTool struct{ stubTool }
+
+func (*typedNilSchemaTool) Declaration() *genai.FunctionDeclaration {
+	var schema *jsonschema.Schema
+	return &genai.FunctionDeclaration{Name: "typed_nil", ParametersJsonSchema: schema}
+}
+
+func TestSearch_TypedNilSchemaDoesNotPanic(t *testing.T) {
+	base := &staticToolset{tools: []tool.Tool{&typedNilSchemaTool{stubTool{name: "typed_nil", desc: "typed nil schema"}}}}
+	gts := mustNew(t, base, Config{})
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "typed", base, gts, 8)
+	checkNames(t, matchNames(out.Matches), []string{"typed_nil"}, nil)
+}
+
+func TestNew_CopiesSkillAnnotations(t *testing.T) {
+	base := &staticToolset{tools: makeTools(toolDef{"list_folders", "list folders"})}
+	annotations := map[string]string{"list_folders": "folder-browser"}
+	gts := mustNew(t, base, Config{SkillAnnotations: annotations})
+	annotations["list_folders"] = "changed-after-new"
+
+	tools, err := gts.Tools(newCtx(newFakeState(nil)))
+	if err != nil {
+		t.Fatalf("Tools() error = %v", err)
+	}
+	var search tool.Tool
+	for _, tl := range tools {
+		if tl.Name() == ToolName {
+			search = tl
+		}
+	}
+	runner, ok := search.(interface {
+		Run(agent.Context, any) (map[string]any, error)
+	})
+	if !ok {
+		t.Fatal("search tool has no Run method")
+	}
+	got, err := runner.Run(newToolCtx(newFakeState(nil)), map[string]any{"query": "select:list_folders"})
+	if err != nil {
+		t.Fatalf("search Run() error = %v", err)
+	}
+	if !strings.Contains(fmt.Sprint(got), "folder-browser") || strings.Contains(fmt.Sprint(got), "changed-after-new") {
+		t.Errorf("search result = %v, want the connected skill given to New", got)
+	}
+}
+
+// TestSearch_OverlappingParallelCallsNeverReportNoMatch sends two overlapping
+// select: calls in one model response through the real runner. Whichever call
+// runs second must say the tool is already available, not that nothing matched.
+func TestSearch_OverlappingParallelCallsNeverReportNoMatch(t *testing.T) {
+	newTool := func(name string) tool.Tool {
+		ft, err := functiontool.New(functiontool.Config{Name: name, Description: name},
+			func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+		if err != nil {
+			t.Fatalf("functiontool.New(%q) error = %v", name, err)
+		}
+		return ft
+	}
+	for i := 0; i < 20; i++ {
+		gated, err := New(&staticToolset{tools: []tool.Tool{newTool("zebra_tool"), newTool("apple_tool")}}, Config{})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		llm := &parallelCallModel{calls: []*genai.FunctionCall{
+			{ID: "1", Name: ToolName, Args: map[string]any{"query": "select:zebra_tool"}},
+			{ID: "2", Name: ToolName, Args: map[string]any{"query": "select:zebra_tool,apple_tool"}},
+		}}
+		a, err := llmagent.New(llmagent.Config{Name: "agent", Model: llm, Toolsets: []tool.Toolset{gated}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatalf("runner.New() error = %v", err)
+		}
+		for ev, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if ev == nil || ev.LLMResponse.Content == nil {
+				continue
+			}
+			for _, p := range ev.LLMResponse.Content.Parts {
+				if fr := p.FunctionResponse; fr != nil && strings.Contains(fmt.Sprint(fr.Response["note"]), "no tools matched") {
+					t.Fatalf("run %d: a search_tools call reported no match: %v", i, fr.Response)
+				}
+			}
+		}
+		checkNames(t, llm.declared, []string{"zebra_tool", "apple_tool"}, nil)
+	}
 }

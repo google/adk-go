@@ -18,6 +18,7 @@ package toolsearch
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -65,7 +66,8 @@ type Config struct {
 	// GatedToolNames are the names of the tools hidden behind search_tools. When
 	// set, they are listed in the search_tools description so the model knows what
 	// it can search for (and can select: them by exact name) instead of guessing
-	// blind. Names only — no schemas — so it stays cheap and fully static.
+	// blind. Names only — no schemas — so it stays cheap and fully static. Names
+	// that are also in CoreToolNames are left out, since those are already active.
 	GatedToolNames []string
 	// SkillAnnotations maps tool names to skill names so search results carry
 	// a connected_skill hint pointing the model at the relevant skill.
@@ -76,37 +78,52 @@ type Config struct {
 }
 
 // New exposes CoreToolNames up front and gates other tools behind search_tools.
-// search_tools is omitted only when every base tool is already core.
+// search_tools is omitted only when every base tool is already core. New copies
+// cfg, so later changes to its slices and maps have no effect.
+//
+// ToolName is reserved for the search tool: it cannot be a core tool, and a
+// base tool by that name is never searchable or exposed. For the same reason an
+// agent can use at most one gating toolset, since two on one agent each expose
+// a tool named ToolName and the framework rejects every model step with a
+// duplicate-tool error. Combine the catalogs into one base toolset instead.
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
+	if base == nil {
+		return nil, errors.New("toolsearch: base toolset is nil")
+	}
+	if slices.Contains(cfg.CoreToolNames, ToolName) {
+		return nil, fmt.Errorf("toolsearch: core tool name %q is reserved for the search tool", ToolName)
+	}
 	maxResults := cfg.MaxResults
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
 	}
 
-	coreNames := nameSet(cfg.CoreToolNames)
+	g := &gatingToolset{
+		base:             base,
+		coreNames:        nameSet(cfg.CoreToolNames),
+		skillAnnotations: maps.Clone(cfg.SkillAnnotations),
+	}
+	var gated []string
+	for _, name := range cfg.GatedToolNames {
+		if !g.coreNames[name] {
+			gated = append(gated, name)
+		}
+	}
 
 	searchTool, err := functiontool.New(
 		functiontool.Config{
-			Name: ToolName,
-			Description: ranksearch.DescribeSearch(
-				toolDescription,
-				cfg.GatedToolNames,
-			),
+			Name:        ToolName,
+			Description: ranksearch.DescribeSearch(toolDescription, gated),
 		},
 		func(ctx agent.Context, args searchArgs) (searchOutput, error) {
-			return executeSearch(ctx, args, base, coreNames, cfg.SkillAnnotations, maxResults)
+			return executeSearch(ctx, args, base, g.coreNames, g.skillAnnotations, maxResults)
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("toolsearch: build search tool: %w", err)
 	}
-
-	return &gatingToolset{
-		base:             base,
-		coreNames:        coreNames,
-		searchTool:       searchTool,
-		skillAnnotations: cfg.SkillAnnotations,
-	}, nil
+	g.searchTool = searchTool
+	return g, nil
 }
 
 // nameSet builds a lookup set from a slice of tool names.
@@ -126,8 +143,10 @@ func nameSet(names []string) map[string]bool {
 // that the flow can pack into a request.
 //
 // Each tool is stored under its own key, so reveals from several function calls
-// in one model response are all kept: each call writes its own state delta and
-// does not see the others'.
+// in one model response are all kept. Those calls run concurrently and share
+// the session state, so a call may or may not see a sibling's reveals. The
+// relative order of tools revealed in one model response is therefore
+// unspecified, but once recorded it does not change.
 func RevealTools(ctx agent.Context, names ...string) error {
 	state, agentName := ctx.State(), ctx.AgentName()
 	discovered := discoveredNames(state, agentName)
@@ -230,10 +249,7 @@ func executeSearch(
 		alreadyAvailable[n] = true
 	}
 
-	searchableTools := append([]tool.Tool(nil), baseTools...)
-	connectedSkillByTool := make(map[string]string, len(skillAnnotations))
-	maps.Copy(connectedSkillByTool, skillAnnotations)
-	matches, note := ranksearch.Rank(buildItems(searchableTools), args.Query, alreadyAvailable, ranksearch.Config{
+	matches, note := ranksearch.Rank(buildItems(baseTools), args.Query, alreadyAvailable, ranksearch.Config{
 		ItemNoun:      "tool",
 		MaxResults:    maxResults,
 		MinScoreRatio: minScoreRatio,
@@ -247,7 +263,7 @@ func executeSearch(
 	matchedNames := make([]string, len(matches))
 	var hasConnectedSkill bool
 	for i, match := range matches {
-		connectedSkill := connectedSkillByTool[match.Name]
+		connectedSkill := skillAnnotations[match.Name]
 		matchedNames[i] = match.Name
 		searchMatches[i] = searchMatch{
 			Name:           match.Name,
@@ -273,13 +289,16 @@ func executeSearch(
 	return searchOutput{Matches: searchMatches, Note: note, NextStep: nextStep}, nil
 }
 
-// buildItems turns the packable tools in catalog into ranksearch items. Tools
-// that don't implement requestProcessor are skipped: the model could discover
-// them but would get an "unknown tool" error when calling them.
+// buildItems turns the tools in catalog that the model can call into ranksearch
+// items. A tool must pack itself into the request and declare a function. A
+// model-side built-in such as geminitool.GoogleSearch packs but declares no
+// function, so a call to it would be rejected as an unknown tool. Search
+// therefore never offers one: list it in CoreToolNames instead. A base tool
+// named ToolName is skipped because it would collide with the search tool.
 func buildItems(catalog []tool.Tool) []ranksearch.Item {
 	items := make([]ranksearch.Item, 0, len(catalog))
 	for _, t := range catalog {
-		if _, ok := t.(requestProcessor); !ok {
+		if !callable(t) || t.Name() == ToolName {
 			continue
 		}
 		items = append(items, ranksearch.Item{
@@ -296,6 +315,16 @@ func buildItems(catalog []tool.Tool) []ranksearch.Item {
 // argument names and descriptions without importing ADK internals.
 type declarer interface {
 	Declaration() *genai.FunctionDeclaration
+}
+
+// callable reports whether the flow can both pack t into a request and dispatch
+// a function call to it.
+func callable(t tool.Tool) bool {
+	if _, ok := t.(requestProcessor); !ok {
+		return false
+	}
+	d, ok := t.(declarer)
+	return ok && d.Declaration() != nil
 }
 
 // argTokens returns a tool's argument names and descriptions for inclusion in
@@ -317,7 +346,7 @@ func argTokens(t tool.Tool) []string {
 	// representation, the type assertion below stops matching and arguments drop
 	// out of the index — TestSearch_IndexesArguments detects when that
 	// happens, since it asserts arg-only discovery through a real functiontool.
-	if js, ok := decl.ParametersJsonSchema.(*jsonschema.Schema); ok {
+	if js, ok := decl.ParametersJsonSchema.(*jsonschema.Schema); ok && js != nil {
 		for argName, argSchema := range js.Properties {
 			extra = append(extra, argName)
 			if argSchema != nil {
@@ -361,9 +390,11 @@ type requestProcessor interface {
 // discovered during it appear only in a later session.
 //
 // Discovered tools are appended after the core tools in discovery order (the
-// order they were persisted to state) rather than catalog order. The tool list
-// therefore only ever grows at the tail across turns, which preserves as much
-// of the provider's prompt-cache prefix as a client-side toolset can.
+// order they were persisted to state) rather than catalog order. While the base
+// catalog stays the same, the list therefore only grows at the tail across
+// turns, which preserves as much of the provider's prompt-cache prefix as a
+// client-side toolset can. A discovered tool the base stops returning drops out
+// of the list.
 func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	baseTools, err := g.base.Tools(ctx)
 	if err != nil {
@@ -398,10 +429,10 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		if g.coreNames[name] {
 			continue
 		}
-		// The flow rejects a tool that cannot pack itself, and RevealTools
-		// accepts any name, so skip those as buildItems does for search.
+		// RevealTools accepts any name, so skip a tool the flow cannot pack, and
+		// one named ToolName, which would duplicate the search tool.
 		t, ok := byName[name]
-		if _, packable := t.(requestProcessor); ok && packable {
+		if _, packable := t.(requestProcessor); ok && packable && name != ToolName {
 			visible = append(visible, t)
 		}
 	}
