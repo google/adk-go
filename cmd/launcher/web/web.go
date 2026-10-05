@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,7 +34,9 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/v2/cmd/launcher/universal"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/internal/originguard"
 	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -50,12 +53,14 @@ const (
 type webConfig struct {
 	port            int
 	host            string
+	allowOrigins    []string
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
 	idleTimeout     time.Duration
 	shutdownTimeout time.Duration
 	otelToCloud     bool
 	useH2C          bool
+	maxPayloadSize  int64
 }
 
 // webLauncher can launch web server
@@ -198,29 +203,9 @@ func applyServiceDefaults(config *launcher.Config) {
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	applyServiceDefaults(config)
 
-	router := BuildBaseRouter()
-	registerHealthRoute(router)
-
-	// check if there are any active sublaunchers
-	if len(w.activeSublaunchers) == 0 {
-		availableSublaunchers := make([]string, len(w.sublaunchers))
-		for i, l := range w.sublaunchers {
-			availableSublaunchers[i] = l.Keyword()
-		}
-		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
-	}
-
-	// Sublaunchers that build a server need the resolved bind address rather
-	// than the raw flag, so an empty -host arms the same checks the default does.
-	config.BindHost = w.bindHost()
-
-	// Setup subrouters
-	for _, l := range w.sublaunchers {
-		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
-			if err := l.SetupSubrouters(router, config); err != nil {
-				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
-			}
-		}
+	router, err := w.buildRouter(config)
+	if err != nil {
+		return err
 	}
 
 	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
@@ -305,6 +290,74 @@ func displayHost(host string) string {
 	}
 }
 
+// buildRouter builds the base router and mounts the active sublaunchers on it.
+// The request-body size limit middleware is applied to the base router itself,
+// so every route mounted by a sublauncher (including the Eventarc and PubSub
+// trigger endpoints) enforces the limit.
+func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) {
+	router := BuildBaseRouter()
+	registerHealthRoute(router)
+
+	// Thread the web launcher's configured limit through to sublaunchers so the
+	// ADK REST API server applies the same limit as the base router instead of
+	// its 10 MiB default. Only overwrite a value the embedder set in code when
+	// the flag was actually provided, and use the resolved value for the base
+	// router as well so the two limits cannot disagree. A value <= 0 keeps the
+	// default behavior in adkrest.
+	if w.config.maxPayloadSize > 0 {
+		config.MaxPayloadSize = w.config.maxPayloadSize
+	}
+	router.Use(adkrest.MaxBytesMiddleware(config.MaxPayloadSize))
+
+	// check if there are any active sublaunchers
+	if len(w.activeSublaunchers) == 0 {
+		availableSublaunchers := make([]string, len(w.sublaunchers))
+		for i, l := range w.sublaunchers {
+			availableSublaunchers[i] = l.Keyword()
+		}
+		return nil, fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
+	}
+
+	// Sublaunchers that build a server need the resolved bind address rather
+	// than the raw flag, so an empty -host arms the same checks the default does.
+	config.BindHost = w.bindHost()
+
+	// Before any sublauncher runs, so that a server one of them builds, like
+	// the REST server, is given the operator's origins too. Clipped so that
+	// neither this append nor a sublauncher's writes into a slice the caller
+	// owns.
+	config.AllowedOrigins = append(slices.Clip(config.AllowedOrigins), w.config.allowOrigins...)
+
+	// Setup subrouters
+	for _, l := range w.sublaunchers {
+		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
+			if err := l.SetupSubrouters(router, config); err != nil {
+				return nil, fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+			}
+		}
+	}
+
+	// One guard over every route registered above, rather than one per
+	// sublauncher, so that a sublauncher added later is covered without having
+	// to remember it. Several of these routes run an agent or return session
+	// data, and a rebound page can reach any of them.
+	//
+	// Built here, after setup, because sublaunchers add origins while they run.
+	// gorilla/mux builds the middleware chain when a route matches, so this
+	// still wraps the routes registered before it.
+	//
+	// The REST server keeps its own copy of these checks, because it is also
+	// mounted outside this launcher. Its copy holds only the origins added
+	// before the api sublauncher ran, so an origin that a later sublauncher adds
+	// passes this guard and is still refused on the REST routes.
+	router.Use(originguard.New(originguard.Config{
+		BindHost:       config.BindHost,
+		AllowedOrigins: config.AllowedOrigins,
+	}).Middleware)
+
+	return router, nil
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
 		Addr:         net.JoinHostPort(w.bindHost(), strconv.Itoa(w.config.port)),
@@ -341,12 +394,20 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.host, "host", defaultHost, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
 	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
+	// Named and repeated like adk-python's --allow_origins, which also accepts
+	// regex: entries; originguard matches literal origins only, so the help
+	// offers none. launcher.Config.AllowedOrigins documents what the list does.
+	fs.Func("allow_origins", "Optional. Origins allowed on every route of the web server (e.g., 'https://example.com'; a bare hostname and optional port is read as http). Repeat the flag to allow more than one. Each entry is admitted by the origin check on every route, is allowed for CORS on the REST API, and on a loopback bind also allows requests whose Host header names that entry's host; other cross-origin browser requests are refused with 403. '*' allows any origin and turns the origin and DNS-rebinding checks off on every route - do not use it on a server reachable from an untrusted network, since these endpoints are unauthenticated.", func(origin string) error {
+		config.allowOrigins = append(config.allowOrigins, origin)
+		return nil
+	})
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	fs.BoolVar(&config.useH2C, "h2c", false, "Enable prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1 Upgrade) on the web server listener. Cleartext is insecure; do not expose it to untrusted networks. Long-lived streaming responses may require increasing --write-timeout.")
+	fs.Int64Var(&config.maxPayloadSize, "max_request_body_size", 0, "Maximum request body size in bytes. Larger requests are rejected with HTTP 400. 0 uses the default (10 MiB) or a value set by an embedder. Applied to the base router so all sublauncher and trigger routes are covered.")
 
 	return &webLauncher{
 		config:       config,

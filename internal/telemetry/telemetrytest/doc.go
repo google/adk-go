@@ -12,24 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetrytest provides reusable helpers for hermetic
-// telemetry tests in ADK.
+// Package telemetrytest provides the helpers behind ADK's record/replay
+// telemetry tests:
 //
-// Helpers in this package:
-//
-//   - [SpanDigest] / [BuildDigests] / [PRESENT] — capture and
-//     normalise the emitted OTel span tree so tests can compare
-//     against a literal expected shape. Log records nest inside
-//     the SpanDigest of the span they were emitted under via
-//     [SpanDigest.Logs], yielding a single causal tree.
-//   - [LogDigest] / [InMemoryLogExporter] — log-record snapshot
-//     type and the in-memory sink to install via
+//   - [Digest] / [BuildDigest]: the emitted span tree, with log
+//     records nested under the span they were emitted in, normalized so it can
+//     be stored as a golden and compared exactly.
+//   - [InMemoryLogExporter]: the log sink to install via
 //     telemetry.OverrideLoggerForTesting.
 //
-// The expected shapes for each scenario live in the sibling
-// telemetrytestcase package; the runners that drive the agent and
-// compare actual vs expected live in the telemetry/functionaltest
-// test package. Functional tests use the shared
-// [google.golang.org/adk/v2/internal/testutil.MockModel] as the
-// deterministic LLM stand-in.
+// The goldens and the tests replaying them live in the functionaltest package.
 package telemetrytest

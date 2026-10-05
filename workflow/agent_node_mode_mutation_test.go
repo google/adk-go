@@ -53,7 +53,7 @@ func coordinatorToolNames(t *testing.T, a agent.Agent) []string {
 	return names
 }
 
-func declaredIncludeContents(t *testing.T, a agent.Agent) string {
+func declaredIncludeContents(t *testing.T, a agent.Agent) llminternal.IncludeContents {
 	t.Helper()
 	llmA, ok := a.(llminternal.Agent)
 	if !ok {

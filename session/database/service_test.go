@@ -105,6 +105,42 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDatabaseService_AppendEvent_TranscriptionsRoundTrip guards that live
+// audio transcriptions survive storage, matching the input_transcription and
+// output_transcription columns of adk-python's events table.
+func TestDatabaseService_AppendEvent_TranscriptionsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	event := &session.Event{ID: "live_event", Author: "agent"}
+	event.InputTranscription = &genai.Transcription{Text: "what time is it", Finished: true}
+	event.OutputTranscription = &genai.Transcription{Text: "it is noon"}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if diff := cmp.Diff(event.InputTranscription, ev.InputTranscription); diff != "" {
+		t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(event.OutputTranscription, ev.OutputTranscription); diff != "" {
+		t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestDatabaseService_AppendEvent_StaleErrorFormatsTimestamps guards that the
 // stale-session error renders human-readable wall-clock timestamps rather than
 // ~1970 dates. The values compared are UnixMicro() microseconds, so formatting
