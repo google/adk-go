@@ -202,14 +202,10 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for _, word := range strings.Fields(text) {
-		cleaned := strings.TrimFunc(word, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
-		})
-		if cleaned == "" {
-			continue
-		}
-		res[strings.ToLower(cleaned)] = struct{}{}
+	for word := range strings.FieldsFuncSeq(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r) && r != '_'
+	}) {
+		res[strings.ToLower(word)] = struct{}{}
 	}
 
 	return res

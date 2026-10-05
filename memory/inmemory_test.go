@@ -109,6 +109,42 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 		},
 		{
+			name: "splits internal punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-internal-punctuation", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "timeout built-in"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "keeps digits as words",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-digits", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Error 404.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "404"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("Error 404.", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "preserves combining marks and underscores",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-marks", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("CAFE\u0301TERIA snake_case", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe\u0301 snake_case"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("CAFE\u0301TERIA snake_case", genai.RoleModel)},
+			}},
+		},
+		{
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
