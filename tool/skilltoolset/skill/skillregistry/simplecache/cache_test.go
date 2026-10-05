@@ -418,19 +418,17 @@ func TestCacheListResources(t *testing.T) {
 		}
 	})
 
-	// The "." subpath currently matches nothing (see review item M3): entries are
-	// stored under their archive paths ("assets/..."), none of which start with
-	// ".". WithCompletePreloadSource relies on ListResources(name, ".") listing
-	// everything, so this is a known gap, pinned here as current behavior.
-	t.Run("dot subpath currently lists nothing", func(t *testing.T) {
+	// "." means "everything": WithCompletePreloadSource enumerates a skill's
+	// resources with ListResources(name, "."), so every entry must be listed.
+	t.Run("dot subpath lists every resource", func(t *testing.T) {
 		ca := newWarmCache(t, newFullClient(t))
 
 		got, err := ca.ListResources("alpha", ".")
 		if err != nil {
 			t.Fatalf("ListResources() error = %v", err)
 		}
-		if len(got) != 0 {
-			t.Errorf(`ListResources(name, ".") = %v, want empty (current behavior)`, got)
+		if diff := cmp.Diff([]string{"SKILL.md", "assets/a.txt"}, got); diff != "" {
+			t.Errorf("ListResources diff (-want +got):\n%s", diff)
 		}
 	})
 }

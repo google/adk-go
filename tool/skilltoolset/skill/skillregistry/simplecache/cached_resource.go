@@ -79,6 +79,13 @@ func (r *resources) loadResources(rev string) error {
 	return nil
 }
 
+// listResources provides a simple mechanism for listing resources
+// it handles subpath "", ".", "/" and "\\" as a root path (listing all the resources)
+// returns the files which are explicit match for a subpath
+// returns all the files with a prefix matching the folder
+// We don't care about path traversal here, the implementation doesn't touch a real file system.
+// The implementation focuses on verbatim prefixes.
+// So, a file 'ccc' doesn't match the subpath 'aaa/bbb/../../ccc'
 func (r *resources) listResources(rev, subpath string) ([]string, error) {
 	r.mu.RLock()
 
@@ -105,6 +112,8 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 	if subpath == "." || subpath == "/" || subpath == "\\" {
 		subpath = ""
 	}
+	subpath = strings.Trim(subpath, "\\/")
+
 	for _, r := range r.res {
 		// we want to add either explicit file of subtree (if subpath looks like a folder)
 		if r.path == subpath {
@@ -113,8 +122,8 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 			continue
 		}
 		if strings.HasPrefix(r.path, subpath) {
-			// check  subtree + "\\" or "/""
-			if strings.HasPrefix(r.path, subpath+"\\") || strings.HasPrefix(r.path, subpath+"/") {
+			// check subtree + "\\" or "/""
+			if subpath == "" || strings.HasPrefix(r.path, subpath+"\\") || strings.HasPrefix(r.path, subpath+"/") {
 				res = append(res, r.path)
 				continue
 			}

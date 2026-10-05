@@ -236,33 +236,30 @@ func TestListResources(t *testing.T) {
 		}
 	})
 
-	// Known gap (see review item M1): subpath "." matches nothing because entries
-	// are stored under their archive paths ("assets/..."), none of which start
-	// with ".". WithCompletePreloadSource relies on ListResources(name, ".")
-	// listing everything, so this is a bug. The test pins today's behavior so a
-	// fix has to update it deliberately.
-	t.Run("dot subpath currently matches nothing", func(t *testing.T) {
+	// "." means "everything": WithCompletePreloadSource enumerates a skill's
+	// resources with ListResources(name, "."), so it must list every entry.
+	t.Run("dot subpath lists every resource", func(t *testing.T) {
 		r := newResources(&zipClientStub{entries: entries})
 		got, err := r.listResources("rev-1", ".")
 		if err != nil {
 			t.Fatalf("listResources() error = %v", err)
 		}
-		if len(got) != 0 {
-			t.Errorf(`listResources(rev, ".") = %v, want empty (current behavior)`, got)
+		want := []string{"SKILL.md", "assets/a.txt", "assets/b.txt", "scripts/run.sh"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("listResources diff (-want +got):\n%s", diff)
 		}
 	})
 
-	// The match is a plain strings.HasPrefix, not path-aware: "script" (no
-	// trailing slash) still matches "scripts/...". Pinned as current behavior.
-	t.Run("prefix match is not path-aware", func(t *testing.T) {
+	// The match is path-aware: "script" (no trailing slash) is a different path
+	// segment than "scripts/...", so it must not match.
+	t.Run("prefix match is path-aware", func(t *testing.T) {
 		r := newResources(&zipClientStub{entries: entries})
 		got, err := r.listResources("rev-1", "script")
 		if err != nil {
 			t.Fatalf("listResources() error = %v", err)
 		}
-		want := []string{"scripts/run.sh"}
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Errorf("listResources diff (-want +got):\n%s", diff)
+		if len(got) != 0 {
+			t.Errorf(`listResources(rev, "script") = %v, want empty (not a path prefix of "scripts/")`, got)
 		}
 	})
 
