@@ -38,7 +38,13 @@ type AgentEngineAPIController struct {
 	sseTimeout     time.Duration
 }
 
-// NewAgentEngineAPIController creates a new AgentEngineAPIController. Verifies if registered methods are unique by name
+// defaultSSETimeout is the write deadline for a response when none is
+// configured. It matches the launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
+
+// NewAgentEngineAPIController creates a new AgentEngineAPIController. Verifies if registered methods are unique by name.
+// A zero sseTimeout means 120 seconds. A negative one means no write deadline,
+// which also clears the http.Server's WriteTimeout.
 func NewAgentEngineAPIController(service session.Service, sseTimeout time.Duration, maxPayloadSize int64, handlers []method.MethodHandler) (*AgentEngineAPIController, error) {
 	methodHandlers := map[string]method.MethodHandler{}
 	for _, handler := range handlers {
@@ -47,12 +53,18 @@ func NewAgentEngineAPIController(service session.Service, sseTimeout time.Durati
 		}
 		methodHandlers[handler.Name()] = handler
 	}
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
 	return &AgentEngineAPIController{service: service, handlers: methodHandlers, maxPayloadSize: maxPayloadSize, sseTimeout: sseTimeout}, nil
 }
 
 // Query provides a way to invoke all the methods
 func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Request) {
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	rc := http.NewResponseController(rw)
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {

@@ -709,7 +709,7 @@ func (s *scheduler) terminalAncestors(nodeName string) []string {
 //
 // RequestedInput is the exception: the child's pause unwinds the
 // orchestrator (dynamic_scheduler.go runNode), and Workflow.Resume
-// matches InterruptID against the parent's NodeState.PendingRequest,
+// matches InterruptID against the parent's NodeState.Interrupts,
 // so the parent must transition to NodeWaiting on a descendant pause.
 func (s *scheduler) handleEvent(it eventItem) {
 	nr := s.runsByName[it.nodeName]
@@ -799,12 +799,13 @@ func (s *scheduler) handleEvent(it eventItem) {
 //
 // # Human-input waiting branch
 //
-// When an activation completes cleanly and recorded a non-nil
-// inputRequest (via setInputRequest from handleEvent), the node
-// transitions to NodeWaiting instead of NodeCompleted, the request
-// is persisted on NodeState.PendingRequest, and successors are not
-// scheduled. The scheduler's main loop terminates naturally when
-// every live node has either completed or moved into NodeWaiting,
+// When an activation completes cleanly having raised at least one
+// long-running interrupt (the nodeRun collects these from
+// Event.LongRunningToolIDs), the node transitions to NodeWaiting
+// instead of NodeCompleted, the interrupt IDs are recorded on
+// NodeState.Interrupts, and successors are not scheduled. The
+// scheduler's main loop terminates naturally when every live node
+// has either completed or moved into NodeWaiting,
 // at which point Workflow.Run's iterator exhausts and the caller
 // observes the pause by inspecting RunState.
 //

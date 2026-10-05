@@ -607,6 +607,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			for !reconnect {
 				select {
 				case ev := <-eventsChan:
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					var tools map[string]tool.Tool
+					if len(fnCalls) > 0 {
+						tools = make(map[string]tool.Tool, len(f.Tools))
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
+					}
 					if !sess.pushEvent(ev) {
 						cleanup()
 						return
@@ -644,13 +653,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 						}
 					}
-					// Handle function calls if present in the event
-					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					if len(fnCalls) > 0 {
-						tools := make(map[string]tool.Tool)
-						for _, t := range f.Tools {
-							tools[t.Name()] = t
-						}
 						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
 						if err != nil {
 							sess.pushError(err)
@@ -1064,6 +1067,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
 		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			if resp == nil && err == nil {
+				// Third-party model implementations may yield an empty response.
+				continue
+			}
 			response := newResponseWithEventID(ctx, resp)
 			lastResponse = *response
 			lastErr = err
