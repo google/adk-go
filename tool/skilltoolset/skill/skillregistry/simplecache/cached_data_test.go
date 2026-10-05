@@ -21,23 +21,35 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	agentregistry "google.golang.org/api/agentregistry/v1alpha"
+
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
-	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 )
 
-// fakeClient is a minimal in-memory [Client] for exercising the frontmatter
-// loading path. That path only calls GetSkill and ParseSkillName; the remaining
-// methods satisfy the interface and are not expected to be called.
+// fakeClient is a minimal in-memory [Client] for exercising the skill and
+// frontmatter loading paths. Those paths only call ListSkills, GetSkill and
+// ParseSkillName; the remaining methods satisfy the interface and are not
+// expected to be called.
 type fakeClient struct {
+	listed   []*agentregistry.Skill          // ListSkills result
+	listErr  error                           // ListSkills error
 	skills   map[string]*agentregistry.Skill // GetSkill result, by resource name
 	getErr   map[string]error                // GetSkill error, by resource name
 	parseErr map[string]error                // ParseSkillName error, by resource name
 }
 
 var _ skillregistry.Client = (*fakeClient)(nil)
+
+func (c *fakeClient) ListSkills() ([]*agentregistry.Skill, error) {
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
+	return c.listed, nil
+}
 
 func (c *fakeClient) GetSkill(name string) (*agentregistry.Skill, error) {
 	if err := c.getErr[name]; err != nil {
@@ -65,9 +77,9 @@ func (c *fakeClient) ParseSkillName(name string) (projectID, location, skillName
 	return m[1], m[2], m[3], nil
 }
 
-// The methods below are unused by the frontmatter loading path.
-func (c *fakeClient) ListSkills() ([]*agentregistry.Skill, error)             { return nil, nil }
+// The methods below are unused by the loading paths.
 func (c *fakeClient) ListFrontmatters() ([]*agentregistry.Frontmatter, error) { return nil, nil }
+
 func (c *fakeClient) GetRevision(string) (*agentregistry.SkillRevision, error) {
 	return nil, nil
 }
@@ -76,6 +88,112 @@ func (c *fakeClient) GetZip(string) (*zip.Reader, error) { return nil, nil }
 
 func (c *fakeClient) FindFrontmatters(string) ([]*agentregistry.Frontmatter, error) { return nil, nil }
 func (c *fakeClient) ResourceID(name string) string                                 { return name }
+
+func TestNewDataCache(t *testing.T) {
+	c := &fakeClient{}
+
+	t.Run("indexes every skill by resource name", func(t *testing.T) {
+		in := []*agentregistry.Skill{
+			{Name: "projects/p/locations/global/skills/alpha", DefaultRevision: "rev-a"},
+			{Name: "projects/p/locations/global/skills/beta", DefaultRevision: "rev-b"},
+		}
+
+		dc := newDataCache(c, in)
+
+		if len(dc.skills) != len(in) {
+			t.Fatalf("len(skills) = %d, want %d", len(dc.skills), len(in))
+		}
+		if len(dc.nameToSkill) != len(in) {
+			t.Errorf("len(nameToSkill) = %d, want %d", len(dc.nameToSkill), len(in))
+		}
+		for i, want := range in {
+			cs := dc.skills[i]
+			if cs.origSkill.Name != want.Name {
+				t.Errorf("skills[%d].origSkill.Name = %q, want %q", i, cs.origSkill.Name, want.Name)
+			}
+			// Resources are fetched by revision, so it must survive the copy.
+			if cs.origSkill.DefaultRevision != want.DefaultRevision {
+				t.Errorf("skills[%d].origSkill.DefaultRevision = %q, want %q", i, cs.origSkill.DefaultRevision, want.DefaultRevision)
+			}
+			if got := dc.nameToSkill[want.Name]; got != cs {
+				t.Errorf("nameToSkill[%q] is not skills[%d]", want.Name, i)
+			}
+		}
+	})
+
+	// loadFrontmatters writes into nameToSkill, so it must be usable even when
+	// the registry has no skills.
+	t.Run("no skills", func(t *testing.T) {
+		dc := newDataCache(c, nil)
+
+		if len(dc.skills) != 0 {
+			t.Errorf("len(skills) = %d, want 0", len(dc.skills))
+		}
+		if dc.nameToSkill == nil {
+			t.Error("nameToSkill is nil, want an empty map")
+		}
+	})
+}
+
+func TestLoadSkills(t *testing.T) {
+	names := []string{
+		"projects/p/locations/global/skills/alpha",
+		"projects/p/locations/global/skills/beta",
+	}
+
+	t.Run("success", func(t *testing.T) {
+		c := &fakeClient{}
+		for _, n := range names {
+			c.listed = append(c.listed, &agentregistry.Skill{Name: n})
+		}
+
+		before := time.Now()
+		dc, err := loadSkills(c)
+		after := time.Now()
+		if err != nil {
+			t.Fatalf("loadSkills() error = %v", err)
+		}
+
+		var got []string
+		for _, cs := range dc.skills {
+			got = append(got, cs.origSkill.Name)
+		}
+		if diff := cmp.Diff(names, got); diff != "" {
+			t.Errorf("skill names diff (-want +got):\n%s", diff)
+		}
+		for _, n := range names {
+			if _, ok := dc.nameToSkill[n]; !ok {
+				t.Errorf("nameToSkill is missing %q", n)
+			}
+		}
+		if dc.readingSkillsStart.Before(before) || dc.readingSkillsEnd.After(after) || dc.readingSkillsEnd.Before(dc.readingSkillsStart) {
+			t.Errorf("reading window [%v, %v] is not an ordered window inside the call [%v, %v]",
+				dc.readingSkillsStart, dc.readingSkillsEnd, before, after)
+		}
+	})
+
+	t.Run("no skills", func(t *testing.T) {
+		dc, err := loadSkills(&fakeClient{})
+		if err != nil {
+			t.Fatalf("loadSkills() error = %v", err)
+		}
+		if len(dc.skills) != 0 {
+			t.Errorf("len(skills) = %d, want 0", len(dc.skills))
+		}
+	})
+
+	t.Run("ListSkills failure is propagated", func(t *testing.T) {
+		boom := errors.New("registry down")
+
+		dc, err := loadSkills(&fakeClient{listErr: boom})
+		if !errors.Is(err, boom) {
+			t.Fatalf("loadSkills() error = %v, want errors.Is %v", err, boom)
+		}
+		if dc != nil {
+			t.Errorf("loadSkills() returned a non-nil cache on error")
+		}
+	})
+}
 
 func TestFrontmatterWorker(t *testing.T) {
 	const name = "projects/p/locations/global/skills/alpha"
@@ -169,6 +287,41 @@ func TestFrontmatterWorker(t *testing.T) {
 	}
 }
 
+// loadFrontmatters reads exactly one result per skill, so a worker must keep
+// draining the queue after a failure instead of abandoning the rest.
+func TestFrontmatterWorker_ReportsEverySkill(t *testing.T) {
+	names := []string{
+		"projects/p/locations/global/skills/alpha",
+		"projects/p/locations/global/skills/beta",
+		"projects/p/locations/global/skills/gamma",
+	}
+	c, dc := newFrontmatterTestCache(names)
+	c.getErr[names[0]] = errors.New("boom")
+	c.parseErr[names[1]] = errors.New("bad name")
+
+	toProcess := make(chan *cachedSkill, len(dc.skills))
+	done := make(chan frontmatterReadDone, len(dc.skills))
+	for _, sk := range dc.skills {
+		toProcess <- sk
+	}
+	close(toProcess)
+
+	frontmatterWorker(0, c, toProcess, done)
+	close(done)
+
+	var failed, succeeded int
+	for res := range done {
+		if res.err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+	if failed != 2 || succeeded != 1 {
+		t.Errorf("got %d failed and %d succeeded results, want 2 and 1", failed, succeeded)
+	}
+}
+
 // newFrontmatterTestCache builds a fakeClient and a dataCache for the given
 // resource names. Each skill resolves through GetSkill to a frontmatter whose
 // description is "desc:"+name.
@@ -196,29 +349,46 @@ func TestLoadFrontmatters(t *testing.T) {
 		"projects/p/locations/global/skills/gamma",
 	}
 
-	t.Run("success", func(t *testing.T) {
-		c, dc := newFrontmatterTestCache(names)
+	// Fewer, as many, and more workers than skills. More than one worker
+	// exercises the parallel path under -race.
+	for _, nWorkers := range []int{1, len(names), 10} {
+		t.Run(fmt.Sprintf("success with %d workers", nWorkers), func(t *testing.T) {
+			c, dc := newFrontmatterTestCache(names)
 
-		// More than one worker so the parallel path is exercised under -race.
+			if err := loadFrontmatters(c, nWorkers, dc); err != nil {
+				t.Fatalf("loadFrontmatters() error = %v", err)
+			}
+
+			for i, n := range names {
+				_, _, prefix, err := c.ParseSkillName(n)
+				if err != nil {
+					t.Fatalf("ParseSkillName(%q) error = %v", n, err)
+				}
+				cs, ok := dc.nameToSkill[prefix]
+				if !ok {
+					t.Fatalf("nameToSkill is missing the prefixed key %q", prefix)
+				}
+				if cs != dc.skills[i] {
+					t.Errorf("nameToSkill[%q] is not skills[%d]", prefix, i)
+				}
+				if cs.frontmatter.Name != prefix {
+					t.Errorf("frontmatter.Name = %q, want %q", cs.frontmatter.Name, prefix)
+				}
+				if want := "desc:" + n; cs.frontmatter.Description != want {
+					t.Errorf("frontmatter.Description = %q, want %q", cs.frontmatter.Description, want)
+				}
+			}
+		})
+	}
+
+	t.Run("no skills", func(t *testing.T) {
+		c, dc := newFrontmatterTestCache(nil)
+
 		if err := loadFrontmatters(c, 2, dc); err != nil {
 			t.Fatalf("loadFrontmatters() error = %v", err)
 		}
-
-		for _, n := range names {
-			_, _, prefix, err := c.ParseSkillName(n)
-			if err != nil {
-				t.Fatalf("ParseSkillName(%q) error = %v", n, err)
-			}
-			cs, ok := dc.nameToSkill[prefix]
-			if !ok {
-				t.Fatalf("nameToSkill is missing the prefixed key %q", prefix)
-			}
-			if cs.frontmatter.Name != prefix {
-				t.Errorf("frontmatter.Name = %q, want %q", cs.frontmatter.Name, prefix)
-			}
-			if want := "desc:" + n; cs.frontmatter.Description != want {
-				t.Errorf("frontmatter.Description = %q, want %q", cs.frontmatter.Description, want)
-			}
+		if len(dc.nameToSkill) != 0 {
+			t.Errorf("len(nameToSkill) = %d, want 0", len(dc.nameToSkill))
 		}
 	})
 
@@ -244,11 +414,13 @@ func TestLoadFrontmatters(t *testing.T) {
 
 	// A non-positive worker count would otherwise block forever on the done
 	// channel with skills to process, so it must be rejected up front.
-	t.Run("non-positive worker count is rejected", func(t *testing.T) {
-		c, dc := newFrontmatterTestCache(names)
+	for _, nWorkers := range []int{0, -1} {
+		t.Run(fmt.Sprintf("%d workers is rejected", nWorkers), func(t *testing.T) {
+			c, dc := newFrontmatterTestCache(names)
 
-		if err := loadFrontmatters(c, 0, dc); err == nil {
-			t.Error("loadFrontmatters(nWorkers=0) = nil error, want error")
-		}
-	})
+			if err := loadFrontmatters(c, nWorkers, dc); err == nil {
+				t.Errorf("loadFrontmatters(nWorkers=%d) = nil error, want error", nWorkers)
+			}
+		})
+	}
 }
