@@ -222,9 +222,10 @@ func canJoin(first, second *genai.Part) bool {
 }
 
 // copyPart returns a copy of p that shares no memory with it. p was decoded
-// from a response, so encoding it again loses nothing, and the copy covers
-// every field genai.Part has or gains. A part that fails to encode, which
-// decoded JSON cannot produce, is copied one level deep.
+// from a response, so encoding it again keeps every value, except that an
+// empty map or slice, such as the arguments of a call without any, comes back
+// nil. The copy covers every field genai.Part has or gains. A part that fails
+// to encode, which decoded JSON cannot produce, is copied one level deep.
 func copyPart(p *genai.Part) *genai.Part {
 	if data, err := json.Marshal(p); err == nil {
 		var cp genai.Part
@@ -244,10 +245,14 @@ func onlyText(p *genai.Part) bool {
 	return reflect.ValueOf(rest).IsZero()
 }
 
-// isEmpty reports whether p has nothing set but the thought flag.
+// isEmpty reports whether p has nothing set but the thought flag, counting an
+// empty signature as none: it encodes as none.
 func isEmpty(p *genai.Part) bool {
 	rest := *p
 	rest.Thought = false
+	if len(rest.ThoughtSignature) == 0 {
+		rest.ThoughtSignature = nil
+	}
 	return reflect.ValueOf(rest).IsZero()
 }
 

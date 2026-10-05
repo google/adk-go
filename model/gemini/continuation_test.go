@@ -628,6 +628,13 @@ func TestAppendParts(t *testing.T) {
 			next: []*genai.Part{nil, {}, {Thought: true}, {Text: "a"}, {}, {Text: "b"}},
 			want: []*genai.Part{{Text: "ab"}},
 		},
+		{
+			// Decoded from {"text":"","thoughtSignature":""}, which would
+			// otherwise be resent as {}.
+			name: "part with an empty signature dropped",
+			next: []*genai.Part{{ThoughtSignature: []byte{}}, {Text: "a"}, {ThoughtSignature: []byte{}}, {Text: "b"}},
+			want: []*genai.Part{{Text: "ab"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
