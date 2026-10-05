@@ -43,13 +43,15 @@ type zipClientStub struct {
 	entries   []zipEntry // archive contents, in order
 	zipErr    error      // when non-nil, GetZip returns it instead of a zip
 	callCount int        // number of GetZip calls
+	revs      []string   // revisions passed to GetZip, in call order
 }
 
 var _ skillregistry.Client = (*zipClientStub)(nil)
 
-func (c *zipClientStub) GetZip(string) (*zip.Reader, error) {
+func (c *zipClientStub) GetZip(rev string) (*zip.Reader, error) {
 	c.mu.Lock()
 	c.callCount++
+	c.revs = append(c.revs, rev)
 	entries, zipErr := c.entries, c.zipErr
 	c.mu.Unlock()
 	if zipErr != nil {
@@ -63,6 +65,17 @@ func (c *zipClientStub) calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.callCount
+}
+
+// lastRev returns the revision passed to the most recent GetZip call, or "" if
+// GetZip has not been called.
+func (c *zipClientStub) lastRev() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.revs) == 0 {
+		return ""
+	}
+	return c.revs[len(c.revs)-1]
 }
 
 // The methods below are unused by the resource-loading paths.
