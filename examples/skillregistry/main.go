@@ -73,7 +73,7 @@ func (f *faultyClient) ListSkills() ([]*agentskillregistry.Skill, error) {
 }
 
 // ParseSkillName implements [skillregistry.Client].
-func (f *faultyClient) ParseSkillName(name string) (projectID string, location string, skillName string, resErr error) {
+func (f *faultyClient) ParseSkillName(name string) (projectID, location, skillName string, resErr error) {
 	panic("unimplemented")
 }
 
@@ -556,20 +556,20 @@ func Process4(ctx context.Context, projectID, location string) error {
 	return nil
 }
 
-func Process3(ctx context.Context, projectID string) error {
-	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: "us"}
-	src, err := skillregistry.NewSkillRegistrySource(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("cannot NewSkillRegistrySource: %w", err)
-	}
+// func Process3(ctx context.Context, projectID string) error {
+// 	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: "us"}
+// 	src, err := skillregistry.NewSkillRegistrySource(ctx, cfg)
+// 	if err != nil {
+// 		return fmt.Errorf("cannot NewSkillRegistrySource: %w", err)
+// 	}
 
-	f, err := src.FindFrontmatters(ctx, "aa")
-	if err != nil {
-		return fmt.Errorf("cannot LoadFrontmatter: %w", err)
-	}
-	log.Printf("F: %+v", f)
-	return nil
-}
+// 	f, err := src.FindFrontmatters(ctx, "aa")
+// 	if err != nil {
+// 		return fmt.Errorf("cannot LoadFrontmatter: %w", err)
+// 	}
+// 	log.Printf("F: %+v", f)
+// 	return nil
+// }
 
 func Process2(ctx context.Context, projectID, location string) error {
 	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: location}

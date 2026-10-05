@@ -26,16 +26,14 @@ import (
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 )
 
+// Config allowes you to indicate the resources your [client] should be providing
 type Config struct {
-	ProjectID string
-	Location  string
+	ProjectID             string
+	Location              string
+	IncludeUnusableSkills bool
 }
 
-const (
-	SearchTypeKeyword  = "KEYWORD"
-	SearchTypeSemantic = "SEMANTIC"
-)
-
+// Client defines the interface for a Client accessing SkillRegistry
 type Client interface {
 	ListSkills() ([]*agentregistry.Skill, error)
 	ListFrontmatters() ([]*agentregistry.Frontmatter, error)
@@ -48,12 +46,14 @@ type Client interface {
 }
 
 type client struct {
-	parent     string
-	namePrefix string
-	pageSize   int64
-	svc        *agentregistry.ProjectsLocationsSkillsService
+	parent                string
+	namePrefix            string
+	pageSize              int64
+	svc                   *agentregistry.ProjectsLocationsSkillsService
+	includeUnusableSkills bool
 }
 
+// NewClient returns a new client using SkillRegistry as a backend
 func NewClient(ctx context.Context, cfg Config) (Client, error) {
 	as, err := agentregistry.NewService(ctx)
 	if err != nil {
@@ -62,15 +62,21 @@ func NewClient(ctx context.Context, cfg Config) (Client, error) {
 
 	svc := agentregistry.NewProjectsLocationsSkillsService(as)
 	return &client{
-		svc:        svc,
-		pageSize:   40,
-		parent:     fmt.Sprintf(`projects/%v/locations/%v`, cfg.ProjectID, cfg.Location),
-		namePrefix: fmt.Sprintf(`projects/%v/locations/`, cfg.ProjectID),
+		svc:                   svc,
+		pageSize:              40,
+		parent:                fmt.Sprintf(`projects/%v/locations/%v`, cfg.ProjectID, cfg.Location),
+		namePrefix:            fmt.Sprintf(`projects/%v/locations/`, cfg.ProjectID),
+		includeUnusableSkills: cfg.IncludeUnusableSkills,
 	}, nil
 }
 
 func (c *client) ResourceID(name string) string {
 	return fmt.Sprintf("%v/skills/%v", c.parent, name)
+}
+
+// isUsableSkill reports whether a skill in the given state can be read.
+func isUsableSkill(state string) bool {
+	return state == "STATE_ACTIVE" || state == "STATE_DEPRECATED"
 }
 
 // iterateDo iterates over the skills using acc to accumulated the data. acc can return false to stop the iteration
@@ -88,6 +94,9 @@ func (c *client) iterateDo(acc func(*agentregistry.Skill) (bool, error)) error {
 		pageToken = resp.NextPageToken
 		cont := true
 		for _, sk := range resp.Skills {
+			if !c.includeUnusableSkills && !isUsableSkill(sk.State) {
+				continue
+			}
 			cont, err = acc(sk)
 			if err != nil {
 				return fmt.Errorf("acc failed: %w", err)
@@ -114,7 +123,8 @@ func (c *client) GetZip(rev string) (*zip.Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot download the revision: %w", err)
 	}
-	defer resp.Body.Close()
+	// ignore the error on Close
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the revision: %w", err)
@@ -181,7 +191,7 @@ func (c *client) GetRevision(rev string) (*agentregistry.SkillRevision, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot download the revision: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the revision: %w", err)
@@ -235,7 +245,7 @@ func (c *client) FindSkills(searchType, query string) ([]*agentregistry.Frontmat
 func (c *client) ListFrontmatters() ([]*agentregistry.Frontmatter, error) {
 	res := make([]*agentregistry.Frontmatter, 0)
 
-	c.iterateDo(func(s *agentregistry.Skill) (bool, error) {
+	err := c.iterateDo(func(s *agentregistry.Skill) (bool, error) {
 		if s == nil {
 			return false, fmt.Errorf("skill cannot be nil")
 		}
@@ -261,16 +271,23 @@ func (c *client) ListFrontmatters() ([]*agentregistry.Frontmatter, error) {
 
 		return true, nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot iterate over the skills: %w", err)
+	}
+
 	return res, nil
 }
 
 func (c *client) ListSkills() ([]*agentregistry.Skill, error) {
 	res := make([]*agentregistry.Skill, 0)
 
-	c.iterateDo(func(s *agentregistry.Skill) (bool, error) {
+	err := c.iterateDo(func(s *agentregistry.Skill) (bool, error) {
 		res = append(res, s)
 		return true, nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot iterate over the skills: %w", err)
+	}
 
 	return res, nil
 }

@@ -20,15 +20,11 @@ import (
 	"io"
 	"log"
 
-	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 	"google.golang.org/api/option"
-)
 
-// skillResourceDirs are the top-level directories of a skill's filesystem that
-// hold addressable resources. See
-// https://agentskills.io/specification#directory-structure.
-var skillResourceDirs = []string{"assets", "references", "scripts"}
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+)
 
 // SkillRegistrySourceConfig configures a [skill.Source] backed by the Skill Registry.
 type SkillRegistrySourceConfig struct {
@@ -82,42 +78,21 @@ type SkillRegistrySource struct {
 
 // ListFrontmatters implements [skill.Source].
 func (s *SkillRegistrySource) ListFrontmatters(ctx context.Context) ([]*skill.Frontmatter, error) {
-	log.Printf("ListFrontmatters")
-	return s.FindFrontmatters(ctx, "private-kdroste-dice-thrower-04")
-}
-
-func (s *SkillRegistrySource) ListFrontmatters2(ctx context.Context) ([]*skill.Frontmatter, error) {
-	frs, err := s.client.ListFrontmatters()
+	lf, err := s.client.ListFrontmatters()
 	if err != nil {
 		return nil, fmt.Errorf("cannot list frontmatters: %w", err)
 	}
 
 	res := make([]*skill.Frontmatter, 0)
-	for _, f := range frs {
+	for _, f := range lf {
 		sf := s.toFrontmatter(f)
 		if sf == nil {
 			continue
 		}
 		res = append(res, sf)
 	}
-	return res, nil
-}
-
-func (s *SkillRegistrySource) FindFrontmatters(ctx context.Context, query string) ([]*skill.Frontmatter, error) {
-	log.Printf("FindFrontmatters: %v", query)
-	frs, err := s.client.FindFrontmatters(query)
-	if err != nil {
-		return nil, fmt.Errorf("cannot list frontmatters: %w", err)
-	}
-
-	res := make([]*skill.Frontmatter, 0)
-	for _, f := range frs {
-		sf := s.toFrontmatter(f)
-		if sf == nil {
-			continue
-		}
-		res = append(res, sf)
-	}
+	// log.Printf("ListFrontmatters")
+	// return s.FindFrontmatters(ctx, "private-kdroste-dice-thrower-04")
 	return res, nil
 }
 
@@ -135,7 +110,7 @@ func (s *SkillRegistrySource) toFrontmatter(f *agentregistry.Frontmatter) *skill
 }
 
 // ListResources implements [skill.Source].
-func (s *SkillRegistrySource) ListResources(ctx context.Context, name string, subpath string) ([]string, error) {
+func (s *SkillRegistrySource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
 	log.Printf("ListResources: %v, %v", name, subpath)
 	res := make([]string, 0)
 	zip, err := s.client.GetZip(name)
@@ -188,7 +163,7 @@ func (s *SkillRegistrySource) LoadInstructions(ctx context.Context, name string)
 			if err != nil {
 				return "", fmt.Errorf("cannot open SKILL.md: %w", err)
 			}
-			defer b.Close()
+			defer func() { _ = b.Close() }()
 			content, err := io.ReadAll(b)
 			if err != nil {
 				return "", fmt.Errorf("cannot read SKILL.md: %w", err)
@@ -206,7 +181,7 @@ func (s *SkillRegistrySource) LoadInstructions(ctx context.Context, name string)
 }
 
 // LoadResource implements [skill.Source].
-func (s *SkillRegistrySource) LoadResource(ctx context.Context, name string, resourcePath string) (io.ReadCloser, error) {
+func (s *SkillRegistrySource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
 	log.Printf("LoadResource: %v, %v", name, resourcePath)
 	zip, err := s.client.GetZip(name)
 	if err != nil {
@@ -219,12 +194,6 @@ func (s *SkillRegistrySource) LoadResource(ctx context.Context, name string, res
 		}
 	}
 	return nil, fmt.Errorf("cannot find the requested resource %v", resourcePath)
-}
-
-// isUsableSkill reports whether a skill in the given state can be read. An
-// empty state is assumed usable, as it only means the API did not report one.
-func isUsableSkill(state string) bool {
-	return state == "" //agentregistry.Active
 }
 
 // // LoadInstructions returns the Markdown body of the skill's SKILL.md, that is

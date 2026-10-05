@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package skillregistry provides the access to SkillRegistry on GCP.
+// You should use the cached version from [simplecache.NewCachedSkillRegistrySource]
 package skillregistry
 
 import (
@@ -24,6 +26,6 @@ type Cache interface {
 	ListFrontmatters() ([]*skill.Frontmatter, error)
 	LoadFrontmatter(name string) (*skill.Frontmatter, error)
 	LoadInstructions(name string) (string, error)
-	LoadResource(name string, resourcePath string) (string, error)
-	ListResources(name string, subpath string) ([]string, error)
+	LoadResource(name, resourcePath string) (string, error)
+	ListResources(name, subpath string) ([]string, error)
 }

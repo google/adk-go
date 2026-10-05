@@ -19,9 +19,10 @@ import (
 	"log"
 	"time"
 
+	agentregistry "google.golang.org/api/agentregistry/v1alpha"
+
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
-	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 )
 
 type dataCache struct {
