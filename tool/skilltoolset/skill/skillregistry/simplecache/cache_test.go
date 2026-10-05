@@ -577,6 +577,78 @@ func TestRunPeriodicalReloads(t *testing.T) {
 	})
 }
 
+func TestCacheStopAutorefresh(t *testing.T) {
+	t.Run("stops the periodic refresher", func(t *testing.T) {
+		c := newFullClient(t)
+		c.onList = make(chan struct{}, 8)
+		ca := &cache{
+			client:                  c,
+			frontmattersParallelism: 4,
+			updateInterval:          10 * time.Millisecond,
+			stop:                    make(chan struct{}),
+		}
+
+		done := make(chan struct{})
+		go func() {
+			ca.runPeriodicalReloads()
+			close(done)
+		}()
+
+		// Confirm the loop is running before stopping it (reset calls ListSkills).
+		select {
+		case <-c.onList:
+		case <-time.After(2 * time.Second):
+			t.Fatal("no periodic reload within 2s")
+		}
+
+		ca.StopAutorefresh()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("runPeriodicalReloads did not return after StopAutorefresh")
+		}
+	})
+
+	// Guards the sync.Once + close: repeated calls must neither panic (a second
+	// close of the channel) nor block (an unbuffered send with no receiver left).
+	t.Run("is safe to call more than once", func(t *testing.T) {
+		c := newFullClient(t)
+		ca := &cache{
+			client:                  c,
+			frontmattersParallelism: 4,
+			updateInterval:          time.Hour,
+			stop:                    make(chan struct{}),
+		}
+
+		done := make(chan struct{})
+		go func() {
+			ca.runPeriodicalReloads()
+			close(done)
+		}()
+
+		// Run the repeated stops off the test goroutine so a block trips the
+		// timeout instead of hanging the whole test binary.
+		returned := make(chan struct{})
+		go func() {
+			ca.StopAutorefresh()
+			ca.StopAutorefresh()
+			ca.StopAutorefresh()
+			close(returned)
+		}()
+		select {
+		case <-returned:
+		case <-time.After(2 * time.Second):
+			t.Fatal("StopAutorefresh blocked on a repeat call")
+		}
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("runPeriodicalReloads did not return after StopAutorefresh")
+		}
+	})
+}
+
 // Concurrent readers of one skill must share a single archive download and stay
 // race-free. Run under -race, this drives the cache's RLock read paths and the
 // per-skill lazy-load dedup at once.
