@@ -83,6 +83,14 @@ func TestStem_PluralCollapses(t *testing.T) {
 		"name":     "names",
 		"process":  "processes",
 		"status":   "statuses",
+		"database": "databases",
+		"case":     "cases",
+		"cache":    "caches",
+		"size":     "sizes",
+		"match":    "matches",
+		"box":      "boxes",
+		"use":      "uses",
+		"axe":      "axes",
 	} {
 		if got, want := tokenize(plural), tokenize(singular); !slices.Equal(got, want) {
 			t.Errorf("tokenize(%q) = %v, want %v", plural, got, want)

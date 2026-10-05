@@ -36,8 +36,8 @@ type scoredDoc struct {
 // the indices sorted by descending score. Documents with no query-term overlap
 // (score 0) are omitted. docs are pre-tokenized token bags.
 //
-// ponytail: IDF and length stats are rebuilt per call; add a catalog-keyed
-// cache if profiling shows this is a bottleneck.
+// IDF and length statistics are rebuilt on every call. A cache keyed on the
+// catalog would avoid that if profiling ever shows it matters.
 func rankBM25(query string, docs [][]string) []scoredDoc {
 	queryTerms := tokenize(query)
 	if len(queryTerms) == 0 || len(docs) == 0 {
@@ -112,16 +112,21 @@ func tokenize(s string) []string {
 	return tokens
 }
 
-// stem strips a trailing plural suffix so singular and plural forms of a word
-// match. It is intentionally minimal — not a full Porter stemmer. It covers the
-// common "-ies", sibilant "-es", and "-s" plurals while leaving non-plural
-// endings ("-ss", "-us") and short words untouched.
+// stem maps a word and its plural to the same token. It is intentionally
+// minimal — not a full Porter stemmer. It covers the common "-ies", sibilant
+// "-es", and "-s" plurals while leaving non-plural endings ("-ss", "-us") and
+// short words untouched. A sibilant "-es" plural is ambiguous ("processes" is
+// "process" plus "es", "databases" is "database" plus "s"), so singulars ending
+// in a sibilant plus "e" also drop the "e": both "database" and "databases"
+// become "databas".
 func stem(tok string) string {
 	switch {
 	case len(tok) > 4 && strings.HasSuffix(tok, "ies"):
 		return tok[:len(tok)-3] + "y" // policies -> policy, activities -> activity
 	case len(tok) > 4 && endsWithAny(tok, "ses", "xes", "zes", "ches", "shes"):
 		return tok[:len(tok)-2] // processes -> process, statuses -> status, boxes -> box
+	case len(tok) > 3 && endsWithAny(tok, "se", "xe", "ze", "che", "she"):
+		return tok[:len(tok)-1] // database -> databas, cache -> cach, size -> siz
 	case strings.HasSuffix(tok, "ss") || strings.HasSuffix(tok, "us"):
 		return tok // process, address, status, nexus — not plurals
 	case len(tok) > 3 && strings.HasSuffix(tok, "s"):
