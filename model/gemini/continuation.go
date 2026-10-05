@@ -16,6 +16,7 @@ package gemini
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"reflect"
 	"slices"
@@ -30,7 +31,7 @@ import (
 // CONTINUATION and a continuation token on the candidate. The model resends
 // the request with the output so far and the token until the generation
 // finishes, and returns one response with the joined content and the summed
-// usage, as adk-python, ADK Java and ADK Kotlin do. A response stopped by
+// usage, as ADK Java and ADK Kotlin do. A response stopped by
 // maxOutputTokens is not resumed, since the API applies maxOutputTokens to the
 // whole generation.
 
@@ -159,54 +160,77 @@ func (c *continuation) nextRequest(token []byte) ([]*genai.Content, *genai.Gener
 	return contents, config
 }
 
-// appendParts appends copies of next to parts, joining text the way the
-// streaming aggregator does: consecutive non-empty text of the same kind
-// becomes one part, keeping the first thought signature. Copies keep a resend
-// from carrying anything set on the parts after they were received, such as
-// client function call IDs. A part with no text and nothing else but the
-// thought flag and a thought signature, such as the one a stream can end with,
-// is dropped: genai omits empty text, so the part would encode with no data,
-// which the API rejects with a 400. ADK Java drops such a part only when it
-// carries no signature, since it sends the empty text.
+// appendParts appends copies of next to parts, joining text: consecutive
+// non-empty text of the same kind becomes one part, and an empty part with
+// only a thought signature, which is how a paused stream closes its text,
+// joins onto the text before it. The later signature wins. A resend and the
+// final response so carry one part per run of text rather than gaining two
+// parts per pause. ADK Java and ADK Kotlin keep the signature part separate and
+// the first signature instead. The copies share no memory with next, so a
+// resend carries the parts as the model sent them even after a consumer edits
+// the ones ADK yielded, a function call's arguments included.
+//
+// A part with no text and nothing else but the thought flag, such as the one a
+// stream can end with, is dropped. genai omits empty text, so the part would
+// encode as {} or {"thought": true}, which the API rejects with a 400. A
+// signature-only part that follows no text is kept: the API accepts it.
 func appendParts(parts, next []*genai.Part) []*genai.Part {
 	for _, p := range next {
 		if p == nil || isEmpty(p) {
 			continue
 		}
-		if n := len(parts); n > 0 && isText(parts[n-1]) && isText(p) && parts[n-1].Thought == p.Thought {
+		if n := len(parts); n > 0 && canJoin(parts[n-1], p) {
 			joined := *parts[n-1]
 			joined.Text += p.Text
-			if len(joined.ThoughtSignature) == 0 {
-				joined.ThoughtSignature = p.ThoughtSignature
+			if len(p.ThoughtSignature) > 0 {
+				joined.ThoughtSignature = slices.Clone(p.ThoughtSignature)
 			}
 			parts[n-1] = &joined
 			continue
 		}
-		cp := *p
-		if p.FunctionCall != nil {
-			fc := *p.FunctionCall
-			cp.FunctionCall = &fc
-		}
-		parts = append(parts, &cp)
+		parts = append(parts, copyPart(p))
 	}
 	return parts
 }
 
-// isText reports whether p is non-empty text with nothing else set but the
-// thought flag and a thought signature.
-func isText(p *genai.Part) bool {
-	return p.Text != "" && onlyText(p)
+// canJoin reports whether second continues the text first started.
+func canJoin(first, second *genai.Part) bool {
+	if first.Text == "" || !onlyText(first) || !onlyText(second) {
+		return false
+	}
+	if second.Text == "" {
+		return len(second.ThoughtSignature) > 0
+	}
+	return first.Thought == second.Thought
 }
 
-// isEmpty reports whether p has no text and nothing else set but the thought
-// flag and a thought signature.
-func isEmpty(p *genai.Part) bool {
-	return p.Text == "" && onlyText(p)
+// copyPart returns a copy of p that shares no memory with it. p was decoded
+// from a response, so encoding it again loses nothing, and the copy covers
+// every field genai.Part has or gains. A part that fails to encode, which
+// decoded JSON cannot produce, is copied one level deep.
+func copyPart(p *genai.Part) *genai.Part {
+	if data, err := json.Marshal(p); err == nil {
+		var cp genai.Part
+		if json.Unmarshal(data, &cp) == nil {
+			return &cp
+		}
+	}
+	cp := *p
+	return &cp
 }
 
+// onlyText reports whether p has nothing set but text, the thought flag and a
+// thought signature.
 func onlyText(p *genai.Part) bool {
 	rest := *p
 	rest.Text, rest.Thought, rest.ThoughtSignature = "", false, nil
+	return reflect.ValueOf(rest).IsZero()
+}
+
+// isEmpty reports whether p has nothing set but the thought flag.
+func isEmpty(p *genai.Part) bool {
+	rest := *p
+	rest.Thought = false
 	return reflect.ValueOf(rest).IsZero()
 }
 

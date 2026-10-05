@@ -199,6 +199,10 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 		if closeResult := aggregator.Close(); closeResult != nil {
 			if c.resumed() {
 				closeResult.UsageMetadata = c.usage
+				if closeResult.Content != nil {
+					// Joins the text each pause split, as the unary path does.
+					closeResult.Content = &genai.Content{Role: closeResult.Content.Role, Parts: appendParts(nil, closeResult.Content.Parts)}
+				}
 			}
 			yield(closeResult, nil)
 		}

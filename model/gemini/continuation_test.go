@@ -317,15 +317,51 @@ func TestContinuation_GenerateStreamGivesUp(t *testing.T) {
 	checkRequests(t, api, []string{"", "t1"}, []string{"", "one "})
 }
 
+// pausedWith returns a candidate that pauses with token after parts.
+func pausedWith(token string, parts ...map[string]any) map[string]any {
+	ps := make([]any, len(parts))
+	for i, p := range parts {
+		ps[i] = p
+	}
+	return map[string]any{
+		"content":           map[string]any{"role": "model", "parts": ps},
+		"finishReason":      "CONTINUATION",
+		"continuationToken": base64.StdEncoding.EncodeToString([]byte(token)),
+	}
+}
+
+// resentOutput returns the parts of the output so far that the second request
+// carried, as JSON values.
+func resentOutput(t *testing.T, api *fakeContinuationAPI) []any {
+	t.Helper()
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.bodies) != 2 {
+		t.Fatalf("sent %d requests, want 2", len(api.bodies))
+	}
+	var resend struct {
+		Contents []struct {
+			Parts []any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal([]byte(api.bodies[1]), &resend); err != nil || len(resend.Contents) != 2 {
+		t.Fatalf("resend %s, want the original contents and the output so far", api.bodies[1])
+	}
+	return resend.Contents[1].Parts
+}
+
 // TestContinuation_ResendCopiesParts checks that a resend carries the parts as
-// the model sent them, not as a consumer changed them in the meantime, as the
-// flow does when it gives a function call an ID.
+// the model sent them, not as a consumer changed them in the meantime: the flow
+// gives a function call an ID, and an after-model callback may edit its
+// arguments or a part's data.
 func TestContinuation_ResendCopiesParts(t *testing.T) {
-	call := map[string]any{"content": map[string]any{"role": "model", "parts": []any{
-		map[string]any{"functionCall": map[string]any{"name": "lookup", "args": map[string]any{}}},
-	}}, "finishReason": "CONTINUATION", "continuationToken": base64.StdEncoding.EncodeToString([]byte("t1"))}
 	api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
-		"":   {call},
+		"": {pausedWith("t1",
+			map[string]any{"functionCall": map[string]any{"name": "lookup", "args": map[string]any{
+				"q": "a", "secret": "s", "filter": map[string]any{"region": "eu"},
+			}}},
+			map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "AQID"}},
+		)},
 		"t1": {candidate("done", "STOP", "")},
 	}}
 	for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), true) {
@@ -336,54 +372,101 @@ func TestContinuation_ResendCopiesParts(t *testing.T) {
 			continue
 		}
 		for _, p := range resp.Content.Parts {
-			if p.FunctionCall != nil {
-				p.FunctionCall.ID = "client-id"
+			if fc := p.FunctionCall; fc != nil {
+				fc.ID = "client-id"
+				delete(fc.Args, "secret")
+				if filter, ok := fc.Args["filter"].(map[string]any); ok {
+					filter["region"] = "us"
+				}
+			}
+			if b := p.InlineData; b != nil && len(b.Data) > 0 {
+				b.Data[0] = 9
 			}
 		}
 	}
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	if len(api.bodies) != 2 {
-		t.Fatalf("sent %d requests, want 2", len(api.bodies))
+	want := []any{
+		map[string]any{"functionCall": map[string]any{"name": "lookup", "args": map[string]any{
+			"q": "a", "secret": "s", "filter": map[string]any{"region": "eu"},
+		}}},
+		map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "AQID"}},
 	}
-	if !strings.Contains(api.bodies[1], `"lookup"`) || strings.Contains(api.bodies[1], "client-id") {
-		t.Errorf("the resend carried %s, want the function call without the ID set after it arrived", api.bodies[1])
+	if diff := cmp.Diff(want, resentOutput(t, api)); diff != "" {
+		t.Errorf("output so far in the resend (-want +got):\n%s", diff)
 	}
 }
 
-// TestContinuation_ResendDropsEmptyParts checks that a resend leaves out a part
-// with no text and no data but a thought signature, such as the one a stream
-// can end with: genai encodes it as a part with no data, which the API rejects.
-func TestContinuation_ResendDropsEmptyParts(t *testing.T) {
-	end := map[string]any{"content": map[string]any{"role": "model", "parts": []any{
-		map[string]any{"thoughtSignature": base64.StdEncoding.EncodeToString([]byte("sig"))},
-	}}, "finishReason": "CONTINUATION", "continuationToken": base64.StdEncoding.EncodeToString([]byte("t1"))}
-	api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
-		"":   {candidate("one ", "", ""), end},
-		"t1": {candidate("two", "STOP", "")},
-	}}
-	for _, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), true) {
-		if err != nil {
-			t.Fatalf("GenerateContent: %v", err)
-		}
+// TestContinuation_PauseClosingParts checks the parts a paused stream can end
+// with: the empty ones, which genai encodes as {} or {"thought": true} and the
+// API rejects, are left out of the resend, and the signature-only one joins
+// onto the text it closes, in the resend and in the final response of both
+// modes.
+func TestContinuation_PauseClosingParts(t *testing.T) {
+	sig := base64.StdEncoding.EncodeToString([]byte("sig"))
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
+				"": {pausedWith("t1",
+					map[string]any{"text": "one "},
+					map[string]any{"text": "", "thoughtSignature": sig},
+					map[string]any{"text": ""},
+					map[string]any{"text": "", "thought": true},
+				)},
+				"t1": {candidate("two", "STOP", "")},
+			}}
+			var final *model.LLMResponse
+			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+				if !resp.Partial {
+					final = resp
+				}
+			}
+			want := []any{map[string]any{"text": "one ", "thoughtSignature": sig}}
+			if diff := cmp.Diff(want, resentOutput(t, api)); diff != "" {
+				t.Errorf("output so far in the resend (-want +got):\n%s", diff)
+			}
+			if final == nil {
+				t.Fatal("no final response")
+			}
+			wantContent := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{Text: "one two", ThoughtSignature: []byte("sig")},
+			}}
+			if diff := cmp.Diff(wantContent, final.Content); diff != "" {
+				t.Errorf("final content (-want +got):\n%s", diff)
+			}
+		})
 	}
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	if len(api.bodies) != 2 {
-		t.Fatalf("sent %d requests, want 2", len(api.bodies))
-	}
-	var resend struct {
-		Contents []struct {
-			Parts []map[string]any `json:"parts"`
-		} `json:"contents"`
-	}
-	if err := json.Unmarshal([]byte(api.bodies[1]), &resend); err != nil || len(resend.Contents) != 2 {
-		t.Fatalf("resend %s, want the original contents and the output so far", api.bodies[1])
-	}
-	for _, p := range resend.Contents[1].Parts {
-		if p["text"] == nil {
-			t.Errorf("the resend's output so far has part %v, want only text parts", p)
-		}
+}
+
+// TestContinuation_LeavesRequestUnchanged checks that resuming a generation
+// does not write the token or the resend's retry options into the caller's
+// request.
+func TestContinuation_LeavesRequestUnchanged(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			}}
+			req := continuationRequest()
+			req.Config = &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{}}
+			for _, err := range newContinuationModel(t, api).GenerateContent(t.Context(), req, stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+			}
+			if diff := cmp.Diff(continuationRequest().Contents, req.Contents); diff != "" {
+				t.Errorf("request contents after the call (-want +got):\n%s", diff)
+			}
+			if req.Config.ContinuationToken != nil {
+				t.Errorf("request config has continuation token %q after the call, want none", req.Config.ContinuationToken)
+			}
+			if req.Config.HTTPOptions.RetryOptions != nil {
+				t.Errorf("request config has retry options %+v after the call, want none", req.Config.HTTPOptions.RetryOptions)
+			}
+			checkRequests(t, api, []string{"", "t1"}, []string{"", "one "})
+		})
 	}
 }
 
@@ -443,24 +526,45 @@ func TestAppendParts(t *testing.T) {
 			want: []*genai.Part{{Text: "ab", Thought: true}, {Text: "c"}, {Text: "d", Thought: true}},
 		},
 		{
-			name: "first signature kept",
+			name: "later signature wins",
 			next: []*genai.Part{{Text: "a", ThoughtSignature: sig1}, {Text: "b", ThoughtSignature: sig2}},
-			want: []*genai.Part{{Text: "ab", ThoughtSignature: sig1}},
-		},
-		{
-			name: "later signature taken when the first part has none",
-			next: []*genai.Part{{Text: "a"}, {Text: "b", ThoughtSignature: sig2}},
 			want: []*genai.Part{{Text: "ab", ThoughtSignature: sig2}},
 		},
 		{
-			name: "function call not joined",
-			next: []*genai.Part{{Text: "a"}, {FunctionCall: call}, {Text: "b"}},
-			want: []*genai.Part{{Text: "a"}, {FunctionCall: call}, {Text: "b"}},
+			name: "earlier signature kept when the later part has none",
+			next: []*genai.Part{{Text: "a", ThoughtSignature: sig1}, {Text: "b"}},
+			want: []*genai.Part{{Text: "ab", ThoughtSignature: sig1}},
+		},
+		{
+			name: "signature part closing each pause joins onto its text",
+			next: []*genai.Part{
+				{Text: "a"},
+				{ThoughtSignature: sig1},
+				{Text: "b"},
+				{ThoughtSignature: sig2},
+				{Text: "c"},
+			},
+			want: []*genai.Part{{Text: "abc", ThoughtSignature: sig2}},
+		},
+		{
+			name: "signature part joins onto thoughts too",
+			next: []*genai.Part{{Text: "a", Thought: true}, {Thought: true, ThoughtSignature: sig1}, {Text: "b"}},
+			want: []*genai.Part{{Text: "a", Thought: true, ThoughtSignature: sig1}, {Text: "b"}},
+		},
+		{
+			name: "function call not joined, signed or not",
+			next: []*genai.Part{{Text: "a"}, {FunctionCall: call}, {Text: "b"}, {FunctionCall: call, ThoughtSignature: sig1}},
+			want: []*genai.Part{{Text: "a"}, {FunctionCall: call}, {Text: "b"}, {FunctionCall: call, ThoughtSignature: sig1}},
+		},
+		{
+			name: "signature part after no text kept",
+			next: []*genai.Part{{FunctionCall: call}, {ThoughtSignature: sig1}, {Text: "a"}},
+			want: []*genai.Part{{FunctionCall: call}, {ThoughtSignature: sig1}, {Text: "a"}},
 		},
 		{
 			name: "empty parts dropped",
-			next: []*genai.Part{nil, {}, {Thought: true}, {ThoughtSignature: sig1}, {Text: "a"}},
-			want: []*genai.Part{{Text: "a"}},
+			next: []*genai.Part{nil, {}, {Thought: true}, {Text: "a"}, {}, {Text: "b"}},
+			want: []*genai.Part{{Text: "ab"}},
 		},
 	}
 	for _, tc := range tests {
