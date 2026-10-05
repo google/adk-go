@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
@@ -99,9 +100,24 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 	defer r.mu.RUnlock()
 
 	res := make([]string, 0)
+
+	// handle '.' as if there was no prefix at all
+	if subpath == "." || subpath == "/" || subpath == "\\" {
+		subpath = ""
+	}
 	for _, r := range r.res {
-		if strings.HasPrefix(r.path, subpath) {
+		// we want to add either explicit file of subtree (if subpath looks like a folder)
+		if r.path == subpath {
+			// got an explict match
 			res = append(res, r.path)
+			continue
+		}
+		if strings.HasPrefix(r.path, subpath) {
+			// check  subtree + "\\" or "/""
+			if strings.HasPrefix(r.path, subpath+"\\") || strings.HasPrefix(r.path, subpath+"/") {
+				res = append(res, r.path)
+				continue
+			}
 		}
 	}
 
@@ -129,7 +145,7 @@ func (r *resources) getResource(rev, path string) (*resource, error) {
 	// loaded
 	res, ok := r.pathToRes[path]
 	if !ok {
-		return nil, fmt.Errorf("cannot find %v", path)
+		return nil, fmt.Errorf("cannot find %v: %w", path, skill.ErrResourceNotFound)
 	}
 
 	log.Printf("getResource done")
