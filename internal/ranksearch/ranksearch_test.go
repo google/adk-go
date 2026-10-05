@@ -244,8 +244,9 @@ func TestRank_SelectByName(t *testing.T) {
 	}
 }
 
-// TestRank_SelectSkipsAlreadyAvailable verifies select silently skips names that
-// are already available rather than reporting them as not found.
+// TestRank_SelectSkipsAlreadyAvailable verifies select leaves already-available
+// names out of the matches and reports them as already available, not as not
+// found.
 func TestRank_SelectSkipsAlreadyAvailable(t *testing.T) {
 	items := makeItems(
 		[2]string{"patch_book", "patch a book"},
@@ -392,5 +393,41 @@ func TestRank_SelectReportsUnknownNameOnce(t *testing.T) {
 	_, note := Rank(makeItems([2]string{"list_books", "list books"}), "select:ghost,ghost", nil, testCfg())
 	if want := "tools not found: ghost"; note != want {
 		t.Errorf("Rank() note = %q, want %q", note, want)
+	}
+}
+
+// TestRank_AlreadyAvailableNoteIsCapped checks that a ranked query whose matches
+// are all already available names at most MaxResults of them.
+func TestRank_AlreadyAvailableNoteIsCapped(t *testing.T) {
+	items := makeItems(
+		[2]string{"list_books", "list books"},
+		[2]string{"list_authors", "list authors"},
+		[2]string{"list_notes", "list notes"},
+	)
+	available := map[string]bool{"list_books": true, "list_authors": true, "list_notes": true}
+	cfg := testCfg()
+	cfg.MaxResults = 2
+	_, note := Rank(items, "list", available, cfg)
+	_, listed, ok := strings.Cut(note, "already available: ")
+	if !ok {
+		t.Fatalf("Rank() note = %q, want it to name the already-available tools", note)
+	}
+	if got := strings.Split(listed, ", "); len(got) != 2 {
+		t.Errorf("Rank() note names %v, want 2 of the 3 matching tools", got)
+	}
+}
+
+// TestRank_SelectWithNoNamesSaysNothingMatched checks that a select: query that
+// names nothing gets the no-match note rather than an empty one.
+func TestRank_SelectWithNoNamesSaysNothingMatched(t *testing.T) {
+	items := makeItems([2]string{"list_books", "list books"})
+	for _, query := range []string{"select:", "select: , "} {
+		matches, note := Rank(items, query, nil, testCfg())
+		if len(matches) != 0 {
+			t.Errorf("Rank(%q) = %v, want no matches", query, names(matches))
+		}
+		if want := "no tools matched; try broader keywords or a different term"; note != want {
+			t.Errorf("Rank(%q) note = %q, want %q", query, note, want)
+		}
 	}
 }
