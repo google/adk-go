@@ -16,26 +16,91 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"time"
+
+	agentskillregistry "google.golang.org/api/agentregistry/v1alpha"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/full"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/skilltoolset"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
-	"google.golang.org/genai"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry/simplecache"
 )
+
+type faultyClient struct {
+	c skillregistry.Client
+}
+
+// FindFrontmatters implements [skillregistry.Client].
+func (f *faultyClient) FindFrontmatters(query string) ([]*agentskillregistry.Frontmatter, error) {
+	panic("unimplemented")
+}
+
+// GetRevision implements [skillregistry.Client].
+func (f *faultyClient) GetRevision(rev string) (*agentskillregistry.SkillRevision, error) {
+	panic("unimplemented")
+}
+
+// GetSkill implements [skillregistry.Client].
+func (f *faultyClient) GetSkill(name string) (*agentskillregistry.Skill, error) {
+	return f.c.GetSkill(name)
+}
+
+// GetZip implements [skillregistry.Client].
+func (f *faultyClient) GetZip(rev string) (*zip.Reader, error) {
+	panic("unimplemented")
+}
+
+// ListFrontmatters implements [skillregistry.Client].
+func (f *faultyClient) ListFrontmatters() ([]*agentskillregistry.Frontmatter, error) {
+	panic("unimplemented")
+}
+
+// ListSkills implements [skillregistry.Client].
+func (f *faultyClient) ListSkills() ([]*agentskillregistry.Skill, error) {
+	return f.c.ListSkills()
+}
+
+// ParseSkillName implements [skillregistry.Client].
+func (f *faultyClient) ParseSkillName(name string) (projectID string, location string, skillName string, resErr error) {
+	panic("unimplemented")
+}
+
+// ResourceID implements [skillregistry.Client].
+func (f *faultyClient) ResourceID(name string) string {
+	panic("unimplemented")
+}
+
+var _ skillregistry.Client = (*faultyClient)(nil)
+
+func NewFaultyClient(c skillregistry.Client) skillregistry.Client {
+	return &faultyClient{c: c}
+}
 
 func main() {
 	ctx := context.Background()
 
-	err := Process7(ctx)
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if projectID == "" {
+		log.Fatalf("Env var GOOGLE_CLOUD_PROJECT is not set")
+	}
+	location := os.Getenv("GOOGLE_CLOUD_LOCATION")
+	if location == "" {
+		log.Fatalf("Env var GOOGLE_CLOUD_LOCATION is not set")
+	}
+
+	err := Process10(ctx, projectID, location)
 	if err != nil {
 		panic(err)
 	}
@@ -43,24 +108,278 @@ func main() {
 	// private-kdroste-test-skill
 }
 
-func Process7(ctx context.Context) error {
-	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+func Process10(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
 	}
 
-	cache, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	cache, err := simplecache.NewCache(simplecache.CacheConfig{Client: c, UpdateInterval: 10 * time.Second})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
 	}
-	cache.IntialRead()
 
-	source, err := skillregistry.NewCachedSkillRegistrySource(ctx, cache)
+	type AvgTime struct {
+		activate   bool
+		deactivate bool
+		workerID   int
+		generation int
+		nSamples   int
+		sum        time.Duration
+		max        time.Duration
+	}
+
+	rampUpDurationInMillisec := 30000
+	nWorkers := 40
+	nRepInGen := 100000
+	maxGen := 100
+	startTime := time.Now()
+
+	partialRes := make(chan AvgTime)
+	for i := 0; i < nWorkers; i++ {
+		go func(workerID int) {
+			// rampup
+			sd := time.Duration(i*rampUpDurationInMillisec/nWorkers) * time.Millisecond
+			time.Sleep(sd)
+			// time.Sleep(time.Duration( float64(workerID)/float64(nWorkers)) * rampUpDuration)
+
+			partialRes <- AvgTime{
+				workerID: workerID,
+				activate: true,
+			}
+
+			for gen := 0; gen < maxGen; gen++ {
+				totalDuration := time.Duration(0)
+				maxDuration := time.Duration(0)
+				for i := 0; i < nRepInGen; i++ {
+					lastTime := time.Now()
+					_, err := cache.LoadInstructions("private-kdroste-dice-thrower-04")
+					// _, err := cache.LoadFrontmatter("private-kdroste-dice-thrower-04")
+					if err != nil {
+						log.Printf("cannot LoadFrontmatter: %v", err)
+					}
+					n := time.Now()
+					d := n.Sub(lastTime)
+					if d > maxDuration {
+						maxDuration = d
+					}
+					totalDuration += d
+				}
+				// got generation data
+				partialRes <- AvgTime{
+					workerID:   workerID,
+					generation: gen,
+					nSamples:   nRepInGen,
+					sum:        totalDuration,
+					max:        maxDuration,
+				}
+			}
+			partialRes <- AvgTime{
+				workerID:   workerID,
+				deactivate: true,
+			}
+		}(i)
+	}
+
+	totalSum := time.Duration(0)
+	nSamples := 0
+	maxDuration := time.Duration(0)
+	lastPrint := time.Now()
+	workersActive := map[int]bool{}
+	for res := range partialRes {
+		if res.activate {
+			workersActive[res.workerID] = true
+			continue
+		}
+		if res.deactivate {
+			delete(workersActive, res.workerID)
+			continue
+		}
+		totalSum += res.sum
+		nSamples += res.nSamples
+		print := false
+		if res.max > maxDuration {
+			maxDuration = res.max
+			print = true
+		}
+		if time.Since(lastPrint) > 1*time.Second {
+			print = true
+		}
+		if !print {
+			continue
+		}
+		lastPrint = time.Now()
+
+		log.Printf("res: {workerID: %5v generation: %5v avg: %.8f max: %.8f}, res totals: {sum: %20v nSamples: %10v avg: %.8f [s] max: %.8f [s]}  active: %4v totalTime: %v",
+			res.workerID, res.generation, res.sum.Seconds()/float64(res.nSamples), res.max.Seconds(),
+			totalSum, nSamples, totalSum.Seconds()/float64(nSamples), maxDuration.Seconds(),
+			len(workersActive),
+			time.Since(startTime),
+		)
+	}
+	return nil
+}
+
+func Process9(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	cache, err := simplecache.NewCache(simplecache.CacheConfig{Client: c, UpdateInterval: 10 * time.Second})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+
+	type AvgTime struct {
+		activate   bool
+		deactivate bool
+		workerID   int
+		generation int
+		nSamples   int
+		sum        time.Duration
+		max        time.Duration
+	}
+
+	rampUpDurationInMillisec := 30000
+	nWorkers := 40
+	nRepInGen := 100000
+	maxGen := 100
+	startTime := time.Now()
+
+	partialRes := make(chan AvgTime)
+	for i := 0; i < nWorkers; i++ {
+		go func(workerID int) {
+			// rampup
+			sd := time.Duration(i*rampUpDurationInMillisec/nWorkers) * time.Millisecond
+			time.Sleep(sd)
+			// time.Sleep(time.Duration( float64(workerID)/float64(nWorkers)) * rampUpDuration)
+
+			partialRes <- AvgTime{
+				workerID: workerID,
+				activate: true,
+			}
+
+			for gen := 0; gen < maxGen; gen++ {
+				totalDuration := time.Duration(0)
+				maxDuration := time.Duration(0)
+				for i := 0; i < nRepInGen; i++ {
+					lastTime := time.Now()
+					_, err := cache.LoadInstructions("private-kdroste-dice-thrower-04")
+					// _, err := cache.LoadFrontmatter("private-kdroste-dice-thrower-04")
+					if err != nil {
+						log.Printf("cannot LoadFrontmatter: %v", err)
+					}
+					n := time.Now()
+					d := n.Sub(lastTime)
+					if d > maxDuration {
+						maxDuration = d
+					}
+					totalDuration += d
+				}
+				// got generation data
+				partialRes <- AvgTime{
+					workerID:   workerID,
+					generation: gen,
+					nSamples:   nRepInGen,
+					sum:        totalDuration,
+					max:        maxDuration,
+				}
+			}
+			partialRes <- AvgTime{
+				workerID:   workerID,
+				deactivate: true,
+			}
+		}(i)
+	}
+
+	totalSum := time.Duration(0)
+	nSamples := 0
+	maxDuration := time.Duration(0)
+	lastPrint := time.Now()
+	workersActive := map[int]bool{}
+	for res := range partialRes {
+		if res.activate {
+			workersActive[res.workerID] = true
+			continue
+		}
+		if res.deactivate {
+			delete(workersActive, res.workerID)
+			continue
+		}
+		totalSum += res.sum
+		nSamples += res.nSamples
+		print := false
+		if res.max > maxDuration {
+			maxDuration = res.max
+			print = true
+		}
+		if time.Since(lastPrint) > 1*time.Second {
+			print = true
+		}
+		if !print {
+			continue
+		}
+		lastPrint = time.Now()
+
+		log.Printf("res: {workerID: %5v generation: %5v avg: %.8f max: %.8f}, res totals: {sum: %20v nSamples: %10v avg: %.8f [s] max: %.8f [s]}  active: %4v totalTime: %v",
+			res.workerID, res.generation, res.sum.Seconds()/float64(res.nSamples), res.max.Seconds(),
+			totalSum, nSamples, totalSum.Seconds()/float64(nSamples), maxDuration.Seconds(),
+			len(workersActive),
+			time.Since(startTime),
+		)
+	}
+	return nil
+}
+
+func Process8(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	cache, err := simplecache.NewCache(simplecache.CacheConfig{Client: c, UpdateInterval: 15 * time.Second})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+	lastTime := time.Now()
+	for {
+		_, err := cache.LoadInstructions("private-kdroste-dice-thrower-04")
+		// _, err := cache.LoadFrontmatter("private-kdroste-dice-thrower-04")
+		n := time.Now()
+		d := n.Sub(lastTime)
+		lastTime = n
+		if err != nil {
+			log.Printf("cannot LoadFrontmatter: %v", err)
+		} else {
+			log.Printf("got fm after: %v", d)
+		}
+		time.Sleep(1 * time.Second)
+	}
+	// time.Sleep(5 * time.Minute)
+}
+
+func Process7(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
+	}
+
+	cache, err := simplecache.NewCache(simplecache.CacheConfig{Client: c})
+	if err != nil {
+		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
+	}
+	err = cache.WarmUp()
+	if err != nil {
+		return fmt.Errorf("cannot cache.WarmUp: %w", err)
+	}
+
+	source, err := simplecache.NewCachedSkillRegistrySource(ctx, cache)
 	if err != nil {
 		return fmt.Errorf("cannot NewCachedSkillRegistrySource: %w", err)
 	}
 
-	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-3.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -71,6 +390,8 @@ func Process7(ctx context.Context) error {
 	if err != nil {
 		log.Fatalf("Failed to create skill toolset: %v", err)
 	}
+
+	ss := session.InMemoryService()
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "skills_agent",
@@ -84,7 +405,8 @@ func Process7(ctx context.Context) error {
 	}
 
 	config := &launcher.Config{
-		AgentLoader: agent.NewSingleLoader(a),
+		AgentLoader:    agent.NewSingleLoader(a),
+		SessionService: ss,
 	}
 
 	l := full.NewLauncher()
@@ -94,19 +416,22 @@ func Process7(ctx context.Context) error {
 	return nil
 }
 
-func Process6(ctx context.Context) error {
-	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+func Process6(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
 	}
 
-	cache, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	cache, err := simplecache.NewCache(simplecache.CacheConfig{Client: c})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
 	}
-	cache.IntialRead()
+	err = cache.WarmUp()
+	if err != nil {
+		return fmt.Errorf("cannot cache.WarmUp: %w", err)
+	}
 
-	cs, err := skillregistry.NewCachedSkillRegistrySource(ctx, cache)
+	cs, err := simplecache.NewCachedSkillRegistrySource(ctx, cache)
 	if err != nil {
 		return fmt.Errorf("cannot NewCachedSkillRegistrySource: %w", err)
 	}
@@ -124,7 +449,6 @@ func Process6(ctx context.Context) error {
 
 	f, err := cs.LoadFrontmatter(ctx, skillPath)
 	// f, err := cs.LoadFrontmatter(ctx, "private-kdroste-dice-thrower-04")
-
 	if err != nil {
 		return fmt.Errorf("cannot LoadFrontmatter: %w", err)
 	}
@@ -139,21 +463,21 @@ func Process6(ctx context.Context) error {
 	return nil
 }
 
-func Process5(ctx context.Context) error {
-	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+func Process5(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
 	}
 
-	tlc, err := skillregistry.NewCache(skillregistry.CacheConfig{Client: c})
+	tlc, err := simplecache.NewCache(simplecache.CacheConfig{Client: c})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewCache: %w", err)
 	}
 	log.Printf("tlc: %+v", tlc)
 
-	err = tlc.IntialRead()
+	err = tlc.WarmUp()
 	if err != nil {
-		return fmt.Errorf("cannot tlc.IntialRead: %w", err)
+		return fmt.Errorf("cannot cache.WarmUp: %w", err)
 	}
 
 	log.Printf("tlc after the initial read")
@@ -161,8 +485,8 @@ func Process5(ctx context.Context) error {
 	return nil
 }
 
-func Process(ctx context.Context) error {
-	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: "kdroste-adk-2025-12", Location: "global"}
+func Process(ctx context.Context, projectID, location string) error {
+	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: location}
 	source, err := skillregistry.NewSkillRegistrySource(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("cannot NewSkillRegistrySource: %w", err)
@@ -202,9 +526,8 @@ func Process(ctx context.Context) error {
 	return nil
 }
 
-func Process4(ctx context.Context) error {
-
-	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: "kdroste-adk-2025-12", Location: "global"})
+func Process4(ctx context.Context, projectID, location string) error {
+	c, err := skillregistry.NewClient(ctx, skillregistry.Config{ProjectID: projectID, Location: location})
 	if err != nil {
 		return fmt.Errorf("cannot skillregistry.NewClient: %w", err)
 	}
@@ -233,8 +556,8 @@ func Process4(ctx context.Context) error {
 	return nil
 }
 
-func Process3(ctx context.Context) error {
-	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: "kdroste-adk-2025-12", Location: "us"}
+func Process3(ctx context.Context, projectID string) error {
+	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: "us"}
 	src, err := skillregistry.NewSkillRegistrySource(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("cannot NewSkillRegistrySource: %w", err)
@@ -248,8 +571,8 @@ func Process3(ctx context.Context) error {
 	return nil
 }
 
-func Process2(ctx context.Context) error {
-	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: "kdroste-adk-2025-12", Location: "global"}
+func Process2(ctx context.Context, projectID, location string) error {
+	cfg := skillregistry.SkillRegistrySourceConfig{ProjectID: projectID, Location: location}
 	src, err := skillregistry.NewSkillRegistrySource(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("cannot NewSkillRegistrySource: %w", err)
