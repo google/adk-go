@@ -37,19 +37,40 @@ func captureNewGoogleOIDC(t *testing.T) *[]authn.GoogleOIDCConfig {
 }
 
 func TestAuthenticatorHandsFlagValuesToNewGoogleOIDC(t *testing.T) {
-	got := captureNewGoogleOIDC(t)
-	f := &Flags{audience: "https://svc.run.app", serviceAccounts: "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com"}
+	for _, tc := range []struct {
+		audience, serviceAccounts string
+		want                      authn.GoogleOIDCConfig
+	}{
+		{
+			audience:        "https://svc.run.app",
+			serviceAccounts: "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com",
+			want: authn.GoogleOIDCConfig{
+				Audience:               "https://svc.run.app",
+				AllowedServiceAccounts: []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"},
+			},
+		},
+		{
+			// A second audience, mixed case, and an entry with a trailing space.
+			audience:        "https://Trigger.Example/Path",
+			serviceAccounts: "c@p.iam.gserviceaccount.com ,d@p.iam.gserviceaccount.com",
+			want: authn.GoogleOIDCConfig{
+				Audience:               "https://Trigger.Example/Path",
+				AllowedServiceAccounts: []string{"c@p.iam.gserviceaccount.com", "d@p.iam.gserviceaccount.com"},
+			},
+		},
+	} {
+		t.Run(tc.audience, func(t *testing.T) {
+			got := captureNewGoogleOIDC(t)
+			f := &Flags{audience: tc.audience, serviceAccounts: tc.serviceAccounts}
 
-	a, err := f.Authenticator()
-	if err != nil || a == nil {
-		t.Fatalf("Authenticator() = %v, %v, want an authenticator", a, err)
-	}
-	want := []authn.GoogleOIDCConfig{{
-		Audience:               "https://svc.run.app",
-		AllowedServiceAccounts: []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"},
-	}}
-	if diff := cmp.Diff(want, *got); diff != "" {
-		t.Errorf("config handed to NewGoogleOIDC mismatch (-want +got):\n%s", diff)
+			a, err := f.Authenticator()
+			if err != nil || a == nil {
+				t.Fatalf("Authenticator() = %v, %v, want an authenticator", a, err)
+			}
+			if diff := cmp.Diff([]authn.GoogleOIDCConfig{tc.want}, *got); diff != "" {
+				t.Errorf("config handed to NewGoogleOIDC mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

@@ -425,7 +425,7 @@ func TestPrepareDockerfile_OmitsUnsetTriggerOIDCFlags(t *testing.T) {
 
 // dockerfileRejection is the part of the ValidateDockerfileSafe rejection
 // message that no other check in computeFlags produces.
-const dockerfileRejection = "not allowed in a value embedded in generated Dockerfile content"
+const dockerfileRejection = "(quote, backtick, backslash, or a control character)"
 
 // setValidTriggerOIDCPairs sets a valid OIDC pair on both triggers.
 func setValidTriggerOIDCPairs(f *deployCloudRunFlags) {

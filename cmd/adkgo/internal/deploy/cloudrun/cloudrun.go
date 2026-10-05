@@ -163,9 +163,11 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				if err := util.ValidateDockerfileSafe(t.trigger.oidcServiceAccounts, saFlag); err != nil {
 					return err
 				}
-				// The sublauncher refuses each of these at startup, which is
-				// only after a full build and deploy. triggerauth is internal
-				// to the launcher, so its checks are repeated here.
+				// An enabled trigger's sublauncher refuses each of these at
+				// startup, which is only after a full build and deploy.
+				// triggerauth is internal to the launcher, so its checks are
+				// repeated here. A disabled trigger is checked too, for the
+				// reason given for --a2a_agent_url above.
 				if (t.trigger.oidcAudience == "") != (t.trigger.oidcServiceAccounts == "") {
 					return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
 				}
