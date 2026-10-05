@@ -31,6 +31,7 @@ import (
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
+// New returns an error if neither Transport nor Endpoint is provided.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
@@ -69,6 +70,9 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
 		transport = &mcp.StreamableClientTransport{Endpoint: cfg.Endpoint}
+	}
+	if transport == nil {
+		return nil, fmt.Errorf("mcptoolset: set Config.Transport or Config.Endpoint")
 	}
 	if cfg.Auth == nil {
 		return transport, nil

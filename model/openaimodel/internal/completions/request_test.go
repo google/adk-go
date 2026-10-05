@@ -479,6 +479,7 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: shared.ErrUnsupportedMIMEType},
 		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: shared.ErrUnsupportedConfigField},
 		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "continuation token", cfg: &genai.GenerateContentConfig{ContinuationToken: []byte("token")}, want: shared.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
