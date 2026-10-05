@@ -23,6 +23,7 @@ import (
 // Cache is an interface which allows you to reset and query the cache
 type Cache interface {
 	WarmUp() error
+	StopAutorefresh()
 	ListFrontmatters() ([]*skill.Frontmatter, error)
 	LoadFrontmatter(name string) (*skill.Frontmatter, error)
 	LoadInstructions(name string) (string, error)

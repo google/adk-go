@@ -65,6 +65,7 @@ type cache struct {
 	frontmattersParallelism int                  // controlls the amount of workers reading frontmatters in parallel
 	updateInterval          time.Duration        // controlls how often the cache is refreshed
 	stop                    chan struct{}        // stop is controlling go routine runPeriodicalReset, allowing to stop the ticker
+	stopOnce                sync.Once
 }
 
 // NewCache returns a top level cache.
@@ -80,7 +81,9 @@ func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
 		updateInterval:          updateInterval,
 		stop:                    make(chan struct{}),
 		preloadMutex:            sync.Mutex{},
+		stopOnce:                sync.Once{},
 	}
+
 	if !cfg.SkipWarmUp {
 		err := c.WarmUp()
 		if err != nil {
@@ -108,6 +111,11 @@ func (c *cache) runPeriodicalReloads() {
 	}
 }
 
+// StopAutorefresh implements [skillregistry.Cache].
+func (c *cache) StopAutorefresh() {
+	c.stopOnce.Do(func() { close(c.stop) })
+}
+
 // ListFrontmatters implements [Cache].
 // Returns the list of all frontmatters. In case of ADK with SkillRegistry it requires
 // caching date - otherwise you would need to query the list first and then query each skill.
@@ -124,8 +132,8 @@ func (c *cache) ListFrontmatters() ([]*skill.Frontmatter, error) {
 // ListResources implements [Cache].
 func (c *cache) ListResources(name, subpath string) ([]string, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	s, ok := c.data.nameToSkill[name]
+	c.mu.RUnlock()
 	if !ok { // not found
 		return nil, skill.ErrSkillNotFound
 	}
@@ -141,8 +149,8 @@ func (c *cache) ListResources(name, subpath string) ([]string, error) {
 // LoadFrontmatter implements [Cache].
 func (c *cache) LoadFrontmatter(name string) (*skill.Frontmatter, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	s, ok := c.data.nameToSkill[name]
+	c.mu.RUnlock()
 	if !ok { // not found
 		return nil, skill.ErrSkillNotFound
 	}
@@ -152,9 +160,8 @@ func (c *cache) LoadFrontmatter(name string) (*skill.Frontmatter, error) {
 // LoadInstructions implements [Cache].
 func (c *cache) LoadInstructions(name string) (string, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	s, ok := c.data.nameToSkill[name]
+	c.mu.RUnlock()
 	if !ok { // not found
 		return "", skill.ErrSkillNotFound
 	}
@@ -172,9 +179,8 @@ func (c *cache) LoadInstructions(name string) (string, error) {
 // Zip has to be unpacked. All the content of the archive goes to the cache.
 func (c *cache) LoadResource(name, resourcePath string) (string, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	s, ok := c.data.nameToSkill[name]
+	c.mu.RUnlock()
 	if !ok { // not found
 		return "", skill.ErrSkillNotFound
 	}

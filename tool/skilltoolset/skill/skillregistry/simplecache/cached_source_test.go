@@ -57,6 +57,9 @@ var _ skillregistry.Cache = (*fakeCache)(nil)
 
 func (f *fakeCache) WarmUp() error { return nil }
 
+func (f *fakeCache) StopAutorefresh() {
+}
+
 func (f *fakeCache) ListFrontmatters() ([]*skill.Frontmatter, error) {
 	return f.frontmatters, f.listFMErr
 }
