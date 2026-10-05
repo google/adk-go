@@ -421,6 +421,25 @@ func TestGatingToolset_DegenerateGuard(t *testing.T) {
 	checkNames(t, names, []string{"get_current_time", "show_help"}, []string{ToolName})
 }
 
+// TestGatingToolset_DiscoveredCoreToolIsListedOnce checks that a core tool
+// whose name is also in the discovery state, as after an app moves a discovered
+// tool into CoreToolNames, comes back from Tools once. A second copy would fail
+// every later model step with a duplicate-tool error.
+func TestGatingToolset_DiscoveredCoreToolIsListedOnce(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"get_current_time", "get time"},
+		toolDef{"list_books", "list books"},
+	)}
+	ts := mustNew(t, base, Config{CoreToolNames: []string{"get_current_time"}})
+
+	state := discoveredState(t, "get_current_time", "list_books")
+
+	want := []string{ToolName, "get_current_time", "list_books"}
+	if diff := cmp.Diff(want, mustToolNames(t, ts, newCtx(state))); diff != "" {
+		t.Errorf("Tools() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestProcessRequest_LeavesToolPackingToTheFlow checks that ProcessRequest
 // does not pack discovered tools itself. Tools already returns them and the
 // flow packs everything Tools returns, so packing here too would fail the run
