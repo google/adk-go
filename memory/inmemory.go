@@ -202,9 +202,17 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 // extractWords returns the lowercase word tokens of text.
 //
 // Words are maximal runs of letters, digits and underscores, so punctuation
-// only ever separates tokens and never becomes part of one. This matches
-// adk-python's re.findall(r'\w+', text), keeping the two SDKs searchable over
-// the same text.
+// only ever separates tokens and never becomes part of one. That token
+// definition matches adk-python's re.findall(r'\w+', text)
+// (in_memory_memory_service.py:_extract_words_lower), which adk-python applies
+// to the query.
+//
+// Two pre-existing differences remain, both out of scope here: adk-python
+// indexes stored text with _extract_searchable_words, which also splits a token
+// that mixes scripts, so it matches "welcome" in "北京welcome" where the
+// substring fallback in SearchMemory does not; and adk-python NFC-normalizes
+// before tokenizing, so it matches a precomposed query against decomposed
+// stored text where this does not.
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 

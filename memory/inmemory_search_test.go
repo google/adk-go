@@ -200,19 +200,26 @@ func Test_inMemoryService_SearchMemory_Tokenization(t *testing.T) {
 		{name: "trailing punctuation", texts: []string{"The agent works great!"}, query: "great", want: []string{"0"}},
 		{name: "leading punctuation", texts: []string{"Error: connection timeout"}, query: "error", want: []string{"0"}},
 		{name: "comma separated", texts: []string{"error, timeout, retry"}, query: "error", want: []string{"0"}},
-		{name: "comma separated trailing", texts: []string{"error, timeout, retry"}, query: "retry", want: []string{"0"}},
+		{name: "comma separated last item", texts: []string{"error, timeout, retry"}, query: "retry", want: []string{"0"}},
 		{name: "quoted", texts: []string{`he said "great"`}, query: "great", want: []string{"0"}},
 		{name: "tab and newline separators", texts: []string{"Error: connection\ntimeout!\tPlease retry."}, query: "retry", want: []string{"0"}},
 		{name: "repeated spaces", texts: []string{"deploy    ready"}, query: "ready", want: []string{"0"}},
 		// Tokenization is applied to stored text and query alike, so a
 		// hyphenated query still matches text that stores it hyphenated.
 		{name: "hyphenated query still matches", texts: []string{"use the built-in flag"}, query: "built-in", want: []string{"0"}},
+		// A hyphen in the query separates tokens there too, so the query also
+		// reaches text that spells the word without the hyphen. Widened
+		// reach, at the cost of matching either half on its own.
+		{name: "hyphenated query matches separated text", texts: []string{"the flag is built in"}, query: "built-in", want: []string{"0"}},
 		{name: "hyphenated identifier matches", texts: []string{"see CVE-2024-3094 for detail"}, query: "CVE-2024-3094", want: []string{"0"}},
 		{name: "digits stay searchable", texts: []string{"recovered after 30 seconds"}, query: "30", want: []string{"0"}},
 		// A text with no word characters has no tokens, so nothing to match.
 		{name: "punctuation only text", texts: []string{"!!! ??? ..."}, query: "great"},
-		// Likewise for a query with no word characters.
+		// Likewise for a query with no word characters. Text that stores
+		// a punctuation run on its own no longer matches such a query, since a
+		// run of punctuation is not a word.
 		{name: "punctuation only query", texts: []string{"the agent works great!"}, query: "!!!"},
+		{name: "punctuation run is not a word", texts: []string{"a !!! b"}, query: "!!!"},
 		// Underscore belongs to a word rather than separating two, so
 		// error_code is one token: searching it finds the event that names the
 		// identifier and not the unrelated one that merely says error.
