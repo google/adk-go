@@ -623,6 +623,36 @@ func TestSearch_CappedResultsIncludeNote(t *testing.T) {
 	}
 }
 
+// TestNew_MaxResults checks that Config.MaxResults reaches the search tool New
+// builds, and that zero or a negative value means the documented default of 8.
+func TestNew_MaxResults(t *testing.T) {
+	var tools []tool.Tool
+	for i := range 10 {
+		tools = append(tools, &stubTool{name: fmt.Sprintf("tool_%02d", i), desc: "lists books"})
+	}
+	base := &staticToolset{tools: tools}
+	for _, tc := range []struct {
+		maxResults int
+		want       int
+	}{{2, 2}, {0, 8}, {-1, 8}} {
+		gts := mustNew(t, base, Config{MaxResults: tc.maxResults})
+		run, ok := gts.searchTool.(interface {
+			Run(agent.Context, any) (map[string]any, error)
+		})
+		if !ok {
+			t.Fatal("search tool has no Run method")
+		}
+		got, err := run.Run(newToolCtx(newFakeState(nil)), map[string]any{"query": "books"})
+		if err != nil {
+			t.Fatalf("MaxResults %d: search Run() error = %v", tc.maxResults, err)
+		}
+		matches, _ := got["matches"].([]any)
+		if len(matches) != tc.want {
+			t.Errorf("MaxResults %d: search returned %d matches, want %d", tc.maxResults, len(matches), tc.want)
+		}
+	}
+}
+
 // TestSearch_SelectByName verifies executeSearch handles the "select:a,b" form
 // and persists the selected tools to the discovered-state so later turns surface
 // them.
