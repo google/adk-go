@@ -38,7 +38,9 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
-// Handles both streaming and non-streaming versions
+// Handles both streaming and non-streaming versions. A zero sseWriteTimeout
+// means 120 seconds. A negative one means no write deadline, which also clears
+// the http.Server's WriteTimeout.
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
 	// Validated here rather than left to the first request. A compaction config
 	// is rejected inside runner.New, which the request handlers call, so an

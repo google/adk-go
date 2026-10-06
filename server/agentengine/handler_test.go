@@ -15,7 +15,11 @@
 package agentengine_test
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +72,92 @@ func TestNewHandlerRejectsUnusableCompaction(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "Compaction") {
 				t.Errorf("error %q does not name the field an operator has to change", err)
+			}
+		})
+	}
+}
+
+// deadlineRecorder records the write deadlines a handler sets and passes them
+// on to the underlying connection.
+type deadlineRecorder struct {
+	http.ResponseWriter
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	r.mu.Lock()
+	r.deadlines = append(r.deadlines, t)
+	r.mu.Unlock()
+	return http.NewResponseController(r.ResponseWriter).SetWriteDeadline(t)
+}
+
+func (r *deadlineRecorder) recorded() []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), r.deadlines...)
+}
+
+func (r *deadlineRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// TestQuerySSEWriteTimeout checks the write deadline a query sets for each
+// sseWriteTimeout. A zero timeout used to set the deadline to the moment the
+// request arrived, so every response was lost. A negative timeout clears the
+// deadline, including the http.Server's own WriteTimeout.
+func TestQuerySSEWriteTimeout(t *testing.T) {
+	tests := []struct {
+		name         string
+		timeout      time.Duration
+		wantDeadline time.Duration // 0 means no deadline
+	}{
+		{name: "zero uses default", timeout: 0, wantDeadline: 120 * time.Second},
+		{name: "positive", timeout: 30 * time.Second, wantDeadline: 30 * time.Second},
+		{name: "negative clears deadline", timeout: -1, wantDeadline: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, err := agentengine.NewHandler(&launcher.Config{SessionService: session.InMemoryService()}, tt.timeout, 1<<20, "engine")
+			if err != nil {
+				t.Fatalf("NewHandler() error = %v", err)
+			}
+			rec := &deadlineRecorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.ResponseWriter = w
+				h.ServeHTTP(rec, r)
+			}))
+			defer srv.Close()
+
+			start := time.Now()
+			resp, err := http.Post(srv.URL+"/reasoning_engine", "application/json",
+				strings.NewReader(`{"class_method":"async_create_session","input":{"user_id":"u"}}`))
+			if err != nil {
+				t.Fatalf("POST /reasoning_engine error = %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading response body: %v", err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("POST /reasoning_engine status = %d, want %d; body: %s", resp.StatusCode, http.StatusOK, got)
+			}
+			if !strings.Contains(string(got), `"user_id":"u"`) {
+				t.Errorf("response does not contain the created session:\n%s", got)
+			}
+			deadlines := rec.recorded()
+			if len(deadlines) != 1 {
+				t.Fatalf("SetWriteDeadline called %d times, want 1", len(deadlines))
+			}
+			d := deadlines[0]
+			if tt.wantDeadline == 0 {
+				if !d.IsZero() {
+					t.Errorf("write deadline = %v, want zero (no deadline)", d)
+				}
+				return
+			}
+			if lo, hi := start.Add(tt.wantDeadline), time.Now().Add(tt.wantDeadline); d.Before(lo) || d.After(hi) {
+				t.Errorf("write deadline = %v, want between %v and %v", d, lo, hi)
 			}
 		})
 	}

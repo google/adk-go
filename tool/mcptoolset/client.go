@@ -42,6 +42,10 @@ type connectionRefresher struct {
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
+	closed  bool
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // refreshableErrors is a list of errors that should trigger a connection refresh.
@@ -62,6 +66,22 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 		client:    client,
 		transport: transport,
 	}
+}
+
+func (c *connectionRefresher) Close() error {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		// Closing is final so failed in-flight calls cannot reconnect.
+		c.closed = true
+		session := c.session
+		c.session = nil
+		c.mu.Unlock()
+
+		if session != nil {
+			c.closeErr = session.Close()
+		}
+	})
+	return c.closeErr
 }
 
 // CallTool calls a tool on the MCP server, automatically reconnecting if needed.
@@ -149,6 +169,9 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed {
+		return nil, mcp.ErrConnectionClosed
+	}
 	if c.session != nil {
 		return c.session, nil
 	}
@@ -165,6 +188,10 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.ClientSession, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, mcp.ErrConnectionClosed
+	}
 
 	// Ping to verify the connection is actually dead before reconnecting.
 	// This handles the case where another goroutine already reconnected.

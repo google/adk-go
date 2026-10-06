@@ -322,9 +322,16 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 			continue
 		}
 		remoteSubagent := subagents[remoteSubagentIdx]
+		// The subagent's client may carry the auth transport remoteagent.NewA2A
+		// installs for A2AConfig.Auth, which keys the credential on the scope.
+		// Without it the provider would see no identity for this cancel, and a
+		// secured remote would leave its task running. The client provider and
+		// a card fetch see it too, matching the remote agent's own run loop.
+		id := iremoteagent.CallIdentity{AppName: cfg.AppName, UserID: meta.userID, SessionID: meta.sessionID, AgentName: task.agentName}
+		scopedCtx := iremoteagent.AttachAuthScope(ctx, remoteSubagent.config, id)
 		client, ok := clientCache[task.agentName]
 		if !ok {
-			_, newClient, err := iremoteagent.CreateA2AClient(ctx, remoteSubagent.config)
+			_, newClient, err := iremoteagent.CreateA2AClient(scopedCtx, remoteSubagent.config)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("failed to create A2A client: %w", err))
 				continue
@@ -332,7 +339,7 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 			clientCache[task.agentName] = newClient
 			client = newClient
 		}
-		_, err = client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: task.taskID})
+		_, err = client.CancelTask(scopedCtx, &a2a.CancelTaskRequest{ID: task.taskID})
 		if err != nil {
 			failures = append(failures, fmt.Errorf("failed to cancel task: %w", err))
 			continue
