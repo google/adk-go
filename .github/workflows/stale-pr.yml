@@ -37,10 +37,11 @@ jobs:
             const WRITE = ['admin', 'maintain', 'write'];
             const SELF = 'github-actions[bot]';  // posts the notice
 
-            // Reviews, conversation comments and inline comments each live in
-            // their own list, and a nudge can be any of the three. Check suites
-            // record when each push happened and who made it, and force-push
-            // events record who rewrote the branch.
+            // A standing change request in `reviews` / `latestOpinionatedReviews`
+            // starts the clock; a reply in `comments`, `reviews` or
+            // `reviewThreads`, or a push dated by its check suites, answers it.
+            // Force-push events record who rewrote the branch, and LabeledEvents
+            // record who applied the stale label.
             const QUERY = `
               query($q: String!, $cursor: String) {
                 search(query: $q, type: ISSUE, first: 20, after: $cursor) {
@@ -50,16 +51,24 @@ jobs:
                     author { login __typename }
                     labels(first: 30) { nodes { name } }
                     comments(last: 50) {
-                      nodes { createdAt author { login __typename } } }
+                      totalCount nodes { createdAt author { login __typename } } }
                     reviews(last: 50) {
-                      nodes { submittedAt author { login __typename } } }
-                    reviewThreads(last: 40) { nodes { comments(last: 30) {
-                      nodes { createdAt author { login __typename } } } } }
+                      totalCount nodes { state submittedAt author { login __typename } } }
+                    latestOpinionatedReviews(first: 20) {
+                      nodes { state submittedAt author { login __typename } } }
+                    reviewThreads(last: 40) {
+                      totalCount nodes { comments(last: 30) {
+                        totalCount nodes { createdAt author { login __typename } } } } }
                     commits(last: 10) { nodes { commit { committedDate
                       checkSuites(first: 20) { nodes { createdAt creator { login } } } } } }
-                    timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 10) {
-                      nodes { ... on HeadRefForcePushedEvent {
-                        createdAt actor { login __typename } } } }
+                    timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT], last: 50) {
+                      nodes {
+                        __typename
+                        ... on HeadRefForcePushedEvent {
+                          createdAt actor { login __typename } }
+                        ... on LabeledEvent {
+                          createdAt label { name } actor { login __typename } }
+                      } }
                   } }
                 }
               }`;
@@ -100,27 +109,101 @@ jobs:
               return ms.length ? Math.max(...ms) : null;
             };
             const isBot = (u) => u.__typename === 'Bot' || u.login.endsWith('[bot]');
+            // GraphQL reports this token as login "github-actions" (Bot), while
+            // REST appends "[bot]".
+            const isSelf = (u) => Boolean(u) && isBot(u) &&
+              (u.login === 'github-actions' || u.login === SELF);
+            const restAuthor = (u) =>
+              (u?.login ? { login: u.login, __typename: u.type === 'Bot' ? 'Bot' : 'User' } : null);
+            const isTruncated = (pr) =>
+              pr.comments.totalCount > pr.comments.nodes.length ||
+              pr.reviews.totalCount > pr.reviews.nodes.length ||
+              pr.reviewThreads.totalCount > pr.reviewThreads.nodes.length ||
+              pr.reviewThreads.nodes.some(t => t.comments.totalCount > t.comments.nodes.length);
 
-            // Who said what, and when. gemini-code-assist and google-cla both
-            // post here, so a bot must never stand in for either side.
+            async function issueComments(pr) {
+              pr._issueComments ??= await github.paginate(github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 });
+              return pr._issueComments;
+            }
+
+            const OPINIONATED = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
+
+            // The two-week clock runs from the latest standing CHANGES_REQUESTED
+            // review by a maintainer with write access (only a reviewer whose
+            // latest opinionated review is CHANGES_REQUESTED counts). Plain
+            // comments, approvals and COMMENTED reviews can be status notes or
+            // remarks to another maintainer, so they never start the clock on an
+            // answered PR; while a change request is unanswered, any later
+            // maintainer message still gives the author two weeks from that
+            // message before marking. Any reply or push from the author answers
+            // the change request. When a busy PR overflows the GraphQL windows,
+            // paginated REST lists supply the full comment and review history.
+            // gemini-code-assist and google-cla both post here, so a bot never
+            // stands in for either side.
             async function activity(pr) {
               const author = pr.author?.login ?? '';
-              const said = [
-                ...pr.comments.nodes.map(c => ({ ...c, at: c.createdAt })),
-                ...pr.reviews.nodes.map(c => ({ ...c, at: c.submittedAt })),
-                ...pr.reviewThreads.nodes.flatMap(
-                  t => t.comments.nodes.map(c => ({ ...c, at: c.createdAt }))),
-              ].filter(c => c.at && c.author);
+              let comments = pr.comments.nodes;
+              let reviews = pr.reviews.nodes;
+              let inlineComments = pr.reviewThreads.nodes.flatMap(t => t.comments.nodes);
+              if (isTruncated(pr)) {
+                const [restComments, restReviews, restInline] = await Promise.all([
+                  issueComments(pr),
+                  github.paginate(github.rest.pulls.listReviews,
+                    { ...context.repo, pull_number: pr.number, per_page: 100 }),
+                  github.paginate(github.rest.pulls.listReviewComments,
+                    { ...context.repo, pull_number: pr.number, per_page: 100 }),
+                ]);
+                comments = restComments.map(c => ({
+                  createdAt: c.created_at, author: restAuthor(c.user),
+                }));
+                reviews = restReviews.map(r => ({
+                  state: r.state, submittedAt: r.submitted_at, author: restAuthor(r.user),
+                }));
+                inlineComments = restInline.map(c => ({
+                  createdAt: c.created_at, author: restAuthor(c.user),
+                }));
+              }
+
+              const opinionatedByReviewer = new Map();
+              for (const r of [
+                ...(pr.latestOpinionatedReviews?.nodes ?? []),
+                ...reviews,
+              ]) {
+                if (!r.submittedAt || !r.author || !OPINIONATED.includes(r.state)) continue;
+                const prev = opinionatedByReviewer.get(r.author.login);
+                if (!prev || Date.parse(r.submittedAt) >= Date.parse(prev.submittedAt)) {
+                  opinionatedByReviewer.set(r.author.login, r);
+                }
+              }
 
               const fromMaintainer = [];
               let unclassified = false;
+              for (const r of opinionatedByReviewer.values()) {
+                if (r.state !== 'CHANGES_REQUESTED') continue;
+                if (r.author.login === author || isBot(r.author)) continue;
+                const write = await hasWriteAccess(r.author.login);
+                if (write === null) unclassified = true;
+                if (write) fromMaintainer.push(r.submittedAt);
+              }
+
+              const said = [
+                ...comments.map(c => ({ author: c.author, at: c.createdAt })),
+                ...reviews.map(r => ({ author: r.author, at: r.submittedAt })),
+                ...inlineComments.map(c => ({ author: c.author, at: c.createdAt })),
+              ].filter(c => c.at && c.author);
+
+              const anyMaintainer = [];
               for (const c of said) {
                 if (c.author.login === author || isBot(c.author)) continue;
                 const write = await hasWriteAccess(c.author.login);
                 if (write === null) unclassified = true;
-                if (!write) continue;
-                fromMaintainer.push(c.at);
+                if (write) anyMaintainer.push(c.at);
               }
+
+              const saidByAuthor = said
+                .filter(c => c.author.login === author)
+                .map(c => c.at);
 
               // Pushing a commit answers a review as well as a reply does. A
               // commit keeps its committedDate however late it is pushed, so
@@ -149,9 +232,19 @@ jobs:
 
               // A maintainer who force-pushed, to rebase say, replaced the
               // commits whose check suites recorded the author's earlier
-              // pushes, so those pushes can no longer be seen.
+              // pushes, so those pushes can no longer be seen. LabeledEvents
+              // record who applied the stale label and when.
               const rewrites = [];
+              const allLabels = [];
+              const selfLabels = [];
               for (const e of pr.timelineItems.nodes) {
+                if (e.label) {
+                  if (e.__typename === 'LabeledEvent' && e.label.name === LABEL) {
+                    allLabels.push(e.createdAt);
+                    if (isSelf(e.actor)) selfLabels.push(e.createdAt);
+                  }
+                  continue;
+                }
                 if (!e.actor || e.actor.login === author || isBot(e.actor)) continue;
                 const write = await hasWriteAccess(e.actor.login);
                 if (write === null) unclassified = true;
@@ -160,15 +253,15 @@ jobs:
 
               return {
                 maintainer: latest(fromMaintainer),
+                anyMaintainer: latest(anyMaintainer),
                 // Someone whose access could not be looked up may be the
-                // maintainer who spoke last, or may have pushed for the
-                // author, so the clock cannot be trusted.
+                // maintainer who requested changes or spoke last, or may have
+                // pushed for the author, so the clock cannot be trusted.
                 unclassified,
-                byAuthor: latest([
-                  ...said.filter(c => c.author.login === author).map(c => c.at),
-                  ...pushes,
-                ]),
+                byAuthor: latest([...saidByAuthor, ...pushes]),
                 rewritten: latest(rewrites),
+                labeled: latest(allLabels),
+                labeledBySelf: latest(selfLabels),
               };
             }
 
@@ -178,26 +271,31 @@ jobs:
             // Only ours, so a marker pasted by hand cannot make a label set by
             // hand look like one this sweep may remove.
             async function lastNudge(pr) {
-              const comments = await github.paginate(github.rest.issues.listComments,
-                { ...context.repo, issue_number: pr.number, per_page: 100 });
+              const comments = await issueComments(pr);
               return latest(comments
                 .filter(c => c.user?.login === SELF && (c.body ?? '').includes(MARKER))
                 .map(c => c.created_at));
             }
 
-            // Authors who came back get the label taken off. Only ours: a label
-            // applied by hand is somebody's judgement, not this sweep's to undo.
+            // Authors who came back get the label taken off when the label on
+            // the PR is the one this sweep applied for the latest notice. A
+            // label whose latest LabeledEvent is by a human, or predates that
+            // notice, is somebody's judgement and not this sweep's to undo.
             let cleared = 0;
+            let failed = false;
             for (const pr of await search(`is:pr is:open label:"${LABEL}"`)) {
               const nudged = await lastNudge(pr);
               if (!nudged) continue;
               const when = await activity(pr);
+              if (!when.labeledBySelf || when.labeledBySelf !== when.labeled) continue;
+              if (when.labeledBySelf < nudged) continue;
               if (!(when.byAuthor > nudged)) continue;
               try {
                 await github.rest.issues.removeLabel(
                   { ...context.repo, issue_number: pr.number, name: LABEL });
               } catch (e) {
                 core.warning(`#${pr.number}: could not remove the ${LABEL} label: ${e.message}`);
+                failed = true;
                 continue;
               }
               cleared++;
@@ -221,37 +319,55 @@ jobs:
               }
               if (!when.maintainer || when.maintainer > cutoff) continue;
               if (when.byAuthor >= when.maintainer) continue;  // ball is in our court
-              // The author may have pushed between the last maintainer message
-              // and a maintainer's force-push, and the sweep cannot tell.
+              // While the change request is unanswered, a later maintainer
+              // message may answer a question the review left open or add
+              // follow-up notes, so give the author two weeks from that message.
+              if (when.anyMaintainer > cutoff) continue;
+              // The author may have pushed between the change request and a
+              // maintainer's force-push, and the sweep cannot tell.
               if (when.rewritten > when.maintainer) continue;
               const nudged = await lastNudge(pr);
-              if (nudged && !(when.byAuthor > nudged)) continue;
+              const unansweredNudge = Boolean(nudged && !(when.byAuthor > nudged));
+              // A notice followed by our LabeledEvent means the label was
+              // applied and later removed by hand; without that LabeledEvent,
+              // the label write failed after the notice and still needs to land.
+              if (unansweredNudge && when.labeledBySelf && when.labeledBySelf >= nudged) continue;
 
-              stalled.push({ pr, since: when.maintainer });
+              stalled.push({ pr, since: when.maintainer, needComment: !unansweredNudge });
             }
             stalled.sort((a, b) => a.since - b.since);  // longest silence first
 
             let marked = 0;
-            for (const { pr, since } of stalled.slice(0, MAX_MARKS)) {
+            for (const { pr, since, needComment } of stalled.slice(0, MAX_MARKS)) {
               const days = Math.floor((Date.now() - since) / 86400000);
               // Comment first. A label without the marker comment is one the
-              // clearing pass above never takes off. A marker without the label
-              // reads as a label removed by hand, and later sweeps leave it be.
-              await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
-                body:
-                  `Marking this pull request stale, @${pr.author.login}.\n\n` +
-                  `A reviewer asked for changes, and a maintainer last wrote here ${days} ` +
-                  'days ago. Nothing has come back since. Our [contribution guide]' +
-                  '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#stale-pull-requests) ' +
-                  'gives you two weeks to reply before a maintainer may take the change over, ' +
-                  'and this one is past that.\n\n' +
-                  'Reply to the review or push a commit and the label comes off on the next ' +
-                  'sweep. Saying you need more time counts. If you would rather someone else ' +
-                  'finished it, say so and we will look for an owner.\n\n' +
-                  MARKER });
-              await github.rest.issues.addLabels(
-                { ...context.repo, issue_number: pr.number, labels: [LABEL] });
+              // clearing pass above never takes off. If adding the label fails,
+              // the next run sees the notice without a matching LabeledEvent
+              // and finishes applying the label.
+              try {
+                if (needComment) {
+                  await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number,
+                    body:
+                      `Marking this pull request stale, @${pr.author.login}.\n\n` +
+                      `A reviewer asked for changes ${days} days ago and nothing has come back ` +
+                      'since. Our [contribution guide]' +
+                      '(https://github.com/google/adk-go/blob/main/CONTRIBUTING.md#stale-pull-requests) ' +
+                      'gives you two weeks to reply before a maintainer may take the change over, ' +
+                      'and this one is past that.\n\n' +
+                      'Reply to the review or push a commit and the label comes off on the next ' +
+                      'sweep. Saying you need more time counts. If you would rather someone else ' +
+                      'finished it, say so and we will look for an owner.\n\n' +
+                      MARKER });
+                }
+                await github.rest.issues.addLabels(
+                  { ...context.repo, issue_number: pr.number, labels: [LABEL] });
+              } catch (e) {
+                core.warning(`#${pr.number}: could not mark ${LABEL}: ${e.message}`);
+                failed = true;
+                continue;
+              }
               marked++;
               core.info(`marked #${pr.number} stale (quiet ${days}d)`);
             }
             core.info(`marked ${marked} of ${stalled.length} stalled PR(s), cleared ${cleared}`);
+            if (failed) core.setFailed('one or more pull request updates failed');
