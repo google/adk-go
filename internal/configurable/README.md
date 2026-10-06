@@ -27,7 +27,8 @@ commands are resolved through symlinks; agent commands may also be found through
 prefixes or wildcards are supported. Use `args: []` for no arguments; `[""]`
 passes one empty string. Missing or null `args`, null array elements, and unknown
 fields are rejected. An empty `allowed_servers` array denies all local servers.
-Field matching is case-insensitive; duplicate keys are accepted.
+Policy JSON field names are matched case-insensitively; argument values are
+matched exactly. Duplicate keys are accepted.
 
 Pass the policy flag **before** any launcher arguments:
 

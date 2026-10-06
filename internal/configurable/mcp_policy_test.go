@@ -309,8 +309,10 @@ func TestFromConfigWorkflowMCPPolicyIsolation(t *testing.T) {
 			for _, tt := range denied {
 				t.Run(tt.name, func(t *testing.T) {
 					for i, path := range workflows {
-						if _, err := FromConfig(tt.ctx, path); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-							t.Errorf("workflow %d did not reject the unapproved MCP server", i)
+						if _, err := FromConfig(tt.ctx, path); err == nil {
+							t.Errorf("workflow %d unexpectedly accepted an unapproved MCP server", i)
+						} else if !strings.Contains(err.Error(), tt.wantErr) {
+							t.Errorf("workflow %d failed with error type %T; want policy rejection containing %q", i, err, tt.wantErr)
 						}
 					}
 				})
