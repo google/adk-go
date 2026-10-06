@@ -233,6 +233,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
 
 	// update the in-memory session
+	// Keep the session locked until AppendEvent finishes all reads of event.
+	// Otherwise, concurrent Session.Events readers can mutate its action maps
+	// during those reads, potentially causing a fatal concurrent map read write runtime throw.
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	if err := sess.appendEvent(event); err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
@@ -368,13 +373,11 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
+// appendEvent requires the caller to hold s.mu for writing.
 func (s *session) appendEvent(event *Event) error {
 	if event.Partial {
 		return nil
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("error on appendEvent: %w", err)
