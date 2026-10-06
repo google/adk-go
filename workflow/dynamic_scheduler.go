@@ -37,7 +37,8 @@ type dynamicSubScheduler struct {
 	// Context._output_for_ancestors.
 	outputForAncestors []string
 
-	// mu guards everything below. Never held across child.Run.
+	// mu guards everything below. Never held across child.Run, nor
+	// across the wait in awaitOrLead.
 	mu sync.Mutex
 	// runCountByChild seeds the auto-counter per child name; the
 	// n-th invocation gets runID strconv.Itoa(n).
@@ -46,8 +47,36 @@ type dynamicSubScheduler struct {
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
 	resultByPath map[string]any
-	delegation   outputDelegation
+	// inflightByPath holds the run currently in progress for a
+	// childPath, so concurrent callers with the same WithRunID share its
+	// outcome instead of running the child again.
+	inflightByPath map[string]*inflightRun
+	delegation     outputDelegation
 }
+
+// runResult is one child run's outcome, shared by every caller that
+// overlapped it. Exactly one of out and err is meaningful.
+type runResult struct {
+	out any
+	err error
+}
+
+// inflightRun is a childPath's run in progress. The leader stores res
+// and closes done; waiters read res only after done is closed, so the
+// close/receive pair carries the write.
+type inflightRun struct {
+	done chan struct{}
+	res  runResult
+}
+
+// publish hands res to the waiters. Called once, by the leader.
+func (r *inflightRun) publish(res runResult) {
+	r.res = res
+	close(r.done)
+}
+
+// result reports the published outcome; valid only once done is closed.
+func (r *inflightRun) result() runResult { return r.res }
 
 // ResolveByRunID implements [agent.DynamicSubScheduler].
 func (s *dynamicSubScheduler) ResolveByRunID(childName, custom string) (string, error) {
@@ -139,6 +168,7 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		outputForAncestors: ancestors,
 		runCountByChild:    map[string]int{},
 		resultByPath:       map[string]any{},
+		inflightByPath:     map[string]*inflightRun{},
 	}
 	s.rehydrateCache()
 	return s
@@ -187,6 +217,11 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 // call with the same stable WithRunID returns the cached output
 // without re-running the child; auto-counter ids never collide so
 // the cache is effectively bypassed for them.
+//
+// Calls sharing a WithRunID are gated per childPath by awaitOrLead, so
+// overlapping callers share one run's outcome instead of each
+// running the child. A child re-entering its own childPath therefore
+// waits on itself; see WithRunID for the caller-facing rule.
 //
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
@@ -248,13 +283,34 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	var rawErr error
 	defer func() { span.recordError(err, rawErr) }()
 
-	// Cached (WithRunID replay): the child already ran, so publish its
-	// output for the delegation immediately. The span opened above still
-	// records the cache hit.
-	if cached, ok := s.lookupCachedOutput(childPath); ok {
-		s.commitDelegation(childPath, cached)
-		return cached, nil
+	// The child already ran (WithRunID replay), or another caller is
+	// running it right now and we shared its outcome. On success, publish
+	// the output for the delegation immediately. The span opened above
+	// still records the hit.
+	if res, hasResult := s.awaitOrLead(childPath); hasResult {
+		if res.err != nil {
+			return nil, res.err
+		}
+		s.commitDelegation(childPath, res.out)
+		return res.out, nil
 	}
+	// This caller leads: hand the outcome to every waiter, on every exit
+	// path, so overlapping callers never start a second run. completed is
+	// set at the single success return below; a panic or runtime.Goexit
+	// unwinds past it leaving err nil, which would otherwise publish and
+	// cache that non-completion as a success carrying whatever output the
+	// child had emitted before it stopped.
+	var completed bool
+	defer func() {
+		res := runResult{out: out, err: err}
+		if err == nil && !completed {
+			res = runResult{err: &NodeRunError{
+				ChildName: name, ChildPath: childPath, RunID: runID,
+				Cause: fmt.Errorf("%w: child did not complete", ErrNodeFailed),
+			}}
+		}
+		s.finishRun(childPath, res)
+	}()
 
 	var (
 		hasOutput   bool
@@ -384,8 +440,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return nil, s.pause(name, childPath, runID, ErrNodeWaitingForOutput)
 	}
 
-	s.storeCachedOutput(childPath, out)
 	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
+	completed = true
 	return out, nil
 }
 
@@ -406,17 +462,59 @@ func waitsForOutput(node Node) bool {
 	return w != nil && *w
 }
 
-func (s *dynamicSubScheduler) lookupCachedOutput(childPath string) (any, bool) {
+// awaitOrLead reports the outcome of childPath's run when one is
+// already available, and otherwise makes this caller the leader, which
+// must run the child and publish the outcome via finishRun.
+//
+// A caller arriving while a leader runs blocks until the leader publishes
+// and then shares that outcome — including a failure or a HITL interrupt
+// — instead of running the child again. So overlapping callers never
+// start a second run, whatever the outcome, not just on success.
+// Mirrors adk-python's _check_existing_run, which awaits the in-flight
+// task and hands every concurrent caller the same result.
+//
+// Sharing is confined to callers that overlap one run: nothing is
+// cached for a failure or an interrupt, so a later sequential call finds
+// no entry and re-runs the child, as before.
+//
+// A blocked caller is released early if s.parentCtx is cancelled, and its
+// outcome is then that cancellation — the leader keeps the slot and
+// finishes on its own.
+func (s *dynamicSubScheduler) awaitOrLead(childPath string) (runResult, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out, ok := s.resultByPath[childPath]
-	return out, ok
+	if out, ok := s.resultByPath[childPath]; ok {
+		s.mu.Unlock()
+		return runResult{out: out}, true
+	}
+	if leader, inflight := s.inflightByPath[childPath]; inflight {
+		s.mu.Unlock()
+		select {
+		case <-leader.done:
+			return leader.result(), true
+		case <-s.parentCtx.Done():
+			return runResult{err: s.parentCtx.Err()}, true
+		}
+	}
+	s.inflightByPath[childPath] = &inflightRun{done: make(chan struct{})}
+	s.mu.Unlock()
+	return runResult{}, false
 }
 
-func (s *dynamicSubScheduler) storeCachedOutput(childPath string, out any) {
+// finishRun publishes res to everyone waiting on childPath and clears the
+// in-flight slot. A successful outcome is also cached so a later call
+// replays it; failures and interrupts are not, matching the pre-existing
+// replay semantics.
+func (s *dynamicSubScheduler) finishRun(childPath string, res runResult) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.resultByPath[childPath] = out
+	leader := s.inflightByPath[childPath]
+	delete(s.inflightByPath, childPath)
+	if res.err == nil {
+		s.resultByPath[childPath] = res.out
+	}
+	s.mu.Unlock()
+	if leader != nil {
+		leader.publish(res)
+	}
 }
 
 // claimDelegation reserves the at-most-one output delegation when
