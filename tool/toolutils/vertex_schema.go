@@ -14,79 +14,127 @@
 
 package toolutils
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"reflect"
+)
 
 // SanitizeSchemaForVertex rewrites JSON Schema maps so that anyOf/oneOf
 // subschemas do not carry sibling keywords. Vertex AI rejects declarations
 // where any_of/one_of appears alongside other fields (e.g. description/title
-// emitted by pydantic for Optional/Union). Sibling fields are merged into
-// each branch. See https://github.com/google/adk-go/issues/1659.
+// emitted by pydantic for Optional/Union). It removes only annotations that
+// do not affect which values a schema accepts, avoiding branch duplication.
+// See https://github.com/google/adk-go/issues/1659.
 func SanitizeSchemaForVertex(schema any) any {
+	schema, _ = sanitizeSchemaForVertex(schema)
+	return schema
+}
+
+func sanitizeSchemaForVertex(schema any) (any, bool) {
 	switch s := schema.(type) {
 	case map[string]any:
 		return sanitizeSchemaMap(s)
 	case []any:
-		out := make([]any, len(s))
-		for i, v := range s {
-			out[i] = SanitizeSchemaForVertex(v)
+		var out []any
+		for i, value := range s {
+			sanitized, changed := sanitizeSchemaForVertex(value)
+			if changed && out == nil {
+				out = append([]any(nil), s[:i]...)
+			}
+			if out != nil {
+				out = append(out, sanitized)
+			}
 		}
-		return out
+		if out == nil {
+			return schema, false
+		}
+		return out, true
 	default:
-		// jsonschema.Schema and other typed values — round-trip via JSON.
-		b, err := json.Marshal(schema)
-		if err != nil {
-			return schema
+		if isScalar(schema) {
+			return schema, false
 		}
-		var generic any
-		if err := json.Unmarshal(b, &generic); err != nil {
-			return schema
-		}
-		return SanitizeSchemaForVertex(generic)
+		return sanitizeTypedSchema(schema)
 	}
 }
 
-func sanitizeSchemaMap(schema map[string]any) map[string]any {
-	out := make(map[string]any, len(schema))
-	for k, v := range schema {
-		out[k] = SanitizeSchemaForVertex(v)
+func sanitizeTypedSchema(schema any) (any, bool) {
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return schema, false
+	}
+	var generic any
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&generic); err != nil {
+		return schema, false
+	}
+	sanitized, changed := sanitizeSchemaForVertex(generic)
+	if !changed {
+		return schema, false
+	}
+	return sanitized, true
+}
+
+func isScalar(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch reflect.ValueOf(value).Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeSchemaMap(schema map[string]any) (any, bool) {
+	var out map[string]any
+	for key, value := range schema {
+		sanitized, changed := sanitizeSchemaForVertex(value)
+		if changed && out == nil {
+			out = make(map[string]any, len(schema))
+			for copiedKey, copiedValue := range schema {
+				out[copiedKey] = copiedValue
+			}
+		}
+		if out != nil {
+			out[key] = sanitized
+		}
+	}
+	childrenChanged := out != nil
+	if out == nil {
+		out = schema
 	}
 
+	var combination map[string]any
 	for _, key := range []string{"anyOf", "oneOf"} {
-		raw, ok := out[key]
-		if !ok {
-			continue
-		}
-		branches, ok := raw.([]any)
-		if !ok || len(branches) == 0 {
-			continue
-		}
-		siblings := map[string]any{}
-		for k, v := range out {
-			if k == key {
-				continue
+		if value, ok := out[key]; ok {
+			if combination != nil {
+				return out, childrenChanged
 			}
-			siblings[k] = v
+			combination = map[string]any{key: value}
 		}
-		if len(siblings) == 0 {
-			continue
-		}
-		merged := make([]any, len(branches))
-		for i, branch := range branches {
-			bm, ok := branch.(map[string]any)
-			if !ok {
-				merged[i] = branch
-				continue
-			}
-			nb := make(map[string]any, len(bm)+len(siblings))
-			for k, v := range siblings {
-				nb[k] = v
-			}
-			for k, v := range bm {
-				nb[k] = v // branch wins on conflict
-			}
-			merged[i] = nb
-		}
-		return map[string]any{key: merged}
 	}
-	return out
+	if combination == nil {
+		return out, childrenChanged
+	}
+
+	for key := range out {
+		if key != "anyOf" && key != "oneOf" && !isAnnotation(key) {
+			return out, childrenChanged
+		}
+	}
+	return combination, true
+}
+
+func isAnnotation(key string) bool {
+	switch key {
+	case "$comment", "$id", "$schema", "default", "deprecated", "description", "examples", "readOnly", "title", "writeOnly":
+		return true
+	default:
+		return false
+	}
 }
