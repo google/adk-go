@@ -27,6 +27,7 @@ commands are resolved through symlinks; agent commands may also be found through
 prefixes or wildcards are supported. Use `args: []` for no arguments; `[""]`
 passes one empty string. Missing or null `args`, null array elements, and unknown
 fields are rejected. An empty `allowed_servers` array denies all local servers.
+Field matching is case-insensitive; duplicate keys are accepted.
 
 Pass the policy flag **before** any launcher arguments:
 
@@ -41,15 +42,19 @@ policy file stops startup. Agent configs rejected by the policy are logged and
 skipped. Keep the policy under operator control, separate from agent configs;
 the CLI only reads the file supplied through this flag.
 
-The process starts when tools are first listed, using the path from the first
-matching policy entry. This preserves virtual environments and program modes
-selected by the executable name. The target is checked again before each startup;
-a changed target is rejected. Changing a policy does not revoke existing agents
-or toolsets.
+The process starts when tools are first listed, using the first matching policy
+entry's path. This preserves that entry's virtual environment or program mode.
+Entries with identical resolved paths and arguments always select the first
+entry, even when the config names a later entry's symlink.
+
+Targets are checked again before startup; changed targets are rejected. Loading
+under another policy rechecks approval without revoking existing agents or toolsets.
 
 The policy does not sandbox approved programs. Their executables, dependencies,
-environment, working directory, and referenced files must remain trusted. The
-startup check cannot prevent filesystem changes between checking and executing,
-or detect replacement of a binary at the same resolved path.
+environment, and referenced files must remain trusted. Subprocesses inherit the
+directory the CLI scans; `python -m`, for example, can load modules from it, so
+this directory must also be trusted. Startup checks cannot prevent filesystem
+changes between checking and executing, or detect replacement of a binary at
+the same resolved path.
 
 Direct construction of an MCP toolset in Go code is unchanged.

@@ -50,7 +50,7 @@ type ToolsetFactory func(ctx context.Context, args map[string]any) (tool.Toolset
 var (
 	registryMu       sync.RWMutex
 	registry         = make(map[string]AgentFactory)
-	agentRegistry    = make(map[agentCacheKey]agent.Agent)
+	agentRegistry    = make(map[configCacheKey]agent.Agent)
 	toolRegistry     = make(map[string]any)
 	callbackRegistry = make(map[string]any)
 )
@@ -412,7 +412,7 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 
 	// An agent constructed under one policy must not bypass another policy's
 	// authorization checks when the same config is loaded again.
-	key := agentCacheKey{path: absPath, policy: mcpPolicyFromContext(ctx)}
+	key := configCacheKey{path: absPath, policy: mcpPolicyFromContext(ctx)}
 	registryMu.RLock()
 	if a, ok := agentRegistry[key]; ok {
 		registryMu.RUnlock()

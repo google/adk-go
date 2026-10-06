@@ -248,6 +248,84 @@ func TestResolveAgentReferenceMCPPolicyIsolation(t *testing.T) {
 	}
 }
 
+func TestFromConfigWorkflowMCPPolicyIsolation(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "unused-test-key")
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+	executable := policyExecutable(t)
+	approved := policyContext(t, executable, []string{})
+	empty, err := WithMCPPolicy(t.Context(), strings.NewReader(`{"allowed_servers":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := []struct {
+		name    string
+		ctx     context.Context
+		wantErr string
+	}{
+		{"no policy", t.Context(), "denied by default"},
+		{"empty policy", empty, "denied by default"},
+		{"different arguments", policyContext(t, executable, []string{"different"}), "not approved"},
+	}
+	for _, shape := range []string{"chain", "route", "nested workflow"} {
+		t.Run(shape, func(t *testing.T) {
+			dir := t.TempDir()
+			writeConfig := func(name string, config map[string]any) string {
+				t.Helper()
+				data, err := json.Marshal(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, name+".yaml")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			child := writeConfig("child", map[string]any{
+				"agent_class": "LlmAgent", "name": "child", "model": "gemini-2.5-flash",
+				"tools": []any{map[string]any{"name": "McpToolset", "args": mcpConfigArgs(executable, nil)}},
+			})
+			var target any = "child.yaml"
+			switch shape {
+			case "route":
+				target = map[string]string{"default": "child.yaml"}
+			case "nested workflow":
+				writeConfig("inner", map[string]any{
+					"agent_class": "Workflow", "name": "inner",
+					"edges": []any{[]any{"START", "child.yaml"}},
+				})
+				target = "inner.yaml"
+			}
+			var workflows []string
+			for _, name := range []string{"first", "second"} {
+				workflows = append(workflows, writeConfig(name, map[string]any{
+					"agent_class": "Workflow", "name": name,
+					"edges": []any{[]any{"START", target}},
+				}))
+			}
+			if _, err := FromConfig(approved, workflows[0]); err != nil {
+				t.Fatalf("load approved workflow: %v", err)
+			}
+			for _, tt := range denied {
+				t.Run(tt.name, func(t *testing.T) {
+					for i, path := range workflows {
+						if _, err := FromConfig(tt.ctx, path); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+							t.Errorf("workflow %d did not reject the unapproved MCP server", i)
+						}
+					}
+				})
+			}
+			// A same-policy cache hit must work after the child file is removed.
+			if err := os.Remove(child); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FromConfig(approved, workflows[0]); err != nil {
+				t.Fatalf("same policy did not reuse the cached workflow node: %v", err)
+			}
+		})
+	}
+}
+
 // TestMCPPolicySubprocess is run in a child copy of this test binary. It only
 // writes a marker and exits, without making any MCP or model network calls.
 func TestMCPPolicySubprocess(t *testing.T) {

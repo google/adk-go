@@ -31,7 +31,7 @@ import (
 // nodeRegistry caches resolved workflow nodes.
 var (
 	nodeFunctionRegistry = make(map[string]func(agent.Context, any) (any, error))
-	nodeRegistry         = make(map[string]workflow.Node)
+	nodeRegistry         = make(map[configCacheKey]workflow.Node)
 )
 
 // RegisterNodeFunction registers a custom node function so it can be referenced inside Workflow YAML configurations.
@@ -195,7 +195,7 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 		return workflow.Start, nil
 	}
 
-	var cacheKey string
+	cacheKey := configCacheKey{policy: mcpPolicyFromContext(ctx)}
 	var absPath string
 	isYAML := strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml")
 
@@ -209,9 +209,9 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
 		}
-		cacheKey = absPath
+		cacheKey.path = absPath
 	} else {
-		cacheKey = ref
+		cacheKey.path = ref
 	}
 
 	registryMu.RLock()

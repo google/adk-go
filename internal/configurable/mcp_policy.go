@@ -93,7 +93,7 @@ func (a *mcpArguments) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type agentCacheKey struct {
+type configCacheKey struct {
 	path   string
 	policy *mcpPolicy
 }
