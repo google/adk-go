@@ -32,6 +32,7 @@ import (
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
 )
 
 type dummyLLM struct {
@@ -776,6 +777,96 @@ func TestNestedWorkflowGraph(t *testing.T) {
 		}
 		if g.IsNode("cluster_inner") {
 			t.Fatalf("cluster id was emitted as a node\n%s", dot)
+		}
+	})
+
+	t.Run("three level nesting", func(t *testing.T) {
+		fan := newTestAgent(t, "fan", "", agentinternal.TypeParallelAgent, []agent.Agent{leaf("a"), leaf("b")}, nil)
+		mid := newTestAgent(t, "mid", "", agentinternal.TypeSequentialAgent, []agent.Agent{fan}, nil)
+		outer := newTestAgent(t, "outer", "", agentinternal.TypeSequentialAgent, []agent.Agent{mid, leaf("merge")}, nil)
+
+		dot, err := GetAgentGraph(context.Background(), outer, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		if strings.HasPrefix(dot, "error:") {
+			t.Fatalf("GetAgentGraph: %s", dot)
+		}
+		g := parseGraph(t, dot)
+		if parents := g.Relations.ChildToParents["cluster_mid"]; !g.IsSubGraph("cluster_mid") || !parents["cluster_outer"] {
+			t.Fatalf("cluster_mid parents = %v, want cluster_outer\n%s", parents, dot)
+		}
+		if parents := g.Relations.ChildToParents["cluster_fan"]; !g.IsSubGraph("cluster_fan") || !parents["cluster_mid"] {
+			t.Fatalf("cluster_fan parents = %v, want cluster_mid\n%s", parents, dot)
+		}
+		for _, name := range []string{"a", "b"} {
+			if parents := g.Relations.ChildToParents[name]; !g.IsNode(name) || !parents["cluster_fan"] {
+				t.Fatalf("node %s parents = %v, want cluster_fan\n%s", name, parents, dot)
+			}
+		}
+		edge := lookupEdge(t, g, "b", "merge")
+		if edge == nil || edge.Attrs["ltail"] != "cluster_mid" {
+			t.Fatalf("edge = %v, want b -> merge ltail=cluster_mid\n%s", edge, dot)
+		}
+		if g.IsNode("fan") || g.IsNode("cluster_fan") || g.IsNode("cluster_mid") {
+			t.Fatalf("cluster id was emitted as a node\n%s", dot)
+		}
+	})
+
+	t.Run("empty cluster", func(t *testing.T) {
+		fanOut := newTestAgent(t, "fan_out", "", agentinternal.TypeParallelAgent, nil, nil)
+		s := newTestAgent(t, "s", "", agentinternal.TypeSequentialAgent, []agent.Agent{fanOut, leaf("merge")}, nil)
+
+		dot, err := GetAgentGraph(context.Background(), s, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		if strings.HasPrefix(dot, "error:") {
+			t.Fatalf("GetAgentGraph: %s", dot)
+		}
+		g := parseGraph(t, dot)
+		if parents := g.Relations.ChildToParents["cluster_fan_out"]; !g.IsSubGraph("cluster_fan_out") || !parents["cluster_s"] {
+			t.Fatalf("cluster_fan_out parents = %v, want cluster_s\n%s", parents, dot)
+		}
+		if g.IsNode("cluster_fan_out") {
+			t.Fatalf("cluster id was emitted as a node\n%s", dot)
+		}
+		if lookupEdge(t, g, "cluster_fan_out", "merge") != nil {
+			t.Fatalf("empty cluster was used as an edge endpoint\n%s", dot)
+		}
+		if parents := g.Relations.ChildToParents["merge"]; !g.IsNode("merge") || !parents["cluster_s"] {
+			t.Fatalf("merge parents = %v, want cluster_s\n%s", parents, dot)
+		}
+	})
+
+	t.Run("workflow also used as a tool", func(t *testing.T) {
+		research := newTestAgent(t, "research", "", agentinternal.TypeParallelAgent, []agent.Agent{leaf("web"), leaf("docs")}, nil)
+		triage := newTestAgent(t, "triage", "", agentinternal.TypeLLMAgent, nil, []tool.Tool{agenttool.New(research, nil)})
+		root := newTestAgent(t, "root", "", agentinternal.TypeSequentialAgent, []agent.Agent{triage, research, leaf("writer")}, nil)
+
+		dot, err := GetAgentGraph(context.Background(), root, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		if strings.HasPrefix(dot, "error:") {
+			t.Fatalf("GetAgentGraph: %s", dot)
+		}
+		g := parseGraph(t, dot)
+		for _, pair := range [][2]string{{"triage", "research"}, {"research", "writer"}} {
+			edge := lookupEdge(t, g, pair[0], pair[1])
+			if edge == nil {
+				t.Fatalf("missing edge %s -> %s\n%s", pair[0], pair[1], dot)
+			}
+			if edge.Attrs["ltail"] != "" || edge.Attrs["lhead"] != "" {
+				t.Fatalf("edge %s -> %s attrs = %v, want no ltail or lhead\n%s", pair[0], pair[1], edge.Attrs, dot)
+			}
+		}
+		researchNode := g.Nodes.Lookup["research"]
+		if researchNode == nil || researchNode.Attrs["shape"] != "box" {
+			t.Fatalf("research node = %v, want the tool box\n%s", researchNode, dot)
+		}
+		if g.IsSubGraph("cluster_research") || g.IsNode("web") || g.IsNode("docs") {
+			t.Fatalf("undrawn workflow was anchored inside its cluster\n%s", dot)
 		}
 	})
 }

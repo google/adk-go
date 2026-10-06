@@ -91,27 +91,41 @@ func nodeName(instance any) string {
 
 // edgeAnchor is the node an edge should touch. When the member is a cluster,
 // Graphviz can only draw to that cluster's border from a node inside it, so
-// the returned cluster id is applied as ltail or lhead.
-func edgeAnchor(instance any, fromClusterEnd bool) (nodeID, clusterID string) {
+// the returned cluster id is applied as ltail or lhead. A cluster that was
+// never added, or that has no node inside it, falls back to the plain name
+// with no cluster id.
+func edgeAnchor(graph *gographviz.Graph, instance any, fromClusterEnd bool) (nodeID, clusterID string) {
 	if !shouldBuildAgentCluster(instance) {
 		return nodeName(instance), ""
 	}
 	clusterID = "cluster_" + nodeName(instance)
+	if !graph.IsSubGraph(clusterID) {
+		return nodeName(instance), ""
+	}
 	subs := instance.(agent.Agent).SubAgents()
 	if len(subs) == 0 {
-		return clusterID, ""
+		return nodeName(instance), ""
 	}
 	child := subs[0]
 	if fromClusterEnd {
 		child = subs[len(subs)-1]
 	}
-	nodeID, _ = edgeAnchor(child, fromClusterEnd)
+	nodeID, _ = edgeAnchor(graph, child, fromClusterEnd)
+	if !graph.IsNode(nodeID) {
+		return nodeName(instance), ""
+	}
 	return nodeID, clusterID
 }
 
 func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][]string, theme Theme) error {
-	src, ltail := edgeAnchor(from, true)
-	dst, lhead := edgeAnchor(to, false)
+	src, ltail := edgeAnchor(graph, from, true)
+	dst, lhead := edgeAnchor(graph, to, false)
+	// cluster_<name> is a subgraph, not a node. Using it as an endpoint makes
+	// Graphviz draw a stray ellipse. Skip the edge when either side was never
+	// drawn as a node, which is what an empty cluster leaves us with.
+	if !graph.IsNode(src) || !graph.IsNode(dst) {
+		return nil
+	}
 	if err := drawEdge(graph, src, dst, highlightedPairs, theme); err != nil {
 		return err
 	}
@@ -223,33 +237,39 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	if !ok {
 		return nil
 	}
-	for i, subAgent := range agent.SubAgents() {
+	subs := agent.SubAgents()
+	// Draw every member before any edge. An edge anchor has to see whether the
+	// destination cluster was actually added; a name already visited as a tool
+	// is skipped and must not be linked through a node that was never drawn.
+	for _, subAgent := range subs {
 		err := buildGraph(cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
-		switch agentinternal.Reveal(agentInternal).AgentType {
-		// Sequential sub-agents should be connected one after another with edges.
-		case agentinternal.TypeSequentialAgent:
-			if i < len(agent.SubAgents())-1 {
-				err = drawClusterEdge(parentGraph, subAgent, agent.SubAgents()[i+1], highlightedPairs, theme)
-				if err != nil {
-					return fmt.Errorf("draw cluster: draw edge: %w", err)
-				}
-			}
-		// Sequential sub-agents should be connected one after another with edges, but the last one should point to the first agent.
-		case agentinternal.TypeLoopAgent:
-			nextAgentIdx := i + 1
-			if nextAgentIdx >= len(agent.SubAgents()) {
-				nextAgentIdx = 0
-			}
-			err = drawClusterEdge(parentGraph, subAgent, agent.SubAgents()[nextAgentIdx], highlightedPairs, theme)
+	}
+	switch agentinternal.Reveal(agentInternal).AgentType {
+	// Sequential sub-agents should be connected one after another with edges.
+	case agentinternal.TypeSequentialAgent:
+		for i := range len(subs) - 1 {
+			err := drawClusterEdge(parentGraph, subs[i], subs[i+1], highlightedPairs, theme)
 			if err != nil {
 				return fmt.Errorf("draw cluster: draw edge: %w", err)
 			}
 		}
-		// Parallel sub-agents shouldn't be connected, they will be a part of the sub graph.
+	// Loop sub-agents should be connected one after another, and the last one should point to the first.
+	case agentinternal.TypeLoopAgent:
+		for i := range subs {
+			next := subs[0]
+			if i+1 < len(subs) {
+				next = subs[i+1]
+			}
+			err := drawClusterEdge(parentGraph, subs[i], next, highlightedPairs, theme)
+			if err != nil {
+				return fmt.Errorf("draw cluster: draw edge: %w", err)
+			}
+		}
 	}
+	// Parallel sub-agents shouldn't be connected, they will be a part of the sub graph.
 	return nil
 }
 
