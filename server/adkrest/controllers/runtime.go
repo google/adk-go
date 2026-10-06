@@ -145,7 +145,8 @@ type RuntimeAPIControllerConfig struct {
 	// and does not upgrade, so one caller cannot hold open more agent
 	// sessions, model connections and goroutines than the process can carry.
 	// [NewErrorHandler] is what turns that error into the response; a caller
-	// mounting [RunLiveHandler] itself has to write the status.
+	// mounting [RuntimeAPIController.RunLiveHandler] itself has to write the
+	// status.
 	//
 	// There is no cap by default, as in adk-python. Behind an autoscaler such
 	// as Cloud Run, the platform's own per-instance concurrency setting decides
@@ -509,7 +510,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		_ = ws.Close()
 	}()
 
-	stopPings := c.applyLiveConnLimits(ws)
+	stopPings, peerGone := c.applyLiveConnLimits(ws)
 	defer stopPings()
 
 	sendClose := func(code int, reason string) {
@@ -552,6 +553,10 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	defer func() {
 		_ = liveSession.Close()
 	}()
+	// Once the keepalive gives up, neither a reader blocked in Send nor the
+	// loop below waiting on the agent would see the socket close. Closing the
+	// session returns both.
+	defer context.AfterFunc(peerGone, func() { _ = liveSession.Close() })()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
 	go func() {
@@ -661,14 +666,15 @@ func (c *RuntimeAPIController) acquireLiveSlot() (release func(), ok bool) {
 // handler of the keepalive, so a peer that stops responding is dropped. The
 // keepalive's deadlines are set around each read and write, from
 // [RuntimeAPIController.liveDeadline]. It returns the function that stops the
-// pinger, which the caller must call.
-func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func()) {
+// pinger, which the caller must call, and a context that is cancelled once a
+// ping cannot be written within the timeout.
+func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func(), peerGone context.Context) {
 	if c.maxLiveMessageBytes > 0 {
 		// The upgrade bypasses MaxBytesMiddleware, and gorilla/websocket has no default limit.
 		ws.SetReadLimit(c.maxLiveMessageBytes)
 	}
 	if c.liveKeepaliveTimeout <= 0 {
-		return func() {}
+		return func() {}, context.Background()
 	}
 
 	ws.SetPongHandler(func(string) error {
@@ -681,6 +687,7 @@ func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop fun
 	// Ping from a goroutine of its own: the caller's write loop blocks on the
 	// event iterator, so it cannot also keep the clock running. WriteControl is
 	// the one write method gorilla allows concurrently with the others.
+	peerGone, giveUp := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	ticker := time.NewTicker(c.livePingInterval)
 	go func() {
@@ -698,12 +705,13 @@ func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop fun
 				// the timeout of the previous one.
 				if err := ws.WriteControl(websocket.PingMessage, nil, c.liveDeadline()); err != nil {
 					_ = ws.Close()
+					giveUp()
 					return
 				}
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() { close(done); giveUp() }, peerGone
 }
 
 // liveDeadline returns the deadline for the next read or write on a live

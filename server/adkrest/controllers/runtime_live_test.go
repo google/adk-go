@@ -904,38 +904,6 @@ func TestRunLiveHandler_IteratorErrorAfterQuietSpellSendsCloseFrame(t *testing.T
 	waitForHandlerExit(t, exits)
 }
 
-func TestRunLiveHandler_DropsPeerThatStopsReading(t *testing.T) {
-	const keepaliveTimeout = 200 * time.Millisecond
-
-	liveSession := newRecordingLiveSession()
-	// Events large enough to fill the socket buffers within a few writes, so
-	// the handler ends up blocked writing to a peer that reads nothing.
-	text := strings.Repeat("a", 256<<10)
-	wsURL, exits := startRunLiveServer(t, RuntimeAPIControllerConfig{
-		LiveKeepaliveTimeout: keepaliveTimeout,
-		MaxLiveSessions:      1,
-	}, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-		return liveSession, func(yield func(*session.Event, error) bool) {
-			for {
-				select {
-				case <-liveSession.closed:
-					return
-				default:
-				}
-				if !yield(makeEvent("inv", testLiveAppName, text), nil) {
-					return
-				}
-			}
-		}, nil
-	})
-	dialLive(t, wsURL)
-
-	waitForHandlerExit(t, exits)
-	// With a cap of one, this handshake succeeds only if the stalled peer's
-	// slot was released.
-	dialLive(t, wsURL)
-}
-
 // stallingConn is the server's end of a connection whose peer can stop
 // accepting data. While stalled, a write blocks until the stall ends or its
 // write deadline passes, and signals blocked when it starts waiting.
@@ -964,8 +932,10 @@ func (c *stallingConn) stall() {
 
 func (c *stallingConn) unstall() {
 	c.mu.Lock()
-	close(c.resume)
-	c.resume = nil
+	if c.resume != nil {
+		close(c.resume)
+		c.resume = nil
+	}
 	c.mu.Unlock()
 }
 
@@ -1008,6 +978,92 @@ func (l *stallingListener) Accept() (net.Conn, error) {
 	sc := &stallingConn{Conn: conn, blocked: make(chan struct{}, 1)}
 	l.conns <- sc
 	return sc, nil
+}
+
+func TestRunLiveHandler_DropsPeerThatStopsReading(t *testing.T) {
+	const keepaliveTimeout = 400 * time.Millisecond
+
+	liveSession := newRecordingLiveSession()
+	stallReady := make(chan struct{})
+	baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
+	if err != nil {
+		t.Fatalf("agent.New() failed: %v", err)
+	}
+	liveAgent := &mockLiveAgent{Agent: baseAgent, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			<-stallReady
+			yield(makeEvent("inv", testLiveAppName, "tick"), nil)
+		}, nil
+	}}
+	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: &fakes.FakeSessionService{
+			Sessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+		},
+		AgentLoader:          agent.NewSingleLoader(liveAgent),
+		LiveKeepaliveTimeout: keepaliveTimeout,
+		MaxLiveSessions:      1,
+	})
+	exits := make(chan struct{}, testMaxHandlerExits)
+	handler := NewErrorHandler(controller.RunLiveHandler)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		defer func() { exits <- struct{}{} }()
+		handler(rw, req)
+	}))
+	listener := &stallingListener{Listener: server.Listener, conns: make(chan *stallingConn, 2)}
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") +
+		"/run_live?appName=" + testLiveAppName + "&userId=" + testLiveUserID + "&sessionId=" + testLiveSessionID
+	conn := dialLive(t, wsURL)
+	serverConn := <-listener.conns
+
+	// The client keeps sending pongs so the server's read deadline never
+	// expires; only the per-event write deadline can end the stalled write
+	// after one keepalive timeout.
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		ticker := time.NewTicker(keepaliveTimeout / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(keepaliveTimeout)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	serverConn.stall()
+	t.Cleanup(serverConn.unstall)
+	start := time.Now()
+	close(stallReady)
+
+	maxExit := 13 * keepaliveTimeout / 10
+	select {
+	case <-exits:
+	case <-time.After(maxExit - time.Since(start)):
+		t.Fatalf("RunLiveHandler still running %v after event write stalled, want exit before %v", time.Since(start), maxExit)
+	}
+	// With a cap of one, this handshake succeeds only if the stalled peer's
+	// slot was released.
+	dialLive(t, wsURL)
+	if elapsed := time.Since(start); elapsed >= maxExit {
+		t.Fatalf("second session admitted after %v, want before %v", elapsed, maxExit)
+	}
 }
 
 func TestRunLiveHandler_PingWriteDeadlineIsKeepaliveTimeout(t *testing.T) {
@@ -1204,6 +1260,81 @@ func TestRunLiveHandler_FailedPingClosesConnection(t *testing.T) {
 	}
 }
 
+// blockingSendLiveSession's Send blocks until the session closes, as
+// internal/llminternal's does while no model connection is taking its input.
+type blockingSendLiveSession struct {
+	entered   chan struct{}
+	enterOnce sync.Once
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *blockingSendLiveSession) Send(agent.LiveRequest) error {
+	s.enterOnce.Do(func() { close(s.entered) })
+	<-s.closed
+	return io.EOF
+}
+
+func (s *blockingSendLiveSession) Close() error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return nil
+}
+
+func TestRunLiveHandler_FailedPingEndsHandlerWhileSendBlocks(t *testing.T) {
+	const keepalive = 200 * time.Millisecond
+
+	sess := &blockingSendLiveSession{entered: make(chan struct{}), closed: make(chan struct{})}
+	t.Cleanup(func() { _ = sess.Close() })
+	base, err := agent.New(agent.Config{Name: testLiveAppName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: &fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{
+			id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: time.Now()},
+		}},
+		AgentLoader: agent.NewSingleLoader(&mockLiveAgent{Agent: base, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			// A quiet agent: no events until the session closes.
+			return sess, func(func(*session.Event, error) bool) { <-sess.closed }, nil
+		}}),
+		LiveKeepaliveTimeout: keepalive,
+	})
+	exited := make(chan struct{})
+	handler := NewErrorHandler(controller.RunLiveHandler)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		defer close(exited)
+		handler(rw, req)
+	}))
+	listener := &stallingListener{Listener: server.Listener, conns: make(chan *stallingConn, 1)}
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	conn := dialLive(t, "ws"+strings.TrimPrefix(server.URL, "http")+
+		"/run_live?appName="+testLiveAppName+"&userId="+testLiveUserID+"&sessionId="+testLiveSessionID)
+	serverConn := <-listener.conns
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pcm")); err != nil {
+		t.Fatal(err)
+	}
+	// The reader is now inside Send, where it neither reads nor has a read
+	// deadline armed, and the agent emits nothing, so only the failed ping
+	// below can end the handler.
+	select {
+	case <-sess.entered:
+	case <-time.After(time.Second):
+		t.Fatal("client message never reached the live session's Send")
+	}
+	serverConn.stall()
+	defer serverConn.unstall()
+
+	select {
+	case <-exited:
+	case <-time.After(5 * keepalive):
+		t.Errorf("handler still running %v after the peer stopped accepting writes", 5*keepalive)
+	}
+}
+
 type smallBufferListener struct {
 	net.Listener
 	writeBuffer int
@@ -1363,12 +1494,112 @@ func TestRunLiveHandler_FlowErrorWhileClientSendsDeliversCloseFrame(t *testing.T
 	waitForHandlerExit(t, handlerDone)
 }
 
-func TestRunLiveHandler_NegativeKeepaliveDisablesPingsAndDeadlines(t *testing.T) {
+type deadlineRecordingConn struct {
+	net.Conn
+	mu             sync.Mutex
+	recording      bool
+	readDeadlines  []time.Time
+	writeDeadlines []time.Time
+}
+
+func (c *deadlineRecordingConn) startRecording() {
+	c.mu.Lock()
+	c.recording = true
+	c.mu.Unlock()
+}
+
+func (c *deadlineRecordingConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	if c.recording {
+		c.readDeadlines = append(c.readDeadlines, t)
+		c.writeDeadlines = append(c.writeDeadlines, t)
+	}
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *deadlineRecordingConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	if c.recording {
+		c.readDeadlines = append(c.readDeadlines, t)
+	}
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *deadlineRecordingConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	if c.recording {
+		c.writeDeadlines = append(c.writeDeadlines, t)
+	}
+	c.mu.Unlock()
+	return c.Conn.SetWriteDeadline(t)
+}
+
+type deadlineRecordingListener struct {
+	net.Listener
+	conns chan *deadlineRecordingConn
+}
+
+func (l *deadlineRecordingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	dc := &deadlineRecordingConn{Conn: conn}
+	l.conns <- dc
+	return dc, nil
+}
+
+func TestRunLiveHandler_NegativeKeepaliveSetsNoDeadlines(t *testing.T) {
 	liveSession := newRecordingLiveSession()
-	wsURL, _ := startRunLiveServer(t, RuntimeAPIControllerConfig{
+	baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
+	if err != nil {
+		t.Fatalf("agent.New() failed: %v", err)
+	}
+	conns := make(chan *deadlineRecordingConn, 1)
+	var serverConn *deadlineRecordingConn
+	liveAgent := &mockLiveAgent{Agent: baseAgent, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		serverConn = <-conns
+		serverConn.startRecording()
+		return liveSession, func(yield func(*session.Event, error) bool) {
+			if !yield(makeEvent("inv", testLiveAppName, "hello"), nil) {
+				return
+			}
+			<-liveSession.closed
+		}, nil
+	}}
+	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: &fakes.FakeSessionService{
+			Sessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+		},
+		AgentLoader:          agent.NewSingleLoader(liveAgent),
 		LiveKeepaliveTimeout: -1,
-	}, blockingLiveRun(liveSession))
+	})
+	server := httptest.NewUnstartedServer(NewErrorHandler(controller.RunLiveHandler))
+	server.Listener = &deadlineRecordingListener{Listener: server.Listener, conns: conns}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") +
+		"/run_live?appName=" + testLiveAppName + "&userId=" + testLiveUserID + "&sessionId=" + testLiveSessionID
 	conn := dialLive(t, wsURL)
+
+	var gotEvent models.Event
+	if err := conn.SetReadDeadline(time.Now().Add(testWebSocketReadTimeout)); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	if err := conn.ReadJSON(&gotEvent); err != nil {
+		t.Fatalf("ReadJSON() failed: %v", err)
+	}
 
 	select {
 	case <-liveSession.closed:
@@ -1382,6 +1613,28 @@ func TestRunLiveHandler_NegativeKeepaliveDisablesPingsAndDeadlines(t *testing.T)
 	got := waitForLiveRequest(t, liveSession)
 	if blob, ok := got.RealtimeInput.(*genai.Blob); !ok || string(blob.Data) != "audio" {
 		t.Fatalf("RealtimeInput = %#v, want *genai.Blob(\"audio\")", got.RealtimeInput)
+	}
+
+	serverConn.mu.Lock()
+	readDeadlines := append([]time.Time(nil), serverConn.readDeadlines...)
+	writeDeadlines := append([]time.Time(nil), serverConn.writeDeadlines...)
+	serverConn.mu.Unlock()
+
+	if len(readDeadlines) == 0 {
+		t.Fatal("expected at least one SetReadDeadline call after upgrade")
+	}
+	for _, d := range readDeadlines {
+		if !d.IsZero() {
+			t.Errorf("SetReadDeadline(%v) after upgrade, want zero time", d)
+		}
+	}
+	if len(writeDeadlines) == 0 {
+		t.Fatal("expected at least one SetWriteDeadline call after upgrade")
+	}
+	for _, d := range writeDeadlines {
+		if !d.IsZero() {
+			t.Errorf("SetWriteDeadline(%v) after upgrade, want zero time", d)
+		}
 	}
 }
 
