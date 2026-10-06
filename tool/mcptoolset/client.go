@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sync/semaphore"
@@ -73,12 +74,14 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 
 func (c *connectionRefresher) Close() error {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
+		// Close has no caller context, so it waits for any connection attempt
+		// in progress. Acquire cannot fail with a context that is never done.
+		_ = c.mu.Acquire(context.Background(), 1)
 		// Closing is final so failed in-flight calls cannot reconnect.
 		c.closed = true
 		session := c.session
 		c.session = nil
-		c.mu.Unlock()
+		c.mu.Release(1)
 
 		if session != nil {
 			c.closeErr = session.Close()
