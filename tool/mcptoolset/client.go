@@ -34,8 +34,9 @@ type MCPClient interface {
 }
 
 // connectionRefresher wraps an MCP client/transport and handles automatic reconnection.
-// It implements MCPClient and transparently retries operations after reconnecting
-// when the underlying session fails.
+// It implements MCPClient. After a session failure it reconnects, and it retries
+// an operation only when repeating it is safe: ListTools always, and CallTool
+// only when its request was never sent.
 type connectionRefresher struct {
 	client    *mcp.Client
 	transport mcp.Transport
@@ -64,12 +65,37 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 	}
 }
 
-// CallTool calls a tool on the MCP server, automatically reconnecting if needed.
+// CallTool calls a tool on the MCP server. After a connection failure it
+// repairs the connection, but it resends the call only when the failure proves
+// the request was never sent. Any other failure leaves the outcome unknown,
+// because the server may already have run the call, and running a mutating
+// tool twice could duplicate a side effect. In that case CallTool returns the
+// original error, and the repaired connection serves the next call.
 func (c *connectionRefresher) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	result, _, err := withRetry(ctx, c, func(session *mcp.ClientSession) (*mcp.CallToolResult, error) {
-		return session.CallTool(ctx, params)
-	})
-	return result, err
+	session, err := c.getSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.CallTool(ctx, params)
+	if err == nil {
+		return result, nil
+	}
+	session, repairErr := c.repairConnection(ctx, err)
+	if repairErr != nil {
+		return nil, repairErr
+	}
+	if !isUnsentCallError(err) {
+		return nil, err
+	}
+	return session.CallTool(ctx, params)
+}
+
+// isUnsentCallError reports whether err shows that a call was refused before
+// its request was written. The MCP SDK documents ErrConnectionClosed as the
+// error for sending on a connection that is closed or closing, which is what a
+// call returns when the connection broke while the client was idle.
+func isUnsentCallError(err error) bool {
+	return errors.Is(err, mcp.ErrConnectionClosed)
 }
 
 // ListTools lists all available tools from the MCP server, handling pagination
@@ -111,6 +137,7 @@ func (c *connectionRefresher) ListTools(ctx context.Context) ([]*mcp.Tool, error
 
 // withRetry executes fn with the current session, and if it fails, attempts to refresh
 // the connection and retry once. Returns the result, whether a reconnection occurred, and any error.
+// Use it only for operations that are safe to repeat.
 func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.ClientSession) (T, error)) (T, bool, error) {
 	var zero T
 
@@ -121,17 +148,29 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 
 	result, err := fn(session)
 	if err != nil {
-		if !shouldRefreshConnection(err) {
+		session, err = c.repairConnection(ctx, err)
+		if err != nil {
 			return zero, false, err
-		}
-		session, refreshErr := c.refreshConnection(ctx)
-		if refreshErr != nil {
-			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
 		}
 		result, err = fn(session)
 		return result, true, err
 	}
 	return result, false, err
+}
+
+// repairConnection refreshes the connection after opErr, an operation's
+// failure, when opErr indicates the connection is broken. It returns the new
+// session. It returns opErr itself when opErr does not call for a refresh, and
+// an error wrapping opErr when the refresh fails.
+func (c *connectionRefresher) repairConnection(ctx context.Context, opErr error) (*mcp.ClientSession, error) {
+	if !shouldRefreshConnection(opErr) {
+		return nil, opErr
+	}
+	session, err := c.refreshConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w (reconnection also failed: %v)", opErr, err)
+	}
+	return session, nil
 }
 
 // shouldRefreshConnection returns true if the error indicates we should
