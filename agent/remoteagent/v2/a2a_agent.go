@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -472,6 +473,15 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 							}
 							toEmit = cbResp
 						}
+					}
+					// Converters and after callbacks may omit the raw response.
+					// Keep its origin so stateless replies still delimit history.
+					if a2aEvent != nil && toEmit.CustomMetadata[adka2a.ToADKMetaKey("response")] == nil {
+						clone := *toEmit
+						clone.CustomMetadata = make(map[string]any, len(toEmit.CustomMetadata)+1)
+						maps.Copy(clone.CustomMetadata, toEmit.CustomMetadata)
+						clone.CustomMetadata[adka2a.ToADKMetaKey("response")] = true
+						toEmit = &clone
 					}
 					if !yield(toEmit, nil) {
 						return false

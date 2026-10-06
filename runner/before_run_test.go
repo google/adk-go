@@ -111,8 +111,8 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 						if ev.Author != a.Name() {
 							t.Errorf("OnEvent author = %q, want %q", ev.Author, a.Name())
 						}
-						if diff := cmp.Diff(cachedReply, ev.Content); diff != "" {
-							t.Errorf("OnEvent content mismatch (-want +got):\n%s", diff)
+						if !cmp.Equal(cachedReply, ev.Content) {
+							t.Error("OnEvent content mismatch")
 						}
 						if got := ic.Session().Events().Len(); got != wantUserEvents {
 							t.Errorf("history length before OnEvent = %d, want %d", got, wantUserEvents)
@@ -136,10 +136,7 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				svc := session.InMemoryService()
-				if tc.appendErr != nil {
-					svc = &beforeRunAppendErrorService{Service: svc, err: tc.appendErr}
-				}
+				svc := &beforeRunSessionService{Service: session.InMemoryService(), err: tc.appendErr}
 				r, err := New(Config{
 					AppName: "test", Agent: a, SessionService: svc, AutoCreateSession: true,
 					PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}},
@@ -178,11 +175,11 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 					if gotEvent.Author != a.Name() || gotEvent.Partial != tc.partial {
 						t.Errorf("reply author/partial = %q/%v, want %q/%v", gotEvent.Author, gotEvent.Partial, a.Name(), tc.partial)
 					}
-					if diff := cmp.Diff(wantReply, gotEvent.Content); diff != "" {
-						t.Errorf("reply mismatch (-want +got):\n%s", diff)
+					if !cmp.Equal(wantReply, gotEvent.Content) {
+						t.Error("reply mismatch")
 					}
 				} else if gotEvent != nil {
-					t.Errorf("error path yielded a content event: %+v", gotEvent)
+					t.Error("error path yielded a content event")
 				}
 				wantOnEventCalls := 1
 				if tc.beforeErr != nil {
@@ -190,6 +187,14 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 				}
 				if onEventCalls != wantOnEventCalls || afterRunCalls != 1 {
 					t.Errorf("OnEvent/AfterRun calls = %d/%d, want %d/1", onEventCalls, afterRunCalls, wantOnEventCalls)
+				}
+
+				wantReplyAppends := 0
+				if tc.beforeErr == nil && tc.onEventErr == nil && !tc.partial {
+					wantReplyAppends = 1
+				}
+				if svc.replyAppends != wantReplyAppends {
+					t.Errorf("reply AppendEvent calls = %d, want %d", svc.replyAppends, wantReplyAppends)
 				}
 
 				fresh, err := svc.Get(ctx, &session.GetRequest{AppName: "test", UserID: "user", SessionID: "session"})
@@ -208,14 +213,14 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 					if userEvent.Author != "user" {
 						t.Errorf("user event author = %q", userEvent.Author)
 					}
-					if diff := cmp.Diff(wantUserContent, userEvent.Content); diff != "" {
-						t.Errorf("stored user input mismatch (-want +got):\n%s", diff)
+					if !cmp.Equal(wantUserContent, userEvent.Content) {
+						t.Error("stored user input mismatch")
 					}
 				}
 				if wantStoredEvents > wantUserEvents {
 					storedReply := fresh.Session.Events().At(wantUserEvents)
-					if diff := cmp.Diff(gotEvent, storedReply); diff != "" {
-						t.Errorf("stored reply mismatch (-want +got):\n%s", diff)
+					if !cmp.Equal(gotEvent, storedReply) {
+						t.Error("stored reply mismatch")
 					}
 				}
 				if tc.replace {
@@ -228,14 +233,18 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 	}
 }
 
-type beforeRunAppendErrorService struct {
+type beforeRunSessionService struct {
 	session.Service
-	err error
+	err          error
+	replyAppends int
 }
 
-func (s *beforeRunAppendErrorService) AppendEvent(ctx context.Context, sess session.Session, ev *session.Event) error {
+func (s *beforeRunSessionService) AppendEvent(ctx context.Context, sess session.Session, ev *session.Event) error {
 	if ev.Author != "user" {
-		return s.err
+		s.replyAppends++
+		if s.err != nil {
+			return s.err
+		}
 	}
 	return s.Service.AppendEvent(ctx, sess, ev)
 }

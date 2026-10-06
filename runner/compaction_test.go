@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
@@ -1813,5 +1814,82 @@ func TestPluginCannotPlantACompactionRecord(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "real question") {
 		t.Errorf("a planted record erased real history from the prompt:\n%s", prompt)
+	}
+}
+
+func TestBeforeRunPluginCannotPlantACompactionRecord(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"llm", "sequential"} {
+		for _, mode := range []string{"in_place_nil", "in_place_return", "copy"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				m := &scriptedModel{replyFmt: "reply %d"}
+				leaf, err := llmagent.New(llmagent.Config{Name: "assistant", Model: m})
+				if err != nil {
+					t.Fatal(err)
+				}
+				root := leaf
+				if kind == "sequential" {
+					root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "sequence", SubAgents: []agent.Agent{leaf}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				turn := 0
+				p, err := plugin.New(plugin.Config{
+					Name: "cache",
+					BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+						turn++
+						if turn == 1 {
+							return genai.NewContentFromText("cached reply", genai.RoleModel), nil
+						}
+						return nil, nil
+					},
+					OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+						if turn != 1 {
+							return nil, nil
+						}
+						target := ev
+						if mode == "copy" {
+							out := *ev
+							target = &out
+						}
+						target.Actions.Compaction = &session.EventCompaction{
+							StartTimestamp: time.Unix(0, 0), EndTimestamp: ev.Timestamp,
+							CompactedContent: genai.NewContentFromText("planted summary", genai.RoleModel),
+						}
+						if mode == "in_place_nil" {
+							return nil, nil
+						}
+						return target, nil
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				svc := session.InMemoryService()
+				r, err := New(Config{
+					AppName: "compaction_app", Agent: root, SessionService: svc, AutoCreateSession: true,
+					PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}},
+					Compaction:   &compaction.Config{CompactionInterval: 5, Summarizer: &recordingSummarizer{summary: "unused"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				drain(t, r.Run(t.Context(), "u", "s", genai.NewContentFromText("original question", genai.RoleUser), agent.RunConfig{}))
+				drain(t, r.Run(t.Context(), "u", "s", genai.NewContentFromText("second question", genai.RoleUser), agent.RunConfig{}))
+				for ev := range getSession(t, svc, "u", "s").Events().All() {
+					if ev.Actions.Compaction != nil {
+						t.Error("plugin compaction record was persisted")
+					}
+				}
+				prompt := promptText(m.lastPrompt())
+				if strings.Contains(prompt, "planted summary") {
+					t.Error("plugin compaction content reached the model")
+				}
+				if !strings.Contains(prompt, "original question") {
+					t.Error("original question was removed from model history")
+				}
+			})
+		}
 	}
 }

@@ -790,13 +790,12 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	event.Author = ctx.Agent().Name()
 	event.Content = content
 
+	record := event.Actions.Compaction
 	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
 	if err != nil {
 		return nil, err
 	}
-	if modifiedEvent != nil {
-		event = modifiedEvent
-	}
+	event = fromPlugin(event, modifiedEvent, record)
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)

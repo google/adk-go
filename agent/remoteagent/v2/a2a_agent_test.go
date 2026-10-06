@@ -697,7 +697,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{
 					Content:        genai.NewContentFromText("foobar", genai.RoleModel),
-					CustomMetadata: map[string]any{"counter": 1},
+					CustomMetadata: map[string]any{"counter": 1, adka2a.ToADKMetaKey("response"): true},
 					TurnComplete:   true,
 				},
 			},
@@ -723,20 +723,20 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				{
 					Partial:        true,
 					Content:        genai.NewContentFromText("Hello", genai.RoleModel),
-					CustomMetadata: map[string]any{"foo": "bar"},
+					CustomMetadata: map[string]any{"foo": "bar", adka2a.ToADKMetaKey("response"): true},
 				},
 				{
 					Partial:        true,
 					Content:        genai.NewContentFromText(", world!", genai.RoleModel),
-					CustomMetadata: map[string]any{"foo": "bar"},
+					CustomMetadata: map[string]any{"foo": "bar", adka2a.ToADKMetaKey("response"): true},
 				},
 				{
 					Content:        genai.NewContentFromText("Hello, world!", genai.RoleModel),
-					CustomMetadata: map[string]any{"foo": "bar"},
+					CustomMetadata: map[string]any{"foo": "bar", adka2a.ToADKMetaKey("response"): true},
 				},
 				{
 					TurnComplete:   true,
-					CustomMetadata: map[string]any{"foo": "bar"},
+					CustomMetadata: map[string]any{"foo": "bar", adka2a.ToADKMetaKey("response"): true},
 				},
 			},
 		},
@@ -781,7 +781,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 					return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
 				},
 			},
-			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel), CustomMetadata: map[string]any{adka2a.ToADKMetaKey("response"): true}}},
 		},
 		{
 			name: "response overwrite with error",
@@ -843,7 +843,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			converter: func(ctx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error) {
 				return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
 			},
-			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel), CustomMetadata: map[string]any{adka2a.ToADKMetaKey("response"): true}}},
 		},
 		{
 			name: "after interceptor invoked with before result",
@@ -1487,7 +1487,7 @@ func TestRemoteAgent_ScopedMessage_NoUserContentUsesScopedHistory(t *testing.T) 
 func TestRemoteAgent_ScopedMessage_ForeignScopeCallIDDoesNotLicenseInScopeResponse(t *testing.T) {
 	const scope, other, remoteName = "workflow/node@1", "workflow/other@1", "remote-agent"
 
-	foreignCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-foreign", Name: "peer_tool"}})
+	foreignCall := newRemoteResponseFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-foreign", Name: "peer_tool"}})
 	foreignCall.IsolationScope = other
 
 	inScopeResponse := newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
