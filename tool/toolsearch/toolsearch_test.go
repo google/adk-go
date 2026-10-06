@@ -504,6 +504,25 @@ func TestProcessRequest_ForwardsToBase(t *testing.T) {
 	}
 }
 
+// failingRequestToolset is a base toolset whose ProcessRequest fails.
+type failingRequestToolset struct {
+	staticToolset
+	err error
+}
+
+func (f *failingRequestToolset) ProcessRequest(agent.Context, *model.LLMRequest) error { return f.err }
+
+// TestProcessRequest_ReturnsBaseError checks that an error from the base
+// toolset's ProcessRequest is returned rather than dropped.
+func TestProcessRequest_ReturnsBaseError(t *testing.T) {
+	errBase := errors.New("base request hook failed")
+	base := &failingRequestToolset{staticToolset: staticToolset{tools: makeTools(toolDef{"list_books", "list"})}, err: errBase}
+	gts := mustNew(t, base, Config{})
+	if err := gts.ProcessRequest(newToolCtx(newFakeState(nil)), &model.LLMRequest{}); !errors.Is(err, errBase) {
+		t.Errorf("ProcessRequest() error = %v, want it to wrap %v", err, errBase)
+	}
+}
+
 // TestSearchTool_AdvertisesGatedToolsInDescription verifies that the gated tool
 // names passed in Config are listed in the search_tools description the model
 // receives, so it knows what it can search for and select: by name. Core names
@@ -717,6 +736,35 @@ func TestSearch_IndexesArguments(t *testing.T) {
 // description that the search must index.
 type updateNoteArgs struct {
 	Body string `json:"body" jsonschema:"the comment text to attach"`
+}
+
+// typedParamsTool declares its arguments with a typed genai.Schema, as
+// loadmemorytool and loadartifactstool do.
+type typedParamsTool struct{ stubTool }
+
+func (t *typedParamsTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name, Description: t.desc, Parameters: &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"zipcode": {Type: genai.TypeString, Description: "the comment text to attach"},
+			"unused":  nil,
+		},
+	}}
+}
+
+// TestSearch_IndexesTypedParameters checks that argument names and
+// descriptions from a typed Parameters schema are searchable, and that a nil
+// property schema is skipped.
+func TestSearch_IndexesTypedParameters(t *testing.T) {
+	base := &staticToolset{tools: []tool.Tool{
+		&typedParamsTool{stubTool{name: "update_note", desc: "modify a note"}},
+		&stubTool{name: "list_images", desc: "list all images"},
+	}}
+	gts := mustNew(t, base, Config{})
+	for _, query := range []string{"comment", "zipcode"} {
+		out := mustSearch(t, newToolCtx(newFakeState(nil)), query, base, gts, 8)
+		checkNames(t, matchNames(out.Matches), []string{"update_note"}, []string{"list_images"})
+	}
 }
 
 func toolNames(tools []tool.Tool) []string {
