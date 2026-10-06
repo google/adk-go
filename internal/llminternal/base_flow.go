@@ -353,13 +353,20 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// Timeouts are not covered. gorilla/websocket replaces any net.Error whose
+// Temporary() is true with its own type (hideTempErr), and ETIMEDOUT counts as
+// temporary on Linux, so a timed-out read loses the *net.OpError and stays
+// fatal, as it was before the type check.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
