@@ -417,6 +417,57 @@ func TestRank_AlreadyAvailableNoteIsCapped(t *testing.T) {
 	}
 }
 
+// TestRank_RelevanceFloorDropsWeakMatches checks that a match scoring below
+// MinScoreRatio of the top score is dropped, and kept under a lower floor.
+func TestRank_RelevanceFloorDropsWeakMatches(t *testing.T) {
+	items := makeItems(
+		[2]string{"list_books", "list books"},
+		[2]string{"get_author", "returns the author of one of the books in the library catalog"},
+	)
+	for _, tc := range []struct {
+		ratio float64
+		want  []string
+	}{
+		{0.5, []string{"list_books"}},
+		{0.1, []string{"list_books", "get_author"}},
+	} {
+		cfg := testCfg()
+		cfg.MinScoreRatio = tc.ratio
+		matches, _ := Rank(items, "books", nil, cfg)
+		if diff := cmp.Diff(tc.want, names(matches)); diff != "" {
+			t.Errorf("MinScoreRatio %v: Rank() names mismatch (-want +got):\n%s", tc.ratio, diff)
+		}
+	}
+}
+
+// TestRank_RegexListsNameMatchesFirst checks that regex results put name
+// matches before description-only matches, each group sorted by name. The order
+// decides which tools survive the MaxResults cap.
+func TestRank_RegexListsNameMatchesFirst(t *testing.T) {
+	items := makeItems(
+		[2]string{"a_tool", "fetches books"},
+		[2]string{"z_books", "unrelated"},
+		[2]string{"m_books", "unrelated"},
+	)
+	matches, _ := Rank(items, "book.*", nil, testCfg())
+	if diff := cmp.Diff([]string{"m_books", "z_books", "a_tool"}, names(matches)); diff != "" {
+		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRank_InvalidPatternMatchesLiterally checks that a query that does not
+// compile as a regex is matched as a case-insensitive literal substring.
+func TestRank_InvalidPatternMatchesLiterally(t *testing.T) {
+	items := makeItems(
+		[2]string{"beta_tool", "runs (Beta) features"},
+		[2]string{"other_tool", "beta without a parenthesis"},
+	)
+	matches, _ := Rank(items, "(beta", nil, testCfg())
+	if diff := cmp.Diff([]string{"beta_tool"}, names(matches)); diff != "" {
+		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestRank_SelectWithNoNamesSaysNothingMatched checks that a select: query that
 // names nothing gets the no-match note rather than an empty one.
 func TestRank_SelectWithNoNamesSaysNothingMatched(t *testing.T) {

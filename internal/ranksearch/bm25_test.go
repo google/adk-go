@@ -74,6 +74,21 @@ func TestTokenize_SplitsSnakeAndCamelCase(t *testing.T) {
 	}
 }
 
+// TestTokenize_NoEmptyTokens checks that runs of separators produce no empty
+// token. An empty token in both a query and a tool description would make the
+// tool match without sharing a word with the query.
+func TestTokenize_NoEmptyTokens(t *testing.T) {
+	for in, want := range map[string][]string{
+		"weather, forecast": {"weather", "forecast"},
+		"an author. Fast.":  {"an", "author", "fast"},
+		"..x..":             {"x"},
+	} {
+		if got := tokenize(in); !slices.Equal(got, want) {
+			t.Errorf("tokenize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestStem_PluralCollapses verifies singular and plural forms tokenize equally so
 // "book" matches "books", including sibilant "-es" plurals.
 func TestStem_PluralCollapses(t *testing.T) {
