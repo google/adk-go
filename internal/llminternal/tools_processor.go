@@ -17,6 +17,7 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"slices"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -35,7 +36,7 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
 			return
 		}
-		tools := Reveal(llmAgent).Tools
+		tools := slices.Clip(Reveal(llmAgent).Tools)
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
 			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 			if err != nil {
