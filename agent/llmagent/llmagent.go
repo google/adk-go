@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -80,17 +81,16 @@ func New(cfg Config) (agent.Agent, error) {
 		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
-			Model:                    cfg.Model,
-			Mode:                     cfg.Mode,
-			GenerateContentConfig:    cfg.GenerateContentConfig,
-			Tools:                    cfg.Tools,
-			Toolsets:                 cfg.Toolsets,
-			DisallowTransferToParent: cfg.DisallowTransferToParent,
-			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
-			InputSchema:              cfg.InputSchema,
-			OutputSchema:             cfg.OutputSchema,
-			// TODO: internal type for includeContents
-			IncludeContents:           string(cfg.IncludeContents),
+			Model:                     cfg.Model,
+			Mode:                      cfg.Mode,
+			GenerateContentConfig:     cfg.GenerateContentConfig,
+			Tools:                     slices.Clone(cfg.Tools),
+			Toolsets:                  slices.Clone(cfg.Toolsets),
+			DisallowTransferToParent:  cfg.DisallowTransferToParent,
+			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
+			InputSchema:               cfg.InputSchema,
+			OutputSchema:              cfg.OutputSchema,
+			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,

@@ -413,6 +413,10 @@ type EventRef struct {
 }
 
 // Prefixes for defining session's state scopes
+//
+// State prefixes are single-level and do not compose.
+// For example, "app:temp:x" is a valid app-scoped key read and written using
+// "app:temp:x", but the "temp:" portion has no ephemeral semantics and will persist.
 const (
 	// KeyPrefixApp is the prefix for app-level state keys.
 	// They are shared across all users and sessions for that application.

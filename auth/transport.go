@@ -25,8 +25,9 @@ import (
 // The provider receives the request context (req.Context()), which — for a
 // request made during a tool call — descends from the ADK context that flowed
 // into the call. The resolver runs on every request so that per-user
-// credentials are never shared across users; refresh and caching are handled by
-// the provider's underlying token source.
+// credentials are never shared across users. Refresh and caching belong to the
+// provider: a token-source-backed one refreshes itself, and a network-backed one
+// can cache in a [CredentialStore].
 type Transport struct {
 	// Provider resolves the credential to apply. Required.
 	Provider CredentialProvider

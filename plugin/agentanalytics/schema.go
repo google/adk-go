@@ -22,10 +22,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
+const timestampField = "timestamp"
+
 // EventsSchema returns the BigQuery schema for the events table.
 func EventsSchema() bq.Schema {
 	return bq.Schema{
-		{Name: "timestamp", Type: bq.TimestampFieldType, Required: true, Description: "The UTC timestamp when the event occurred. Used for ordering events within a session."},
+		{Name: timestampField, Type: bq.TimestampFieldType, Required: true, Description: "The UTC timestamp when the event occurred. Used for ordering events within a session."},
 		{Name: "event_type", Type: bq.StringFieldType, Required: false, Description: "The category of the event (e.g., 'LLM_REQUEST', 'TOOL_CALL', 'AGENT_RESPONSE'). Helps in filtering specific types of interactions."},
 		{Name: "agent", Type: bq.StringFieldType, Required: false, Description: "The name of the agent that generated this event. Useful for multi-agent systems."},
 		{Name: "session_id", Type: bq.StringFieldType, Required: false, Description: "A unique identifier for the entire conversation session. Used to group all events belonging to a single user interaction."},
@@ -73,7 +75,7 @@ func EventsSchema() bq.Schema {
 func ArrowSchema() *arrow.Schema {
 	return arrow.NewSchema(
 		[]arrow.Field{
-			{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
+			{Name: timestampField, Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
 			{Name: "event_type", Type: arrow.BinaryTypes.String, Nullable: true},
 			{Name: "agent", Type: arrow.BinaryTypes.String, Nullable: true},
 			{Name: "session_id", Type: arrow.BinaryTypes.String, Nullable: true},
