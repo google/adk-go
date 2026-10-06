@@ -547,5 +547,4 @@ func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
 	if count != 0 {
 		t.Errorf("expected no persisted session for the failing write, found %d", count)
 	}
-
 }
