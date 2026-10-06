@@ -56,7 +56,7 @@ func continuationToken(resp *genai.GenerateContentResponse) []byte {
 	}
 	token := resp.Candidates[0].ContinuationToken
 	if len(token) == 0 {
-		log.Printf("adk: the model paused a generation for continuation without a continuation token; returning the partial output")
+		log.Printf("adk: the model paused a generation for continuation without a continuation token; returning the partial output") //nolint:forbidigo // pre-slog call site
 		return nil
 	}
 	return token
@@ -109,9 +109,9 @@ func (c *continuation) advance(token []byte, parts []*genai.Part, usage *genai.G
 	}
 	if !c.willResume(token) {
 		if bytes.Equal(token, c.token) {
-			log.Printf("adk: the model returned the same continuation token twice; returning the output generated so far")
+			log.Printf("adk: the model returned the same continuation token twice; returning the output generated so far") //nolint:forbidigo // pre-slog call site
 		} else {
-			log.Printf("adk: the model paused a generation %d times; returning the output generated so far", maxResumes)
+			log.Printf("adk: the model paused a generation %d times; returning the output generated so far", maxResumes) //nolint:forbidigo // pre-slog call site
 		}
 		return nil, nil, false
 	}
