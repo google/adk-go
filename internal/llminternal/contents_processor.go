@@ -332,7 +332,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 	}
 
 	if len(orphanedIDs) > 0 {
-		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs)
+		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs) //nolint:forbidigo // pre-slog call site
 	}
 	return result, orphanRemnants
 }
@@ -395,7 +395,7 @@ func dropOrphanedFunctionCalls(events []*session.Event) []*session.Event {
 	}
 
 	if len(orphanedIDs) > 0 {
-		log.Printf("adk: dropping function calls with no matching function response: %q", orphanedIDs)
+		log.Printf("adk: dropping function calls with no matching function response: %q", orphanedIDs) //nolint:forbidigo // pre-slog call site
 	}
 	return result
 }
