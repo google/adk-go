@@ -19,12 +19,15 @@ import (
 	"google.golang.org/adk/v2/internal/workflowwalk"
 )
 
+// init hands walkAgents to the experimental app-info endpoint through
+// [workflowwalk.WalkAgents].
 func init() {
 	workflowwalk.WalkAgents = func(edges any) []agent.Agent {
 		return walkAgents(edges.([]Edge))
 	}
 }
 
+// walkAgents is the walk behind [workflowwalk.WalkAgents].
 func walkAgents(edges []Edge) []agent.Agent {
 	var agents []agent.Agent
 	seen := make(map[Node]bool)
