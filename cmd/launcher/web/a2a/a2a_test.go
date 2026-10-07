@@ -15,8 +15,11 @@
 package a2a
 
 import (
+	"fmt"
 	"iter"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -27,11 +30,13 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/gorilla/mux"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/web"
+	"google.golang.org/adk/v2/cmd/launcher/web/api"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -174,4 +179,136 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 			t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], wantMessage)
 		}
 	})
+}
+
+// routerCaptureSublauncher records the root router built by web.NewLauncher so
+// a test can send requests through the assembled middleware and sublaunchers.
+type routerCaptureSublauncher struct {
+	router *mux.Router
+}
+
+func (s *routerCaptureSublauncher) Keyword() string                       { return "capture" }
+func (s *routerCaptureSublauncher) Parse(args []string) ([]string, error) { return args, nil }
+func (s *routerCaptureSublauncher) CommandLineSyntax() string             { return "" }
+func (s *routerCaptureSublauncher) SimpleDescription() string             { return "" }
+func (s *routerCaptureSublauncher) UserMessage(string, func(v ...any))    {}
+func (s *routerCaptureSublauncher) SetupSubrouters(r *mux.Router, _ *launcher.Config) error {
+	s.router = r
+	return nil
+}
+
+// TestA2AAgentURLDoesNotWidenAPIOrigins pins that -a2a_agent_url (whether left
+// at its http://localhost:8080 default or set explicitly) does not widen which
+// origins /api admits, and that what /api admits does not depend on whether
+// a2a is set up before api (as in full.NewLauncher) or after api (as in
+// prod.NewLauncher).
+func TestA2AAgentURLDoesNotWidenAPIOrigins(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	for _, order := range []struct {
+		name  string
+		build func(a2aSub, apiSub, capSub web.Sublauncher) launcher.SubLauncher
+		args  func(a2aArgs []string) []string
+	}{
+		{
+			name: "a2a before api",
+			build: func(a2aSub, apiSub, capSub web.Sublauncher) launcher.SubLauncher {
+				return web.NewLauncher(a2aSub, apiSub, capSub)
+			},
+			args: func(a2aArgs []string) []string {
+				out := []string{"-allow_origins", "https://allowed.example.com", "a2a"}
+				out = append(out, a2aArgs...)
+				return append(out, "api", "-webui_address", "localhost:9000", "capture")
+			},
+		},
+		{
+			name: "api before a2a",
+			build: func(a2aSub, apiSub, capSub web.Sublauncher) launcher.SubLauncher {
+				return web.NewLauncher(apiSub, a2aSub, capSub)
+			},
+			args: func(a2aArgs []string) []string {
+				out := []string{"-allow_origins", "https://allowed.example.com", "api", "-webui_address", "localhost:9000", "a2a"}
+				out = append(out, a2aArgs...)
+				return append(out, "capture")
+			},
+		},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name       string
+				a2aArgs    []string
+				origin     string
+				wantStatus int
+				wantCORS   string
+			}{
+				{
+					name:       "default a2a_agent_url is refused on /api",
+					origin:     "http://localhost:8080",
+					wantStatus: http.StatusForbidden,
+					wantCORS:   "",
+				},
+				{
+					name:       "explicit a2a_agent_url is refused on /api",
+					a2aArgs:    []string{"-a2a_agent_url", "https://agent.example.com"},
+					origin:     "https://agent.example.com",
+					wantStatus: http.StatusForbidden,
+					wantCORS:   "",
+				},
+				{
+					name:       "configured webui_address is served on /api",
+					origin:     "http://localhost:9000",
+					wantStatus: http.StatusOK,
+					wantCORS:   "http://localhost:9000",
+				},
+				{
+					name:       "configured allow_origins is served on /api",
+					origin:     "https://allowed.example.com",
+					wantStatus: http.StatusOK,
+					wantCORS:   "https://allowed.example.com",
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ln, err := net.Listen("tcp", "127.0.0.1:0")
+					if err != nil {
+						t.Fatalf("net.Listen() error = %v", err)
+					}
+					t.Cleanup(func() { _ = ln.Close() })
+					port := ln.Addr().(*net.TCPAddr).Port
+
+					capSub := &routerCaptureSublauncher{}
+					l := order.build(NewLauncher(), api.NewLauncher(), capSub)
+					args := append([]string{"-port", fmt.Sprint(port)}, order.args(tc.a2aArgs)...)
+					if _, err := l.Parse(args); err != nil {
+						t.Fatalf("Parse(%v) error = %v", args, err)
+					}
+					cfg := &launcher.Config{
+						AgentLoader:    agent.NewSingleLoader(agnt),
+						SessionService: session.InMemoryService(),
+					}
+					if err := l.Run(t.Context(), cfg); err == nil {
+						t.Fatalf("Run() succeeded, want server bind failure")
+					}
+					if capSub.router == nil {
+						t.Fatalf("Run() returned before SetupSubrouters captured the router")
+					}
+
+					req := httptest.NewRequest(http.MethodGet, "/api/list-apps", nil)
+					req.Host = "127.0.0.1:9000"
+					req.Header.Set("Origin", tc.origin)
+					rec := httptest.NewRecorder()
+					capSub.router.ServeHTTP(rec, req)
+
+					if rec.Code != tc.wantStatus {
+						t.Errorf("GET /api/list-apps with Origin %q = %d, want %d", tc.origin, rec.Code, tc.wantStatus)
+					}
+					if got := rec.Header().Get("Access-Control-Allow-Origin"); got != tc.wantCORS {
+						t.Errorf("GET /api/list-apps with Origin %q: Access-Control-Allow-Origin = %q, want %q", tc.origin, got, tc.wantCORS)
+					}
+				})
+			}
+		})
+	}
 }

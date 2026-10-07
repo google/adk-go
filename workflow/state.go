@@ -76,13 +76,13 @@ const (
 // NodeState is the per-node lifecycle record. A RunState holds one
 // of these for every node the engine has touched.
 //
-// JSON-marshallable: NodeState is persisted across pause/resume
-// turns via session.State (see persistence.go). The Input, Output,
-// and PendingRequest.Payload fields are typed any and must
-// therefore be JSON-encodable for the persisted state to
-// round-trip. Nodes that need to carry binary data across a pause
-// should store the bytes via agent.Artifacts and stash a URI
-// string in place of the bytes.
+// JSON-marshallable: the parts of a NodeState that survive a pause
+// are rebuilt from session event history on the next turn (see
+// ReconstructRunState in persistence.go). The Input, Output and
+// ResumedInputs fields are typed any and must therefore be
+// JSON-encodable for that round-trip to work. Nodes that need to
+// carry binary data across a pause should store the bytes via
+// agent.Artifacts and stash a URI string in place of the bytes.
 type NodeState struct {
 	// Status is the current lifecycle position. See NodeStatus.
 	Status NodeStatus `json:"status"`
@@ -112,10 +112,16 @@ type NodeState struct {
 	Branch string `json:"branch,omitempty"`
 
 	// Interrupts holds the long-running tool call IDs the node is
-	// waiting on. Non-empty iff Status == NodeWaiting due to a
-	// long-running tool pause; lets resume match a human's
-	// FunctionResponse to the node. Mirrors adk-python
-	// NodeState.interrupts.
+	// waiting on; lets resume match a human's FunctionResponse to the
+	// node. Mirrors adk-python NodeState.interrupts.
+	//
+	// It is non-empty for a node waiting on long-running interrupts,
+	// and also while Status is NodePending for a partially resumed
+	// re-entry node, where some interrupts are resolved and others are
+	// not and the node runs again to re-interrupt for the rest. A node
+	// parked by WaitForOutput also reaches NodeWaiting, but with this
+	// field empty: that park creates no interrupt ID, so there is
+	// nothing here to match a response against.
 	Interrupts []string `json:"interrupts,omitempty"`
 
 	// interruptSchemas maps an interrupt ID to its declared response
@@ -153,8 +159,10 @@ type NodeState struct {
 }
 
 // RunState is the per-invocation lifecycle state for a workflow
-// run. It rides in session.State across pause and resume turns so
-// the workflow can pick up where a previous invocation left off.
+// run. It is not carried across turns as a stored value: a resume
+// turn rebuilds it by scanning session event history (see
+// ReconstructRunState), which is how the workflow picks up where a
+// previous turn left off.
 type RunState struct {
 	// Nodes is the per-node lifecycle map. Absent entries are
 	// inactive.
