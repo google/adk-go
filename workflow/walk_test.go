@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/workflowwalk"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -64,7 +65,7 @@ func newWalkParallelWorker(t *testing.T, wrapped workflow.Node) *workflow.Parall
 // sorted, since the walk promises no order.
 func walkedNames(edges []workflow.Edge) []string {
 	var names []string
-	for _, a := range workflow.WalkAgents(edges) {
+	for _, a := range workflowwalk.WalkAgents(edges) {
 		names = append(names, a.Name())
 	}
 	slices.Sort(names)

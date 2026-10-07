@@ -70,6 +70,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/workflowwalk"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/workflow"
@@ -236,7 +237,7 @@ func children(a agent.Agent) []agent.Agent {
 	// agents share a name and one is in a nested workflow, which one is
 	// described can change from request to request. Sort them here if that
 	// matters.
-	return slices.Concat(a.SubAgents(), workflow.WalkAgents(workflowEdges(a)))
+	return slices.Concat(a.SubAgents(), workflowwalk.WalkAgents(workflowEdges(a)))
 }
 
 // workflowEdges returns the edges of a's workflow graph, or nil when a is not

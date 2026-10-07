@@ -14,19 +14,18 @@
 
 package workflow
 
-import "google.golang.org/adk/v2/agent"
+import (
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/workflowwalk"
+)
 
-// WalkAgents returns the agents the nodes of edges run: the agent of each
-// [AgentNode], including those inside nested sub-workflows and inside the node
-// a [ParallelWorker] runs. It shows what a graph is built from without running
-// it. The agents a workflow agent reaches through its edges are not among its
-// [agent.Agent.SubAgents], so walking sub-agents alone never finds them.
-//
-// Each node is visited once, so an agent that two nodes run is returned twice.
-// The order is not stable: the edges of a nested sub-workflow come back in map
-// order. An agent that a node runs from its own code, such as a dynamic node,
-// is not returned. The result is nil when no node runs an agent.
-func WalkAgents(edges []Edge) []agent.Agent {
+func init() {
+	workflowwalk.WalkAgents = func(edges any) []agent.Agent {
+		return walkAgents(edges.([]Edge))
+	}
+}
+
+func walkAgents(edges []Edge) []agent.Agent {
 	var agents []agent.Agent
 	seen := make(map[Node]bool)
 	var visit func(n Node)
