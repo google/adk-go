@@ -15,979 +15,181 @@
 package utils
 
 import (
-	"cmp"
-	"os"
 	"path/filepath"
-	"slices"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-type fsTest struct {
-	name         string
-	p            string
-	wantErr      bool
-	wantBase     string
-	wantPath     string
-	relOnWindows bool
+type normalizeCase struct {
+	name       string
+	rel        string
+	wantErr    bool
+	wantSuffix string
 }
 
-type testingEntry struct {
-	p    string
-	base string
+// runTests runs every case against [SafeSubpath] for the given base.
+func runTests(t *testing.T, base string, cases []normalizeCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SafeSubpath(base, tc.rel)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Normalize(%q, %q) = %q, nil; want error (escape/invalid)", base, tc.rel, got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Normalize(%q, %q) returned error %v; want success", base, tc.rel, err)
+			}
+
+			// Defense-in-depth: a success must never land outside base.
+			if !withinBase(base, got) {
+				t.Fatalf("Normalize(%q, %q) = %q; result escapes base %q", base, tc.rel, got, base)
+			}
+
+			want := base
+			if tc.wantSuffix != "" {
+				want = filepath.Join(base, filepath.FromSlash(tc.wantSuffix))
+			}
+			if got != want {
+				t.Errorf("Normalize(%q, %q) = %q; want %q", base, tc.rel, got, want)
+			}
+		})
+	}
 }
 
-func TestNorm(t *testing.T) {
-
-	tests := []struct {
-		p                string // to be appended to a base absolute path with `/` or `\\` at the end
-		wantDefault      string // after normalization, what should be appended to a base absolute path with `/` or `\` at the end - may be ``
-		wantWindows      string
-		wantDefaultValid bool
-		wantWindowsValid bool
-	}{
-		{
-			p:                `a`,
-			wantDefault:      `a`,
-			wantWindows:      `a`,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-		{
-			p:                `.`,
-			wantDefault:      ``,
-			wantWindows:      ``,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-		{
-			p: `..`,
-		},
-		{
-			p: `../`,
-		},
-		{
-			p: `..\`,
-		},
-		{
-			p: `../a`,
-		},
-		{
-			p: `../z`, // the same like the final path element for the base path
-		},
-		{
-			p: `../../../..`,
-		},
-		{
-			p: `../../../../a/b/c`,
-		},
-		{
-			p: "a\x00/../../etc/passwd",
-		},
-		{
-			p: `/`,
-		},
-		{
-			p: `/a`,
-		},
-		{
-			p: `/a/../b`,
-		},
-		{
-			p: `\\`,
-		},
-		{
-			p: `\\host`,
-		},
-		{
-			p: `\\host\d`,
-		},
-		{
-			p: `\\host\d\a\b`,
-		},
-		{
-			p:                `../a`,
-			wantDefault:      ``,
-			wantWindows:      ``,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-		{
-			p:                `../c`,
-			wantDefault:      ``,
-			wantWindows:      ``,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-		{
-			p:                `../a/b`,
-			wantDefault:      `b`,
-			wantWindows:      `b`,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-		{
-			p:                `a/../b`,
-			wantDefault:      `b`,
-			wantWindows:      `b`,
-			wantDefaultValid: true,
-			wantWindowsValid: true,
-		},
-	}
-
-	for _, tc := range tests {
-		// gotDefValid, gotDef := defaultNormalizeRelativePath(tc.p)
-		// gotWinValid, gotWin := windowsNormalizeRelativePath(tc.p)
-		ssp, err := SafeSubpath("/x/y/z", tc.p)
-		t.Logf("ssp: %30v => %30v", tc.p, ssp)
-		if err != nil {
-			t.Errorf("SafeSubpath failed: %v", err)
-		}
-
-		// if gotDefValid != tc.wantDefaultValid {
-		// 	t.Errorf("default for %q: error got: %v want %v", tc.p, gotDefValid, tc.wantDefaultValid)
-		// }
-		// if gotWinValid != tc.wantWindowsValid {
-		// 	t.Errorf("windows for %q: error got: %v want %v", tc.p, gotWinValid, tc.wantWindowsValid)
-		// }
-		// if gotDefValid && (gotDef != tc.wantDefault) {
-		// 	t.Errorf("default for %q: error got: %v want %v", tc.p, gotDef, tc.wantDefault)
-		// }
-		// if gotWinValid && (gotWin != tc.wantWindows) {
-		// 	t.Errorf("default for %q: error got: %v want %v", tc.p, gotWin, tc.wantWindows)
-		// }
-	}
-	t.Fail()
-}
-
-func addPrefixes(paths []string) []string {
-	res := []string{}
-	prefs := []string{
-		`/`,
-		`./`,
-		`../`,
-		`a/./`,
-		`a/../`,
-		`\\?\`,
-		`\\.\`,
-		`\\?\UNC\`,
-		`\\host\dir`,
-	}
-	for _, pref := range prefs {
-		for _, p := range paths {
-			res = append(res, pref+p)
-		}
-	}
-	return res
-}
-
-func addSuffixes(paths []string) []string {
-	res := []string{}
-	sufs := []string{
-		``,
-		`.`,
-		`..`,
-		`...`,
-		`.txt`,
-		`:stream`,
-	}
-	for _, suf := range sufs {
-		for _, p := range paths {
-			res = append(res, p+suf)
-		}
-	}
-	return res
-}
-
-func addBackslashes(paths []string) []string {
-	res := []string{}
-	res = append(res, paths...)
-	for _, p := range paths {
-		bs := strings.ReplaceAll(p, "/", "\\")
-		if bs != p {
-			res = append(res)
-		}
-	}
-	return res
-}
-
-func toBeTested() []string {
-	res := []string{
-		``,
-		`a`,
-		`a/b`,
-		`a/b.txt`,
-		`a/b/`,
-		`/a`,
-		`CON`,
-		`CONIN$`,
-		`CONOUT$`,
-		`LPT`,
-		`LPT1`,
-		`NUL`,
-		`c:`,
-		`c:\`,
-		`c:\a`,
-		`c:a`,
-		`.`,
-		`..`,
-		`....`,
-	}
-	res = addSuffixes(res)
-	res = addPrefixes(res)
-	res = addBackslashes(res)
-	return res
-}
-
-func allTests(allin, nonein string) []testingEntry {
-	tests := toBeTested()
-
-	res := []testingEntry{}
-
-	for _, p := range tests {
-		res = append(res, testingEntry{p: p, base: allin})
-		res = append(res, testingEntry{p: p, base: nonein})
-	}
-	slices.SortFunc(res, func(a, b testingEntry) int { return cmp.Compare(a.p+"|"+a.base, b.p+"|"+b.base) })
-	res = slices.Compact(res)
-	return res
-}
-
-func TestComb2(t *testing.T) {
-	format := "%-20v %-6v %-6v %-6v %-6v %-10v %-10v %-10v"
-	t.Logf(format, "path", "isAbs", "isLoc", "open?", "stat?", "clean", "volume", "base")
-
-	dir, err := os.Getwd()
+// withinBase reports whether p is base or a descendant of base, using the
+// platform's path semantics.
+func withinBase(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
 	if err != nil {
-		t.Errorf("os.Getwd failed %v", err)
+		return false
 	}
-
-	defer os.Chdir(dir)
-
-	os.Chdir("./_testDir")
-
-	tests := allTests(`C:\Users\kdroste\Projects\test\files\_testDir\allin\tp`, `C:\Users\kdroste\Projects\test\files\_testDir\nonein\tp`)
-
-	for _, tc := range tests {
-		resPath := filepath.Join(tc.base, tc.p)
-
-		isAbs := filepath.IsAbs(tc.p)
-		isLocal := filepath.IsLocal(tc.p)
-		clean := filepath.Clean(tc.p)
-		volume := filepath.VolumeName(tc.p)
-		statable := true
-		openable := true
-
-		_, err := os.Stat(resPath)
-		if err != nil {
-			statable = false
-			// t.Errorf("os.Stat failed for %v: %v", p, err)
-			// continue
-		}
-		f, errOpen := os.Open(resPath)
-		if errOpen != nil {
-			openable = false
-		} else {
-			defer f.Close()
-		}
-
-		// t.Logf(format, "path", "isAbs", "isLoc", "open?", "stat?", "clean", "volume")
-		t.Logf(format, tc.p, isAbs, isLocal, openable, statable, clean, volume, tc.base)
-
+	if rel == ".." || rel == "." {
+		return rel == "."
 	}
-	t.Fail()
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func TestComb(t *testing.T) {
-	format := "%-20v %-6v %-6v %-6v %-6v %-10v %-10v"
-	t.Logf(format, "path", "isAbs", "isLoc", "open?", "stat?", "clean", "volume")
+// commonSubpathCases apply identically on all platforms.
+var commonSubpathCases = []normalizeCase{
+	// Accepted
+	{name: "simple_file", rel: "file.txt", wantSuffix: "file.txt"},
+	{name: "nested_descendant", rel: "sub/dir/file.txt", wantSuffix: "sub/dir/file.txt"},
+	{name: "leading_dot_slash", rel: "./file.txt", wantSuffix: "file.txt"},
+	{name: "interior_dotdot_stays_inside", rel: "sub/../file.txt", wantSuffix: "file.txt"},
+	{name: "interior_single_dot", rel: "sub/./nested/file.txt", wantSuffix: "sub/nested/file.txt"},
+	{name: "collapsed_double_slash", rel: "sub//double.txt", wantSuffix: "sub/double.txt"},
+	{name: "trailing_slash", rel: "sub/", wantSuffix: "sub"},
 
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Errorf("os.Getwd failed %v", err)
-	}
+	// Rejected
+	// We don't allow that, it allows to test for the physical path (brute-force)
+	{name: "dotdot_nets_back_into_base", rel: "../data/inside.txt", wantErr: true},
 
-	defer os.Chdir(dir)
+	// Empty input
+	{name: "empty_resolves_to_base", rel: "", wantErr: true},
+	{name: "dot_resolves_to_base", rel: ".", wantErr: true},
 
-	os.Chdir("./_testDir")
+	// Escapes
+	{name: "parent_escape", rel: "../x", wantErr: true},
+	{name: "deep_escape", rel: "../../../../etc/secret", wantErr: true},
+	{name: "interior_escape", rel: "sub/../../x", wantErr: true},
+	{name: "mixed_valid_then_escape", rel: "foo/../../../bar", wantErr: true},
+	{name: "bare_dotdot", rel: "..", wantErr: true},
+	{name: "sibling_prefix_dash", rel: "../data-evil/x", wantErr: true},
+	{name: "sibling_prefix_word", rel: "../database/x", wantErr: true},
 
-	tests := toBeTested()
-	slices.Sort(tests)
-
-	for _, p := range tests {
-
-		isAbs := filepath.IsAbs(p)
-		isLocal := filepath.IsLocal(p)
-		clean := filepath.Clean(p)
-		volume := filepath.VolumeName(p)
-		statable := true
-		openable := true
-
-		_, err := os.Stat(p)
-		if err != nil {
-			statable = false
-			// t.Errorf("os.Stat failed for %v: %v", p, err)
-			// continue
-		}
-		f, errOpen := os.Open(p)
-		if errOpen != nil {
-			openable = false
-		} else {
-			defer f.Close()
-		}
-
-		// t.Logf(format, "path", "isAbs", "isLoc", "open?", "stat?", "clean", "volume")
-		t.Logf(format, p, isAbs, isLocal, openable, statable, clean, volume)
-
-		// if fi.IsDir() {
-		// 	t.Logf("Dir: "+format, p, isAbs, isLocal, "", clean, volume, 0, err, "")
-		// } else {
-		// 	f, errOpen := os.Open(p)
-		// 	nRead := -1
-		// 	if errOpen == nil {
-		// 		defer f.Close()
-
-		// 		b := make([]byte, 10)
-		// 		// err = f.SetReadDeadline(time.Now().Add(time.Second))
-		// 		// if err != nil {
-		// 		// 	t.Errorf("f.SetReadDeadline failed: %v", err)
-		// 		// }
-
-		// 		skip := false
-		// 		if p == `\\.\CON` || p == `\\.\CON.` || p == `\\.\CON..` || p == `\\.\CON...` ||
-		// 			p == `\\.\CONIN$` || p == `\\.\CONIN$.` || p == `\\.\CONIN$..` || p == `\\.\CONIN$...` ||
-		// 			p == `\\.\CONOUT$` || p == `\\.\CONOUT$.` || p == `\\.\CONOUT$..` || p == `\\.\CONOUT$...` ||
-		// 			p == `\\?\CONIN$` || p == `\\?\CONIN$.` || p == `\\?\CONIN$..` || p == `\\?\CONIN$...` ||
-		// 			p == `\\?\CONOUT$` || p == `\\?\CONOUT$.` || p == `\\?\CONOUT$..` || p == `\\?\CONOUT$...` ||
-		// 			p == `\\?\CON` {
-		// 			skip = true
-		// 		}
-
-		// 		if skip {
-		// 			fmt.Fprintf(os.Stderr, "Will read: %v  - SKIPPED\n", p)
-		// 		} else {
-		// 			fmt.Fprintf(os.Stderr, "Will read: %v\n", p)
-		// 			nRead, err = f.Read(b)
-		// 			if err != nil && !errors.Is(err, io.EOF) {
-		// 				t.Errorf("f.Read failed: %v", err)
-		// 			}
-		// 		}
-		// 	}
-		// t.Logf("File: "+format, p, isAbs, isLocal, errOpen == nil, clean, volume, nRead, err, errOpen)
-		// }
-	}
-	t.Fail()
-
+	// NUL rune
+	{name: "embedded_null_byte", rel: "a\x00.txt", wantErr: true},
 }
 
-func listFSTestCases(basePath string) []fsTest {
-	return []fsTest{
-		{
-			name:         "existing rel file path",
-			p:            `a`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:         "existing rel file backslash sub path ",
-			p:            `a\b`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:         "existing rel file slash sub path",
-			p:            `a/b`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     "long existing rel file path",
-			p:        `\\?\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         "parent slash",
-			p:            `../a`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     "long parent slash",
-			p:        `\\?\../a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         "parent backslash",
-			p:            `..\a`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     "long parent backslash",
-			p:        `\\?\..\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "root backslash",
-			p:        `\`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long root backslash",
-			p:        `\\?\\`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "root slash",
-			p:        `/`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long root slash",
-			p:        `\\?\/`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "c slash",
-			p:        `c:/`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long c slash",
-			p:        `\\?\c:/`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "c backslash",
-			p:        `c:\`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long c backslash",
-			p:        `\\?\c:\`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "just c",
-			p:        `c:`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long just c",
-			p:        `\\.\c:`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     "long c backslash",
-			p:        `\\.\c:\`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		// {
-		// 	name:     `\\host`,
-		// 	p:        `\\host`,
-		// 	wantErr:  false,
-		// 	wantBase: basePath,
-		// 	wantPath: filepath.Join(basePath, "a"),
-		// },
-		{
-			name:     `\\localhost`,
-			p:        `\\localhost`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		// {
-		// 	name:     `\\host\dir`,
-		// 	p:        `\\host\dir`,
-		// 	wantErr:  false,
-		// 	wantBase: basePath,
-		// 	wantPath: filepath.Join(basePath, "a"),
-		// },
-		{
-			name:     `long UNC`,
-			p:        `\\?\UNC\host\dir`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `\\localhost\dir`,
-			p:        `\\localhost\dir`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `\\localhost\c$`,
-			p:        `\\localhost\c$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `only NUL`,
-			p:        `NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long only NUL`,
-			p:        `\\?\NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `abs C:\NUL`,
-			p:        `C:\NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long abs C:\NUL`,
-			p:        `\\?\C:\NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `default C:NUL`,
-			p:        `C:NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long default C:NUL`,
-			p:        `\\?\C:NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         `relative parent NUL`,
-			p:            `..\NUL`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     `long relative parent NUL`,
-			p:        `\\?\..\NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         `relative sub NUL`,
-			p:            `a\NUL`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:         `relative current NUL`,
-			p:            `.\NUL`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     `long relative sub NUL`,
-			p:        `\\?\a\NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `decent abs path`,
-			p:        `c:\temp\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `decent abs path mixed slashes`,
-			p:        `c:\temp/a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long decent abs path`,
-			p:        `\\?\c:\temp\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `decent backslashed abs path`,
-			p:        `c:/temp/a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long backslashed decent abs path`,
-			p:        `\\?\c:/temp/a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long fully backslashed decent abs path`,
-			p:        `//?/c:/temp/a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-
-		{
-			name:     `decent default path`,
-			p:        `c:a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long decent default path`,
-			p:        `\\?\c:a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-
-		{
-			name:         `only CON`,
-			p:            `CON`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     `long only CON`,
-			p:        `\\?\CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `abs C:\CON`,
-			p:        `C:\CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long abs C:\CON`,
-			p:        `\\?\C:\CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `default C:CON`,
-			p:        `C:CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `long default C:CON`,
-			p:        `\\?\C:CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         `relative parent CON`,
-			p:            `..\CON`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     `long relative parent CON`,
-			p:        `\\?\..\CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:         `relative sub CON`,
-			p:            `a\CON`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:         `relative current CON`,
-			p:            `.\CON`,
-			wantErr:      false,
-			wantBase:     basePath,
-			wantPath:     filepath.Join(basePath, "a"),
-			relOnWindows: true,
-		},
-		{
-			name:     `long relative sub CON`,
-			p:        `\\?\a\CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `current dir`,
-			p:        `.`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `current dir \ a`,
-			p:        `.\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `current dir / a`,
-			p:        `./a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `parent dir`,
-			p:        `..`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `parent dir / a`,
-			p:        `../a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `parent dir \ a`,
-			p:        `..\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `b\..\a`,
-			p:        `b\..\a`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `b\..\a\..\..\c`,
-			p:        `b\..\a\..\..\c`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CON`,
-			p:        `CON`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CON.`,
-			p:        `CON.`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CON.txt`,
-			p:        `CON.txt`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `NUL.txt`,
-			p:        `NUL.txt`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `./NUL`,
-			p:        `./NUL`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `./NUL.`,
-			p:        `./NUL.`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `./NUL.txt`,
-			p:        `./NUL.txt`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CONIN`,
-			p:        `CONIN`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CONIN$`,
-			p:        `CONIN$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `CONIN$.txt`,
-			p:        `CONIN$.txt`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `./CONIN$`,
-			p:        `./CONIN$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `.\CONIN$`,
-			p:        `.\CONIN$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `\\?\.\CONIN$`,
-			p:        `\\?\.\CONIN$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
-		{
-			name:     `\\?\CONIN$`,
-			p:        `\\?\CONIN$`,
-			wantErr:  false,
-			wantBase: basePath,
-			wantPath: filepath.Join(basePath, "a"),
-		},
+func TestSafeSubpath_Windows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Skipped - will be run only on Windows")
 	}
+
+	const base = `C:\srv\app\data`
+
+	cases := append([]normalizeCase(nil), commonSubpathCases...)
+	cases = append(cases, []normalizeCase{
+		// Allowed: mixed separators
+		{name: "backslash_separators", rel: `logs\2025\app.log`, wantSuffix: "logs/2025/app.log"},
+		{name: "forward_slash_separators", rel: "logs/2025/app.log", wantSuffix: "logs/2025/app.log"},
+		{name: "mixed_separators", rel: `sub/nested\mixed.txt`, wantSuffix: "sub/nested/mixed.txt"},
+
+		// .. in the middle, stays within the base
+		{name: "mixed_sep_interior_dotdot", rel: `a\b\..\c.txt`, wantSuffix: "a/c.txt"},
+
+		// Traversal
+		{name: "backslash_traversal", rel: `..\..\Windows\System32\drivers\etc\hosts`, wantErr: true},
+		{name: "mixed_sep_traversal", rel: `../..\Windows`, wantErr: true},
+		{name: "interior_escape_backslash", rel: `sub\..\..\Windows`, wantErr: true},
+
+		// base has data at the end, simple suffix check is not sufficient
+		{name: "sibling_prefix_backslash", rel: `..\data-evil\x`, wantErr: true},
+
+		// ADS
+		{name: "ads_with_traversal", rel: `..\..\secret.txt::$DATA`, wantErr: true},
+
+		// Absolute
+		{name: "drive_absolute", rel: `C:\Windows\System32`, wantErr: true},
+		{name: "drive_absolute_forward_slash", rel: "C:/Windows", wantErr: true},
+		{name: "other_drive_absolute", rel: `D:\data\x`, wantErr: true},
+		{name: "unc_path", rel: `\\server\share\x`, wantErr: true},
+		{name: "extended_length_prefix", rel: `\\?\C:\Windows`, wantErr: true},
+		{name: "device_namespace", rel: `\\.\PhysicalDrive0`, wantErr: true},
+
+		// Current drive - relative
+		{name: "drive_rooted_current_drive", rel: `\Windows\x`, wantErr: true},
+		// Specified drive, current dir-related
+		{name: "drive_relative", rel: "C:file.txt", wantErr: true},
+
+		// Misc
+		{name: "reserved_name_con", rel: "CON", wantErr: true},
+		{name: "reserved_name_nul", rel: "NUL", wantErr: true},
+		{name: "reserved_name_com1", rel: "COM1", wantErr: true},
+		{name: "ads_on_inside_file", rel: "file.txt:hidden", wantErr: true},
+		{name: "control_char", rel: "bad\x01name.txt", wantErr: true},
+
+		// Trailing ' ' and '.'
+		{name: "trailing_dot", rel: "secret.txt.", wantErr: true},
+		{name: "trailing_space", rel: "secret.txt ", wantErr: true},
+
+		// ' ' or '.' suffix within the path
+		{name: "dir_trailing_dot", rel: "./dir./secret.txt", wantErr: true},
+		{name: "dir_trailing_space", rel: "./dir /secret.txt", wantErr: true},
+	}...)
+
+	runTests(t, base, cases)
 }
 
-func TestValues(t *testing.T) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		t.Errorf("cannot os.Getwd()")
-	}
-	tests := listFSTestCases(pwd)
+func TestSafeSubpath_NonWindows(t *testing.T) {
+	const base = "/srv/app/data"
 
-	format := "%-20v %-6v %-6v %-10v %-10v %10v %-6v %20v   %50v"
+	cases := append([]normalizeCase(nil), commonSubpathCases...)
+	cases = append(cases, []normalizeCase{
+		// ---- Allowed: characters that are LITERAL on POSIX filesystems ----
+		// Backslash is a normal filename byte on POSIX, NOT a separator: this
+		// must be a single file inside base, not treated as traversal.
+		{name: "backslash_is_literal_not_separator", rel: `weird\name.txt`, wantSuffix: `weird\name.txt`},
+		{name: "colon_is_literal", rel: "file:with:colons.txt", wantSuffix: "file:with:colons.txt"},
+		{name: "dotfile", rel: ".hiddenfile", wantSuffix: ".hiddenfile"},
+		{name: "unicode_name", rel: "naïve-名前.txt", wantSuffix: "naïve-名前.txt"},
 
-	t.Logf(format, "path", "isAbs", "isLoc", "openable", "clean", "volume", "RES", "Norm", "errOpen")
+		// ---- Rejected: absolute override ----
+		// An absolute rel must not silently replace the base.
+		{name: "absolute_override", rel: "/etc/passwd", wantErr: true},
+		{name: "leading_double_slash_absolute", rel: "//etc/passwd", wantErr: true},
 
-	for _, tc := range tests {
-		isAbs := filepath.IsAbs(tc.p)
-		isLocal := filepath.IsLocal(tc.p)
-		clean := filepath.Clean(tc.p)
-		volume := filepath.VolumeName(tc.p)
-		f, errOpen := os.Open(tc.p)
-		if errOpen == nil {
-			defer f.Close()
-		}
+		// ---- Rejected: traversal ----
+		{name: "classic_traversal", rel: "../../etc/passwd", wantErr: true},
+		{name: "traversal_into_proc", rel: "../../../proc/self/environ", wantErr: true},
+		{name: "null_byte_with_traversal", rel: "foo\x00/../../etc/passwd", wantErr: true},
+	}...)
 
-		valid, norm := windowsNormalizeRelativePath(tc.p)
-
-		t.Logf(format, tc.p, isAbs, isLocal, errOpen == nil, clean, volume, valid, norm, errOpen)
-	}
-	t.Fail()
+	runTests(t, base, cases)
 }
-
-// func TestWindowsPaths(t *testing.T) {
-// 	pwd, err := os.Getwd()
-// 	if err != nil {
-// 		t.Errorf("cannot os.Getwd()")
-// 	}
-
-// 	tests := listFSTestCases(pwd)
-
-// 	for _, tc := range tests {
-// 		t.Run(tc.name, func(t *testing.T) {
-// 			cleanBase, cleanPath, err := ResolveSubPath(".", tc.p)
-// 			if (err != nil) != tc.wantErr {
-// 				t.Errorf("TestWindowsPaths() name=%v, error = %v, wantErr %v", tc.name, err, tc.wantErr)
-// 			}
-// 			if cleanBase != tc.wantBase {
-// 				t.Errorf("TestWindowsPaths() name=%v, cleanBase got %q, want %q", tc.name, cleanBase, tc.wantBase)
-// 			}
-// 			if cleanPath != tc.wantPath {
-// 				t.Errorf("TestWindowsPaths() name=%v, cleanPath got %q, want %q", tc.name, cleanPath, tc.wantPath)
-// 			}
-
-// 		})
-// 	}
-
-// }
