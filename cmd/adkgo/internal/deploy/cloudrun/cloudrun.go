@@ -44,6 +44,10 @@ type triggerConfigFlags struct {
 
 	oidcAudience        string
 	oidcServiceAccounts string
+	// Whether each OIDC flag was on the command line, which an empty value
+	// alone cannot tell from it being omitted.
+	oidcAudiencePassed        bool
+	oidcServiceAccountsPassed bool
 }
 
 type cloudRunServiceFlags struct {
@@ -94,6 +98,10 @@ var cloudrunCmd = &cobra.Command{
 	Service on Cloudrun is created using this information. 
 	Local proxy adding authentication is started. 
 	`,
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		flags.notePassedOIDCFlags(cmd.Flags().Changed)
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return flags.deployOnCloudRun()
 	},
@@ -123,15 +131,15 @@ func init() {
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.baseDelay, "pubsub_base_delay", 1*time.Second, "Base delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.maxDelay, "pubsub_max_delay", 10*time.Second, "Maximum delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRuns, "pubsub_max_concurrent_runs", 100, "Maximum concurrent PubSub trigger runs")
-	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcAudience, "pubsub_oidc_audience", "", "Audience of the Google-signed OIDC token the PubSub push subscription attaches. Requires --pubsub_oidc_service_accounts. When unset, the PubSub endpoint is unauthenticated")
-	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcServiceAccounts, "pubsub_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the PubSub endpoint. Requires --pubsub_oidc_audience")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcAudience, "pubsub_oidc_audience", "", "Audience of the Google-signed OIDC token the PubSub push subscription attaches. Requires --pubsub and --pubsub_oidc_service_accounts. When neither OIDC flag is given, the PubSub endpoint is unauthenticated. An empty value is refused")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.pubsubTrigger.oidcServiceAccounts, "pubsub_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the PubSub endpoint. Requires --pubsub and --pubsub_oidc_audience")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.eventarc, "eventarc", false, "Enable Eventarc subrouter")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRetries, "eventarc_max_retries", 3, "Maximum retries for HTTP 429 errors from Eventarc triggers")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.baseDelay, "eventarc_base_delay", 1*time.Second, "Base delay for Eventarc trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.maxDelay, "eventarc_max_delay", 10*time.Second, "Maximum delay for Eventarc trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRuns, "eventarc_max_concurrent_runs", 100, "Maximum concurrent Eventarc trigger runs")
-	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcAudience, "eventarc_oidc_audience", "", "Audience of the Google-signed OIDC token the Eventarc trigger attaches. Requires --eventarc_oidc_service_accounts. When unset, the Eventarc endpoint is unauthenticated")
-	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcServiceAccounts, "eventarc_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the Eventarc endpoint. Requires --eventarc_oidc_audience")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcAudience, "eventarc_oidc_audience", "", "Audience of the Google-signed OIDC token the Eventarc trigger attaches. Requires --eventarc and --eventarc_oidc_service_accounts. When neither OIDC flag is given, the Eventarc endpoint is unauthenticated. An empty value is refused")
+	cloudrunCmd.PersistentFlags().StringVar(&flags.cloudRun.eventarcTrigger.oidcServiceAccounts, "eventarc_oidc_service_accounts", "", "Comma-separated service account emails allowed to call the Eventarc endpoint. Requires --eventarc and --eventarc_oidc_audience")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -153,6 +161,12 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				return err
 			}
 			if err := validateTriggerOIDC("eventarc", f.cloudRun.eventarcTrigger); err != nil {
+				return err
+			}
+			if err := checkTriggerOIDCEmitted("pubsub", f.cloudRun.pubsub, f.cloudRun.pubsubTrigger); err != nil {
+				return err
+			}
+			if err := checkTriggerOIDCEmitted("eventarc", f.cloudRun.eventarc, f.cloudRun.eventarcTrigger); err != nil {
 				return err
 			}
 
@@ -311,6 +325,14 @@ func validateTriggerOIDC(name string, t triggerConfigFlags) error {
 	if err := util.ValidateDockerfileSafe(t.oidcServiceAccounts, saFlag); err != nil {
 		return err
 	}
+	// Before the pair check, so a deploy script with one variable unset is told
+	// which value is empty rather than to pass both flags.
+	if t.oidcAudiencePassed && t.oidcAudience == "" {
+		return fmt.Errorf("%s is empty: give it a value or leave it out", audFlag)
+	}
+	if t.oidcServiceAccountsPassed && t.oidcServiceAccounts == "" {
+		return fmt.Errorf("%s is empty: give it a value or leave it out", saFlag)
+	}
 	if (t.oidcAudience == "") != (t.oidcServiceAccounts == "") {
 		return fmt.Errorf("%s and %s must be set together", audFlag, saFlag)
 	}
@@ -325,6 +347,24 @@ func validateTriggerOIDC(name string, t triggerConfigFlags) error {
 		}
 	}
 	return nil
+}
+
+// checkTriggerOIDCEmitted rejects OIDC values for a trigger that is not
+// enabled. They are only written after that trigger's keyword, so the deploy
+// would succeed without the auth the operator asked for.
+func checkTriggerOIDCEmitted(name string, enabled bool, t triggerConfigFlags) error {
+	audFlag, saFlag := "--"+name+"_oidc_audience", "--"+name+"_oidc_service_accounts"
+	if !enabled && (t.oidcAudience != "" || t.oidcServiceAccounts != "") {
+		return fmt.Errorf("%s and %s require --%s", audFlag, saFlag, name)
+	}
+	return nil
+}
+
+func (f *deployCloudRunFlags) notePassedOIDCFlags(passed func(name string) bool) {
+	f.cloudRun.pubsubTrigger.oidcAudiencePassed = passed("pubsub_oidc_audience")
+	f.cloudRun.pubsubTrigger.oidcServiceAccountsPassed = passed("pubsub_oidc_service_accounts")
+	f.cloudRun.eventarcTrigger.oidcAudiencePassed = passed("eventarc_oidc_audience")
+	f.cloudRun.eventarcTrigger.oidcServiceAccountsPassed = passed("eventarc_oidc_service_accounts")
 }
 
 // writeOIDCFlags emits the trigger's OIDC flags when set. computeFlags has

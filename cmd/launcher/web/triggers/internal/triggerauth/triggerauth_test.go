@@ -15,6 +15,7 @@
 package triggerauth
 
 import (
+	"flag"
 	"strings"
 	"testing"
 
@@ -229,9 +230,44 @@ func TestAuthenticatorNamesTheMissingFlag(t *testing.T) {
 	}{
 		{Flags{audience: "https://svc.run.app"}, "requires -oidc_service_accounts"},
 		{Flags{serviceAccounts: "a@p.iam.gserviceaccount.com"}, "requires -oidc_audience"},
+		{Flags{audience: "https://svc.run.app", serviceAccounts: "a@p.iam.gserviceaccount.com,"}, `-oidc_service_accounts "a@p.iam.gserviceaccount.com," has an empty entry`},
 	} {
 		if _, err := tc.f.Authenticator(); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("Authenticator() with %+v = %v, want an error containing %q", tc.f, err, tc.want)
 		}
+	}
+}
+
+func TestAuthenticatorRejectsAFlagPassedEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-oidc_audience=", "-oidc_service_accounts="}, "-oidc_audience is empty"},
+		{[]string{"-oidc_audience="}, "-oidc_audience is empty"},
+		{[]string{"-oidc_service_accounts="}, "-oidc_service_accounts is empty"},
+		{[]string{"-oidc_audience=https://svc.run.app", "-oidc_service_accounts="}, "-oidc_service_accounts is empty"},
+	} {
+		var f Flags
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		f.Register(fs)
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatalf("Parse(%q) = %v", tc.args, err)
+		}
+		if _, err := f.Authenticator(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Authenticator() after %q = %v, want an error containing %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+func TestAuthenticatorNilWhenFlagsAreRegisteredButNotPassed(t *testing.T) {
+	var f Flags
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	f.Register(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := f.Authenticator(); a != nil || err != nil {
+		t.Errorf("Authenticator() = %v, %v, want nil, nil", a, err)
 	}
 }

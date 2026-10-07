@@ -29,13 +29,16 @@ import (
 type Flags struct {
 	audience        string
 	serviceAccounts string
+	fs              *flag.FlagSet
 }
 
 // Register adds the flags to fs.
 func (f *Flags) Register(fs *flag.FlagSet) {
+	f.fs = fs
 	fs.StringVar(&f.audience, "oidc_audience", "", "Audience a Google-signed OIDC token must carry to call this "+
 		"trigger endpoint: the token audience configured on the push subscription or Eventarc trigger. "+
-		"Requires -oidc_service_accounts. When unset, the endpoint is unauthenticated. Like every flag of "+
+		"Requires -oidc_service_accounts. When neither flag is given, the endpoint is unauthenticated, and an empty value "+
+		"for either is refused. Like every flag of "+
 		"this trigger, it must follow the trigger's own keyword: in \"pubsub eventarc -oidc_audience=...\" "+
 		"it configures eventarc only.")
 	fs.StringVar(&f.serviceAccounts, "oidc_service_accounts", "", "Comma-separated service account emails "+
@@ -48,8 +51,15 @@ func (f *Flags) Register(fs *flag.FlagSet) {
 var newGoogleOIDC = authn.NewGoogleOIDC
 
 // Authenticator builds the authenticator the flags describe. It returns nil
-// when neither flag is set, which keeps the endpoint unauthenticated.
+// when neither flag is passed, which keeps the endpoint unauthenticated.
 func (f *Flags) Authenticator() (authn.Authenticator, error) {
+	// A launch script reading an unset variable passes the flag empty, and
+	// leaving the endpoint open for that would hide the mistake.
+	for _, fl := range []struct{ name, value string }{{"oidc_audience", f.audience}, {"oidc_service_accounts", f.serviceAccounts}} {
+		if fl.value == "" && f.passed(fl.name) {
+			return nil, fmt.Errorf("-%s is empty: give it a value or leave it out", fl.name)
+		}
+	}
 	if f.audience == "" && f.serviceAccounts == "" {
 		return nil, nil
 	}
@@ -64,13 +74,23 @@ func (f *Flags) Authenticator() (authn.Authenticator, error) {
 	if f.audience != strings.TrimSpace(f.audience) {
 		return nil, fmt.Errorf("-oidc_audience %q has surrounding whitespace", f.audience)
 	}
-	// Empty entries are kept so NewGoogleOIDC rejects a stray comma at startup.
 	accounts := strings.Split(f.serviceAccounts, ",")
 	for i := range accounts {
 		accounts[i] = strings.TrimSpace(accounts[i])
+		if accounts[i] == "" {
+			return nil, fmt.Errorf("-oidc_service_accounts %q has an empty entry", f.serviceAccounts)
+		}
 	}
 	return newGoogleOIDC(authn.GoogleOIDCConfig{
 		Audience:               f.audience,
 		AllowedServiceAccounts: accounts,
 	})
+}
+
+func (f *Flags) passed(name string) bool {
+	found := false
+	if f.fs != nil {
+		f.fs.Visit(func(fl *flag.Flag) { found = found || fl.Name == name })
+	}
+	return found
 }

@@ -40,6 +40,15 @@ func resetFlags(t *testing.T, entryPointPath, a2aAgentCardURL string) {
 	t.Cleanup(func() { flags = saved })
 
 	flags = deployCloudRunFlags{}
+	// PreRunE asks cobra which OIDC flags were passed, and a test that parses
+	// the command would otherwise leave them marked for the next one.
+	for _, name := range triggerOIDCFlagNames {
+		f := cloudrunCmd.PersistentFlags().Lookup(name)
+		if f == nil {
+			t.Fatalf("no --%s flag", name)
+		}
+		f.Changed = false
+	}
 	flags.source.entryPointPath = entryPointPath
 	flags.build.tempDir = t.TempDir()
 	flags.cloudRun.a2aAgentCardURL = a2aAgentCardURL
@@ -182,6 +191,15 @@ func TestComputeFlags_RejectionLeavesNoTempDir(t *testing.T) {
 		"empty oidc service account entry": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
 			setValidTriggerOIDCPairs(f)
 			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com,"
+		}},
+		"oidc pair for a disabled trigger": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			setValidTriggerOIDCPairs(f)
+			f.cloudRun.eventarc = false
+		}},
+		"oidc flag passed empty": {"main.go", "http://127.0.0.1:8081", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarc = true
+			f.cloudRun.eventarcTrigger.oidcAudiencePassed = true
+			f.cloudRun.eventarcTrigger.oidcServiceAccountsPassed = true
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -427,8 +445,11 @@ func TestPrepareDockerfile_OmitsUnsetTriggerOIDCFlags(t *testing.T) {
 // disallowed character that no other check in computeFlags produces.
 const dockerfileRejection = "(quote, backtick, backslash, or a control character)"
 
-// setValidTriggerOIDCPairs sets a valid OIDC pair on both triggers.
+// setValidTriggerOIDCPairs enables both triggers and sets a valid OIDC pair on
+// each, so a test's rejection comes from the value it changes.
 func setValidTriggerOIDCPairs(f *deployCloudRunFlags) {
+	f.cloudRun.pubsub = true
+	f.cloudRun.eventarc = true
 	f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
 	f.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
 	f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
@@ -481,6 +502,8 @@ func TestComputeFlags_RejectsLoneTriggerOIDCFlag(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			flags.cloudRun.pubsub = true
+			flags.cloudRun.eventarc = true
 			tc.set(&flags)
 
 			err := flags.computeFlags()
@@ -607,8 +630,12 @@ func TestValidateTriggerOIDCMatchesReference(t *testing.T) {
 	}
 }
 
+var triggerOIDCFlagNames = []string{"pubsub_oidc_audience", "pubsub_oidc_service_accounts", "eventarc_oidc_audience", "eventarc_oidc_service_accounts"}
+
 func TestComputeFlags_AcceptsCompleteTriggerOIDCPairs(t *testing.T) {
 	resetFlags(t, "main.go", "http://127.0.0.1:8081")
+	flags.cloudRun.pubsub = true
+	flags.cloudRun.eventarc = true
 	flags.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
 	flags.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
 	flags.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
@@ -658,6 +685,112 @@ func TestCloudRunCommandBindsTriggerOIDCFlags(t *testing.T) {
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// A pair is only written into the CMD after its own trigger's keyword, so one
+// for a disabled trigger would be dropped while the deploy reports success.
+func TestComputeFlags_RejectsTriggerOIDCFlagsForADisabledTrigger(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*deployCloudRunFlags)
+		want string
+	}{
+		{"pubsub pair, eventarc enabled", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarc = true
+			f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
+			f.cloudRun.pubsubTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+		}, "require --pubsub"},
+		{"eventarc pair, pubsub enabled", func(f *deployCloudRunFlags) {
+			f.cloudRun.pubsub = true
+			f.cloudRun.eventarcTrigger.oidcAudience = "https://svc.run.app"
+			f.cloudRun.eventarcTrigger.oidcServiceAccounts = "a@p.iam.gserviceaccount.com"
+		}, "require --eventarc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			tc.set(&flags)
+
+			err := flags.computeFlags()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("computeFlags() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// What a deploy script passes when the variables it reads are unset. Nothing
+// would be emitted, so the endpoint would start unauthenticated.
+func TestComputeFlags_RejectsTriggerOIDCFlagPassedEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*deployCloudRunFlags)
+		want string
+	}{
+		{"pubsub pair", func(f *deployCloudRunFlags) {
+			f.cloudRun.pubsubTrigger.oidcAudiencePassed = true
+			f.cloudRun.pubsubTrigger.oidcServiceAccountsPassed = true
+		}, "--pubsub_oidc_audience is empty"},
+		{"pubsub service accounts", func(f *deployCloudRunFlags) { f.cloudRun.pubsubTrigger.oidcServiceAccountsPassed = true }, "--pubsub_oidc_service_accounts is empty"},
+		{"pubsub service accounts beside an audience", func(f *deployCloudRunFlags) {
+			f.cloudRun.pubsubTrigger.oidcAudience = "https://svc.run.app"
+			f.cloudRun.pubsubTrigger.oidcAudiencePassed = true
+			f.cloudRun.pubsubTrigger.oidcServiceAccountsPassed = true
+		}, "--pubsub_oidc_service_accounts is empty"},
+		{"eventarc pair", func(f *deployCloudRunFlags) {
+			f.cloudRun.eventarcTrigger.oidcAudiencePassed = true
+			f.cloudRun.eventarcTrigger.oidcServiceAccountsPassed = true
+		}, "--eventarc_oidc_audience is empty"},
+		{"eventarc service accounts", func(f *deployCloudRunFlags) { f.cloudRun.eventarcTrigger.oidcServiceAccountsPassed = true }, "--eventarc_oidc_service_accounts is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t, "main.go", "http://127.0.0.1:8081")
+			flags.cloudRun.pubsub = true
+			flags.cloudRun.eventarc = true
+			tc.set(&flags)
+
+			err := flags.computeFlags()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("computeFlags() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCloudRunCommandRecordsPassedTriggerOIDCFlags(t *testing.T) {
+	resetFlags(t, "main.go", "http://127.0.0.1:8081")
+	if err := cloudrunCmd.ParseFlags([]string{"--pubsub_oidc_audience=", "--eventarc_oidc_service_accounts="}); err != nil {
+		t.Fatalf("ParseFlags() = %v", err)
+	}
+	if err := cloudrunCmd.PreRunE(cloudrunCmd, nil); err != nil {
+		t.Fatalf("PreRunE() = %v", err)
+	}
+
+	for _, c := range []struct {
+		name      string
+		got, want bool
+	}{
+		{"pubsub audience", flags.cloudRun.pubsubTrigger.oidcAudiencePassed, true},
+		{"pubsub service accounts", flags.cloudRun.pubsubTrigger.oidcServiceAccountsPassed, false},
+		{"eventarc audience", flags.cloudRun.eventarcTrigger.oidcAudiencePassed, false},
+		{"eventarc service accounts", flags.cloudRun.eventarcTrigger.oidcServiceAccountsPassed, true},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s passed = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// Stands alone rather than leaning on validateTriggerOIDC having rejected a
+// lone flag first.
+func TestCheckTriggerOIDCEmittedRejectsEitherFlagForADisabledTrigger(t *testing.T) {
+	for _, tc := range []triggerConfigFlags{
+		{oidcAudience: "https://svc.run.app"},
+		{oidcServiceAccounts: "a@p.iam.gserviceaccount.com"},
+	} {
+		if err := checkTriggerOIDCEmitted("pubsub", false, tc); err == nil || !strings.Contains(err.Error(), "require --pubsub") {
+			t.Errorf("checkTriggerOIDCEmitted(%+v) = %v, want an error naming --pubsub", tc, err)
 		}
 	}
 }
