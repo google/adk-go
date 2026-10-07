@@ -62,10 +62,41 @@ func defaultNormalizeRelativePath(p string) (bool, string) {
 }
 
 func SafeSubpath(base, rel string) (string, error) {
+	// validate rel
+	// on windows it will catch \\host\dir, \\.\long, \\?\ etc
+	if strings.HasPrefix(rel, "\\") {
+		return "", fmt.Errorf("rel path should not start with \\")
+	}
+	if strings.HasPrefix(rel, "/") {
+		return "", fmt.Errorf("rel path should not start with /")
+	}
+	if runtime.GOOS == "windows" {
+		// this will prevent explicit drive like "c:\" and ADS ("test.txt:aaa")
+		if strings.ContainsAny(rel, windowsInvalidChars) {
+			return "", fmt.Errorf("rel path contains windows-specific invalid chars: %v", windowsInvalidChars)
+		}
+		if strings.ContainsAny(rel, windowsLowChar) {
+			return "", fmt.Errorf("rel path contains windows-specific invalid chars 1-31")
+		}
+		fn := filepath.Base(rel)
+		// get the file name without the extension
+		if noext, _, found := strings.Cut(fn, "."); found {
+			fn = noext
+		}
+		if _, ok := windowsForbiddenFileNames[fn]; ok {
+			return "", fmt.Errorf("rel path has a windows-specific forbidden file: %v", fn)
+		}
+
+	}
+
+	if strings.Contains(rel, "\x00") {
+		return "", fmt.Errorf("rel path contains null byte")
+	}
+
 	if !filepath.IsAbs(base) {
 		return "", fmt.Errorf("base file is not absolute")
 	}
-	absBase := filepath.Clean(base)
+	absBase := filepath.Clean(base) + string(filepath.Separator)
 	p := filepath.Join(absBase, rel)
 	r, err := filepath.Rel(absBase, p)
 	if err != nil {
@@ -80,6 +111,7 @@ func SafeSubpath(base, rel string) (string, error) {
 
 const (
 	windowsInvalidChars string = `:<>"|?*`
+	windowsLowChar      string = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
 )
 
 func windowsNormalizeRelativePath(p string) (bool, string) {
