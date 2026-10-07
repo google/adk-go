@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -467,5 +468,112 @@ func TestResolveConfigReferenceEmptyRef(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("resolveConfigReference(%q, \"\") = %q, want the message to name the reference as empty", parentPath, err)
+	}
+}
+
+// withinDir reports whether path resolves to a location at or below dir. It is
+// the property the whole containment check exists to guarantee: whatever
+// resolveConfigReference accepts must satisfy this. filepath.Rel returns an
+// error when the two are on different volumes (a Windows drive escape), and
+// filepath.IsLocal is false for a relative result that climbs out with "..",
+// so both forms of escape are caught.
+func withinDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return filepath.IsLocal(rel)
+}
+
+// TestResolveConfigReferenceOSSpecificRefs exercises references whose meaning
+// depends on the operating system, and pins the single property that must hold
+// on every platform: a reference is either refused, or resolved to a path that
+// stays inside the parent directory — it can never resolve to a path outside
+// it. The expectation is branched on runtime.GOOS rather than skipped, so the
+// test asserts something concrete on both Windows and Unix.
+//
+// The cases all turn on filepath.IsLocal being platform-aware:
+//
+//   - Windows reserved device names (NUL, CON, COM1, LPT1, ...) name a device
+//     rather than a file on Windows and are refused there; on Unix they are
+//     ordinary file names and stay inside the directory.
+//   - "\" is a path separator on Windows and an ordinary filename character on
+//     Unix, so `..\..\outside.yaml` is a traversal that escapes on Windows and
+//     a single, oddly-named local file on Unix, while `sub\child.yaml` is a
+//     nested path on Windows and one flat file name on Unix — contained either
+//     way.
+//   - A drive-relative reference such as `C:node.yaml` carries a volume name on
+//     Windows, where it resolves against that drive's current directory and so
+//     escapes; on Unix the colon is a legal filename character.
+//   - An absolute POSIX path is rooted on both platforms and refused on both.
+//
+// This layout deliberately avoids symlinks (unlike newAgentDir), so the Windows
+// branch runs even where creating a symlink needs privileges the test process
+// does not have.
+func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	parentDir := filepath.Join(base, "agents", "root")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) failed: %v", parentDir, err)
+	}
+	parentPath := filepath.Join(parentDir, "root_agent.yaml")
+	if err := os.WriteFile(parentPath, []byte("agent_class: LlmAgent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) failed: %v", parentPath, err)
+	}
+
+	windows := runtime.GOOS == "windows"
+
+	tests := []struct {
+		name         string
+		refPath      string
+		wantRejected bool
+	}{
+		{name: "reserved name NUL", refPath: "NUL", wantRejected: windows},
+		{name: "reserved name COM1", refPath: "COM1", wantRejected: windows},
+		{name: "reserved name LPT1", refPath: "LPT1", wantRejected: windows},
+		{name: "reserved name PhysicalDrive0", refPath: `\\.\PhysicalDrive0`, wantRejected: windows},
+		{name: "reserved name direct c:", refPath: `\\.\C:`, wantRejected: windows},
+		{name: "reserved name direct c:\\", refPath: `\\.\C:\`, wantRejected: windows},
+		{name: "reserved name Charger0", refPath: `\\.\Charger0`, wantRejected: windows},
+		{name: "reserved name CON", refPath: "CON", wantRejected: windows},
+		{name: "reserved name CONIN$", refPath: "CONIN$", wantRejected: windows},
+		// Backslash as a separator (Windows) climbs out; as a literal character
+		// (Unix) it is one file name that stays put.
+		{name: "backslash traversal", refPath: `..\..\outside.yaml`, wantRejected: windows},
+		// Accepted on both, and contained on both: a nested path on Windows, a
+		// flat file name on Unix. Exercises the containment branch on Windows.
+		{name: "backslash subdir", refPath: `sub\child.yaml`, wantRejected: false},
+		// Drive-relative: a volume name on Windows, a legal name on Unix.
+		{name: "drive-relative ref", refPath: `C:node.yaml`, wantRejected: windows},
+		// Rooted on every platform.
+		{name: "posix absolute", refPath: "/etc/passwd", wantRejected: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveConfigReference(parentPath, tc.refPath)
+
+			if gotRejected := err != nil; gotRejected != tc.wantRejected {
+				t.Fatalf("resolveConfigReference(%q, %q) rejected = %v (%v), want rejected = %v",
+					parentPath, tc.refPath, gotRejected, err, tc.wantRejected)
+			}
+			if err != nil {
+				// A rejection here is the lexical containment check refusing the
+				// reference, never a later failure to load what it names.
+				if !errors.Is(err, errConfigReferenceNotLocal) {
+					t.Errorf("resolveConfigReference(%q, %q) = %v, want %v",
+						parentPath, tc.refPath, err, errConfigReferenceNotLocal)
+				}
+				return
+			}
+			// Accepted: the resolved path must not escape the parent directory.
+			if !withinDir(parentDir, got) {
+				t.Errorf("resolveConfigReference(%q, %q) = %q, which escapes the parent directory %q",
+					parentPath, tc.refPath, got, parentDir)
+			}
+		})
 	}
 }
