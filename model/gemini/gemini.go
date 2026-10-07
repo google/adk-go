@@ -124,39 +124,101 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 	return m.name
 }
 
-// generate calls the model synchronously returning result from the first candidate.
+// generate calls the model synchronously returning result from the first
+// candidate, resuming a generation the model paused with CONTINUATION.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, req.Config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call model: %w", err)
+	c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+	contents, config := req.Contents, req.Config
+	for {
+		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to call model: %w", err)
+		}
+		if len(resp.Candidates) == 0 {
+			// shouldn't happen?
+			return nil, fmt.Errorf("empty response")
+		}
+		var parts []*genai.Part
+		if candidate := resp.Candidates[0]; candidate != nil {
+			if candidate.Content != nil {
+				parts = candidate.Content.Parts
+			}
+			c.keepMetadata(candidate)
+		}
+		var ok bool
+		if contents, config, ok = c.advance(continuationToken(resp), parts, resp.UsageMetadata); !ok {
+			return converters.Genai2LLMResponse(c.complete(resp)), nil
+		}
 	}
-	if len(resp.Candidates) == 0 {
-		// shouldn't happen?
-		return nil, fmt.Errorf("empty response")
-	}
-	return converters.Genai2LLMResponse(resp), nil
 }
 
-// generateStream returns a stream of responses from the model.
+// generateStream returns a stream of responses from the model, resuming a
+// generation the model paused with CONTINUATION in a new stream that feeds the
+// same aggregator.
 func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, req.Config) {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
-				if !yield(llmResponse, err) {
-					return // Consumer stopped
+		c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+		contents, config := req.Contents, req.Config
+		for {
+			var token []byte
+			var parts []*genai.Part
+			var usage *genai.GenerateContentResponseUsageMetadata
+			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, config) {
+				if err != nil {
+					yield(nil, err)
+					return
 				}
+				if resp.UsageMetadata != nil {
+					usage = resp.UsageMetadata
+				}
+				if len(resp.Candidates) > 0 && resp.Candidates[0] != nil {
+					candidate := resp.Candidates[0]
+					if candidate.Content != nil {
+						// Copied before the aggregator sees them.
+						parts = appendParts(parts, candidate.Content.Parts)
+					}
+					if t := continuationToken(resp); t != nil {
+						token = t
+						if c.willResume(t) {
+							// The generation goes on in the next stream, so
+							// this chunk does not complete the turn.
+							candidate.FinishReason = ""
+						}
+					}
+				}
+				for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
+					if !yield(llmResponse, err) {
+						return // Consumer stopped
+					}
+				}
+			}
+			var ok bool
+			if contents, config, ok = c.advance(token, parts, usage); !ok {
+				break
 			}
 		}
 		if closeResult := aggregator.Close(); closeResult != nil {
+			if c.resumed() {
+				closeResult.UsageMetadata = c.usage
+				if closeResult.Content != nil {
+					// Joins the text each pause split by the unary path's rules.
+					closeResult.Content = &genai.Content{Role: closeResult.Content.Role, Parts: appendParts(nil, closeResult.Content.Parts)}
+				}
+			}
 			yield(closeResult, nil)
 		}
 	}
+}
+
+// retryResends reports whether the requests that resume a generation set
+// continuationRetry: not when the request or the client sets retry options.
+func (m *geminiModel) retryResends(config *genai.GenerateContentConfig) bool {
+	if config != nil && config.HTTPOptions != nil && config.HTTPOptions.RetryOptions != nil {
+		return false
+	}
+	return m.client.ClientConfig().HTTPOptions.RetryOptions == nil
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.

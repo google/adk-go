@@ -37,6 +37,10 @@ import (
 	"google.golang.org/adk/v2/session/compaction"
 )
 
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
+
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
 	sseTimeout        time.Duration
@@ -63,10 +67,13 @@ type RuntimeAPIController struct {
 // constructor; a struct absorbs both problems at once, and adding a field to it
 // breaks nobody.
 type RuntimeAPIControllerConfig struct {
-	SessionService    session.Service
-	MemoryService     memory.Service
-	AgentLoader       agent.Loader
-	ArtifactService   artifact.Service
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	// SSETimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
@@ -145,13 +152,17 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 	if authorizer == nil {
 		authorizer = authz.NewNoop()
 	}
+	sseTimeout := cfg.SSETimeout
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
 
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
 		agentLoader:            cfg.AgentLoader,
 		artifactService:        cfg.ArtifactService,
-		sseTimeout:             cfg.SSETimeout,
+		sseTimeout:             sseTimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
 		checkOrigin:            cfg.CheckOrigin,
@@ -212,7 +223,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 			// the request would discard work the caller asked for and paid for
 			// in order to report that a later prompt will be larger.
 			if errors.Is(err, compaction.ErrCompaction) {
-				log.Printf("adkrest: %v", err)
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
 				continue
 			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
@@ -226,7 +237,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
@@ -284,14 +298,14 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			// an error event here would tell a client its answer failed after
 			// it has already received it.
 			if errors.Is(err, compaction.ErrCompaction) {
-				log.Printf("adkrest: %v", err)
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
 				continue
 			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
 			if err != nil {
-				log.Printf("failed to flash error event: %v", err)
+				log.Printf("failed to flash error event: %v", err) //nolint:forbidigo // pre-slog call site
 				return
 			}
 			continue
@@ -302,12 +316,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
 		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
-			log.Printf("failed to marshal event: %v", err)
+			log.Printf("failed to marshal event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 		err = flashEvent(rc, rw, string(marshalledData))
 		if err != nil {
-			log.Printf("failed to flash event: %v", err)
+			log.Printf("failed to flash event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 	}
@@ -452,7 +466,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		if _, loadErr := c.agentLoader.LoadAgent(appName); loadErr != nil {
 			closeReason = fmt.Sprintf("agent %s not found for original error: %v", appName, err)
 		}
-		log.Printf("Failed to get runner for app %s: %v", appName, err)
+		log.Printf("Failed to get runner for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, closeReason)
 		return nil
 	}
@@ -465,7 +479,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 	})
 	if err != nil {
-		log.Printf("RunLive failed for app %s: %v", appName, err)
+		log.Printf("RunLive failed for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, err.Error())
 		return nil
 	}
@@ -482,7 +496,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Printf("WebSocket read error for app %s: %v", appName, err)
+					log.Printf("WebSocket read error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 				}
 				break
 			}
@@ -494,13 +508,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 						Data:     p,
 					},
 				}); err != nil {
-					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			} else if messageType == websocket.TextMessage {
 				var apiReq models.LiveRequest
 				if err := json.Unmarshal(p, &apiReq); err != nil {
-					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err)
+					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					continue
 				}
 
@@ -524,7 +538,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 				}
 
 				if err := liveSession.Send(liveReq); err != nil {
-					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			}
@@ -533,7 +547,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 	for event, err := range eventIter {
 		if err != nil {
-			log.Printf("RunLive failed: %v\n", err)
+			log.Printf("RunLive failed: %v\n", err) //nolint:forbidigo // pre-slog call site
 			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
 			break
 		}
@@ -541,7 +555,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) {
-				log.Printf("WebSocket write error for app %s: %v", appName, err)
+				log.Printf("WebSocket write error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 			}
 			break
 		}

@@ -209,6 +209,11 @@ information on using pull requests.
     `Related: #<number>`. Describe the problem and the solution in the PR
     description as well, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
+-   Library code must not write diagnostics to stdout, stderr, the standard
+    `log` package's logger or `slog`'s default logger, and `golangci-lint`
+    rejects it. See
+    [Logging and error messages](AGENTS.md#logging-and-error-messages) in
+    `AGENTS.md` for the levels to use and what to do instead.
 -   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
     `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
     title, and in the commit subject too on a single-commit PR, where that is
