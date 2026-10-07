@@ -115,7 +115,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)}},
 				}),
 			},
-			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "timeout built-in"},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "timeout built"},
 			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
 				{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)},
 			}},
@@ -143,6 +143,36 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
 				{Content: genai.NewContentFromText("CAFE\u0301TERIA snake_case", genai.RoleModel)},
 			}},
+		},
+		{
+			name: "does not treat leading Unicode marks as words",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-leading-mark", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("⚠️ disk full", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "thanks ❤️"},
+			wantResp: &memory.SearchResponse{},
+		},
+		{
+			name: "preserves combining mark boundary",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-combining-negative", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Je bois un cafe\u0301.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe"},
+			wantResp: &memory.SearchResponse{},
+		},
+		{
+			name: "preserves underscore boundary",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-underscore-negative", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("call snake_case now", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "snake"},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no leakage for different appName",

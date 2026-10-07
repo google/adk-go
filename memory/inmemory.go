@@ -205,6 +205,12 @@ func extractWords(text string) map[string]struct{} {
 	for word := range strings.FieldsFuncSeq(text, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r) && r != '_'
 	}) {
+		// A mark with no letter or number before it, such as the emoji variation
+		// selector U+FE0F, does not belong to a word.
+		word = strings.TrimLeftFunc(word, unicode.IsMark)
+		if word == "" {
+			continue
+		}
 		res[strings.ToLower(word)] = struct{}{}
 	}
 
