@@ -1008,17 +1008,15 @@ func TestAiplatformToGenaiContent_OtherParts(t *testing.T) {
 	}
 
 	got := aiplatformToGenaiContent(input)
-	if got == nil || len(got.Parts) != 3 {
-		t.Fatalf("expected 3 parts, got %v", got)
+	want := &genai.Content{
+		Role: "model",
+		Parts: []*genai.Part{
+			genai.NewPartFromExecutableCode("print('hello')", genai.LanguagePython),
+			genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "hello"),
+			genai.NewPartFromURI("gs://bucket/file.txt", "text/plain"),
+		},
 	}
-
-	if got.Parts[0].ExecutableCode == nil || got.Parts[0].ExecutableCode.Code != "print('hello')" || got.Parts[0].ExecutableCode.Language != genai.LanguagePython {
-		t.Errorf("incorrect ExecutableCode: %+v", got.Parts[0].ExecutableCode)
-	}
-	if got.Parts[1].CodeExecutionResult == nil || got.Parts[1].CodeExecutionResult.Output != "hello" || got.Parts[1].CodeExecutionResult.Outcome != genai.OutcomeOK {
-		t.Errorf("incorrect CodeExecutionResult: %+v", got.Parts[1].CodeExecutionResult)
-	}
-	if got.Parts[2].FileData == nil || got.Parts[2].FileData.FileURI != "gs://bucket/file.txt" || got.Parts[2].FileData.MIMEType != "text/plain" {
-		t.Errorf("incorrect FileData: %+v", got.Parts[2].FileData)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("aiplatformToGenaiContent() mismatch (-want +got):\n%s", diff)
 	}
 }
