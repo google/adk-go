@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -197,17 +198,38 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
-		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+		if ev == nil || ev.Partial || ev.NodeInfo == nil {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
+		// The parent records child failures even when cancellation stops
+		// a child from emitting its own marker through makeEmit.
+		if paths, ok := ev.CustomMetadata[workflowFailedChildPathsKey].([]any); ok {
+			for _, value := range paths {
+				if path, ok := value.(string); ok && strings.HasPrefix(path, prefix) {
+					delete(s.resultByPath, path)
+				}
+			}
+		} else if ev.NodeInfo.Path == s.parentPath && ev.ErrorCode == workflowNodeCancelledCode {
+			// Cancellation may stop the producer before it reports which
+			// child was in flight. With no completion evidence for that
+			// attempt, conservatively retry rather than replay partial data.
+			clear(s.resultByPath)
+		}
 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
 			continue
 		}
-		// Last write wins, matching live execution order.
-		s.resultByPath[ev.NodeInfo.Path] = ev.Output
+		// A partial result followed by failure or a pause is not a
+		// cached success. Last outcome wins, as in live execution.
+		if len(ev.LongRunningToolIDs) > 0 || ev.RequestedInput != nil {
+			delete(s.resultByPath, ev.NodeInfo.Path)
+		} else if out, ok := childEventOutput(ev); ok {
+			s.resultByPath[ev.NodeInfo.Path] = out
+		} else if ev.ErrorCode != "" {
+			delete(s.resultByPath, ev.NodeInfo.Path)
+		}
 	}
 }
 
@@ -277,9 +299,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	defer span.end()
 	childCtx = spanCtx
 
-	// rawErr is the unwrapped child/emit error. The returned err wraps
-	// the cause with "%w: %v", dropping context.Canceled from the chain,
-	// so span status is classified on rawErr rather than err.
+	// rawErr preserves the original child/emit error for span classification.
 	var rawErr error
 	defer func() { span.recordError(err, rawErr) }()
 
@@ -309,6 +329,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				Cause: fmt.Errorf("%w: child did not complete", ErrNodeFailed),
 			}}
 		}
+		if res.err != nil && !errors.Is(res.err, ErrNodeInterrupted) && !errors.Is(res.err, ErrNodeWaitingForOutput) {
+			// The parent's failure record cannot invalidate this child's
+			// path-keyed cache on a later re-entry. Record the child failure
+			// too, without including the child's error text.
+			ev := session.NewEvent(childCtx, childCtx.InvocationID())
+			ev.NodeInfo = &session.NodeInfo{Path: childPath}
+			ev.ErrorCode = workflowNodeFailureCode
+			_ = s.emitUp(ev)
+		}
 		s.finishRun(childPath, res)
 	}()
 
@@ -331,7 +360,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			rawErr = evErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
-				Cause: fmt.Errorf("%w: %v", ErrNodeFailed, evErr),
+				Cause: fmt.Errorf("%w: %w", ErrNodeFailed, evErr),
 			}
 		}
 		if ev == nil {
@@ -418,9 +447,12 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			rawErr = emitErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
-				Cause: fmt.Errorf("%w: emitUp: %v", ErrNodeFailed, emitErr),
+				Cause: fmt.Errorf("%w: emitUp: %w", ErrNodeFailed, emitErr),
 			}
 		}
+	}
+	if ctxErr := childCtx.Err(); ctxErr != nil {
+		return nil, &NodeRunError{ChildName: name, ChildPath: childPath, RunID: runID, Cause: fmt.Errorf("%w: %w", ErrNodeFailed, ctxErr)}
 	}
 
 	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {

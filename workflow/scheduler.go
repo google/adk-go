@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -92,7 +93,8 @@ type scheduler struct {
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
 
-	parentCtx agent.Context
+	parentCtx    agent.Context
+	workflowName string
 
 	// maxConcurrency caps len(runsByName); 0 disables the cap.
 	// When at the cap, scheduleResumedNode enqueues into
@@ -127,12 +129,13 @@ type pendingActivation struct {
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
-	routingEvent *session.Event // at most one; multiple is an error
-	output       any            // single Event.Output; nil if hasOutput is false
-	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
-	err          error          // set on duplicate output or duplicate routing event
-	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
-	nodePath     string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
+	routingEvent    *session.Event // at most one; multiple is an error
+	output          any            // single Event.Output; nil if hasOutput is false
+	hasOutput       bool           // distinguishes "no output yet" from "output was nil"
+	outputDelegated bool           // a descendant emitted an explicit OutputFor result
+	err             error          // set on duplicate output or duplicate routing event
+	branch          string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+	nodePath        string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
 
 	// interruptIDs are unresolved long-running tool call IDs raised by
 	// the node's events. A non-empty set at completion parks the node
@@ -394,6 +397,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
+	ns.Output = nil
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
 	ns.Branch = branch
@@ -600,7 +604,15 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 				close(it.processed)
 			}
 		case completionItem:
+			nr := s.runsByName[it.nodeName]
 			err := s.handleCompletion(it, !draining)
+			if !consumerGone {
+				if ev := s.completionEvent(it.nodeName, nr, it.err); ev != nil && !yield(ev, nil) {
+					consumerGone = true
+					draining = true
+					s.cancelAll()
+				}
+			}
 			if err != nil && pendingErr == nil {
 				pendingErr = err
 				if !draining {
@@ -645,6 +657,60 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 			yield(nil, err)
 		}
 	}
+}
+
+// Output events alone cannot distinguish success from a partial result
+// followed by failure, or record successful completion with no output.
+// Keep those outcomes in history without persisting the node's error text.
+func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *session.Event {
+	if name == Start.Name() || s.graph.isRootWrapper {
+		return nil
+	}
+	ns := s.state.Nodes[name]
+	if ns == nil || nr == nil {
+		return nil
+	}
+	var code string
+	switch ns.Status {
+	case NodeFailed, NodePending:
+		code = workflowNodeFailureCode
+	case NodeCancelled:
+		code = workflowNodeCancelledCode
+	case NodeCompleted:
+		if ns.Output != nil || nr.outputDelegated {
+			return nil
+		}
+	default:
+		return nil
+	}
+	ev := session.NewEvent(s.parentCtx, s.parentCtx.InvocationID())
+	ev.Branch = ns.Branch
+	path := nr.nodePath
+	if path == "" {
+		path = name
+	}
+	ev.NodeInfo = &session.NodeInfo{Path: path}
+	ev.CustomMetadata = map[string]any{workflowBasePathPrefix + s.workflowName: s.parentCtx.Path()}
+	if code != "" {
+		ev.ErrorCode = code
+		var paths []any
+		for failure != nil {
+			var childError *NodeRunError
+			if !errors.As(failure, &childError) {
+				break
+			}
+			if childError.ChildPath != "" {
+				paths = append(paths, childError.ChildPath)
+			}
+			failure = childError.Cause
+		}
+		if len(paths) > 0 {
+			ev.CustomMetadata[workflowFailedChildPathsKey] = paths
+		}
+	} else {
+		ev.CustomMetadata[workflowNodeCompletedKey] = true
+	}
+	return ev
 }
 
 // finalize errors if more than one terminal node (no outgoing edges,
@@ -721,6 +787,14 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
+	if !s.graph.isRootWrapper {
+		metadata := maps.Clone(it.ev.CustomMetadata)
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
+		it.ev.CustomMetadata = metadata
+	}
 	// Stamp the activation's branch onto events that left
 	// Event.Branch empty; nodes that set a non-empty Event.Branch
 	// keep it.
@@ -748,6 +822,11 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// parent node (a RequestInput pause rides on LongRunningToolIDs).
 	nr.trackInterrupts(it.ev)
 	if isDescendant {
+		// An explicit delegation is also this activation's result;
+		// merely forwarding a dynamic child's event is not.
+		if _, ok := childEventOutput(it.ev); ok && slices.Contains(it.ev.NodeInfo.OutputFor, expectedPath) {
+			nr.outputDelegated = true
+		}
 		return
 	}
 	// Stamp the node name onto the event so history rehydration can

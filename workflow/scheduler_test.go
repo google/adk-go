@@ -844,11 +844,16 @@ func TestScheduler_RetryNode(t *testing.T) {
 		t.Errorf("node calls = %d, want 3", got)
 	}
 
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if len(events) != 3 {
+		t.Fatalf("expected 2 failure records and 1 result, got %d events", len(events))
 	}
 
-	out := fmt.Sprint(events[0].Output)
+	for _, ev := range events[:2] {
+		if ev.ErrorCode != workflowNodeFailureCode || ev.Output != nil || ev.ErrorMessage != "" {
+			t.Fatal("retry failure record has an unexpected code, output or error text")
+		}
+	}
+	out := fmt.Sprint(events[2].Output)
 	if out != "seed:retryNode" {
 		t.Errorf("output = %q, want %q", out, "seed:retryNode")
 	}

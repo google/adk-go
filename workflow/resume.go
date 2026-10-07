@@ -60,19 +60,21 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //
 //     - A re-entry node (RerunOnResume) is set to NodePending and
 //     scheduled again with the response delivered via
-//     ctx.ResumedInput, so a duplicate Resume re-runs it a second
-//     time.
+//     ctx.ResumedInput. Successful completion clears the consumed
+//     responses; reconstructed history retains the completed result.
 //     - A handoff node is set to NodeCompleted and its response is
 //     routed to its successors without re-running the asker; a
 //     duplicate Resume then matches no waiting node and yields
 //     ErrNothingToResume.
 //
 //     A caller that must treat a double-submit as success therefore
-//     has to tolerate ErrNothingToResume. It is never a no-op in the
-//     re-entry case.
+//     has to tolerate ErrNothingToResume after completion. A failed
+//     re-entry can be retried with a matching response.
 //
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
+// After a response matches an interrupted node, siblings whose latest
+// activation failed are re-run before they can satisfy a downstream join.
 //
 // If responses is non-empty but no waiting node matches any
 // InterruptID in it, Resume yields ErrNothingToResume so the
@@ -90,6 +92,7 @@ func (w *Workflow) Resume(
 		}
 
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		s.workflowName = w.name
 		s.state = state
 
 		// Resume runs in two passes so that when one call
@@ -103,6 +106,7 @@ func (w *Workflow) Resume(
 		}
 		var deferredHandoffs []deferredHandoff
 		scheduled := 0
+		invalidResponses := map[string]bool{}
 
 		// Act on each node the rehydration reconstructed, but only
 		// for interrupts answered in THIS turn (present in responses).
@@ -125,13 +129,19 @@ func (w *Workflow) Resume(
 					break
 				}
 			}
-			// WAITING nodes whose response arrived this turn but is not
-			// yet in history (the runner node path passes responses
-			// directly): fold it into ResumedInputs after validation.
+			// Direct Resume callers may supply a new or corrected response
+			// not yet in history. Validate it before a waiting handoff or
+			// merging it into a pending/failed node's re-entry inputs.
 			freshMatched := map[string]any{}
-			if ns.Status == NodeWaiting {
+			if ns.Status == NodeWaiting || ns.Status == NodePending || ns.Status == NodeFailed {
+				ids := append([]string(nil), ns.Interrupts...)
+				if ns.Status != NodeWaiting {
+					for id := range ns.ResumedInputs {
+						ids = append(ids, id)
+					}
+				}
 				schemaErr := false
-				for _, id := range ns.Interrupts {
+				for _, id := range ids {
 					resp, ok := responses[id]
 					if !ok {
 						continue
@@ -150,6 +160,7 @@ func (w *Workflow) Resume(
 					freshMatched[id] = resp
 				}
 				if schemaErr {
+					invalidResponses[name] = true
 					continue
 				}
 			}
@@ -162,7 +173,7 @@ func (w *Workflow) Resume(
 				reenter = true
 			}
 
-			if reenter || ns.Status == NodePending {
+			if reenter || ns.Status == NodePending || ns.Status == NodeFailed {
 				// Re-entry: re-activate with the resolved responses
 				// delivered via ctx.ResumedInput.
 				if ns.ResumedInputs == nil {
@@ -233,6 +244,17 @@ func (w *Workflow) Resume(
 		if scheduled == 0 {
 			yield(nil, ErrNothingToResume)
 			return
+		}
+		// A valid resume also retries siblings whose latest attempt
+		// failed. They cannot satisfy a join with their discarded partial
+		// output, and need not have raised an interrupt themselves.
+		for name, ns := range state.Nodes {
+			if ns.Status != NodeFailed || invalidResponses[name] {
+				continue
+			}
+			if node := s.nodesByName[name]; node != nil {
+				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
+			}
 		}
 
 		s.run(yield)
