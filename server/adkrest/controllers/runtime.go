@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -36,6 +37,10 @@ import (
 	"google.golang.org/adk/v2/session/compaction"
 )
 
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
+
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
 	sseTimeout        time.Duration
@@ -46,6 +51,8 @@ type RuntimeAPIController struct {
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
 	authorizer        authz.Authorizer
+
+	checkOrigin func(*http.Request) bool
 
 	eventsCompactionConfig *compaction.Config
 }
@@ -60,10 +67,13 @@ type RuntimeAPIController struct {
 // constructor; a struct absorbs both problems at once, and adding a field to it
 // breaks nobody.
 type RuntimeAPIControllerConfig struct {
-	SessionService    session.Service
-	MemoryService     memory.Service
-	AgentLoader       agent.Loader
-	ArtifactService   artifact.Service
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	// SSETimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
@@ -80,7 +90,32 @@ type RuntimeAPIControllerConfig struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// CheckOrigin reports whether a /run_live upgrade carrying this request's
+	// Origin may proceed. It becomes the WebSocket upgrader's CheckOrigin hook,
+	// and a false answer refuses the handshake with 403.
+	//
+	// [google.golang.org/adk/v2/server/adkrest.NewServer] supplies one built
+	// from its AllowedOrigins, which is where the check belongs for anyone
+	// using that server. Set this only when mounting this controller in a
+	// router of your own.
+	//
+	// optional; nil keeps gorilla/websocket's default, which accepts a request
+	// with no Origin and otherwise requires Origin's host to equal Host — and
+	// so accepts a page that reached this server by rebinding its own DNS name,
+	// since such a page controls both
+	CheckOrigin func(*http.Request) bool
 }
+
+// maxLiveMessageBytes is the read limit RunLiveHandler applies to a single
+// client-sent WebSocket message. Matches uvicorn's ws_max_size default,
+// which adk-python's dev servers (adk web, adk api_server) leave unset, so
+// a message either server accepts, the other does too.
+//
+// Unexported: nothing currently overrides it. If that's needed later, add
+// a field to RuntimeAPIControllerConfig where zero means this default, the
+// same way ServerConfig.MaxPayloadSize works.
+const maxLiveMessageBytes = 16 << 20 // 16 MiB
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
 //
@@ -117,15 +152,20 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 	if authorizer == nil {
 		authorizer = authz.NewNoop()
 	}
+	sseTimeout := cfg.SSETimeout
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
 
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
 		agentLoader:            cfg.AgentLoader,
 		artifactService:        cfg.ArtifactService,
-		sseTimeout:             cfg.SSETimeout,
+		sseTimeout:             sseTimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
+		checkOrigin:            cfg.CheckOrigin,
 		eventsCompactionConfig: cfg.Compaction,
 		authorizer:             authorizer,
 	}
@@ -197,7 +237,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
@@ -231,7 +274,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	// Flush as soon as possible so the client doesn't drop connection.
 	// Add the headers after the error handling to avoid wrong content type.
-	rw.Header().Set("Content-Type", "text/event-stream")
+	// The charset is redundant — text/event-stream is always UTF-8 — but is
+	// stated anyway, which is what its registration allows the parameter for.
+	// RFC 7231 removed the old ISO-8859-1 default for text/*, yet clients
+	// still implement it and mojibake every non-ASCII rune when it is absent.
+	rw.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
 	if err := rc.Flush(); err != nil {
@@ -363,6 +410,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		CheckOrigin:     c.checkOrigin,
 	}
 
 	q := req.URL.Query()
@@ -399,8 +447,11 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		_ = ws.Close()
 	}()
 
+	// The upgrade bypasses MaxBytesMiddleware, and gorilla/websocket has no default limit.
+	ws.SetReadLimit(maxLiveMessageBytes)
+
 	sendClose := func(code int, reason string) {
-		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(reason)))
 		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
@@ -497,7 +548,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	for event, err := range eventIter {
 		if err != nil {
 			log.Printf("RunLive failed: %v\n", err)
-			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
 			break
 		}
 
@@ -511,4 +562,23 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}
 
 	return nil
+}
+
+// maxCloseReason is the longest reason a websocket close frame can carry: a
+// control frame payload is capped at 125 bytes and the close code takes two.
+const maxCloseReason = 123
+
+// truncateCloseReason trims reason to fit a close frame, on a rune boundary
+// because the reason must be valid UTF-8. gorilla refuses to send an over-long
+// control frame at all, so without this a long error reaches the browser as a
+// bare abnormal closure carrying no explanation.
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReason {
+		return reason
+	}
+	truncated := reason[:maxCloseReason]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }

@@ -17,6 +17,7 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"slices"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -24,19 +25,18 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// ContentRequestProcessor populates the LLMRequest's Contents based on
-// the InvocationContext that includes the previous events.
+// toolProcessor populates f.Tools on every step by re-evaluating each
+// Toolset. Toolsets may return different tools based on session state that
+// was modified by an earlier step in the same Run(), so the tool list must
+// be rebuilt before each model call rather than being cached across steps.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if f.Tools != nil {
-			return
-		}
 		llmAgent, ok := ctx.Agent().(Agent)
 		if !ok {
 			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
 			return
 		}
-		tools := Reveal(llmAgent).Tools
+		tools := slices.Clip(Reveal(llmAgent).Tools)
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
 			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 			if err != nil {

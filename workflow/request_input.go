@@ -51,7 +51,7 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 //
 // Prefer a unique InterruptID per request. If req.InterruptID is
 // empty, a UUID is generated so the downstream contract (a non-empty
-// correlation key on NodeState.PendingRequest) is always satisfied.
+// correlation key in NodeState.Interrupts) is always satisfied.
 // You may also build a readable-but-unique ID (a stable prefix plus a
 // UUID). Avoid a fixed literal that recurs across separate runs in the
 // same session: clients such as the Dev UI track answered requests by
