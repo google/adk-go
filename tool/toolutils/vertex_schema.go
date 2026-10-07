@@ -20,12 +20,12 @@ import (
 	"reflect"
 )
 
-// SanitizeSchemaForVertex rewrites JSON Schema maps so that anyOf/oneOf
-// subschemas do not carry sibling keywords. Vertex AI rejects declarations
-// where any_of/one_of appears alongside other fields (e.g. description/title
-// emitted by pydantic for Optional/Union). It removes only annotations that
-// do not affect which values a schema accepts, avoiding branch duplication.
-// See https://github.com/google/adk-go/issues/1659.
+// SanitizeSchemaForVertex strips annotation siblings (title, description,
+// default, …) from maps that contain anyOf/oneOf so Vertex AI accepts the
+// declaration. Validation keywords beside a union (type, properties,
+// required, discriminator, …) and maps that are not schemas are left
+// unchanged — the same shapes adk-python leaves alone. Nested schemas are
+// walked recursively. See https://github.com/google/adk-go/issues/1659.
 func SanitizeSchemaForVertex(schema any) any {
 	schema, _ = sanitizeSchemaForVertex(schema)
 	return schema
@@ -39,12 +39,16 @@ func sanitizeSchemaForVertex(schema any) (any, bool) {
 		var out []any
 		for i, value := range s {
 			sanitized, changed := sanitizeSchemaForVertex(value)
-			if changed && out == nil {
-				out = append([]any(nil), s[:i]...)
+			if !changed {
+				continue
 			}
-			if out != nil {
-				out = append(out, sanitized)
+			if out == nil {
+				// Copy prefixes with make+copy so a rewrite of s[0] is kept:
+				// append(nil, s[:0]...) is still nil and would drop the change.
+				out = make([]any, len(s))
+				copy(out, s)
 			}
+			out[i] = sanitized
 		}
 		if out == nil {
 			return schema, false
@@ -109,16 +113,19 @@ func sanitizeSchemaMap(schema map[string]any) (any, bool) {
 		out = schema
 	}
 
-	var combination map[string]any
+	var unionKey string
+	var unionValue any
 	for _, key := range []string{"anyOf", "oneOf"} {
 		if value, ok := out[key]; ok {
-			if combination != nil {
+			if unionKey != "" {
+				// both anyOf and oneOf — leave alone (same as adk-python)
 				return out, childrenChanged
 			}
-			combination = map[string]any{key: value}
+			unionKey = key
+			unionValue = value
 		}
 	}
-	if combination == nil {
+	if unionKey == "" {
 		return out, childrenChanged
 	}
 
@@ -127,7 +134,20 @@ func sanitizeSchemaMap(schema map[string]any) (any, bool) {
 			return out, childrenChanged
 		}
 	}
-	return combination, true
+	// Already a bare union with no annotation siblings — keep original.
+	if !childrenChanged {
+		onlyUnion := true
+		for key := range out {
+			if key != unionKey {
+				onlyUnion = false
+				break
+			}
+		}
+		if onlyUnion {
+			return out, false
+		}
+	}
+	return map[string]any{unionKey: unionValue}, true
 }
 
 func isAnnotation(key string) bool {

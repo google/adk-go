@@ -117,3 +117,59 @@ func TestSanitizeSchemaForVertex_PreservesValidationSiblings(t *testing.T) {
 		t.Fatalf("validation sibling was removed: %#v", out)
 	}
 }
+
+func TestSanitizeSchemaForVertex_RewritesFirstAnyOfBranch(t *testing.T) {
+	// Nested optional whose first anyOf branch itself has an annotated optional.
+	// The []any rewrite must keep changes at index 0 (append(nil, s[:0]...) is nil).
+	raw := `{
+	  "type": "object",
+	  "properties": {
+	    "person": {
+	      "title": "Person",
+	      "anyOf": [
+	        {
+	          "type": "object",
+	          "properties": {
+	            "age": {
+	              "title": "Age",
+	              "description": "years",
+	              "anyOf": [{"type": "integer"}, {"type": "null"}]
+	            }
+	          }
+	        },
+	        {"type": "null"}
+	      ]
+	    }
+	  }
+	}`
+	var in any
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		t.Fatal(err)
+	}
+	out := SanitizeSchemaForVertex(in).(map[string]any)
+	person := out["properties"].(map[string]any)["person"].(map[string]any)
+	if _, ok := person["title"]; ok {
+		t.Fatalf("person title still alongside anyOf: %#v", person)
+	}
+	branches := person["anyOf"].([]any)
+	age := branches[0].(map[string]any)["properties"].(map[string]any)["age"].(map[string]any)
+	if _, ok := age["anyOf"]; !ok {
+		t.Fatalf("age missing anyOf: %#v", age)
+	}
+	if _, ok := age["title"]; ok {
+		t.Fatalf("age title still alongside anyOf: %#v", age)
+	}
+	if _, ok := age["description"]; ok {
+		t.Fatalf("age description still alongside anyOf: %#v", age)
+	}
+}
+
+func TestSanitizeSchemaForVertex_BareUnionUnchanged(t *testing.T) {
+	in := &jsonschema.Schema{}
+	if err := json.Unmarshal([]byte(`{"anyOf":[{"type":"string"},{"type":"null"}]}`), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := SanitizeSchemaForVertex(in); got != in {
+		t.Fatalf("bare union rewritten to %T %#v, want original pointer", got, got)
+	}
+}

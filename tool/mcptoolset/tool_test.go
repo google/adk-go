@@ -16,12 +16,15 @@ package mcptoolset
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 )
 
 type fixedResultMCPClient struct {
@@ -38,6 +41,49 @@ func (c *fixedResultMCPClient) CallTool(context.Context, *mcp.CallToolParams) (*
 
 func (*fixedResultMCPClient) ListTools(context.Context) ([]*mcp.Tool, error) {
 	return nil, nil
+}
+
+func TestConvertTool_SanitizesAnyOfInputSchema(t *testing.T) {
+	ischema := &jsonschema.Schema{}
+	if err := json.Unmarshal([]byte(`{
+		"type":"object",
+		"properties":{
+			"age":{
+				"title":"Age",
+				"description":"the person's age, if known",
+				"anyOf":[{"type":"integer"},{"type":"null"}]
+			}
+		}
+	}`), ischema); err != nil {
+		t.Fatal(err)
+	}
+	got, err := convertTool(&mcp.Tool{
+		Name:        "create_payee",
+		Description: "creates a payee",
+		InputSchema: ischema,
+	}, &fixedResultMCPClient{}, false, nil)
+	if err != nil {
+		t.Fatalf("convertTool: %v", err)
+	}
+	decl := got.(toolinternal.FunctionTool).Declaration()
+	raw, err := json.Marshal(decl.ParametersJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	age := out["properties"].(map[string]any)["age"].(map[string]any)
+	if _, ok := age["anyOf"]; !ok {
+		t.Fatalf("age missing anyOf: %#v", age)
+	}
+	if _, ok := age["title"]; ok {
+		t.Fatalf("title still alongside anyOf: %#v", age)
+	}
+	if _, ok := age["description"]; ok {
+		t.Fatalf("description still alongside anyOf: %#v", age)
+	}
 }
 
 func TestMCPToolRunContent(t *testing.T) {
