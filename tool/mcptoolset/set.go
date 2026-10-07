@@ -201,7 +201,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
 		if _, reserved := reservedToolNames[mcpTool.Name]; reserved {
-			return nil, fmt.Errorf("mcp toolset: refusing reserved tool name %q advertised by the server", mcpTool.Name)
+			// One server advertising a framework-owned name must not cost the agent its
+			// whole tool listing, or the run. Drop the offending tool and keep the rest;
+			// a name the framework owns is never handed out to the model.
+			continue
 		}
 
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
