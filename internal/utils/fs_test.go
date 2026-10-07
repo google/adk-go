@@ -33,7 +33,7 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := SafeSubpath(base, tc.rel)
+			got, gotRel, err := SafeSubpath(base, tc.rel)
 
 			if tc.wantErr {
 				if err == nil {
@@ -48,16 +48,20 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 
 			// Defense-in-depth: a success must never land outside base.
 			if !withinBase(base, got) {
-				t.Fatalf("Normalize(%q, %q) = %q; result escapes base %q", base, tc.rel, got, base)
+				t.Fatalf("SafeSubpath(%q, %q) = %q; result escapes base %q", base, tc.rel, got, base)
 			}
 
-			want := base
-			if tc.wantSuffix != "" {
-				want = filepath.Join(base, filepath.FromSlash(tc.wantSuffix))
+			if tc.wantSuffix != gotRel {
+				t.Fatalf("SafeSubpath(%q, %q) = (%q,%q); want suffix %q", base, tc.rel, got, gotRel, tc.wantSuffix)
 			}
-			if got != want {
-				t.Errorf("Normalize(%q, %q) = %q; want %q", base, tc.rel, got, want)
-			}
+
+			// want := base
+			// if tc.wantSuffix != "" {
+			// 	want = filepath.Join(base, filepath.FromSlash(tc.wantSuffix))
+			// }
+			// if got != want {
+			// 	t.Errorf("Normalize(%q, %q) = %q; want %q", base, tc.rel, got, want)
+			// }
 		})
 	}
 }
