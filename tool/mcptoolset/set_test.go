@@ -23,7 +23,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -256,75 +258,72 @@ func TestToolFilter(t *testing.T) {
 	}
 }
 
-func TestReservedToolNames(t *testing.T) {
-	// Framework-internal dispatch names and the in-model built-ins this port
-	// actually registers. Both classes must be refused.
-	refused := []string{
-		"set_model_response",
-		"transfer_to_agent",
-		"finish_task",
-		"task_completed",
-		"exit_loop",
-		"load_artifacts",
-		"load_memory",
-		"google_search",
-		"google_maps_grounding",
-		"url_context",
-	}
-	for _, name := range refused {
-		t.Run("refuses/"+name, func(t *testing.T) {
-			clientTransport, serverTransport := mcp.NewInMemoryTransports()
-
-			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
-			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
-			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+func TestMCPToolSetClose(t *testing.T) {
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connected=%t", connected), func(t *testing.T) {
+			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "1"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: "get_weather"}, weatherFunc)
+			transport := &spyTransport{Transport: &reconnectableTransport{server: server}}
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: transport})
+			if err != nil {
 				t.Fatal(err)
 			}
-
-			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
-			if err != nil {
-				t.Fatalf("Failed to create MCP tool set: %v", err)
+			t.Cleanup(func() {
+				for session := range server.Sessions() {
+					_ = session.Close()
+				}
+			})
+			closer, ok := ts.(io.Closer)
+			if !ok {
+				t.Fatal("MCP toolset does not implement io.Closer")
 			}
-			got, err := ts.Tools(icontext.NewReadonlyContext(
-				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
-			))
-			if err != nil {
-				t.Fatalf("Tools() failed the whole listing over the reserved name %q: %v", name, err)
-			}
-			for _, gotTool := range got {
-				if gotTool.Name() == name {
-					t.Fatalf("Tools() handed out the reserved name %q; it must be dropped", name)
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := icontext.NewReadonlyContext(invCtx)
+			var tools []tool.Tool
+			var sessionClosed <-chan struct{}
+			if connected {
+				tools, err = ts.Tools(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for session := range server.Sessions() {
+					done := make(chan struct{})
+					sessionClosed = done
+					go func() {
+						_ = session.Wait()
+						close(done)
+					}()
 				}
 			}
-		})
-	}
-
-	// The other direction: a name from another port (or one ADK Go does not
-	// define) must still be accepted. Refusing these would be a port that
-	// rejects names its own implementation never had a problem with.
-	accepted := []string{"google_maps", "vertex_ai_search", "code_execution", "web_search"}
-	for _, name := range accepted {
-		t.Run("accepts/"+name, func(t *testing.T) {
-			clientTransport, serverTransport := mcp.NewInMemoryTransports()
-
-			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
-			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
-			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
-				t.Fatal(err)
+			var wg sync.WaitGroup
+			for range 2 {
+				wg.Go(func() {
+					if err := closer.Close(); err != nil {
+						t.Errorf("Close() failed: %v", err)
+					}
+				})
 			}
-
-			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
-			if err != nil {
-				t.Fatalf("Failed to create MCP tool set: %v", err)
+			wg.Wait()
+			if connected {
+				select {
+				case <-sessionClosed:
+				case <-time.After(5 * time.Second):
+					t.Fatal("Close() left the MCP session open")
+				}
+				fnTool := tools[0].(toolinternal.FunctionTool)
+				if _, err := fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"}); !errors.Is(err, mcp.ErrConnectionClosed) {
+					t.Errorf("Run() after Close() error = %v, want ErrConnectionClosed", err)
+				}
 			}
-			tools, err := ts.Tools(icontext.NewReadonlyContext(
-				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
-			))
-			if err != nil {
-				t.Fatalf("Tools() refused %q, which this framework does not define: %v", name, err)
+			if _, err := ts.Tools(ctx); !errors.Is(err, mcp.ErrConnectionClosed) {
+				t.Errorf("Tools() after Close() error = %v, want ErrConnectionClosed", err)
 			}
-			if len(tools) != 1 || tools[0].Name() != name {
-				t.Fatalf("Tools() = %v, want the single tool %q", tools, name)
+			wantConnections := 0
+			if connected {
+				wantConnections = 1
+			}
+			if transport.connectCount != wantConnections {
+				t.Errorf("Connect() called %d times, want %d", transport.connectCount, wantConnections)
 			}
 		})
 	}
@@ -985,5 +984,79 @@ func TestMCPTool_NonTextContentRoundTrip(t *testing.T) {
 		"[MCP audio: mimeType=\"audio/wav\", size=3 bytes]"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Run() result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestReservedToolNames(t *testing.T) {
+	// Framework-internal dispatch names and the in-model built-ins this port
+	// actually registers. Both classes must be refused.
+	refused := []string{
+		"set_model_response",
+		"transfer_to_agent",
+		"finish_task",
+		"task_completed",
+		"exit_loop",
+		"load_artifacts",
+		"load_memory",
+		"google_search",
+		"google_maps_grounding",
+		"url_context",
+	}
+	for _, name := range refused {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			got, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			))
+			if err != nil {
+				t.Fatalf("Tools() failed the whole listing over the reserved name %q: %v", name, err)
+			}
+			for _, gotTool := range got {
+				if gotTool.Name() == name {
+					t.Fatalf("Tools() handed out the reserved name %q; it must be dropped", name)
+				}
+			}
+		})
+	}
+
+	// The other direction: a name from another port (or one ADK Go does not
+	// define) must still be accepted. Refusing these would be a port that
+	// rejects names its own implementation never had a problem with.
+	accepted := []string{"google_maps", "vertex_ai_search", "code_execution", "web_search"}
+	for _, name := range accepted {
+		t.Run("accepts/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			tools, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			))
+			if err != nil {
+				t.Fatalf("Tools() refused %q, which this framework does not define: %v", name, err)
+			}
+			if len(tools) != 1 || tools[0].Name() != name {
+				t.Fatalf("Tools() = %v, want the single tool %q", tools, name)
+			}
+		})
 	}
 }
