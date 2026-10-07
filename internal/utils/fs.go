@@ -15,11 +15,18 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+)
+
+var (
+	ErrNotValidRelativePath  = errors.New("the path is not valid relative path in the subtree")
+	ErrSymlinkInRelativePath = errors.New("relative path contains a symlink")
 )
 
 // SafeSubpath returns a normalized absolute path and the base-path-relative equivalent path.
@@ -27,56 +34,68 @@ import (
 // The rel path is not considered to be safe.
 // The base path should be absolute and is considered to be safe
 // Returns on error if the result is not a valid subpath or the path contains unsafe elements (especially for windows)
-func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
+func SafeSubpath(base, rel string, acceptSymlinks bool) (absPath, relPath string, resErr error) {
 	// validate rel
 	// do not allow rel to start with "\\"
 	// on windows it will catch \\host\dir, \\.\long, \\?\ etc
 	if strings.HasPrefix(rel, "\\") {
-		return "", "", fmt.Errorf("rel path should not start with \\")
+		return "", "", fmt.Errorf("%w: rel path should not start with \\", ErrNotValidRelativePath)
 	}
 	// do not allow rel to start with "/"
 	if strings.HasPrefix(rel, "/") {
-		return "", "", fmt.Errorf("rel path should not start with /")
+		return "", "", fmt.Errorf("%w: rel path should not start with /", ErrNotValidRelativePath)
 	}
 	// on windows we need additional tests
 	if runtime.GOOS == "windows" {
 		// this will prevent explicit drive like "c:\" and ADS ("test.txt:aaa")
 		if strings.ContainsAny(rel, windowsForbiddenStandardChars) {
-			return "", "", fmt.Errorf("rel path contains windows-specific invalid chars: %v", windowsForbiddenStandardChars)
+			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars: %v", ErrNotValidRelativePath, windowsForbiddenStandardChars)
 		}
 		if strings.ContainsAny(rel, windowsForbiddenLowChar) {
-			return "", "", fmt.Errorf("rel path contains windows-specific invalid chars 1-31")
+			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars 1-31", ErrNotValidRelativePath)
 		}
 		fn := filepath.Base(rel)
 		// look at the file name and its extension
 		if noext, ext, found := strings.Cut(fn, "."); found {
 			// catches a.txt. and .....
 			if strings.HasSuffix(ext, ".") {
-				return "", "", fmt.Errorf("rel path: file extension contains '.' at the end")
+				return "", "", fmt.Errorf("%w: rel path: file extension contains '.' at the end", ErrNotValidRelativePath)
 			}
 			if _, ok := windowsForbiddenFileNames[noext]; ok {
-				return "", "", fmt.Errorf("rel path has a windows-specific forbidden file: %v", noext)
+				return "", "", fmt.Errorf("%w: rel path has a windows-specific forbidden file: %v", ErrNotValidRelativePath, noext)
 			}
 		} else {
 			if _, ok := windowsForbiddenFileNames[fn]; ok {
-				return "", "", fmt.Errorf("rel path has a windows-specific forbidden file: %v", noext)
+				return "", "", fmt.Errorf("%w: rel path has a windows-specific forbidden file: %v", ErrNotValidRelativePath, noext)
 			}
 		}
 
 		// check for trailing " " and "." all along the path
-		for _, s := range filepath.SplitList(rel) {
-			if strings.HasSuffix(s, " ") {
-				return "", "", fmt.Errorf("rel path contains trailing space")
+		// cleanRel := filepath.Clean(rel)
+		p := rel
+		cont := true
+		for cont {
+			p = filepath.Clean(p)
+			d, f := filepath.Split(p)
+			if d == "" {
+				cont = false
 			}
-			if strings.HasSuffix(s, ".") {
-				return "", "", fmt.Errorf("rel path contains trailing dot")
+			if strings.HasSuffix(f, " ") {
+				return "", "", fmt.Errorf("%w: rel path contains trailing space", ErrNotValidRelativePath)
 			}
+			if strings.HasSuffix(f, ".") {
+				return "", "", fmt.Errorf("%w: rel path contains trailing dot", ErrNotValidRelativePath)
+			}
+			if p == d {
+				cont = false
+			}
+			p = d
 		}
 	}
 
 	// NUL char is not allowed both on linux and windows
 	if strings.Contains(rel, "\x00") {
-		return "", "", fmt.Errorf("rel path contains null byte")
+		return "", "", fmt.Errorf("%w: rel path contains null byte", ErrNotValidRelativePath)
 	}
 
 	// now check the base path.
@@ -87,7 +106,7 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 
 	cleanRel := filepath.Clean(rel)
 	if strings.HasPrefix(cleanRel, "..\\") || strings.HasPrefix(cleanRel, "../") {
-		return "", "", fmt.Errorf("rel path after cleaning should not start with ..")
+		return "", "", fmt.Errorf("%w: rel path after cleaning should not start with ..", ErrNotValidRelativePath)
 	}
 
 	// check if rel escapes absBase
@@ -99,13 +118,40 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 	res := filepath.Join(absBase, r)
 	// now compare res and absBase
 	if absBase == res { // r effectively is .
-		return "", "", fmt.Errorf("rel is effectively empty")
+		return "", "", fmt.Errorf("%w: rel is effectively empty", ErrNotValidRelativePath)
 	}
 	if !strings.HasPrefix(res, absBase+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("not a subpath")
+		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
+	}
+
+	if !acceptSymlinks {
+		hasSymlink, err := ContainsSymlink(absBase, rel)
+		if err != nil {
+			return "", "", fmt.Errorf("%w: cannot check for symlinks: %v", ErrNotValidRelativePath, err)
+		}
+		if hasSymlink {
+			return "", "", ErrSymlinkInRelativePath
+		}
 	}
 
 	return res, r, nil
+}
+
+func splitPathToFragments(p string) []string {
+	p = filepath.Clean(p)
+	res := make([]string, 0)
+	cont := true
+	for cont {
+		p = filepath.Clean(p)
+		d, f := filepath.Split(p)
+		res = append(res, f)
+		if p == d || d == "" {
+			cont = false
+		}
+		p = d
+	}
+	slices.Reverse(res)
+	return res
 }
 
 // ContainsSymlink checks the rel path for symlinks
@@ -120,30 +166,21 @@ func ContainsSymlink(base, rel string) (bool, error) {
 	}
 
 	p := base
-	frags := filepath.SplitList(rel)
-	for i, fn := range frags {
-		p = filepath.Join(p, fn)
-		// all fragments save the last one should be a directory, not a symlink
+	frags := splitPathToFragments(rel)
+	for _, fr := range frags {
+		p = filepath.Join(p, fr)
 		fi, err := os.Lstat(p)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		if i < len(frags)-1 {
-			// we expect a directory
-			if !fi.IsDir() {
-				return false, fmt.Errorf("not a directory")
-			}
+			return false, fmt.Errorf("cannot Lstat: %w", err)
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
-			return false, fmt.Errorf("symlink detected")
+			return true, nil
 		}
 		if fi.Mode()&os.ModeIrregular != 0 {
-			return false, fmt.Errorf("irregular file detected")
+			return true, nil
 		}
 	}
+
 	return false, nil
 }
 

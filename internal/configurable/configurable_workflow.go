@@ -203,7 +203,7 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 		// need the same containment check as agent refs: without it a workflow
 		// config can read and instantiate a node from anywhere on the filesystem.
 		var err error
-		absPath, err = resolveConfigReference(parentPath, ref)
+		absPath, err = resolveConfigReference(parentPath, ref, false)
 		if err != nil {
 			return nil, err
 		}

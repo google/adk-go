@@ -33,11 +33,11 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotRel, err := SafeSubpath(base, tc.rel)
+			got, gotRel, err := SafeSubpath(base, tc.rel, true)
 
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("Normalize(%q, %q) = %q, nil; want error (escape/invalid)", base, tc.rel, got)
+					t.Fatalf("Normalize(%q, %q) = (%q, %q), nil; want error (escape/invalid)", base, tc.rel, got, gotRel)
 				}
 				return
 			}
@@ -48,7 +48,7 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 
 			// Defense-in-depth: a success must never land outside base.
 			if !withinBase(base, got) {
-				t.Fatalf("SafeSubpath(%q, %q) = %q; result escapes base %q", base, tc.rel, got, base)
+				t.Fatalf("SafeSubpath(%q, %q) = (%q, %q); result escapes base %q", base, tc.rel, got, gotRel, base)
 			}
 
 			if tc.wantSuffix != gotRel {
@@ -83,11 +83,8 @@ func withinBase(base, p string) bool {
 var commonSubpathCases = []normalizeCase{
 	// Accepted
 	{name: "simple_file", rel: "file.txt", wantSuffix: "file.txt"},
-	{name: "nested_descendant", rel: "sub/dir/file.txt", wantSuffix: "sub/dir/file.txt"},
 	{name: "leading_dot_slash", rel: "./file.txt", wantSuffix: "file.txt"},
 	{name: "interior_dotdot_stays_inside", rel: "sub/../file.txt", wantSuffix: "file.txt"},
-	{name: "interior_single_dot", rel: "sub/./nested/file.txt", wantSuffix: "sub/nested/file.txt"},
-	{name: "collapsed_double_slash", rel: "sub//double.txt", wantSuffix: "sub/double.txt"},
 	{name: "trailing_slash", rel: "sub/", wantSuffix: "sub"},
 
 	// Rejected
@@ -120,13 +117,17 @@ func TestSafeSubpath_Windows(t *testing.T) {
 
 	cases := append([]normalizeCase(nil), commonSubpathCases...)
 	cases = append(cases, []normalizeCase{
+		{name: "nested_descendant", rel: "sub/dir/file.txt", wantSuffix: "sub\\dir\\file.txt"},
+		{name: "interior_single_dot", rel: "sub/./nested/file.txt", wantSuffix: "sub\\nested\\file.txt"},
+		{name: "collapsed_double_slash", rel: "sub//double.txt", wantSuffix: "sub\\double.txt"},
+
 		// Allowed: mixed separators
-		{name: "backslash_separators", rel: `logs\2025\app.log`, wantSuffix: "logs/2025/app.log"},
-		{name: "forward_slash_separators", rel: "logs/2025/app.log", wantSuffix: "logs/2025/app.log"},
-		{name: "mixed_separators", rel: `sub/nested\mixed.txt`, wantSuffix: "sub/nested/mixed.txt"},
+		{name: "backslash_separators", rel: `logs\2025\app.log`, wantSuffix: "logs\\2025\\app.log"},
+		{name: "forward_slash_separators", rel: "logs/2025/app.log", wantSuffix: "logs\\2025\\app.log"},
+		{name: "mixed_separators", rel: `sub/nested\mixed.txt`, wantSuffix: "sub\\nested\\mixed.txt"},
 
 		// .. in the middle, stays within the base
-		{name: "mixed_sep_interior_dotdot", rel: `a\b\..\c.txt`, wantSuffix: "a/c.txt"},
+		{name: "mixed_sep_interior_dotdot", rel: `a\b\..\c.txt`, wantSuffix: "a\\c.txt"},
 
 		// Traversal
 		{name: "backslash_traversal", rel: `..\..\Windows\System32\drivers\etc\hosts`, wantErr: true},
@@ -174,11 +175,20 @@ func TestSafeSubpath_Windows(t *testing.T) {
 func TestSafeSubpath_NonWindows(t *testing.T) {
 	const base = "/srv/app/data"
 
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipped - will be skipped on Windows")
+	}
+
 	cases := append([]normalizeCase(nil), commonSubpathCases...)
 	cases = append(cases, []normalizeCase{
+		{name: "nested_descendant", rel: "sub/dir/file.txt", wantSuffix: "sub/dir/file.txt"},
+		{name: "interior_single_dot", rel: "sub/./nested/file.txt", wantSuffix: "sub/nested/file.txt"},
+		{name: "collapsed_double_slash", rel: "sub//double.txt", wantSuffix: "sub/double.txt"},
+
 		// ---- Allowed: characters that are LITERAL on POSIX filesystems ----
 		// Backslash is a normal filename byte on POSIX, NOT a separator: this
 		// must be a single file inside base, not treated as traversal.
+
 		{name: "backslash_is_literal_not_separator", rel: `weird\name.txt`, wantSuffix: `weird\name.txt`},
 		{name: "colon_is_literal", rel: "file:with:colons.txt", wantSuffix: "file:with:colons.txt"},
 		{name: "dotfile", rel: ".hiddenfile", wantSuffix: ".hiddenfile"},
@@ -197,3 +207,26 @@ func TestSafeSubpath_NonWindows(t *testing.T) {
 
 	runTests(t, base, cases)
 }
+
+// func TestSymlinks(t *testing.T) {
+// 	p := `C:\Users\kdroste\Start Menu`
+
+// 	tests := []string{"Users\\kdroste\\Start Menu", "Users\\kdroste", "Users\\kdroste\\Start Menu\\", "Users\\kdroste\\Start Menu\\desktop.ini", "Users\\kdroste\\Start Menu\\Programs"}
+
+// 	for _, f := range tests {
+// 		t.Logf("Looking at %q", f)
+// 		fi, err := os.Lstat(p)
+// 		if err != nil {
+// 			t.Errorf("failed to Lstat: %v", err)
+// 		}
+// 		t.Logf("ModeIrregular: %+v", fi.Mode()&os.ModeIrregular != 0)
+// 		t.Logf("ModeDir: %+v", fi.Mode()&os.ModeDir != 0)
+// 		res, err := ContainsSymlink("C:\\", f)
+// 		if err != nil {
+// 			t.Errorf("cannot ContainsSymlink")
+// 		}
+// 		t.Logf("ContainsSymlink: %+v", res)
+// 	}
+
+// 	t.Fail()
+// }

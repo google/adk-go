@@ -24,13 +24,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"google.golang.org/adk/v2/internal/utils"
 )
 
 // isContainmentRejection reports whether err is the containment check refusing a
 // reference, as opposed to a later failure to load the config that it names.
 // Asserting on the sentinels keeps these tests independent of the message text.
 func isContainmentRejection(err error) bool {
-	return errors.Is(err, errConfigReferenceNotLocal) || errors.Is(err, errConfigReferenceSymlink)
+	return errors.Is(err, utils.ErrNotValidRelativePath) || errors.Is(err, utils.ErrSymlinkInRelativePath)
 }
 
 // TestIsLinkLike pins the mode predicate the component walk uses. It runs
@@ -96,7 +98,7 @@ func newAgentDir(t *testing.T) (base, parentPath string) {
 
 func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
 	_, parentPath := newAgentDir(t)
-
+	parentPath = filepath.Dir(parentPath)
 	tests := []struct {
 		name    string
 		refPath string
@@ -105,17 +107,17 @@ func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
 		{
 			name:    "absolute path",
 			refPath: filepath.Join(string(os.PathSeparator), "etc", "passwd"),
-			wantErr: errConfigReferenceNotLocal,
+			wantErr: utils.ErrNotValidRelativePath,
 		},
 		{
 			name:    "parent traversal",
 			refPath: filepath.Join("..", "..", "outside.yaml"),
-			wantErr: errConfigReferenceNotLocal,
+			wantErr: utils.ErrNotValidRelativePath,
 		},
 		{
 			name:    "symlink escaping the agent directory",
 			refPath: "link.yaml",
-			wantErr: errConfigReferenceSymlink,
+			wantErr: utils.ErrSymlinkInRelativePath,
 		},
 	}
 
@@ -137,6 +139,7 @@ func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
 // error.
 func TestResolveAgentReferenceAllowsPathsInsideAgentDir(t *testing.T) {
 	_, parentPath := newAgentDir(t)
+	parentPath = filepath.Dir(parentPath)
 
 	_, err := ResolveAgentReference(context.Background(), parentPath, "sub_agent.yaml")
 	if isContainmentRejection(err) {
@@ -260,7 +263,7 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 		t.Skipf("symlinks are not supported in this environment: %v", err)
 	}
 
-	parentPath := filepath.Join(alias, "root_agent.yaml")
+	parentPath := alias //filepath.Join(alias, "root_agent.yaml")
 	if _, err := ResolveAgentReference(context.Background(), parentPath, "missing.yaml"); isContainmentRejection(err) {
 		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no containment rejection", parentPath, "missing.yaml", err)
 	}
@@ -288,7 +291,7 @@ func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 			// be refused; otherwise it is a legal file name and must be accepted.
 			wantRejected := filepath.VolumeName(refPath) != ""
 
-			_, err := resolveConfigReference(parentPath, refPath)
+			_, err := resolveConfigReference(parentPath, refPath, true)
 			if gotRejected := err != nil; gotRejected != wantRejected {
 				t.Errorf("resolveConfigReference(%q, %q) rejected = %v (%v), want rejected = %v",
 					parentPath, refPath, gotRejected, err, wantRejected)
@@ -364,10 +367,10 @@ func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
 			}
 			refPath := tc.layout(t, dir)
 
-			parentPath := filepath.Join(dir, "root_agent.yaml")
-			if _, err := resolveConfigReference(parentPath, refPath); !errors.Is(err, errConfigReferenceSymlink) {
+			parentPath := dir //filepath.Join(dir, "root_agent.yaml")
+			if _, err := resolveConfigReference(parentPath, refPath, false); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
 				t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a link inside the directory is refused for being a link",
-					parentPath, refPath, err, errConfigReferenceSymlink)
+					parentPath, refPath, err, utils.ErrSymlinkInRelativePath)
 			}
 		})
 	}
@@ -406,11 +409,11 @@ func TestResolveConfigReferenceCanonicalizesRegistryKey(t *testing.T) {
 		t.Skipf("symlinks are not supported in this environment: %v", err)
 	}
 
-	realKey, err := resolveConfigReference(filepath.Join(realDir, "root_agent.yaml"), "sub_agent.yaml")
+	realKey, err := resolveConfigReference(filepath.Join(realDir, "root_agent.yaml"), "sub_agent.yaml", false)
 	if err != nil {
 		t.Fatalf("resolveConfigReference through the real directory failed: %v", err)
 	}
-	aliasKey, err := resolveConfigReference(filepath.Join(aliasDir, "root_agent.yaml"), "sub_agent.yaml")
+	aliasKey, err := resolveConfigReference(filepath.Join(aliasDir, "root_agent.yaml"), "sub_agent.yaml", false)
 	if err != nil {
 		t.Fatalf("resolveConfigReference through the symlinked directory failed: %v", err)
 	}
@@ -448,7 +451,7 @@ func TestResolveConfigReferenceBelowNonDirectory(t *testing.T) {
 
 	// sub_agent.yaml is a regular file, so sub_agent.yaml/nested.yaml cannot exist.
 	refPath := filepath.Join("sub_agent.yaml", "nested.yaml")
-	if _, err := resolveConfigReference(parentPath, refPath); err != nil {
+	if _, err := resolveConfigReference(parentPath, refPath, false); err != nil {
 		t.Errorf("resolveConfigReference(%q, %q) = %v, want no error: the reference cannot exist, which is the caller's read to report",
 			parentPath, refPath, err)
 	}
@@ -462,9 +465,9 @@ func TestResolveConfigReferenceBelowNonDirectory(t *testing.T) {
 func TestResolveConfigReferenceEmptyRef(t *testing.T) {
 	_, parentPath := newAgentDir(t)
 
-	_, err := resolveConfigReference(parentPath, "")
-	if !errors.Is(err, errConfigReferenceNotLocal) {
-		t.Fatalf("resolveConfigReference(%q, \"\") = %v, want %v", parentPath, err, errConfigReferenceNotLocal)
+	_, err := resolveConfigReference(parentPath, "", false)
+	if !errors.Is(err, utils.ErrNotValidRelativePath) {
+		t.Fatalf("resolveConfigReference(%q, \"\") = %v, want %v", parentPath, err, utils.ErrNotValidRelativePath)
 	}
 	if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("resolveConfigReference(%q, \"\") = %q, want the message to name the reference as empty", parentPath, err)
@@ -554,7 +557,7 @@ func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveConfigReference(parentPath, tc.refPath)
+			got, err := resolveConfigReference(parentPath, tc.refPath, false)
 
 			if gotRejected := err != nil; gotRejected != tc.wantRejected {
 				t.Fatalf("resolveConfigReference(%q, %q) rejected = %v (%v), want rejected = %v",
@@ -563,9 +566,9 @@ func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
 			if err != nil {
 				// A rejection here is the lexical containment check refusing the
 				// reference, never a later failure to load what it names.
-				if !errors.Is(err, errConfigReferenceNotLocal) {
+				if !errors.Is(err, utils.ErrNotValidRelativePath) {
 					t.Errorf("resolveConfigReference(%q, %q) = %v, want %v",
-						parentPath, tc.refPath, err, errConfigReferenceNotLocal)
+						parentPath, tc.refPath, err, utils.ErrNotValidRelativePath)
 				}
 				return
 			}

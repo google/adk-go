@@ -27,6 +27,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -651,17 +652,17 @@ func TestWorkflowNodeReferenceRejectsEscapingPath(t *testing.T) {
 		{
 			name:    "absolute path",
 			ref:     filepath.Join(base, "outside.yaml"),
-			wantErr: errConfigReferenceNotLocal,
+			wantErr: utils.ErrNotValidRelativePath,
 		},
 		{
 			name:    "parent traversal",
 			ref:     filepath.Join("..", "..", "outside.yaml"),
-			wantErr: errConfigReferenceNotLocal,
+			wantErr: utils.ErrNotValidRelativePath,
 		},
 		{
 			name:    "symlink escaping the workflow directory",
 			ref:     "link.yaml",
-			wantErr: errConfigReferenceSymlink,
+			wantErr: utils.ErrSymlinkInRelativePath,
 		},
 	}
 
@@ -728,7 +729,7 @@ func TestWorkflowNodeReferenceCacheDoesNotBypassCheck(t *testing.T) {
 	escaping := filepath.Join("..", "agents", "root", "nodes", "join.yaml")
 	escapingPath := writeWorkflow(t, otherDir, "wf_cache_escape", escaping)
 
-	if _, err := FromConfig(context.Background(), escapingPath); !errors.Is(err, errConfigReferenceNotLocal) {
-		t.Errorf("FromConfig(_, %q) with cached node ref %q = %v, want %v", escapingPath, escaping, err, errConfigReferenceNotLocal)
+	if _, err := FromConfig(context.Background(), escapingPath); !errors.Is(err, utils.ErrNotValidRelativePath) {
+		t.Errorf("FromConfig(_, %q) with cached node ref %q = %v, want %v", escapingPath, escaping, err, utils.ErrNotValidRelativePath)
 	}
 }

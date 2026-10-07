@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/exampletool"
@@ -376,17 +377,25 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-// Reasons a config reference can be rejected. They are sentinels so that callers
-// and tests can identify the rejection without matching on the message text.
-var (
-	// errConfigReferenceNotLocal reports a reference that names a file outside
-	// the referencing config's directory by its spelling alone.
-	errConfigReferenceNotLocal = errors.New("config reference must be a relative path inside the agent directory")
-	// errConfigReferenceSymlink reports a reference that reaches its target
-	// through a symbolic link, or through any other reparse point, below that
-	// directory.
-	errConfigReferenceSymlink = errors.New("config reference traverses a link")
-)
+// // Reasons a config reference can be rejected. They are sentinels so that callers
+// // and tests can identify the rejection without matching on the message text.
+// var (
+// 	// errConfigReferenceNotLocal reports a reference that names a file outside
+// 	// the referencing config's directory by its spelling alone.
+// 	errConfigReferenceNotLocal = errors.New("config reference must be a relative path inside the agent directory")
+// 	// errConfigReferenceSymlink reports a reference that reaches its target
+// 	// through a symbolic link, or through any other reparse point, below that
+// 	// directory.
+// 	errConfigReferenceSymlink = errors.New("config reference traverses a link")
+// )
+
+func resolveConfigReference(parentPath, refPath string, acceptSymlinks bool) (string, error) {
+	abs, _, err := utils.SafeSubpath(parentPath, refPath, acceptSymlinks)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
 
 // resolveConfigReference turns a config-supplied reference into an absolute path
 // that is guaranteed to sit inside the referencing config's own directory.
@@ -415,19 +424,19 @@ var (
 // through here: the check is the trust boundary between the config being loaded
 // and the rest of the filesystem, and a second copy of it is a second place to
 // forget.
-func resolveConfigReference(parentPath, refPath string) (string, error) {
+func resolveConfigReference2(parentPath, refPath string) (string, error) {
 	// IsLocal rejects the empty string along with the escaping spellings, but an
 	// empty reference is almost always an unfilled template rather than an
 	// attempt to escape, and the generic message renders it as a dangling ": ".
 	if refPath == "" {
-		return "", fmt.Errorf("%w: reference is empty", errConfigReferenceNotLocal)
+		return "", fmt.Errorf("%w: reference is empty", utils.ErrNotValidRelativePath)
 	}
 	// IsLocal is purely lexical and rejects, in one call, everything that could
 	// name a file outside the directory the reference is evaluated in: absolute
 	// paths, any ".." that escapes, and on Windows drive-relative refs such as
 	// `C:node.yaml`, UNC paths and reserved names such as NUL.
 	if !filepath.IsLocal(refPath) {
-		return "", fmt.Errorf("%w: %s", errConfigReferenceNotLocal, refPath)
+		return "", fmt.Errorf("%w: %s", utils.ErrNotValidRelativePath, refPath)
 	}
 
 	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
@@ -516,7 +525,7 @@ func refuseSymlinkComponents(dir, refPath string) error {
 			return fmt.Errorf("failed to inspect config reference %q: %w", refPath, err)
 		}
 		if isLinkLike(fi.Mode()) {
-			return fmt.Errorf("%w: %s", errConfigReferenceSymlink, refPath)
+			return fmt.Errorf("%w: %s", utils.ErrSymlinkInRelativePath, refPath)
 		}
 	}
 	return nil
@@ -524,7 +533,7 @@ func refuseSymlinkComponents(dir, refPath string) error {
 
 // ResolveAgentReference builds an agent from a reference config.
 func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
-	absPath, err := resolveConfigReference(parentPath, refPath)
+	absPath, err := resolveConfigReference(parentPath, refPath, false)
 	if err != nil {
 		return nil, err
 	}
