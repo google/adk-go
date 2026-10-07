@@ -849,8 +849,8 @@ func TestScheduler_RetryNode(t *testing.T) {
 	}
 
 	for _, ev := range events[:2] {
-		if ev.ErrorCode != workflowNodeFailureCode || ev.Output != nil || ev.ErrorMessage != "" {
-			t.Fatal("retry failure record has an unexpected code, output or error text")
+		if ev.CustomMetadata[workflowNodeOutcomeKey] != workflowNodeFailureOutcome || ev.ErrorCode != "" || ev.Output != nil || ev.ErrorMessage != "" {
+			t.Fatal("retry failure record has an unexpected outcome, output or error text")
 		}
 	}
 	out := fmt.Sprint(events[2].Output)

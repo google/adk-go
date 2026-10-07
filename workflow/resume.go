@@ -94,6 +94,13 @@ func (w *Workflow) Resume(
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		s.state = state
+		defer func() {
+			s.cancelAll()
+			if len(s.runsByName) > 0 {
+				s.run(func(*session.Event, error) bool { return false })
+			}
+			s.wg.Wait()
+		}()
 
 		// Resume runs in two passes so that when one call
 		// satisfies several askers feeding a JoinNode, the
@@ -258,7 +265,6 @@ func (w *Workflow) Resume(
 		}
 
 		s.run(yield)
-		s.wg.Wait()
 	}
 }
 

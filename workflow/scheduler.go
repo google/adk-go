@@ -129,13 +129,12 @@ type pendingActivation struct {
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
-	routingEvent    *session.Event // at most one; multiple is an error
-	output          any            // single Event.Output; nil if hasOutput is false
-	hasOutput       bool           // distinguishes "no output yet" from "output was nil"
-	outputDelegated bool           // a descendant emitted an explicit OutputFor result
-	err             error          // set on duplicate output or duplicate routing event
-	branch          string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
-	nodePath        string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
+	routingEvent *session.Event // at most one; multiple is an error
+	output       any            // single Event.Output; nil if hasOutput is false
+	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
+	err          error          // set on duplicate output or duplicate routing event
+	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+	nodePath     string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
 
 	// interruptIDs are unresolved long-running tool call IDs raised by
 	// the node's events. A non-empty set at completion parks the node
@@ -670,14 +669,14 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *se
 	if ns == nil || nr == nil {
 		return nil
 	}
-	var code string
+	var outcome string
 	switch ns.Status {
 	case NodeFailed, NodePending:
-		code = workflowNodeFailureCode
+		outcome = workflowNodeFailureOutcome
 	case NodeCancelled:
-		code = workflowNodeCancelledCode
+		outcome = workflowNodeCancelledOutcome
 	case NodeCompleted:
-		if ns.Output != nil || nr.outputDelegated {
+		if ns.Output != nil {
 			return nil
 		}
 	default:
@@ -691,17 +690,30 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *se
 	}
 	ev.NodeInfo = &session.NodeInfo{Path: path}
 	ev.CustomMetadata = map[string]any{workflowBasePathPrefix + s.workflowName: s.parentCtx.Path()}
-	if code != "" {
-		ev.ErrorCode = code
+	if outcome != "" {
+		// A failed attempt can still recover through retries or a parent
+		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
+		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
 		var paths []any
+		seen := map[string]bool{}
+		addPath := func(path string) {
+			if path != "" && !seen[path] {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+		}
 		for failure != nil {
+			var allChildren *failedChildPathsError
+			if errors.As(failure, &allChildren) {
+				for _, path := range allChildren.paths {
+					addPath(path)
+				}
+			}
 			var childError *NodeRunError
 			if !errors.As(failure, &childError) {
 				break
 			}
-			if childError.ChildPath != "" {
-				paths = append(paths, childError.ChildPath)
-			}
+			addPath(childError.ChildPath)
 			failure = childError.Cause
 		}
 		if len(paths) > 0 {
@@ -822,11 +834,6 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// parent node (a RequestInput pause rides on LongRunningToolIDs).
 	nr.trackInterrupts(it.ev)
 	if isDescendant {
-		// An explicit delegation is also this activation's result;
-		// merely forwarding a dynamic child's event is not.
-		if _, ok := childEventOutput(it.ev); ok && slices.Contains(it.ev.NodeInfo.OutputFor, expectedPath) {
-			nr.outputDelegated = true
-		}
 		return
 	}
 	// Stamp the node name onto the event so history rehydration can
@@ -840,6 +847,21 @@ func (s *scheduler) handleEvent(it eventItem) {
 		}
 		it.ev.NodeInfo.Path = expectedPath
 		path = expectedPath
+	}
+	if value, delegated := completedDelegatedOutput(it.ev); delegated {
+		if value == nil {
+			return
+		}
+		// The dynamic body completed with a delegated (possibly cached)
+		// result. It is now safe to use it as this activation's output.
+		validated, err := validateAndStampOutput(s.nodesByName[it.nodeName], value, it.ev)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		it.ev.CustomMetadata[workflowDelegatedOutputKey] = validated
+		nr.setOutput(validated, it.nodeName)
+		return
 	}
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)

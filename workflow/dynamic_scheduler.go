@@ -53,7 +53,18 @@ type dynamicSubScheduler struct {
 	// outcome instead of running the child again.
 	inflightByPath map[string]*inflightRun
 	delegation     outputDelegation
+	failedPaths    map[string]struct{}
 }
+
+// A parent may return only one of several concurrent child errors. Keep
+// the other uncertain paths without changing the public error or its cause.
+type failedChildPathsError struct {
+	cause error
+	paths []string
+}
+
+func (e *failedChildPathsError) Error() string { return e.cause.Error() }
+func (e *failedChildPathsError) Unwrap() error { return e.cause }
 
 // runResult is one child run's outcome, shared by every caller that
 // overlapped it. Exactly one of out and err is meaningful.
@@ -170,6 +181,7 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		runCountByChild:    map[string]int{},
 		resultByPath:       map[string]any{},
 		inflightByPath:     map[string]*inflightRun{},
+		failedPaths:        map[string]struct{}{},
 	}
 	s.rehydrateCache()
 	return s
@@ -206,17 +218,20 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		}
 		// The parent records child failures even when cancellation stops
 		// a child from emitting its own marker through makeEmit.
+		knownPaths := false
 		if paths, ok := ev.CustomMetadata[workflowFailedChildPathsKey].([]any); ok {
 			for _, value := range paths {
-				if path, ok := value.(string); ok && strings.HasPrefix(path, prefix) {
-					delete(s.resultByPath, path)
+				if path, ok := value.(string); ok && path != "" {
+					knownPaths = true
+					s.invalidateCachePath(path)
 				}
 			}
-		} else if ev.NodeInfo.Path == s.parentPath && ev.ErrorCode == workflowNodeCancelledCode {
+		}
+		if _, hasOutput := childEventOutput(ev); !knownPaths && !hasOutput && workflowNodeOutcome(ev) != "" {
 			// Cancellation may stop the producer before it reports which
 			// child was in flight. With no completion evidence for that
 			// attempt, conservatively retry rather than replay partial data.
-			clear(s.resultByPath)
+			s.invalidateCachePath(ev.NodeInfo.Path)
 		}
 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
 			continue
@@ -227,8 +242,22 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 			delete(s.resultByPath, ev.NodeInfo.Path)
 		} else if out, ok := childEventOutput(ev); ok {
 			s.resultByPath[ev.NodeInfo.Path] = out
-		} else if ev.ErrorCode != "" {
+		} else if out, delegated := completedDelegatedOutput(ev); delegated {
+			if _, exists := s.resultByPath[ev.NodeInfo.Path]; out != nil || !exists {
+				s.resultByPath[ev.NodeInfo.Path] = out
+			}
+		} else if workflowNodeOutcome(ev) != "" {
 			delete(s.resultByPath, ev.NodeInfo.Path)
+		}
+	}
+}
+
+// A failure of this scheduler's producer invalidates every cached child;
+// a known descendant failure invalidates only that subtree. Called under mu.
+func (s *dynamicSubScheduler) invalidateCachePath(path string) {
+	for cachedPath := range s.resultByPath {
+		if cachedPath == path || strings.HasPrefix(cachedPath, path+"/") {
+			delete(s.resultByPath, cachedPath)
 		}
 	}
 }
@@ -329,13 +358,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				Cause: fmt.Errorf("%w: child did not complete", ErrNodeFailed),
 			}}
 		}
-		if res.err != nil && !errors.Is(res.err, ErrNodeInterrupted) && !errors.Is(res.err, ErrNodeWaitingForOutput) {
+		if res.err != nil && !errors.Is(res.err, ErrNodeInterrupted) {
 			// The parent's failure record cannot invalidate this child's
 			// path-keyed cache on a later re-entry. Record the child failure
 			// too, without including the child's error text.
 			ev := session.NewEvent(childCtx, childCtx.InvocationID())
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
-			ev.ErrorCode = workflowNodeFailureCode
+			ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
 			_ = s.emitUp(ev)
 		}
 		s.finishRun(childPath, res)
@@ -419,7 +448,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				}
 			}
 		}
-		if childOut, ok := childEventOutput(ev); ok {
+		childOut, hasChildOutput := childEventOutput(ev)
+		delegatedCompletion := false
+		if !hasChildOutput && ev.NodeInfo.Path == childPath {
+			childOut, delegatedCompletion = completedDelegatedOutput(ev)
+			hasChildOutput = delegatedCompletion && childOut != nil
+		}
+		if hasChildOutput {
 			validated, err := validateAndStampOutput(child, childOut, ev)
 			if err != nil {
 				return nil, &NodeRunError{
@@ -429,12 +464,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			}
 			out = validated
 			hasOutput = true
+			if delegatedCompletion {
+				ev.CustomMetadata[workflowDelegatedOutputKey] = validated
+			}
 			// Stamp OutputFor so resume can attribute the output: the
 			// emitter's own path plus, under delegation, this parent and
 			// its ancestors (the parent then suppresses its own terminal
 			// event). Mirrors adk-python _enrich_event. A nested child
 			// that already stamped its chain keeps it.
-			if ev.NodeInfo.OutputFor == nil {
+			if !delegatedCompletion && ev.NodeInfo.OutputFor == nil {
 				outputFor := []string{ev.NodeInfo.Path}
 				if opts.useAsOutput {
 					outputFor = append(outputFor, s.parentPath)
@@ -542,11 +580,30 @@ func (s *dynamicSubScheduler) finishRun(childPath string, res runResult) {
 	delete(s.inflightByPath, childPath)
 	if res.err == nil {
 		s.resultByPath[childPath] = res.out
+		delete(s.failedPaths, childPath)
+	} else if !errors.Is(res.err, ErrNodeInterrupted) {
+		s.failedPaths[childPath] = struct{}{}
 	}
 	s.mu.Unlock()
 	if leader != nil {
 		leader.publish(res)
 	}
+}
+
+func (s *dynamicSubScheduler) withChildFailures(err error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	paths := make([]string, 0, len(s.failedPaths)+len(s.inflightByPath))
+	for path := range s.failedPaths {
+		paths = append(paths, path)
+	}
+	for path := range s.inflightByPath {
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return err
+	}
+	return &failedChildPathsError{cause: err, paths: paths}
 }
 
 // claimDelegation reserves the at-most-one output delegation when

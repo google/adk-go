@@ -340,8 +340,16 @@ func TestScheduler_NoOutputActivationClearsPreviousResult(t *testing.T) {
 }
 
 func TestWorkflow_CancelledDynamicChildDoesNotReplayOutput(t *testing.T) {
-	for _, nested := range []bool{false, true} {
-		t.Run(map[bool]string{false: "child", true: "nested_child"}[nested], func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nested       bool
+		contextError bool
+	}{
+		{name: "child"},
+		{name: "nested_child", nested: true},
+		{name: "nested_context_error", nested: true, contextError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			paused, childEmitted := make(chan struct{}), make(chan struct{})
 			var attempts, failures, stableAttempts atomic.Int32
 			stable := NewFunctionNode("stable", func(agent.Context, any) (string, error) {
@@ -361,10 +369,14 @@ func TestWorkflow_CancelledDynamicChildDoesNotReplayOutput(t *testing.T) {
 				<-ctx.Done()
 				return nil, nil
 			}, NodeConfig{})
-			if nested {
+			if tc.nested {
 				leaf := q
 				q = NewDynamicNode("mid", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
-					return RunNode[any](ctx, leaf, in)
+					out, err := RunNode[any](ctx, leaf, in)
+					if tc.contextError && ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					return out, err
 				}, NodeConfig{})
 			}
 			c := NewDynamicNode("c", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {

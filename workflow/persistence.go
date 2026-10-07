@@ -35,9 +35,44 @@ const workflowBasePathPrefix = "adk.workflow.base_path."
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
 
 const (
+	workflowNodeOutcomeKey     = "adk.workflow.node_outcome"
+	workflowDelegatedOutputKey = "adk.workflow.delegated_output"
+)
+
+const (
+	workflowNodeFailureOutcome   = "failed"
+	workflowNodeCancelledOutcome = "cancelled"
+)
+
+// Read markers recorded by the earlier PR revision as well as real
+// error events. New attempt records use metadata, not terminal errors.
+const (
 	workflowNodeFailureCode   = "WorkflowNodeFailed"
 	workflowNodeCancelledCode = "WorkflowNodeCancelled"
 )
+
+func workflowNodeOutcome(ev *session.Event) string {
+	if outcome, ok := ev.CustomMetadata[workflowNodeOutcomeKey].(string); ok {
+		if outcome == workflowNodeFailureOutcome || outcome == workflowNodeCancelledOutcome {
+			return outcome
+		}
+	}
+	if ev.ErrorCode == workflowNodeCancelledCode {
+		return workflowNodeCancelledOutcome
+	}
+	if ev.ErrorCode != "" {
+		return workflowNodeFailureOutcome
+	}
+	return ""
+}
+
+func completedDelegatedOutput(ev *session.Event) (any, bool) {
+	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
+		return nil, false
+	}
+	value, ok := ev.CustomMetadata[workflowDelegatedOutputKey]
+	return value, ok
+}
 
 // nodeScanState accumulates, per node, what the session history says
 // about a paused run. Mirrors adk-python's _ChildScanState.
@@ -191,6 +226,11 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
+				// A repeated answer must not reopen work that completed after
+				// its first answer. A first answer invalidates pre-resume output.
+				if sf.resolvedCount[fr.ID] == 0 || sf.failed {
+					sf.finished = false
+				}
 				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
@@ -208,20 +248,20 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		for _, name := range eventOutputOwners(ev, nodesByName) {
 			sf := scanFor(name)
 			sf.branch = ev.Branch
-			sf.finished, sf.failed = true, false
 		}
 		if own := ownEventNodeName(ev, nodesByName); own != "" {
 			sf := scanFor(own)
-			if ev.CustomMetadata[workflowNodeCompletedKey] == true {
+			_, hasOutput := childEventOutput(ev)
+			if hasOutput || ev.CustomMetadata[workflowNodeCompletedKey] == true {
 				sf.branch = ev.Branch
 				sf.finished, sf.failed = true, false
-			} else if _, hasOutput := childEventOutput(ev); !hasOutput && ev.ErrorCode != "" {
+			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
 				sf.branch = ev.Branch
 				sf.finished = false
 				// A sibling failure may cancel an asker just after its
 				// pause was persisted. Its interrupt still owns the resume;
 				// cancellation must not replace that pause with a failure.
-				sf.failed = ev.ErrorCode != workflowNodeCancelledCode || len(unresolvedInterrupts(sf)) == 0
+				sf.failed = outcome != workflowNodeCancelledOutcome || len(unresolvedInterrupts(sf)) == 0
 			}
 		}
 		for _, id := range ev.LongRunningToolIDs {
@@ -253,6 +293,8 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invocationID, workflowName string) (outputs map[string]any, completed map[string]bool) {
 	outputs = map[string]any{}
 	completed = map[string]bool{}
+	interruptOwner := map[string]string{}
+	resolved := map[string]bool{}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil {
@@ -265,15 +307,38 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 			continue
 		}
 		ev = graphHistoryEvent(ev, workflowName)
+		if ev.Author == "user" && ev.Content != nil {
+			for _, part := range ev.Content.Parts {
+				if fr := frPart(part); fr != nil {
+					if owner, ok := interruptOwner[fr.ID]; ok && !resolved[fr.ID] {
+						delete(outputs, owner)
+						delete(completed, owner)
+						resolved[fr.ID] = true
+					}
+				}
+			}
+			continue
+		}
 		name := eventNodeName(ev, nodesByName)
 		if _, ok := nodesByName[name]; !ok {
 			continue
 		}
 		completed[name] = true
+		for _, id := range ev.LongRunningToolIDs {
+			if id != "" {
+				interruptOwner[id] = name
+			}
+		}
 		if own := ownEventNodeName(ev, nodesByName); own != "" {
 			if ev.CustomMetadata[workflowNodeCompletedKey] == true {
-				outputs[own] = nil
-			} else if _, hasOutput := childEventOutput(ev); !hasOutput && ev.ErrorCode != "" {
+				if value, delegated := completedDelegatedOutput(ev); delegated {
+					if _, exists := outputs[own]; value != nil || !exists {
+						outputs[own] = value
+					}
+				} else {
+					outputs[own] = nil
+				}
+			} else if _, hasOutput := childEventOutput(ev); !hasOutput && workflowNodeOutcome(ev) != "" {
 				delete(outputs, own)
 				delete(completed, own)
 			}
