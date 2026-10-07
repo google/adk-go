@@ -86,7 +86,6 @@ func SafeSubpath(base, rel string) (string, error) {
 		if _, ok := windowsForbiddenFileNames[fn]; ok {
 			return "", fmt.Errorf("rel path has a windows-specific forbidden file: %v", fn)
 		}
-
 	}
 
 	if strings.Contains(rel, "\x00") {
@@ -96,16 +95,21 @@ func SafeSubpath(base, rel string) (string, error) {
 	if !filepath.IsAbs(base) {
 		return "", fmt.Errorf("base file is not absolute")
 	}
-	absBase := filepath.Clean(base) + string(filepath.Separator)
+	absBase := filepath.Clean(base)
 	p := filepath.Join(absBase, rel)
 	r, err := filepath.Rel(absBase, p)
 	if err != nil {
 		return "", err
 	}
 	res := filepath.Join(absBase, r)
-	if !strings.HasPrefix(res, absBase) {
+	// now compare res and absBase
+	if absBase == res { // r effectively is .
+		return "", fmt.Errorf("rel is effectively empty")
+	}
+	if !strings.HasPrefix(res, absBase+string(filepath.Separator)) {
 		return "", fmt.Errorf("not a subpath")
 	}
+
 	return res, nil
 }
 

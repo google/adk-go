@@ -112,10 +112,8 @@ var commonNormalizeCases = []normalizeCase{
 	// checks, rather than rejecting any path containing "..".
 	{name: "dotdot_nets_back_into_base", rel: "../data/inside.txt", wantSuffix: "inside.txt"},
 
-	// Policy A4: a path that resolves exactly to base is allowed. Flip these to
-	// wantErr:true if your contract forbids returning the root itself.
-	{name: "empty_resolves_to_base", rel: "", wantSuffix: ""},
-	{name: "dot_resolves_to_base", rel: ".", wantSuffix: ""},
+	{name: "empty_resolves_to_base", rel: "", wantErr: true},
+	{name: "dot_resolves_to_base", rel: ".", wantErr: true},
 
 	// ---- Rejected: escapes base ----
 	{name: "parent_escape", rel: "../x", wantErr: true},
