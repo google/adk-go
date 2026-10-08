@@ -17,8 +17,6 @@ package llmagent_test
 import (
 	"context"
 	"iter"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +26,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/compactioninternal"
-	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -49,6 +47,12 @@ type recordingModel struct {
 }
 
 func (m *recordingModel) Name() string { return m.inner.Name() }
+
+// GetGoogleLLMVariant forwards to the wrapped model, so the summarizer's
+// telemetry reports the real backend rather than an unspecified one.
+func (m *recordingModel) GetGoogleLLMVariant() genai.Backend {
+	return googlellm.GetGoogleLLMVariant(m.inner)
+}
 
 func (m *recordingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	var sb strings.Builder
@@ -74,24 +78,30 @@ func (m *recordingModel) seen() []string {
 	return append([]string(nil), m.prompts...)
 }
 
-// TestTailRetentionE2E drives the rolling-summary path against a real model.
+// TestTailRetentionE2E drives the rolling-summary path through the real
+// summarizer and a real model.
 //
-// TestCompactionE2E covers the sliding window, which summarizes each group of
-// turns once and never revisits it. Tail retention is the other trigger and the
-// one with a failure mode of its own: it seeds every new summary with the
-// previous one, so a value has to survive being recompressed on every pass.
-// Nothing exercised that end to end, which is why the default summarizer prompt
-// could lose the early conversation without a single test noticing.
+// The selection logic and the runner already have offline coverage: the seed
+// in internal/compactioninternal (TestSelectTailRetentionWindowSeedsPreviousSummary)
+// and supersession and boundedness in runner (TestTailRetentionKeepsThePromptBounded).
+// Those use fake summarizers. What only this test does is run
+// compaction.NewLLMSummarizer, with its default prompt template and transcript
+// rendering, around a rolling seed, so the assertions are aimed at what that
+// summarizer was actually sent:
 //
-// What it asserts, in order of what would go unnoticed without it:
-//
-//   - A later summarization was handed an earlier summary. That is the seed
-//     path, and it is the whole difference from the sliding window.
+//   - Every summarization after the first was handed the complete previous
+//     summary, as the transcript renders it. That is the seed path, and it is
+//     the whole difference from the sliding window TestCompactionE2E covers.
 //   - Successive records supersede rather than accumulate: each covers a range
 //     starting where the first one did, so exactly one summary materializes
 //     into a prompt no matter how many passes have run.
-//   - The prompt stays bounded while the conversation grows, which is the
-//     property tail retention exists to provide.
+//   - No prompt the agent sent outgrew the summary, the retained tail and the
+//     new message.
+//
+// Replay keys on exact request bytes, so most defects in these change a request
+// and arrive as a replay miss. The checks on captured prompts run before that
+// miss is reported, as in TestCompactionE2E, so the failure names the property
+// that broke rather than only saying the bytes moved.
 //
 // It deliberately does not assert that any particular fact survived. Recall is
 // a property of the model and the prompt, it varies run to run, and pinning it
@@ -116,19 +126,7 @@ func (m *recordingModel) seen() []string {
 //go:generate go test -httprecord=^testdata[/\\]TestTailRetentionE2E\.httprr$
 
 func TestTailRetentionE2E(t *testing.T) {
-	trace := filepath.Join("testdata", t.Name()+".httprr")
-	if recording, _ := httprr.Recording(trace); !recording {
-		const reRecord = "Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ " +
-			"-run '^TestTailRetentionE2E$' -httprecord='TestTailRetentionE2E\\.httprr$' -count=1 -v"
-		info, err := os.Stat(trace)
-		if err != nil {
-			t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
-		}
-		if info.Size() < minCassetteBytes {
-			t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
-				"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
-		}
-	}
+	requireCassette(t)
 
 	var (
 		mu      sync.Mutex
@@ -176,11 +174,12 @@ func TestTailRetentionE2E(t *testing.T) {
 	// At 700 it fired once in one recording and twice in another, depending on
 	// how verbose the model happened to be, which would make a re-record a coin
 	// flip on whether the test exercises anything.
-	r := testutil.NewTestAgentRunnerWithCompaction(t, a, &compaction.Config{
+	cfg := &compaction.Config{
 		TokenThreshold:     400,
 		EventRetentionSize: 2,
 		Summarizer:         summarizer,
-	})
+	}
+	r := testutil.NewTestAgentRunnerWithCompaction(t, a, cfg)
 
 	const sessionID = "tail_retention_session"
 	turns := []string{
@@ -201,10 +200,27 @@ func TestTailRetentionE2E(t *testing.T) {
 			break
 		}
 	}
-	if runErr != nil {
-		t.Fatalf("turn %d (%q) failed: %v", failedTurn+1, turns[failedTurn], runErr)
+
+	// Boundedness. Once compaction runs, a prompt holds one summary, the
+	// retained tail and the new message, however long the session gets.
+	// Without compaction the prompt for turn N holds 2N-1 contents, so this
+	// fails from the third turn on.
+	mu.Lock()
+	captured := append([][]*genai.Content(nil), prompts...)
+	mu.Unlock()
+	maxContents := cfg.EventRetentionSize + 2
+	for i, p := range captured {
+		if len(p) > maxContents {
+			t.Errorf("prompt %d carries %d contents, want at most %d (summary, retained tail of %d, new message): history is not being replaced by a summary",
+				i+1, len(p), maxContents, cfg.EventRetentionSize)
+		}
 	}
 
+	// The seed. The summarizer is called once per stored record, so call k
+	// produced summaries[k] and must have been handed summaries[k-1]. It is
+	// matched whole, with newlines escaped as the transcript renders them so a
+	// tool response cannot forge a turn. A summary longer than the
+	// transcript's per-part cap would arrive truncated and fail here.
 	events := sessionEventsFor(t, r, sessionID)
 	var summaries []*session.Event
 	for _, ev := range events {
@@ -212,38 +228,26 @@ func TestTailRetentionE2E(t *testing.T) {
 			summaries = append(summaries, ev)
 		}
 	}
+	calls := summarizerModel.seen()
+	for k := 1; k < len(calls) && k <= len(summaries); k++ {
+		prev := strings.TrimSpace(textOf(summaries[k-1].Actions.Compaction.CompactedContent))
+		if prev == "" {
+			t.Errorf("summary %d is empty", k)
+			continue
+		}
+		if rendered := strings.ReplaceAll(prev, "\n", `\n`); !strings.Contains(calls[k], rendered) {
+			t.Errorf("summarization %d was not handed summary %d (%d chars as rendered), so it was not built on its predecessor", k+1, k, len(rendered))
+		}
+	}
+
+	if runErr != nil {
+		t.Fatalf("turn %d (%q) failed: %v", failedTurn+1, turns[failedTurn], runErr)
+	}
 	if len(summaries) < 2 {
 		t.Fatalf("got %d compaction records over %d turns, need at least 2 for one summary to be built on another; this test exercised nothing", len(summaries), len(turns))
 	}
-
-	// The seed. A later summarization must have been handed the text of an
-	// earlier summary, or the rolling path never ran and this is a sliding
-	// window with extra steps.
-	first := strings.TrimSpace(textOf(summaries[0].Actions.Compaction.CompactedContent))
-	if first == "" {
-		t.Fatal("the first stored summary is empty")
-	}
-	// Matched on the longest single line rather than the whole summary. The
-	// transcript escapes newlines so a tool response cannot forge a turn, so a
-	// multi-line summary never appears in a prompt in the form it was stored.
-	var needle string
-	for _, line := range strings.Split(first, "\n") {
-		if line = strings.TrimSpace(line); len(line) > len(needle) {
-			needle = line
-		}
-	}
-	if len(needle) < 40 {
-		t.Fatalf("the first summary has no line long enough to identify it, so this assertion cannot distinguish anything.\nsummary:\n%s", first)
-	}
-	var reSummarized bool
-	for _, p := range summarizerModel.seen() {
-		if strings.Contains(p, needle) {
-			reSummarized = true
-			break
-		}
-	}
-	if !reSummarized {
-		t.Errorf("no summarization prompt contained a line from the first summary, so no summary was built on a previous one.\nlooked for:\n%s", needle)
+	if len(calls) != len(summaries) {
+		t.Errorf("summarizer called %d times for %d stored records, so calls cannot be paired with the records they produced", len(calls), len(summaries))
 	}
 
 	// Supersession. Every record rolls forward from where the first one began,
@@ -257,19 +261,5 @@ func TestTailRetentionE2E(t *testing.T) {
 		if prev := summaries[i].Actions.Compaction; !c.EndTimestamp.After(prev.EndTimestamp) {
 			t.Errorf("summary %d ends at %v, not after its predecessor's %v: the window did not advance", i+1, c.EndTimestamp, prev.EndTimestamp)
 		}
-	}
-
-	// Boundedness, the property tail retention is chosen for. The last prompt
-	// must not be the whole conversation: with a retained tail of 2 it carries
-	// one summary plus a few recent turns however long the session runs.
-	mu.Lock()
-	captured := append([][]*genai.Content(nil), prompts...)
-	mu.Unlock()
-	if len(captured) < len(turns) {
-		t.Fatalf("captured %d prompts for %d turns", len(captured), len(turns))
-	}
-	last := captured[len(captured)-1]
-	if len(last) >= len(turns)*2 {
-		t.Errorf("the final prompt carries %d contents for %d turns, so history is not being replaced by a summary", len(last), len(turns))
 	}
 }
