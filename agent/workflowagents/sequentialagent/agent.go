@@ -85,8 +85,9 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 	return func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range ctx.Agent().SubAgents() {
 			for event, err := range subAgent.Run(ctx) {
-				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
-				if !yield(event, err) {
+				// A failed sub-agent ends the sequence, as in adk-python: later
+				// sub-agents would run without the output they depend on.
+				if !yield(event, err) || err != nil {
 					return
 				}
 			}

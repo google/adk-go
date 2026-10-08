@@ -376,3 +376,68 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 		}
 	}
 }
+
+// failingLLM fails every call, as a model does on a quota or auth error.
+type failingLLM struct {
+	calls int
+}
+
+func (f *failingLLM) Name() string {
+	return "failing-llm"
+}
+
+func (f *failingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		f.calls++
+		yield(nil, fmt.Errorf("model unavailable"))
+	}
+}
+
+func TestLoopAgentStopsOnSubAgentError(t *testing.T) {
+	llm := &failingLLM{}
+	worker, err := llmagent.New(llmagent.Config{Name: "worker", Model: llm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A sub-agent after the failing one tells "stop now" apart from "finish
+	// this pass over the sub-agents, then stop".
+	nextLLM := &FakeLLM{id: 1}
+	next, err := llmagent.New(llmagent.Config{Name: "next", Model: nextLLM})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No MaxIterations: the loop is meant to end when a sub-agent escalates.
+	loopAgent, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{Name: "loop", SubAgents: []agent.Agent{worker, next}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: loopAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Keep reading after an error, as the run_sse handler and the console
+	// launcher do, and stop the test well before an unbounded loop would.
+	const maxErrors = 10
+	errCount := 0
+	for _, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			errCount++
+			if errCount == maxErrors {
+				break
+			}
+		}
+	}
+
+	if errCount != 1 {
+		t.Errorf("got %d errors, want 1: the loop should end on the first sub-agent error", errCount)
+	}
+	if llm.calls != 1 {
+		t.Errorf("model called %d times, want 1", llm.calls)
+	}
+	if nextLLM.callCounter != 0 {
+		t.Errorf("next agent's model called %d times after worker failed, want 0", nextLLM.callCounter)
+	}
+}
