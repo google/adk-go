@@ -130,6 +130,28 @@ func TestContentsRequestProcessor_Compaction(t *testing.T) {
 			},
 		},
 		{
+			// The summary covers only q1, so the call stays raw. Unanswered
+			// and not long-running, it is dropped at assembly.
+			name: "an unanswered call left outside the summary is dropped",
+			events: []*session.Event{
+				compactionTextEvent("user", 1, "q1"),
+				{
+					Author:    agentName,
+					Timestamp: compactionAt(2),
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "unanswered", Name: "slow_tool"}}},
+					}},
+				},
+				compactionTextEvent("user", 3, "q2"),
+				compactionSummaryEvent(4, 1, 1, "Earlier: the user asked one question."),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Earlier: the user asked one question.", "model"),
+				genai.NewContentFromText("q2", "user"),
+			},
+		},
+		{
 			name: "a subsumed summary is dropped, only the wider one is sent",
 			events: []*session.Event{
 				compactionTextEvent("user", 1, "q1"),

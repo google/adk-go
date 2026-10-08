@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -353,8 +354,12 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = eventActionsFrom(actions)
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		// Deliberately not ending the invocation here, which matches the Python
+		// ADK. Ended reports whether the invocation should stop early, and nothing
+		// reads it after this point: running the after-agent callbacks is the last
+		// step of the agent's Run loop. The flag is also local to this agent's
+		// context and never propagates to a parent, so setting it here would imply
+		// an effect it does not have.
 		return event, nil
 	}
 
@@ -371,6 +376,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 type invocationContext struct {
 	context.Context
+	adkcontext.Marker
 
 	agent     Agent
 	artifacts Artifacts
@@ -385,7 +391,7 @@ type invocationContext struct {
 	endInvocation  bool
 }
 
-// Apply implements [InvocationContext].
+// WithICDelta implements [InvocationContext].
 func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c
@@ -423,6 +429,26 @@ func (c *invocationContext) Memory() Memory {
 
 func (c *invocationContext) Session() session.Session {
 	return c.session
+}
+
+// Value implements context.Context, answering the ADK identity key like every
+// other invocation context so a promoted copy and this one cannot disagree. It
+// owns its session, so no session means no identity — never the enclosing
+// invocation's, whose user made no such call.
+func (c *invocationContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	if key == adkcontext.IdentityKey {
+		if id, ok := identityOf(func() session.Session { return c.session }); ok {
+			return id
+		}
+		return nil
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
 }
 
 func (c *invocationContext) InvocationID() string {

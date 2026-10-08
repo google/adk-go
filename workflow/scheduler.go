@@ -709,7 +709,7 @@ func (s *scheduler) terminalAncestors(nodeName string) []string {
 //
 // RequestedInput is the exception: the child's pause unwinds the
 // orchestrator (dynamic_scheduler.go runNode), and Workflow.Resume
-// matches InterruptID against the parent's NodeState.PendingRequest,
+// matches InterruptID against the parent's NodeState.Interrupts,
 // so the parent must transition to NodeWaiting on a descendant pause.
 func (s *scheduler) handleEvent(it eventItem) {
 	nr := s.runsByName[it.nodeName]
@@ -789,22 +789,23 @@ func (s *scheduler) handleEvent(it eventItem) {
 }
 
 // handleCompletion finalises a node's run: transitions its lifecycle
-// status, removes the live task, and (if scheduleSuccessors is true)
-// schedules its successors. When the consumer is draining (caller
-// stopped or a node failed), pass scheduleSuccessors=false so the
-// workflow does not keep dispatching new nodes after cancellation.
+// status, removes the live task, and (if scheduleNewWork is true)
+// schedules retries or successors. When the consumer is draining (caller
+// stopped or a node failed), pass scheduleNewWork=false so the workflow
+// does not keep dispatching new nodes after cancellation.
 //
 // The returned error is the node's own error (NodeFailed); nil on
 // clean success or sibling cancellation.
 //
 // # Human-input waiting branch
 //
-// When an activation completes cleanly and recorded a non-nil
-// inputRequest (via setInputRequest from handleEvent), the node
-// transitions to NodeWaiting instead of NodeCompleted, the request
-// is persisted on NodeState.PendingRequest, and successors are not
-// scheduled. The scheduler's main loop terminates naturally when
-// every live node has either completed or moved into NodeWaiting,
+// When an activation completes cleanly having raised at least one
+// long-running interrupt (the nodeRun collects these from
+// Event.LongRunningToolIDs), the node transitions to NodeWaiting
+// instead of NodeCompleted, the interrupt IDs are recorded on
+// NodeState.Interrupts, and successors are not scheduled. The
+// scheduler's main loop terminates naturally when every live node
+// has either completed or moved into NodeWaiting,
 // at which point Workflow.Run's iterator exhausts and the caller
 // observes the pause by inspecting RunState.
 //
@@ -813,7 +814,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 // context cancel, multiple-output, multiple-routing-event,
 // multiple-input-request) does not silently park in NodeWaiting:
 // failures take precedence and surface as NodeFailed.
-func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
+func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) error {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
 	// For retryable nodes still delete them from run variables. If the node is retried,
@@ -855,7 +856,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 	if it.err != nil {
 		currentNode := s.nodesByName[it.nodeName]
-		if currentNode != nil {
+		if scheduleNewWork && currentNode != nil {
 			cfg := currentNode.Config()
 			if cfg.RetryConfig != nil {
 				ns.Attempt = ns.Attempt + 1
@@ -881,7 +882,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 
 	// Happy path: decide between NodeWaiting (an open interrupt) or
 	// NodeCompleted. The waiting branch fires regardless of the
-	// scheduleSuccessors flag — an interrupt that survived the run
+	// scheduleNewWork flag — an interrupt that survived the run
 	// must be observable in RunState even when the consumer is
 	// draining.
 	//
@@ -908,7 +909,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	// loop-back routing) starts a fresh lifecycle.
 	ns.ResumedInputs = nil
 
-	if !scheduleSuccessors {
+	if !scheduleNewWork {
 		return nil
 	}
 

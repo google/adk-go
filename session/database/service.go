@@ -14,6 +14,12 @@
 
 // Package database provides a session.Service backed by a relational
 // database (for example PostgreSQL, Spanner, or SQLite) using GORM.
+//
+// The service never creates or alters its tables. Call [AutoMigrate] after
+// constructing it, on every startup: a release of this package may add
+// columns, and writes to that table fail until they exist. Applications that
+// manage the schema themselves instead of calling AutoMigrate must add those
+// columns before deploying the release that introduces them.
 package database
 
 import (
@@ -42,7 +48,7 @@ type databaseService struct {
 // accepts optional [gorm.Option] values for further GORM configuration.
 //
 // It returns the new [session.Service] or an error if the database connection
-// [gorm.Open] fails.
+// [gorm.Open] fails. The service does not create its tables. See [AutoMigrate].
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
@@ -51,8 +57,25 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	return &databaseService{db: db}, nil
 }
 
+// NewSessionServiceFromDB creates a new [session.Service] implementation using
+// an existing [*gorm.DB] connection. This is useful when the application
+// already manages a database connection and wants to share it across multiple
+// services.
+//
+// It returns an error if db is nil. The service does not create its tables.
+// See [AutoMigrate].
+func NewSessionServiceFromDB(db *gorm.DB) (session.Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+	return &databaseService{db: db}, nil
+}
+
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
+// It creates missing tables and columns, alters existing columns whose type,
+// size or nullability differs from the models, and never drops a column. It
+// can be called repeatedly and is meant to run on every startup.
 //
 // NOTE: This function relies on a type assertion to the concrete *databaseService
 // implementation. It will return an error if the provided session.Service is
@@ -161,7 +184,9 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		}).
 		First(&foundSession).Error
 	if err != nil {
-		// For any error including ErrRecordNotFound, return it as a system error.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: %q: %w", session.ErrNotFound, sessionID, err)
+		}
 		return nil, fmt.Errorf("database error while fetching session: %w", err)
 	}
 
@@ -382,16 +407,16 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 
 // applyEvent fetches the session, validates it, applies state changes from an
 // event, and saves the event atomically.
-func (s *databaseService) applyEvent(ctx context.Context, session *localSession, event *session.Event) error {
+func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Fetch the session object from storage.
 		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: session.AppName(), UserID: session.UserID(), ID: session.ID()}).
+		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
 			First(&storageSess).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("session not found, cannot apply event")
+				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
 			}
 			return fmt.Errorf("failed to get session: %w", err)
 		}
@@ -399,7 +424,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := session.updatedAt.UnixMicro()
+		sessionUpdateTime := sess.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
@@ -409,11 +434,11 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Fetch App and User states.
-		storageApp, err := fetchStorageAppState(tx, session.AppName())
+		storageApp, err := fetchStorageAppState(tx, sess.AppName())
 		if err != nil {
 			return err
 		}
-		storageUser, err := fetchStorageUserState(tx, session.AppName(), session.UserID())
+		storageUser, err := fetchStorageUserState(tx, sess.AppName(), sess.UserID())
 		if err != nil {
 			return err
 		}
@@ -444,7 +469,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Create the new event record in the database.
-		storageEv, err := createStorageEvent(session, event)
+		storageEv, err := createStorageEvent(sess, event)
 		if err != nil {
 			return fmt.Errorf("failed to map event to storage model: %w", err)
 		}
@@ -458,7 +483,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
-		session.updatedAt = storageSess.UpdateTime
+		sess.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})

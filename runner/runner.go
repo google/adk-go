@@ -347,7 +347,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	}
 	discardRaced := func() {
 		finish(nil, "another compaction covering the same events landed while summarizing")
-		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
+		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 	}
 
 	lost, err := raced()
@@ -391,7 +391,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 			// prompt.
 			if !compactioninternal.SanitizeSummary(modified) {
 				finish(nil, "a plugin left the summary with nothing usable in it")
-				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it")
+				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it") //nolint:forbidigo // pre-slog call site
 				return nil
 			}
 			summary = modified
@@ -434,12 +434,12 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	repairCtx, cancelRepair := compactioninternal.RepairContext(ctx)
 	defer cancelRepair()
 	if latest, err := r.reloadSession(repairCtx, storedSession); err != nil {
-		log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err)
+		log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err) //nolint:forbidigo // pre-slog call site
 	} else if repair := compactioninternal.RepairAfterAppend(summary, known, latest); repair != nil {
 		if err := r.sessionService.AppendEvent(repairCtx, current, repair); err != nil {
-			log.Printf("adk: could not store a corrected compaction record: %v", err)
+			log.Printf("adk: could not store a corrected compaction record: %v", err) //nolint:forbidigo // pre-slog call site
 		} else {
-			log.Printf("adk: corrected a compaction record that would have covered %d event(s) it did not summarize",
+			log.Printf("adk: corrected a compaction record that would have covered %d event(s) it did not summarize", //nolint:forbidigo // pre-slog call site
 				len(repair.Actions.Compaction.ExcludedEvents)-len(summary.Actions.Compaction.ExcludedEvents))
 		}
 	}
@@ -576,15 +576,27 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			llmInternalState := llminternal.Reveal(llmInternalAgent)
 
-			if llmInternalState.Mode == "" {
-				// LlmAgent as root agent must have chat mode.
-				llmInternalState.Mode = llminternal.ModeChat
-			}
-
-			if llmInternalState.Mode != llminternal.ModeChat {
-				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+			// LlmAgent as root agent must have chat mode.
+			rootMode := llminternal.ResolveMode(llmInternalState.Mode, llminternal.ModeChat)
+			if rootMode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), rootMode))
 				return
 			}
+			// Record the root's placement, as every other placement does.
+			// This changes no behavior today: the check above has already
+			// rejected anything but chat, and chat is also what an unbound
+			// agent falls back to, so no reader can tell a chat binding from
+			// an absent one. It is here so the runner is not the one
+			// placement that resolves a mode and then keeps it to itself,
+			// which is how a later reader would come to be right about graph
+			// nodes and wrong about roots.
+			//
+			// Kept in a local rather than assigned back to ctx, this closure's
+			// captured parameter, so ranging the returned iterator twice cannot
+			// accumulate wrappers. The non-LlmAgent path below does assign back,
+			// but this branch returns before reaching it, so on this path the
+			// iterator really is clean for a re-range.
+			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
@@ -614,7 +626,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
+			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, options, yield)
 			return
 		}
 
@@ -647,7 +659,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
-				log.Printf("adk: %v", err)
+				log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 			}
 		}()
 
@@ -719,7 +731,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {
@@ -937,7 +952,17 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if event == nil {
-				continue
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				if len(bufferedEvents) > 0 {
+					ids := make([]string, 0, len(bufferedEvents))
+					for _, bufferedEvent := range bufferedEvents {
+						ids = append(ids, bufferedEvent.ID)
+					}
+					err = fmt.Errorf("%w; discarded buffered event IDs: %q", err, ids)
+				}
+				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
+				yield(nil, err)
+				return
 			}
 
 			if !event.LLMResponse.Partial {
@@ -1024,6 +1049,25 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if !yield(event, nil) {
+				return
+			}
+		}
+
+		// innerIter has returned; every downstream stop above returns from wrappedIter.
+		// Live agents reach here when their session closes, including on cancellation.
+		// Python persists live events as they arrive; Go buffers them during transcription.
+		// Detach cancellation so session teardown can still persist that buffer.
+		// Match the mid-stream flush's persistence policy for buffered tool events,
+		// including those carrying inline data.
+		flushCtx := context.WithoutCancel(iCtx)
+		for _, bufferedEvent := range bufferedEvents {
+			if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
+				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(bufferedEvent, nil) {
 				return
 			}
 		}
@@ -1136,7 +1180,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		if subAgent != nil {
 			return subAgent, nil
 		}
-		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
+		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
 	}
 
 	events := session.Events()
@@ -1150,7 +1194,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
-			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
 			continue
 		}
 

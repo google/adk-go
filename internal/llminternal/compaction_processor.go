@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
@@ -112,7 +113,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		}
 		if compactioninternal.RangeRacedSince(latest, before, summary) {
 			finish(nil, "another compaction covering the same events landed while summarizing")
-			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing")
+			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -131,7 +132,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// exported surface at compaction.Config.TokenThreshold.
 		if !compactioninternal.SanitizeSummary(summary) {
 			finish(nil, "the summary held nothing usable")
-			log.Printf("adk: discarding a tail-retention summary because it held no usable content")
+			log.Printf("adk: discarding a tail-retention summary because it held no usable content") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -163,12 +164,12 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		repairCtx, cancelRepair := compactioninternal.RepairContext(ctx)
 		defer cancelRepair()
 		if latest, err := compactioninternal.ReloadSession(repairCtx, rt.SessionService(), sess); err != nil {
-			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err)
+			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err) //nolint:forbidigo // pre-slog call site
 		} else if repair := compactioninternal.RepairAfterAppend(summary, before, latest); repair != nil {
 			if err := rt.SessionService().AppendEvent(repairCtx, sess, repair); err != nil {
-				log.Printf("adk: could not store a corrected compaction record: %v", err)
+				log.Printf("adk: could not store a corrected compaction record: %v", err) //nolint:forbidigo // pre-slog call site
 			} else {
-				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize",
+				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize", //nolint:forbidigo // pre-slog call site
 					len(repair.Actions.Compaction.ExcludedEvents)-len(summary.Actions.Compaction.ExcludedEvents))
 			}
 		}
@@ -195,7 +196,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 // rather than only in an aborted turn. The post-invocation pass still surfaces
 // its own failures to the caller, since nothing is mid-flight there.
 func degrade(ctx context.Context, stage string, err error) {
-	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err))
+	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err)) //nolint:forbidigo // pre-slog call site
 }
 
 // compactionFailure marks err as a compaction failure at the named stage.
@@ -228,12 +229,28 @@ func promptTokenEstimator(ctx agent.InvocationContext) compactioninternal.TokenC
 			return 0
 		}
 		state := llmAgent.internal()
-		contents, err := buildContentsDefault(
+		// Resolve the mode the way the contents processor resolves it for the
+		// NUDGE. Reading the declaration instead would estimate a prompt
+		// without the single-turn nudge for an agent whose placement resolved
+		// single_turn, and the estimate decides when to compact.
+		//
+		// It does not mirror that processor's other half: the estimate always
+		// builds with buildContentsDefault below, so for a placement that hides
+		// history it counts turns the real prompt will not carry. That
+		// divergence predates this change — an explicit IncludeContents="none"
+		// reached it the same way — and a placement is now a second route in.
+		// A suffix may omit a response's call without making that response stale.
+		allEvents := events
+		if ctx.Session() != nil {
+			allEvents = slices.Collect(ctx.Session().Events().All())
+		}
+		contents, err := buildContentsDefaultWithCallSource(
 			ctx.Agent().Name(),
 			ctx.Branch(),
 			ctx.IsolationScope(),
 			events,
-			state.Mode == ModeSingleTurn,
+			allEvents,
+			ModeFor(ctx, ctx.Agent().Name(), state) == ModeSingleTurn,
 			ctx.UserContent(),
 		)
 		if err != nil {

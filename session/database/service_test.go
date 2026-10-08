@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -102,6 +103,42 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	if ev.IsolationScope != "task-1" {
 		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
+	}
+}
+
+// TestDatabaseService_AppendEvent_TranscriptionsRoundTrip guards that live
+// audio transcriptions survive storage, matching the input_transcription and
+// output_transcription columns of adk-python's events table.
+func TestDatabaseService_AppendEvent_TranscriptionsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	event := &session.Event{ID: "live_event", Author: "agent"}
+	event.InputTranscription = &genai.Transcription{Text: "what time is it", Finished: true}
+	event.OutputTranscription = &genai.Transcription{Text: "it is noon"}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if diff := cmp.Diff(event.InputTranscription, ev.InputTranscription); diff != "" {
+		t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(event.OutputTranscription, ev.OutputTranscription); diff != "" {
+		t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -213,6 +250,92 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	if usr.UpdateTime.IsZero() {
 		t.Errorf("user_states.update_time is zero after AppendEvent; want it populated")
 	}
+}
+
+func TestNewSessionServiceFromDB(t *testing.T) {
+	t.Run("nil db returns error", func(t *testing.T) {
+		_, err := NewSessionServiceFromDB(nil)
+		if err == nil {
+			t.Fatal("expected error for nil db, got nil")
+		}
+	})
+
+	t.Run("valid db creates service", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v, want nil", err)
+		}
+		if svc == nil {
+			t.Fatal("NewSessionServiceFromDB() returned nil service")
+		}
+	})
+
+	t.Run("shares db connection", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+		}
+		dbSvc, ok := svc.(*databaseService)
+		if !ok {
+			t.Fatalf("expected *databaseService, got %T", svc)
+		}
+		if dbSvc.db != db {
+			t.Error("NewSessionServiceFromDB() did not use the provided *gorm.DB")
+		}
+	})
+}
+
+func Test_databaseServiceFromDB(t *testing.T) {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+		return emptyServiceFromDB(t)
+	})
+}
+
+func emptyServiceFromDB(t *testing.T) *databaseService {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{PrepareStmt: true})
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	svc, err := NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("NewSessionServiceFromDB() failed: %v", err)
+	}
+	if err := AutoMigrate(svc); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	dbSvc := svc.(*databaseService)
+	t.Cleanup(func() {
+		modelsToDelete := []any{&storageEvent{}, &storageSession{}, &storageUserState{}, &storageAppState{}}
+		for _, model := range modelsToDelete {
+			stmt := &gorm.Statement{DB: dbSvc.db}
+			if err := stmt.Parse(model); err != nil {
+				t.Errorf("failed to parse model: %v", err)
+				continue
+			}
+			if err := dbSvc.db.Exec(`DELETE FROM ` + stmt.Table + ` WHERE true`).Error; err != nil {
+				t.Errorf("failed to delete from %s: %v", stmt.Table, err)
+			}
+		}
+		sqlDB, err := dbSvc.db.DB()
+		if err != nil {
+			t.Errorf("failed to get *sql.DB: %v", err)
+			return
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("failed to close *sql.DB: %v", err)
+		}
+	})
+	return dbSvc
 }
 
 func emptyService(t *testing.T) *databaseService {
@@ -387,5 +510,41 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 	slices.Reverse(reversed)
 	if cmp.Diff(reversed, first) == "" {
 		t.Errorf("tied events came back in reverse insertion order:\n%v", first)
+	}
+}
+
+// TestDatabaseService_NonJSONStateErrorSurfaces guards against the
+// GormValuer path discarding json.Marshal errors: stateMap.GormValue used to
+// do `data, _ := json.Marshal(sm)` and bind an empty payload, and because
+// GORM dispatches GormValuer before driver.Valuer, the error-returning
+// Value() path was never reached. A NaN state value must fail the write at
+// the boundary instead of silently persisting an empty state (#1537).
+func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user-bad",
+		State:   map[string]any{"bad": math.NaN()},
+	}); err == nil {
+		t.Fatalf("expected an error writing non-JSON state (NaN), got nil")
+	}
+
+	// The session row for the bad write must not exist: the write must fail
+	// at the boundary, not persist an empty payload.
+	var count int64
+	if err := s.db.Model(&storageSession{}).Where("app_name = ? AND user_id = ?", "app", "user-bad").Count(&count).Error; err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no persisted session for the failing write, found %d", count)
 	}
 }

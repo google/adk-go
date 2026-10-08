@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -80,17 +81,16 @@ func New(cfg Config) (agent.Agent, error) {
 		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
-			Model:                    cfg.Model,
-			Mode:                     cfg.Mode,
-			GenerateContentConfig:    cfg.GenerateContentConfig,
-			Tools:                    cfg.Tools,
-			Toolsets:                 cfg.Toolsets,
-			DisallowTransferToParent: cfg.DisallowTransferToParent,
-			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
-			InputSchema:              cfg.InputSchema,
-			OutputSchema:             cfg.OutputSchema,
-			// TODO: internal type for includeContents
-			IncludeContents:           string(cfg.IncludeContents),
+			Model:                     cfg.Model,
+			Mode:                      cfg.Mode,
+			GenerateContentConfig:     cfg.GenerateContentConfig,
+			Tools:                     slices.Clone(cfg.Tools),
+			Toolsets:                  slices.Clone(cfg.Toolsets),
+			DisallowTransferToParent:  cfg.DisallowTransferToParent,
+			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
+			InputSchema:               cfg.InputSchema,
+			OutputSchema:              cfg.OutputSchema,
+			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,
@@ -153,11 +153,9 @@ func installTaskTools(a *llmAgent) error {
 			continue
 		}
 		subState := llminternal.Reveal(subInternal)
-		if subState.Mode == llminternal.ModeUnset {
-			subState.Mode = llminternal.ModeChat
-		}
-
-		switch subState.Mode {
+		// A sub-agent that declares no mode is a chat peer, reached via
+		// transfer_to_agent rather than through a tool on the parent.
+		switch llminternal.ResolveMode(subState.Mode, llminternal.ModeChat) {
 		case llminternal.ModeSingleTurn:
 			t, err := workflowinternal.NewSingleTurnTool(sub)
 			if err != nil {
@@ -251,6 +249,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -280,6 +280,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -303,6 +305,10 @@ type Config struct {
 	DisallowTransferToPeers bool
 
 	// Whether to include contents (conversation history) in the model request.
+	//
+	// Left unset, an agent placed as a single_turn workflow node sees only the
+	// current turn. Setting IncludeContentsDefault explicitly keeps the history
+	// even there.
 	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
@@ -416,7 +422,11 @@ type IncludeContents string
 const (
 	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
 	IncludeContentsNone IncludeContents = "none"
-	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
+	// IncludeContentsDefault is what an unset IncludeContents behaves as for a
+	// plain conversational agent: the llmagent receives the relevant
+	// conversation history. Setting it explicitly is not the same as leaving
+	// the field unset — it also keeps the history for an agent placed as a
+	// single_turn workflow node, which otherwise sees only the current turn.
 	IncludeContentsDefault IncludeContents = "default"
 )
 
@@ -521,12 +531,17 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
-	if a.OutputKey != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
+	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
+		hasTextPart := false
 		for _, part := range event.Content.Parts {
 			if part.Text != "" && !part.Thought {
+				hasTextPart = true
 				sb.WriteString(part.Text)
 			}
+		}
+		if !hasTextPart {
+			return
 		}
 		result := sb.String()
 

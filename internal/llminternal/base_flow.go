@@ -15,13 +15,16 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"iter"
 	"log"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +33,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -73,6 +77,10 @@ type Flow struct {
 	BeforeToolCallbacks   []BeforeToolCallback
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
+
+	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
+	// only tests set it, to shrink the delays.
+	reconnect *liveReconnectPolicy
 }
 
 var (
@@ -146,7 +154,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				thoughtOnlyTurns++
 				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
-					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event", //nolint:forbidigo // pre-slog call site
 						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
 					return
 				}
@@ -154,9 +162,13 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				thoughtOnlyTurns = 0
 			}
 			if lastEvent.LLMResponse.Partial {
-				// We may have reached max token limit during streaming mode.
-				// TODO: handle Partial response in model level. CL 781377328
-				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				// The last event is a partial streaming response. The realistic cause
+				// is a producer that ends a stream without a terminal aggregate (e.g.,
+				// an a2a peer whose stream ends on an appended artifact chunk with no
+				// terminal status). The turn was truncated, not completed, which is
+				// not expected, so we log a warning and return instead of looping again.
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history", //nolint:forbidigo // pre-slog call site
+					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
 		}
@@ -305,6 +317,71 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
+// tornDown reports whether the session was closed or the invocation cancelled.
+func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
+	select {
+	case <-sess.done:
+		return true
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// waitBeforeReconnect paces a reconnect, reporting whether it should go ahead.
+// Teardown during the wait cuts it short, so Close stays prompt.
+//
+// The re-check after the timer matters: select picks uniformly among ready
+// cases, so a teardown landing as the timer fires would otherwise report
+// "proceed" half the time and dial a socket nobody reads.
+func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return !tornDown(ctx, sess)
+	case <-sess.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// isResumable reports whether a live-connection error means the socket is
+// gone and the flow should reconnect, rather than surface the error and stop.
+//
+// Both the reader and the sender goroutine report into the same errChan and
+// the flow acts on whichever arrives first, so the two must classify the same
+// connection loss the same way. They do not produce the same text: the reader
+// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
+// sees the raw socket write failure, whose wording is platform-specific
+// ("write: broken pipe" on Linux, "wsasend: An established connection was
+// aborted by the software in your host machine." on Windows). Matching the
+// transport failure by type rather than by text keeps the verdict the same on
+// every platform.
+func isResumable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	// A failed read or write on the underlying socket of an already-established
+	// connection. The dial lives on a different path, which handles its own
+	// errors, so reaching here means a live connection dropped.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "1008") ||
+		strings.Contains(errStr, "GoAway")
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -351,24 +428,64 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
 		}
 
-		isResumable := func(err error) bool {
-			if err == nil {
-				return false
-			}
-			if err == io.EOF {
-				return true
-			}
-			errStr := err.Error()
-			return strings.Contains(errStr, "broken pipe") ||
-				strings.Contains(errStr, "connection reset") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "1008") ||
-				strings.Contains(errStr, "GoAway")
-		}
-
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
 
+		policy := f.reconnect
+		if policy == nil {
+			policy = defaultLiveReconnectPolicy()
+		}
+		// reconnectAttempts counts consecutive reconnects since a connection
+		// last worked and drives the backoff; a connection works by delivering
+		// content or by outliving healthyUptime. shortLivedReconnects counts
+		// only the connections that died inside healthyUptime, and never
+		// resets.
+		reconnectAttempts := 0
+		shortLivedReconnects := 0
+		currentBackoff := policy.initialBackoff
+		// lastConnWasBrief records whether the connection that just dropped
+		// died inside healthyUptime. A connection the server cycles after
+		// minutes of service is routine, so it spends neither budget and clears
+		// the consecutive one; charging it would let a long call die of old
+		// age.
+		lastConnWasBrief := false
+		var lastErr error
+		// isReconnect is false only for the very first dial; every path back to
+		// the loop top sets it. It is what makes a first-ever connect failure
+		// fatal while a failed redial is charged to the budget.
+		isReconnect := false
+
 		for {
+			if isReconnect {
+				reconnectAttempts++
+				if lastConnWasBrief {
+					shortLivedReconnects++
+				}
+				if reconnectAttempts > policy.maxAttempts {
+					// Resumable errors are swallowed while retrying, so
+					// without this the caller's stream just goes quiet.
+					sess.pushError(liveReconnectGaveUpError(
+						fmt.Sprintf("%d consecutive attempts delivered no content", policy.maxAttempts), lastErr))
+					return
+				}
+				if shortLivedReconnects > policy.maxTotal {
+					sess.pushError(liveReconnectGaveUpError(
+						fmt.Sprintf("%d short-lived connections in one invocation", policy.maxTotal), lastErr))
+					return
+				}
+				sleepDuration := policy.jittered(currentBackoff)
+				currentBackoff = policy.nextBackoff(currentBackoff)
+
+				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v", //nolint:forbidigo // pre-slog call site
+					reconnectAttempts, policy.maxAttempts, shortLivedReconnects, sleepDuration)
+				if !waitBeforeReconnect(ctx, sess, sleepDuration) {
+					// Cancellation reports itself, matching the consumer
+					// loop's ctx.Done arm; Close is a clean teardown.
+					if err := ctx.Err(); err != nil {
+						sess.pushError(err)
+					}
+					return
+				}
+			}
 			if isIContext {
 				handle := iCtx.LiveSessionResumptionHandle()
 				if handle != "" {
@@ -385,16 +502,27 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle) //nolint:forbidigo // pre-slog call site
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
-				log.Printf("failed to connect live session: %v\n", err)
+				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
+				if isReconnect {
+					// genai returns without closing the socket it dialled when
+					// the setup write fails, and it dials with a context-less
+					// dialer, so cancelConn cannot release it either. Each
+					// budgeted redial against such an endpoint strands one fd
+					// until the process exits; the bounds above cap how many.
+					lastErr = err
+					lastConnWasBrief = true
+					continue
+				}
 				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
 				return
 			}
 
+			connectedAt := time.Now()
 			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
 
 			cleanup := func() {
@@ -406,12 +534,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// Producers must guard sends with connCtx: once a reconnect (or any
 			// teardown) abandons this unbuffered channel, cleanup's cancelConn is
 			// what unblocks them (issue #1152).
-			errChan := make(chan error)
+			errChan := make(chan liveConnError)
 
 			// Send preprocessed content directly to model if any exists after early preprocessing
 			if len(nreq.Contents) > 0 {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-					log.Printf("failed to send history: %v\n", err)
+					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
 					sess.pushError(err)
 					// cleanup, not a bare return: genai dials the live socket
 					// with a context-less websocket.DefaultDialer.Dial, and
@@ -429,7 +557,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
 						select {
-						case errChan <- err:
+						case errChan <- liveConnError{err: err, at: time.Now()}:
 						case <-connCtx.Done():
 						}
 						return
@@ -437,7 +565,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if resp != nil {
 						if resp.SessionResumptionHandle != "" {
 							if isIContext {
-								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle) //nolint:forbidigo // pre-slog call site
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
 						}
@@ -473,7 +601,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						if req.Content != nil {
 							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
 								select {
-								case errChan <- err:
+								case errChan <- liveConnError{err: err, at: time.Now()}:
 								case <-connCtx.Done():
 								}
 								return
@@ -485,7 +613,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
 								select {
-								case errChan <- err:
+								case errChan <- liveConnError{err: err, at: time.Now()}:
 								case <-connCtx.Done():
 								}
 								return
@@ -499,9 +627,26 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			for !reconnect {
 				select {
 				case ev := <-eventsChan:
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					var tools map[string]tool.Tool
+					if len(fnCalls) > 0 {
+						tools = make(map[string]tool.Tool, len(f.Tools))
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
+					}
 					if !sess.pushEvent(ev) {
 						cleanup()
 						return
+					}
+					// Content proves this connection is serving, so the
+					// consecutive budget starts over; shortLivedReconnects does
+					// not, which is what bounds a backend that serves one frame
+					// per connection and then hangs up.
+					if ev != nil && ev.LLMResponse.Content != nil {
+						reconnectAttempts = 0
+						currentBackoff = policy.initialBackoff
 					}
 					// Flush caches if needed
 					if runCfg.Live.SaveLiveBlob {
@@ -528,13 +673,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 						}
 					}
-					// Handle function calls if present in the event
-					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					if len(fnCalls) > 0 {
-						tools := make(map[string]tool.Tool)
-						for _, t := range f.Tools {
-							tools[t.Name()] = t
-						}
 						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
 						if err != nil {
 							sess.pushError(err)
@@ -569,13 +708,29 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 						}
 					}
-				case err := <-errChan:
-					if isResumable(err) {
-						log.Printf("Connection error, attempting to resume: %v\n", err)
+				case ce := <-errChan:
+					if isResumable(ce.err) {
+						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
+						lastErr = ce.err
+						// Score the connection's life from where the error was
+						// produced, not from here: this loop also runs tools
+						// and blocks on the caller, and crediting that time as
+						// uptime would let a flapping backend pass as healthy.
+						lastConnWasBrief = ce.at.Sub(connectedAt) < policy.healthyUptime
+						if !lastConnWasBrief {
+							// The connection served for as long as a healthy
+							// one does, which is the only evidence a session
+							// the model has nothing to say on ever produces.
+							// Without this the consecutive budget ends such a
+							// call after maxAttempts of the cycles the Live API
+							// performs as ordinary lifecycle.
+							reconnectAttempts = 0
+							currentBackoff = policy.initialBackoff
+						}
 						reconnect = true
 						break // Break the select
 					}
-					sess.pushError(err)
+					sess.pushError(ce.err)
 					cleanup()
 					return
 				case <-sess.done:
@@ -597,6 +752,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if !reconnect {
 				break
 			}
+			isReconnect = true
 		}
 	}()
 
@@ -931,6 +1087,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
 		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			if resp == nil && err == nil {
+				// Third-party model implementations may yield an empty response.
+				continue
+			}
 			response := newResponseWithEventID(ctx, resp)
 			lastResponse = *response
 			lastErr = err
@@ -1081,6 +1241,12 @@ Suggested fixes:
 
 type cancelledToolContext struct {
 	agent.Context
+	// Marker: this is one of ADK's own context types, so the identity procedure
+	// asks it rather than reading a session it does not have. Without it the
+	// procedure would fall back to the embedded tool context's Session(), which
+	// is nil by design, and a streaming tool that re-derives its context would
+	// lose the acting user.
+	adkcontext.Marker
 	cancelCtx context.Context
 }
 
@@ -1097,7 +1263,60 @@ func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
 }
 
 func (c *cancelledToolContext) Value(key any) any {
+	// Fails closed rather than dereferencing: this type carries the identity
+	// marker, so the identity procedure asks it directly, and that ask can arrive
+	// from inside http.RoundTripper where net/http does not recover.
+	if c == nil || c.cancelCtx == nil {
+		return nil
+	}
 	return c.cancelCtx.Value(key)
+}
+
+// displayableToolResultText renders a tool result as text for the case where
+// SkipSummarization suppresses the LLM's own summary of it. It returns
+// ok=false for results that carry nothing worth showing: error responses,
+// and empty or null results such as those from control-flow-only tools
+// (e.g. exitlooptool), which return no meaningful output of their own.
+//
+// Tools that wrap a single plain-text result under a "result" key (the
+// convention used by agenttool) are shown as-is; anything else is rendered
+// as JSON so structured results remain readable.
+func displayableToolResultText(result map[string]any) (string, bool) {
+	if len(result) == 0 {
+		return "", false
+	}
+	if _, isErr := result["error"]; isErr {
+		return "", false
+	}
+	if len(result) == 1 {
+		if v, ok := result["result"]; ok {
+			if v == nil {
+				return "", false
+			}
+			if text, ok := v.(string); ok {
+				return text, text != ""
+			}
+		}
+	}
+	b, err := marshalJSONNoHTMLEscape(result)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// marshalJSONNoHTMLEscape is json.Marshal without HTML-escaping the output.
+// json.Marshal escapes '<', '>' and '&' (e.g. a URL's "&" becomes "&"),
+// which is meant for embedding JSON in HTML but only hurts readability of
+// text meant for a chat transcript.
+func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
@@ -1182,7 +1401,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								default:
 								}
 								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 								updatedContent := &genai.Content{
@@ -1194,7 +1413,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 									},
 								}
 								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
-									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 							}
@@ -1232,19 +1451,41 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
+			parts := []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       fnCall.ID,
+						Name:     fnCall.Name,
+						Response: result,
+					},
+				},
+			}
+			// SkipSummarization causes the parent agent loop to terminate on this
+			// event (see session.Event.IsFinalResponse) without the LLM ever
+			// seeing the function response. Since most UIs don't render function
+			// response parts, attach the result as a visible text part so it
+			// isn't silently dropped from the terminal event.
+			//
+			// This only applies to tools that opt in via
+			// SkipSummarizationResultDisplayer (agenttool): SkipSummarization is
+			// also set by tools whose result is an internal detail never meant
+			// for display - e.g. a pending tool confirmation (see
+			// RequestedToolConfirmations above) or a UI/widget tool's
+			// acknowledgement - and those must not have their result leaked into
+			// a visible text part.
+			if actions := toolCtx.Actions(); actions.SkipSummarization {
+				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
+					if text, ok := displayableToolResultText(result); ok {
+						parts = append(parts, &genai.Part{Text: text})
+					}
+				}
+			}
+
 			ev := session.NewEvent(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
-					Role: "user",
-					Parts: []*genai.Part{
-						{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       fnCall.ID,
-								Name:     fnCall.Name,
-								Response: result,
-							},
-						},
-					},
+					Role:  "user",
+					Parts: parts,
 				},
 			}
 			ev.Author = ctx.Agent().Name()
@@ -1504,3 +1745,8 @@ type pluginManager interface {
 	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }
+
+// Asserted rather than left to the [adkcontext.Marker] embed: dropping the embed
+// would also drop the import, breaking the build for an unrelated reason. This
+// fails on the type.
+var _ adkcontext.Source = (*cancelledToolContext)(nil)
