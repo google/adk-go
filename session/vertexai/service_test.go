@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -318,13 +319,37 @@ func TestSetupReplay_InitializesWithoutExternalNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(teardown)
+	dialAttempts := make(chan struct{}, 1)
 	opts = append(opts, option.WithGRPCDialOption(grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		select {
+		case dialAttempts <- struct{}{}:
+		default:
+		}
 		return nil, errors.New("network disabled during replay")
 	})))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	_, err = newVertexAiClient(ctx, Location, ProjectID, EngineID, opts...)
+	client, err := newVertexAiClient(ctx, Location, ProjectID, EngineID, opts...)
 	if err != nil {
 		t.Fatalf("replay client must initialize without a network connection: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	conn := client.rpcClient.Connection()
+	conn.Connect()
+	for state := conn.GetState(); state != connectivity.Shutdown && state != connectivity.Ready; state = conn.GetState() {
+		select {
+		case <-dialAttempts:
+			t.Fatal("replay client attempted a network connection")
+		default:
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			t.Fatal("replay connection did not settle before the deadline")
+		}
+	}
+	select {
+	case <-dialAttempts:
+		t.Fatal("replay client attempted a network connection")
+	default:
 	}
 }

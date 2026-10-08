@@ -103,7 +103,7 @@ func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.Context, req *mo
 	return toolutils.PackTool(req, f)
 }
 
-// FunctionDeclaration implements toolinternal.StreamingFunctionTool.
+// Declaration implements toolinternal.StreamingFunctionTool.
 func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),

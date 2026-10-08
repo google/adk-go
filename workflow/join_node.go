@@ -30,10 +30,15 @@ import (
 // map[string]any keyed by predecessor name. Its own output is
 // that map, emitted verbatim.
 //
-// All incoming edges feed the barrier; conditional routing into a
-// JoinNode is a configuration error, because the barrier waits
-// for every declared predecessor and a route-skipped predecessor
-// never fires.
+// All incoming edges feed the barrier. Routing into a JoinNode
+// conditionally is a configuration error that nothing validates:
+// validateFanIn skips every *JoinNode, so such a graph is accepted
+// rather than rejected.
+//
+// The failure is silent and depends on the graph and on completion
+// order, which makes it hard to diagnose. Depending on that ordering,
+// the join and everything downstream of it can be skipped entirely —
+// and the run still reports success, neither erroring nor hanging.
 type JoinNode struct {
 	BaseNode
 }
