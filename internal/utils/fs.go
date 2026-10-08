@@ -34,11 +34,11 @@ var (
 // The rel path is not considered to be safe.
 // The base path should be absolute and is considered to be safe
 // Returns on error if the result is not a valid subpath or the path contains unsafe elements (especially for windows)
-func SafeSubpath(base, rel string, acceptSymlinks bool) (absPath, relPath string, resErr error) {
+func SafeSubpath(base, rel string, acceptSymlinks bool, evalPath bool) (absPath, relPath string, resErr error) {
 	// validate rel
 	// do not allow rel to start with "\\"
 	// on windows it will catch \\host\dir, \\.\long, \\?\ etc
-	if strings.HasPrefix(rel, "\\") {
+	if runtime.GOOS == "windows" && strings.HasPrefix(rel, "\\") {
 		return "", "", fmt.Errorf("%w: rel path should not start with \\", ErrNotValidRelativePath)
 	}
 	// do not allow rel to start with "/"
@@ -124,18 +124,70 @@ func SafeSubpath(base, rel string, acceptSymlinks bool) (absPath, relPath string
 		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
 	}
 
-	if !acceptSymlinks {
-		hasSymlink, err := ContainsSymlink(absBase, rel)
-		if err != nil {
-			return "", "", fmt.Errorf("%w: cannot check for symlinks: %v", ErrNotValidRelativePath, err)
+	if acceptSymlinks {
+		if evalPath {
+			fp := filepath.Join(absBase, r)
+			ev, err := filepath.EvalSymlinks(fp)
+			if err != nil {
+				return "", "", fmt.Errorf("%w: cannot evaluate symlinks: %w", ErrNotValidRelativePath, err)
+			}
+			if ev != fp {
+				// got symlink in rel
+				// make it relative to absBase
+				evr, err := filepath.Rel(absBase, ev)
+				if err != nil {
+					return "", "", fmt.Errorf("filepath.Rel failed: %w", err)
+				}
+
+				// make sure we are still safe - recheck everything
+				return SafeSubpath(absBase, evr, false, true)
+			}
+		} else {
+			return absBase, r, nil
 		}
-		if hasSymlink {
-			return "", "", ErrSymlinkInRelativePath
+	} else {
+		if evalPath {
+			hasSymlink, err := ContainsSymlink(absBase, rel)
+			if err != nil {
+				return "", "", fmt.Errorf("%w: cannot check for symlinks: %v", ErrNotValidRelativePath, err)
+			}
+			if hasSymlink {
+				return "", "", ErrSymlinkInRelativePath
+			}
 		}
 	}
 
 	return res, r, nil
 }
+
+// // evalExistingSymlinks tries to resolve symlinks in the whole base and then symlinks in existing part of rel
+// func evalExistingSymlinks(base, rel string) (existing, absent string, err error) {
+// 	cleanbase, err := filepath.EvalSymlinks(base)
+// 	if err != nil {
+// 		return "", "", fmt.Errorf("cannot evaluate symlinks in base: %w", err)
+// 	}
+// 	cleanrel, err := filepath.EvalSymlinks(rel)
+// 	if err == nil {
+// 		return filepath.Join(cleanbase, cleanrel), "", nil
+// 	}
+
+// 	// why?
+// 	if !errors.Is(err, os.ErrNotExist) {
+// 		// if any other reason that NotExist - return error
+// 		return "", "", fmt.Errorf("cannot evaluate symlinks in rel: %w", err)
+// 	}
+
+// 	// a part of ref path doesn't exist. Find the existing part
+// 	// don't worry about path traversal right now
+// 	frags:= splitPathToFragments(rel)
+// 	currentDir:= cleanbase
+// 	for i, fr := range frags {
+// 		p:= filepath.Join(currentDir, fr)
+// 		fi, err := os.Lstat(p)
+// 		if fi
+
+// 	return cleanbase, cleanrel, nil
+// }
 
 func splitPathToFragments(p string) []string {
 	p = filepath.Clean(p)

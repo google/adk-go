@@ -226,7 +226,7 @@ func resolveSubAgents(ctx context.Context, parentPath string, refs []agentRefCon
 	var agents []agent.Agent
 	for _, ref := range refs {
 		if ref.ConfigPath != "" {
-			a, err := ResolveAgentReference(ctx, parentPath, ref.ConfigPath)
+			a, err := ResolveAgentReference(ctx, parentPath, ref.ConfigPath, false)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve agent reference %s: %w", ref.ConfigPath, err)
 			}

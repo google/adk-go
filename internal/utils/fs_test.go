@@ -33,7 +33,7 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotRel, err := SafeSubpath(base, tc.rel, true)
+			got, gotRel, err := SafeSubpath(base, tc.rel, true, true)
 
 			if tc.wantErr {
 				if err == nil {

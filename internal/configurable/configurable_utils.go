@@ -119,7 +119,7 @@ func init() {
 			return nil, fmt.Errorf("parentPath not found in context")
 		}
 		if configPath, ok := a["config_path"].(string); ok {
-			ag, err := ResolveAgentReference(ctx, parentPath, configPath)
+			ag, err := ResolveAgentReference(ctx, parentPath, configPath, false)
 			if err != nil {
 				return nil, err
 			}
@@ -336,9 +336,10 @@ func FromConfig(ctx context.Context, configPath string) (agent.Agent, error) {
 		return nil, fmt.Errorf("invalid agent class '%s': not registered. Ensure the package is imported", agentClass)
 	}
 
+	agentDir := filepath.Dir(absPath)
 	// 4. Delegate creation to the specific factory.
 	// We pass the raw data so the factory can unmarshal into its specific Config struct.
-	return factory(ctx, data, absPath)
+	return factory(ctx, data, agentDir)
 }
 
 func ResolveToolReference(ctx context.Context, toolName string, args map[string]any) (tool.Tool, tool.Toolset, error) {
@@ -389,8 +390,8 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 // 	errConfigReferenceSymlink = errors.New("config reference traverses a link")
 // )
 
-func resolveConfigReference(parentPath, refPath string, acceptSymlinks bool) (string, error) {
-	abs, _, err := utils.SafeSubpath(parentPath, refPath, acceptSymlinks)
+func resolveConfigReference(parentPath, refPath string, acceptSymlinks, evalPath bool) (string, error) {
+	abs, _, err := utils.SafeSubpath(parentPath, refPath, acceptSymlinks, evalPath)
 	if err != nil {
 		return "", err
 	}
@@ -532,8 +533,8 @@ func refuseSymlinkComponents(dir, refPath string) error {
 }
 
 // ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
-	absPath, err := resolveConfigReference(parentPath, refPath, false)
+func ResolveAgentReference(ctx context.Context, agentDir, refPath string, acceptSymlinks bool) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(agentDir, refPath, acceptSymlinks, true)
 	if err != nil {
 		return nil, err
 	}
