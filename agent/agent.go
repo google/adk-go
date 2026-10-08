@@ -391,7 +391,7 @@ type invocationContext struct {
 	endInvocation  bool
 }
 
-// Apply implements [InvocationContext].
+// WithICDelta implements [InvocationContext].
 func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c

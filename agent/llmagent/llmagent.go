@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -80,17 +81,16 @@ func New(cfg Config) (agent.Agent, error) {
 		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
-			Model:                    cfg.Model,
-			Mode:                     cfg.Mode,
-			GenerateContentConfig:    cfg.GenerateContentConfig,
-			Tools:                    cfg.Tools,
-			Toolsets:                 cfg.Toolsets,
-			DisallowTransferToParent: cfg.DisallowTransferToParent,
-			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
-			InputSchema:              cfg.InputSchema,
-			OutputSchema:             cfg.OutputSchema,
-			// TODO: internal type for includeContents
-			IncludeContents:           string(cfg.IncludeContents),
+			Model:                     cfg.Model,
+			Mode:                      cfg.Mode,
+			GenerateContentConfig:     cfg.GenerateContentConfig,
+			Tools:                     slices.Clone(cfg.Tools),
+			Toolsets:                  slices.Clone(cfg.Toolsets),
+			DisallowTransferToParent:  cfg.DisallowTransferToParent,
+			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
+			InputSchema:               cfg.InputSchema,
+			OutputSchema:              cfg.OutputSchema,
+			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,
@@ -249,6 +249,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -278,6 +280,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the

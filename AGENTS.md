@@ -141,6 +141,52 @@ The rule covers any error you construct or wrap, and any test assertion message
 that would echo a payload. URLs are not exempt: query parameters carry tokens
 and identifiers.
 
+Library code does not write diagnostics to a process-wide sink. That rules out
+the standard `log` package's logger, `slog`'s default logger and its
+package-level functions, `os.Stdout` and `os.Stderr`, `fmt.Print*`, and
+`print`/`println`. An application embedding ADK can neither silence nor route
+any of them. `forbidigo` enforces this in `golangci-lint`. Code under `cmd/` and
+`examples/`, tests, and `plugin/loggingplugin` are exempt, because each of them
+owns the terminal it writes to.
+
+ADK has no logger for library code to write through yet, so return the error to
+the caller instead. When that is impossible and a maintainer agrees the call
+site in review, mark the line
+`//nolint:forbidigo // <why the error cannot be returned>`. Call sites that
+predate the rule carry `//nolint:forbidigo // pre-slog call site`; do not copy
+that marker onto new code.
+
+Every diagnostic ADK emits through `log/slog` uses the levels below. `TRACE` is
+`slog.LevelDebug - 4`, for traffic that would drown out `DEBUG`:
+
+| Level   | Use it for |
+| ------- | ---------- |
+| `TRACE` | Traffic that repeats within one invocation: live frames, streaming chunks, transport retries. |
+| `DEBUG` | Per-invocation detail: a tool selected, a session resumed, a fallback taken. |
+| `INFO`  | Lifecycle of a process ADK owns, such as a server binding a port. Never per invocation. |
+| `WARN`  | Unexpected, but the operation survived: a method called where it is unsupported, a failed cleanup, an event ADK cannot attribute. |
+| `ERROR` | The operation the caller asked for did not happen, and the caller has no other way to see the error. |
+
+- `INFO` is process-scoped. adk-python logs each model request at `INFO`
+  (`models/google_llm.py`), but one record per run at a hundred requests a
+  second is 8.6 million lines a day in the host's log, so ADK Go logs
+  per-invocation events at `DEBUG`.
+- Never log an error you also return. The caller decides whether it deserves a
+  line, and logging it here as well records it twice. adk-python logs and
+  re-raises in places (`runners.py`); ADK Go does not. `ERROR` is for errors ADK
+  swallows in background goroutines and at transport boundaries. A failed
+  cleanup is `WARN`, even when ADK swallows its error.
+- Messages are constant strings. Put every variable value in an attribute, so a
+  backend can group records by message:
+  `logger.WarnContext(ctx, "function call from an unknown agent", "author", ev.Author, "event_id", ev.ID)`.
+- Use the standard attribute keys `tool`, `model`, `error`, `event_id`, `author`
+  and `function_call_id`. Attach an error as `"error", err` rather than
+  formatting it into the message, and add a stable `kind` attribute when the
+  error text carries generated IDs.
+- Guard expensive arguments. Check `logger.Enabled(ctx, level)` before
+  assembling them, or implement `slog.LogValuer` when the cost is rendering one
+  value.
+
 ## Comments
 
 Doc comments are the public API documentation. `pkg.go.dev` renders them, so
@@ -206,11 +252,12 @@ most of this repo does, or `TODO(#1234)` when an issue tracks it. A bare
 - Sentinel errors are package-level vars, wrapped as
   `fmt.Errorf("%w: …", ErrX)` and tested with `errors.Is`, never by string
   match.
-- In new code, keep `fmt.Print*` out of library and server packages, and
-  `context.Background()` out of anything but `main`, tests and examples — plumb
-  the caller's context through, or use `context.WithoutCancel(ctx)` when a
-  resource must outlive the request. Neither is linted, and existing code has
-  exceptions, so fix one only in a PR that is already about that code.
+- In new code, keep `context.Background()` out of anything but `main`, tests
+  and examples — plumb the caller's context through, or use
+  `context.WithoutCancel(ctx)` when a resource must outlive the request. This
+  is not linted, and existing code has exceptions, so fix one only in a PR that
+  is already about that code. `fmt.Print*` is covered, and linted, under
+  [Logging and error messages](#logging-and-error-messages).
 
 ## Multi-module development
 

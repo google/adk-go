@@ -40,6 +40,20 @@ type runNodeOptions struct {
 // auto-counter), and exclude the composite-path separators '/' and
 // '@'. Violations surface as ErrInvalidRunID from RunNode.
 //
+// A stable id deduplicates calls within one activation of the enclosing
+// dynamic node: a repeat returns the first run's output without
+// re-running the child, and calls that overlap in time share one
+// execution and its outcome. A failed or interrupted run is not
+// retained, so a later call runs the child again. Do not rely on this
+// across a HITL pause: the resume turn re-executes the dynamic node's
+// body, and a child that completed before the pause can run again.
+//
+// A child that is not a dynamic node must not call RunNode with its own
+// name and id from inside its own run. The inner call resolves to the run
+// already in progress, waits for it to finish, and so waits on itself
+// until the invocation is cancelled. A dynamic node can recurse this way,
+// because its body schedules children under its own path.
+//
 // Mirrors adk-python's run_id kwarg
 // (https://adk.dev/graphs/dynamic/#custom-execution-ids).
 func WithRunID(id string) RunNodeOption {

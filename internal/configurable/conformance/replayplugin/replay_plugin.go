@@ -162,7 +162,7 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 		if ft, ok := t.(toolinternal.FunctionTool); ok {
 			_, err := ft.Run(ctx, args)
 			if err != nil {
-				fmt.Println("Error calling tool:", err)
+				fmt.Println("Error calling tool:", err) //nolint:forbidigo // pre-slog call site
 			}
 		}
 	}
