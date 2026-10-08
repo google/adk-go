@@ -175,7 +175,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("⚠️ disk full", genai.RoleModel)}},
 				}),
 			},
-			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "thanks ❤️"},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "thanks ❤️"},
 			wantResp: &memory.SearchResponse{},
 		},
 		{
@@ -185,7 +185,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Je bois un cafe\u0301.", genai.RoleModel)}},
 				}),
 			},
-			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe"},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe"},
 			wantResp: &memory.SearchResponse{},
 		},
 		{
@@ -195,7 +195,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("call snake_case now", genai.RoleModel)}},
 				}),
 			},
-			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "snake"},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "snake"},
 			wantResp: &memory.SearchResponse{},
 		},
 		{
