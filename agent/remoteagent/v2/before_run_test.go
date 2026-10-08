@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -144,6 +145,131 @@ func TestBeforeRunReplyPreservesRemoteSession(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerBeforeRunReplyPreservesRemoteSession(t *testing.T) {
+	for _, mode := range []agent.StreamingMode{agent.StreamingModeNone, agent.StreamingModeSSE} {
+		t.Run(string(mode), func(t *testing.T) {
+			peer, err := agent.New(agent.Config{Name: "peer"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache, err := plugin.New(plugin.Config{
+				Name: "peer cache",
+				BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+					return genai.NewContentFromText("remote cached reply", genai.RoleModel), nil
+				},
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					ev.CustomMetadata = map[string]any{"cache_hit": true}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			peerConfig := runner.Config{
+				AppName: "peer", Agent: peer, SessionService: session.InMemoryService(), AutoCreateSession: true,
+				PluginConfig: runner.PluginConfig{Plugins: []*plugin.Plugin{cache}},
+			}
+			var executor a2asrv.AgentExecutor = adka2a.NewExecutor(adka2a.ExecutorConfig{RunnerConfig: peerConfig})
+			if mode == agent.StreamingModeNone {
+				peerRunner, err := runner.New(peerConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				executor = &mockA2AExecutor{
+					executeFn: func(ctx context.Context, req *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+						return func(yield func(a2a.Event, error) bool) {
+							parts, err := adka2a.ToGenAIParts(req.Message.Parts)
+							if err != nil {
+								yield(nil, err)
+								return
+							}
+							for ev, err := range peerRunner.Run(ctx, "u", req.ContextID, genai.NewContentFromParts(parts, genai.RoleUser), agent.RunConfig{}) {
+								if err != nil {
+									yield(nil, err)
+									return
+								}
+								msg, err := adka2a.EventToMessage(ev)
+								if err != nil {
+									yield(nil, err)
+									return
+								}
+								msg.ContextID = req.ContextID
+								if !yield(msg, nil) {
+									return
+								}
+							}
+						}
+					},
+				}
+			}
+			client := &beforeRunPeerClient{RequestHandler: a2asrv.NewHandler(executor)}
+			var lastMessage *a2a.Message
+			cfg := A2AConfig{
+				Name: "remote", AgentCard: &a2a.AgentCard{},
+				ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) { return client, nil },
+				BeforeRequestCallbacks: []BeforeA2ARequestCallback{
+					func(_ agent.Context, req *a2a.SendMessageRequest) (*session.Event, error) {
+						lastMessage = req.Message
+						return nil, nil
+					},
+				},
+			}
+			if mode == agent.StreamingModeSSE {
+				// A content-only converter must not rely on a trailing status event to preserve context.
+				cfg.Converter = func(ctx agent.InvocationContext, _ *a2a.SendMessageRequest, ev a2a.Event, err error) (*session.Event, error) {
+					if err != nil {
+						return nil, err
+					}
+					converted, err := adka2a.ToSessionEvent(ctx, ev)
+					if err != nil || converted == nil || converted.Content == nil {
+						return nil, err
+					}
+					return converted, nil
+				}
+			}
+			remote, err := NewA2A(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName: "client", Agent: remote, SessionService: session.InMemoryService(), AutoCreateSession: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var remoteContext string
+			for i, question := range []string{"first question", "second question"} {
+				for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText(question, genai.RoleUser), agent.RunConfig{StreamingMode: mode}) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+						t.Fatal("run emitted an error event")
+					}
+					if ev.Content != nil && i == 0 {
+						_, remoteContext = adka2a.GetA2ATaskInfo(ev)
+						if ev.CustomMetadata["cache_hit"] != true {
+							t.Error("peer custom metadata was not preserved")
+						}
+					}
+				}
+			}
+			if remoteContext == "" || lastMessage.ContextID != remoteContext {
+				t.Error("peer BeforeRun reply did not preserve the remote context")
+			}
+			if len(lastMessage.Parts) != 1 || lastMessage.Parts[0].Text() != "second question" {
+				t.Error("peer BeforeRun reply was replayed as a local reply")
+			}
+		})
+	}
+}
+
+type beforeRunPeerClient struct {
+	a2asrv.RequestHandler
+}
+
+func (c *beforeRunPeerClient) Destroy() error { return nil }
 
 func TestCallbackReplyKeepsHistoryBoundary(t *testing.T) {
 	for _, kind := range []string{"before agent", "plugin before agent", "before request"} {
