@@ -67,8 +67,16 @@ func NewPubSubControllerWithConfig(cfg ControllerConfig) (*PubSubController, err
 	if err := retriable.validateCompaction(); err != nil {
 		return nil, err
 	}
+	// A non-positive MaxConcurrentRuns means "no limit": leave semaphore nil so
+	// the guard in PubSubTriggerHandler is skipped. make(chan, 0) would be an
+	// unbuffered channel (not nil), which would make every request block forever.
+	var semaphore chan struct{}
+	if cfg.TriggerConfig.MaxConcurrentRuns > 0 {
+		semaphore = make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns)
+	}
 	return &PubSubController{
-		runner: retriable,
+		runner:    retriable,
+		semaphore: semaphore,
 	}, nil
 }
 
