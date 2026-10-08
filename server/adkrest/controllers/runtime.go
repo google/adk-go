@@ -17,10 +17,12 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -30,8 +32,14 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
+
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
@@ -42,11 +50,125 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+	authorizer        authz.Authorizer
+
+	checkOrigin func(*http.Request) bool
+
+	eventsCompactionConfig *compaction.Config
 }
 
+// RuntimeAPIControllerConfig carries everything [NewRuntimeAPIControllerWithConfig]
+// needs.
+//
+// A config struct rather than functional options, which is what the rest of
+// this repository does and what this constructor should have taken from the
+// start. Options would have solved only the new field and left the seven
+// positional parameters in place, so every later addition would need a third
+// constructor; a struct absorbs both problems at once, and adding a field to it
+// breaks nobody.
+type RuntimeAPIControllerConfig struct {
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	// SSETimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
+	SSETimeout        time.Duration
+	PluginConfig      runner.PluginConfig
+	AutoCreateSession bool
+	Authorizer        authz.Authorizer
+
+	// Compaction enables context compaction for the runners this controller
+	// creates, replacing older session events with summaries.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth, and it only fires when
+	// more events accumulate between sliding-window compactions than
+	// EventRetentionSize holds back, so a short interval with a large retention
+	// size leaves it idle. See [compaction.Config].
+	//
+	// optional
+	Compaction *compaction.Config
+
+	// CheckOrigin reports whether a /run_live upgrade carrying this request's
+	// Origin may proceed. It becomes the WebSocket upgrader's CheckOrigin hook,
+	// and a false answer refuses the handshake with 403.
+	//
+	// [google.golang.org/adk/v2/server/adkrest.NewServer] supplies one built
+	// from its AllowedOrigins, which is where the check belongs for anyone
+	// using that server. Set this only when mounting this controller in a
+	// router of your own.
+	//
+	// optional; nil keeps gorilla/websocket's default, which accepts a request
+	// with no Origin and otherwise requires Origin's host to equal Host — and
+	// so accepts a page that reached this server by rebinding its own DNS name,
+	// since such a page controls both
+	CheckOrigin func(*http.Request) bool
+}
+
+// maxLiveMessageBytes is the read limit RunLiveHandler applies to a single
+// client-sent WebSocket message. Matches uvicorn's ws_max_size default,
+// which adk-python's dev servers (adk web, adk api_server) leave unset, so
+// a message either server accepts, the other does too.
+//
+// Unexported: nothing currently overrides it. If that's needed later, add
+// a field to RuntimeAPIControllerConfig where zero means this default, the
+// same way ServerConfig.MaxPayloadSize works.
+const maxLiveMessageBytes = 16 << 20 // 16 MiB
+
 // NewRuntimeAPIController creates the controller for the Runtime API.
+//
+// Deprecated: use [NewRuntimeAPIControllerWithConfig], which does not have to
+// grow a parameter every time the controller gains a setting. This one is kept
+// because it is released API and every existing call site still compiles; it is
+// a candidate for removal at the next major version.
 func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
+	return NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService:    sessionService,
+		MemoryService:     memoryService,
+		AgentLoader:       agentLoader,
+		ArtifactService:   artifactService,
+		SSETimeout:        sseTimeout,
+		PluginConfig:      pluginConfig,
+		AutoCreateSession: autoCreateSession,
+	})
+}
+
+// WithAuthorizer sets the authorizer. Provided to be compatible with [NewRuntimeAPIController]
+// Deprecated: use [NewRuntimeAPIControllerWithConfig] to set authorizer directly in RuntimeAPIControllerConfig.
+func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
+// NewRuntimeAPIControllerWithConfig creates the controller for the Runtime API.
+//
+// A separate constructor rather than a variadic parameter on the one above:
+// adding a parameter would change that function's type, which breaks any caller
+// holding it as a value even though ordinary call sites still compile, and it
+// is released API.
+func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+	sseTimeout := cfg.SSETimeout
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
+
+	return &RuntimeAPIController{
+		sessionService:         cfg.SessionService,
+		memoryService:          cfg.MemoryService,
+		agentLoader:            cfg.AgentLoader,
+		artifactService:        cfg.ArtifactService,
+		sseTimeout:             sseTimeout,
+		pluginConfig:           cfg.PluginConfig,
+		autoCreateSession:      cfg.AutoCreateSession,
+		checkOrigin:            cfg.CheckOrigin,
+		eventsCompactionConfig: cfg.Compaction,
+		authorizer:             authorizer,
+	}
 }
 
 // RunHandler executes a non-streaming agent run for a given session and message.
@@ -55,6 +177,14 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
@@ -88,6 +218,14 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so failing
+			// the request would discard work the caller asked for and paid for
+			// in order to report that a later prompt will be larger.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
+				continue
+			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
 		}
 		events = append(events, event)
@@ -99,7 +237,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
@@ -110,6 +251,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -126,7 +274,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	// Flush as soon as possible so the client doesn't drop connection.
 	// Add the headers after the error handling to avoid wrong content type.
-	rw.Header().Set("Content-Type", "text/event-stream")
+	// The charset is redundant — text/event-stream is always UTF-8 — but is
+	// stated anyway, which is what its registration allows the parameter for.
+	// RFC 7231 removed the old ISO-8859-1 default for text/*, yet clients
+	// still implement it and mojibake every non-ASCII rune when it is absent.
+	rw.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
 	if err := rc.Flush(); err != nil {
@@ -142,11 +294,18 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
+			// Bookkeeping, not the turn: see the RunHandler comment. Streaming
+			// an error event here would tell a client its answer failed after
+			// it has already received it.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
+				continue
+			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
 			if err != nil {
-				log.Printf("failed to flash error event: %v", err)
+				log.Printf("failed to flash error event: %v", err) //nolint:forbidigo // pre-slog call site
 				return
 			}
 			continue
@@ -157,12 +316,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
 		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
-			log.Printf("failed to marshal event: %v", err)
+			log.Printf("failed to marshal event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 		err = flashEvent(rc, rw, string(marshalledData))
 		if err != nil {
-			log.Printf("failed to flash event: %v", err)
+			log.Printf("failed to flash event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 	}
@@ -218,6 +377,7 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		MemoryService:     c.memoryService,
 		ArtifactService:   c.artifactService,
 		PluginConfig:      c.pluginConfig,
+		Compaction:        c.eventsCompactionConfig,
 		AutoCreateSession: c.autoCreateSession,
 	},
 	)
@@ -250,6 +410,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		CheckOrigin:     c.checkOrigin,
 	}
 
 	q := req.URL.Query()
@@ -261,6 +422,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if userID == "" {
 		userID = q.Get("user_id")
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), userID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionID := q.Get("sessionId")
 	if sessionID == "" {
 		sessionID = q.Get("session_id")
@@ -278,8 +447,11 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		_ = ws.Close()
 	}()
 
+	// The upgrade bypasses MaxBytesMiddleware, and gorilla/websocket has no default limit.
+	ws.SetReadLimit(maxLiveMessageBytes)
+
 	sendClose := func(code int, reason string) {
-		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(reason)))
 		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
@@ -294,7 +466,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		if _, loadErr := c.agentLoader.LoadAgent(appName); loadErr != nil {
 			closeReason = fmt.Sprintf("agent %s not found for original error: %v", appName, err)
 		}
-		log.Printf("Failed to get runner for app %s: %v", appName, err)
+		log.Printf("Failed to get runner for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, closeReason)
 		return nil
 	}
@@ -307,7 +479,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 	})
 	if err != nil {
-		log.Printf("RunLive failed for app %s: %v", appName, err)
+		log.Printf("RunLive failed for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, err.Error())
 		return nil
 	}
@@ -324,7 +496,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Printf("WebSocket read error for app %s: %v", appName, err)
+					log.Printf("WebSocket read error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 				}
 				break
 			}
@@ -336,13 +508,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 						Data:     p,
 					},
 				}); err != nil {
-					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			} else if messageType == websocket.TextMessage {
 				var apiReq models.LiveRequest
 				if err := json.Unmarshal(p, &apiReq); err != nil {
-					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err)
+					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					continue
 				}
 
@@ -366,7 +538,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 				}
 
 				if err := liveSession.Send(liveReq); err != nil {
-					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			}
@@ -375,16 +547,38 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 	for event, err := range eventIter {
 		if err != nil {
-			log.Printf("RunLive failed: %v\n", err)
-			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			log.Printf("RunLive failed: %v\n", err) //nolint:forbidigo // pre-slog call site
+			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
 			break
 		}
 
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
+			if !errors.Is(err, websocket.ErrCloseSent) {
+				log.Printf("WebSocket write error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
+			}
 			break
 		}
 	}
 
 	return nil
+}
+
+// maxCloseReason is the longest reason a websocket close frame can carry: a
+// control frame payload is capped at 125 bytes and the close code takes two.
+const maxCloseReason = 123
+
+// truncateCloseReason trims reason to fit a close frame, on a rune boundary
+// because the reason must be valid UTF-8. gorilla refuses to send an over-long
+// control frame at all, so without this a long error reaches the browser as a
+// bare abnormal closure carrying no explanation.
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReason {
+		return reason
+	}
+	truncated := reason[:maxCloseReason]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }

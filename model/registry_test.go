@@ -17,6 +17,7 @@ package model
 import (
 	"context"
 	"iter"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,11 +37,26 @@ func (s *stubLLM) GenerateContent(ctx context.Context, req *LLMRequest, stream b
 	return func(yield func(*LLMResponse, error) bool) {}
 }
 
+// isolateRegistry restores the package-level registry when t finishes, so
+// tests that call Register stay repeatable under go test -count=N.
+func isolateRegistry(t *testing.T) {
+	t.Helper()
+	mu.RLock()
+	saved := slices.Clone(registry)
+	mu.RUnlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		registry = saved
+		mu.Unlock()
+	})
+}
+
 // The registry is a global shared across every test in this package, so each
 // test registers its own uniquely prefixed patterns and never relies on
 // provider packages (e.g. gemini) self-registering.
 
 func TestNewLLMSingleMatch(t *testing.T) {
+	isolateRegistry(t)
 	const pattern = "^registry-test-single-.*$"
 	Register(pattern, func(_ context.Context, name string) (LLM, error) {
 		return &stubLLM{name: name}, nil
@@ -60,6 +76,7 @@ func TestNewLLMSingleMatch(t *testing.T) {
 }
 
 func TestRegisterDuplicatePatternPanics(t *testing.T) {
+	isolateRegistry(t)
 	// Registering the same pattern twice is a programming error and must panic
 	// at the registration site rather than surfacing later in NewLLM.
 	const pattern = "^registry-test-dup-.*$"
@@ -89,6 +106,7 @@ func TestNewLLMNoMatch(t *testing.T) {
 }
 
 func TestNewLLMMultipleMatchesError(t *testing.T) {
+	isolateRegistry(t)
 	// Two patterns that both match the same name. NewLLM must refuse to guess
 	// and instead return an error, regardless of registration order.
 	const (
@@ -116,6 +134,7 @@ func TestNewLLMMultipleMatchesError(t *testing.T) {
 }
 
 func TestRegistryConcurrentAccess(t *testing.T) {
+	isolateRegistry(t)
 	// Exercise Register and NewLLM concurrently so `go test -race` can detect
 	// data races on the package-level registry. Each goroutine uses a distinct
 	// pattern so no name matches more than one of them.

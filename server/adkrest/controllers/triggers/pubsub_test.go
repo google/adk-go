@@ -16,12 +16,15 @@ package triggers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,11 +32,15 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 var defaultTriggerConfig = triggers.TriggerConfig{
@@ -178,4 +185,230 @@ func createMockAgent(t *testing.T, results []error, runCount *int, expectedAttri
 		t.Fatalf("agent.New failed: %v", err)
 	}
 	return testAgent
+}
+
+// failingSummarizer stands in for a summarizer outage.
+type failingSummarizer struct{}
+
+func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (compaction.SummarizeResult, error) {
+	return compaction.SummarizeResult{}, errors.New("summarizer unavailable")
+}
+
+// TestPubSubTriggerSurvivesACompactionFailure pins that a compaction failure
+// does not fail a delivery the agent already handled.
+//
+// Compaction is bookkeeping that runs after the agent has answered and after
+// its events are persisted. Reporting it as a failed delivery makes Pub/Sub
+// push read the 500 as a NACK, so the message is redelivered and the agent
+// runs again, repeating work that already succeeded.
+func TestPubSubTriggerSurvivesACompactionFailure(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+
+	apiController, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
+		SessionService: sessionService,
+		AgentLoader:    agent.NewSingleLoader(testAgent),
+		TriggerConfig:  defaultTriggerConfig,
+		Compaction: &compaction.Config{
+			CompactionInterval: 1,
+			Summarizer:         failingSummarizer{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPubSubControllerWithConfig() error = %v", err)
+	}
+
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent")))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+
+	apiController.PubSubTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d: the agent answered, so the delivery succeeded. Body: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if runCount != 1 {
+		t.Errorf("agent ran %d times, want 1: a NACKed delivery is retried and repeats work already done", runCount)
+	}
+}
+
+// countingSummarizer records that compaction actually reached the summarizer.
+type countingSummarizer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingSummarizer) SummarizeEvents(context.Context, []*session.Event) (compaction.SummarizeResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return compaction.SummarizeResult{Content: genai.NewContentFromText("a summary", genai.RoleModel)}, nil
+}
+
+func (c *countingSummarizer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestPubSubTriggerActuallyRunsCompaction pins that the config this surface
+// accepts reaches a runner and does something.
+//
+// The existing tests on this surface assert that a compaction failure is
+// tolerated, which a surface that never runs compaction at all satisfies just
+// as well. Deleting the line that puts Compaction into the runner
+// config left the whole suite green. Counting summarizer calls is the
+// difference between "compaction ran and its failure was tolerated" and
+// "compaction never ran".
+func TestPubSubTriggerActuallyRunsCompaction(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	summarizer := &countingSummarizer{}
+
+	apiController, err := triggers.NewPubSubControllerWithConfig(triggers.ControllerConfig{
+		SessionService: sessionService,
+		AgentLoader:    agent.NewSingleLoader(testAgent),
+		TriggerConfig:  defaultTriggerConfig,
+		Compaction: &compaction.Config{
+			CompactionInterval: 1,
+			Summarizer:         summarizer,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPubSubControllerWithConfig() error = %v", err)
+	}
+
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent")))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+	apiController.PubSubTriggerHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if got := summarizer.count(); got == 0 {
+		t.Error("the summarizer was never called, so this surface accepts a compaction config and does nothing with it")
+	}
+}
+
+func buildPubSubRequest(t *testing.T, data string) *http.Request {
+	t.Helper()
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte(data)))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	return mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+}
+
+// TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns is a behavioral test: with
+// MaxConcurrentRuns=N, firing N+1 concurrent requests at a blocking agent must
+// leave exactly N runs in flight (the extra request waits on the semaphore).
+// Before the fix the semaphore was nil and all N+1 ran at once.
+func TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
+	const limit = 2
+	started := make(chan struct{}, limit+1)
+	release := make(chan struct{})
+	blockingAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				started <- struct{}{}
+				<-release
+				yield(&session.Event{ID: "success-event"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = limit
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(blockingAgent), nil, nil, runner.PluginConfig{}, cfg)
+
+	var wg sync.WaitGroup
+	for range limit + 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctrl.PubSubTriggerHandler(httptest.NewRecorder(), buildPubSubRequest(t, "hello"))
+		}()
+	}
+
+	for i := range limit {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d runs started", i, limit)
+		}
+	}
+	// The (limit+1)th request must be blocked on the semaphore, not running.
+	select {
+	case <-started:
+		t.Fatalf("a run beyond MaxConcurrentRuns=%d started; limit not enforced", limit)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	wg.Wait()
+}
+
+// TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited guards the edge case
+// from review: MaxConcurrentRuns<=0 must mean "no limit" (nil semaphore), not a
+// zero-capacity channel that would block every request forever.
+func TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = 0
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(testAgent), nil, nil, runner.PluginConfig{}, cfg)
+
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		ctrl.PubSubTriggerHandler(rr, buildPubSubRequest(t, "hello"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked with MaxConcurrentRuns=0; must be treated as no limit")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
 }

@@ -17,6 +17,7 @@ package method
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/server/agentengine/internal/helper"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 type streamingAgentRunWithEventsHandler struct {
@@ -61,26 +63,26 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 	var req models.StreamingAgentRunWithEventsRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		err = fmt.Errorf("json.Unmarshal() failed for models.StreamingAgentRunWithEventsRequest: %w", err)
-		log.Print(err.Error())
+		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
 
 	runReq, requestedSessionID, err := decodeStreamingAgentRunWithEventsRequest(&req)
 	if err != nil {
 		err = fmt.Errorf("decodeStreamingAgentRunWithEventsRequest() failed: %w", err)
-		log.Print(err.Error())
+		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
 	if err := s.ensureBackendSession(ctx, runReq, requestedSessionID); err != nil {
 		err = fmt.Errorf("s.ensureBackendSession() failed: %w", err)
-		log.Print(err.Error())
+		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
 
 	events, err := s.run(ctx, runReq, &runReq.Message, s.config)
 	if err != nil {
 		err = fmt.Errorf("s.run() failed: %w", err)
-		log.Print(err.Error())
+		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
 
@@ -90,13 +92,23 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 	// from this moment on we must not return error. Instead, it should be handled by using helper.EmitJSONError
 
 	for event, err := range events {
-		log.Printf("Processing event: %+v err: %+v\n", event, err)
+		log.Printf("Processing event: %+v err: %+v\n", event, err) //nolint:forbidigo // pre-slog call site
 		if err != nil {
-			log.Printf("error in events: %v\n", err)
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so emitting
+			// an error and closing the stream would tell the client its request
+			// failed after it has received the response, in order to report
+			// that a later prompt will be larger. The other three serving
+			// surfaces log and carry on, and this one was the outlier.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("agentengine: %v", err) //nolint:forbidigo // pre-slog call site
+				continue
+			}
+			log.Printf("error in events: %v\n", err) //nolint:forbidigo // pre-slog call site
 			e := helper.EmitJSONError(rw, err)
 			if e != nil {
 				e = fmt.Errorf("helper.EmitJSONError() failed: %w", e)
-				log.Print(e.Error())
+				log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			}
 			break
 		}
@@ -113,11 +125,11 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 		})
 		if err != nil {
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
-			log.Print(e.Error())
+			log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			e = helper.EmitJSONError(rw, e)
 			if e != nil {
 				e = fmt.Errorf("helper.EmitJSONError() failed: %w", e)
-				log.Print(e.Error())
+				log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			}
 			break
 		}
@@ -236,6 +248,7 @@ func (s *streamingAgentRunWithEventsHandler) run(ctx context.Context, req *model
 		ArtifactService:   config.ArtifactService,
 		MemoryService:     config.MemoryService,
 		PluginConfig:      config.PluginConfig,
+		Compaction:        config.Compaction,
 		AutoCreateSession: true,
 	})
 	if err != nil {

@@ -15,11 +15,17 @@
 package database
 
 import (
+	"context"
+	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 	"gorm.io/gorm"
 
 	"google.golang.org/adk/v2/platform"
@@ -97,6 +103,42 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	if ev.IsolationScope != "task-1" {
 		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
+	}
+}
+
+// TestDatabaseService_AppendEvent_TranscriptionsRoundTrip guards that live
+// audio transcriptions survive storage, matching the input_transcription and
+// output_transcription columns of adk-python's events table.
+func TestDatabaseService_AppendEvent_TranscriptionsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	event := &session.Event{ID: "live_event", Author: "agent"}
+	event.InputTranscription = &genai.Transcription{Text: "what time is it", Finished: true}
+	event.OutputTranscription = &genai.Transcription{Text: "it is noon"}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if diff := cmp.Diff(event.InputTranscription, ev.InputTranscription); diff != "" {
+		t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(event.OutputTranscription, ev.OutputTranscription); diff != "" {
+		t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -210,6 +252,92 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 }
 
+func TestNewSessionServiceFromDB(t *testing.T) {
+	t.Run("nil db returns error", func(t *testing.T) {
+		_, err := NewSessionServiceFromDB(nil)
+		if err == nil {
+			t.Fatal("expected error for nil db, got nil")
+		}
+	})
+
+	t.Run("valid db creates service", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v, want nil", err)
+		}
+		if svc == nil {
+			t.Fatal("NewSessionServiceFromDB() returned nil service")
+		}
+	})
+
+	t.Run("shares db connection", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+		}
+		dbSvc, ok := svc.(*databaseService)
+		if !ok {
+			t.Fatalf("expected *databaseService, got %T", svc)
+		}
+		if dbSvc.db != db {
+			t.Error("NewSessionServiceFromDB() did not use the provided *gorm.DB")
+		}
+	})
+}
+
+func Test_databaseServiceFromDB(t *testing.T) {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+		return emptyServiceFromDB(t)
+	})
+}
+
+func emptyServiceFromDB(t *testing.T) *databaseService {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{PrepareStmt: true})
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	svc, err := NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("NewSessionServiceFromDB() failed: %v", err)
+	}
+	if err := AutoMigrate(svc); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	dbSvc := svc.(*databaseService)
+	t.Cleanup(func() {
+		modelsToDelete := []any{&storageEvent{}, &storageSession{}, &storageUserState{}, &storageAppState{}}
+		for _, model := range modelsToDelete {
+			stmt := &gorm.Statement{DB: dbSvc.db}
+			if err := stmt.Parse(model); err != nil {
+				t.Errorf("failed to parse model: %v", err)
+				continue
+			}
+			if err := dbSvc.db.Exec(`DELETE FROM ` + stmt.Table + ` WHERE true`).Error; err != nil {
+				t.Errorf("failed to delete from %s: %v", stmt.Table, err)
+			}
+		}
+		sqlDB, err := dbSvc.db.DB()
+		if err != nil {
+			t.Errorf("failed to get *sql.DB: %v", err)
+			return
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("failed to close *sql.DB: %v", err)
+		}
+	})
+	return dbSvc
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
@@ -318,5 +446,105 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+// TestEventsSharingATimestampComeBackInAStableOrder pins that a tie does not
+// flip between reads.
+//
+// Timestamps are truncated to microseconds on write, so two events in one tick
+// are ordinary. The query fetches DESC so a limit takes the most recent and
+// then reverses, and without a tiebreak SQLite's stable sort hands ties back in
+// reverse insertion order, differently from how they went in. Compaction reads
+// this order to decide what a summary stands for, so a pair that swaps lets a
+// record cover an event nothing summarized.
+func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
+	// Not parallel: emptyService opens file::memory:?cache=shared, so every
+	// test in this package works against one database.
+
+	ctx := context.Background()
+	svc := emptyService(t)
+	const appName, userID = "app", "user"
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	sess := created.Session
+
+	// Six events on one instant, appended in a known order.
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var want []string
+	for i := range 6 {
+		ev := session.NewEvent(ctx, "inv1")
+		ev.Author = "author"
+		ev.Timestamp = ts
+		ev.LLMResponse.Content = genai.NewContentFromText(fmt.Sprintf("event %d", i), genai.RoleUser)
+		if err := svc.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+		want = append(want, ev.ID)
+	}
+
+	read := func() []string {
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: appName, UserID: userID, SessionID: sess.ID()})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		var ids []string
+		for ev := range got.Session.Events().All() {
+			ids = append(ids, ev.ID)
+		}
+		return ids
+	}
+
+	first := read()
+	// Stable across reads is the property compaction depends on.
+	for range 5 {
+		if diff := cmp.Diff(first, read()); diff != "" {
+			t.Fatalf("the order of tied events changed between reads (-first +later):\n%s", diff)
+		}
+	}
+	// And not the reverse of how they were appended, which is what the missing
+	// tiebreak produced.
+	reversed := slices.Clone(want)
+	slices.Reverse(reversed)
+	if cmp.Diff(reversed, first) == "" {
+		t.Errorf("tied events came back in reverse insertion order:\n%v", first)
+	}
+}
+
+// TestDatabaseService_NonJSONStateErrorSurfaces guards against the
+// GormValuer path discarding json.Marshal errors: stateMap.GormValue used to
+// do `data, _ := json.Marshal(sm)` and bind an empty payload, and because
+// GORM dispatches GormValuer before driver.Valuer, the error-returning
+// Value() path was never reached. A NaN state value must fail the write at
+// the boundary instead of silently persisting an empty state (#1537).
+func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user-bad",
+		State:   map[string]any{"bad": math.NaN()},
+	}); err == nil {
+		t.Fatalf("expected an error writing non-JSON state (NaN), got nil")
+	}
+
+	// The session row for the bad write must not exist: the write must fail
+	// at the boundary, not persist an empty payload.
+	var count int64
+	if err := s.db.Model(&storageSession{}).Where("app_name = ? AND user_id = ?", "app", "user-bad").Count(&count).Error; err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no persisted session for the failing write, found %d", count)
 	}
 }

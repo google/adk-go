@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/web"
 	"google.golang.org/adk/v2/internal/cli/util"
+	"google.golang.org/adk/v2/internal/compactionvalidate"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 )
@@ -83,6 +84,20 @@ func (a *a2aLauncher) Parse(args []string) ([]string, error) {
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds A2A paths to the main router.
 func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	// Refuse a compaction config this surface cannot serve, before it serves
+	// anything. A config can pass its own shape check and still be unservable,
+	// the plainest case being no Summarizer over a root agent with no model to
+	// default to, and without this the process starts healthy and then fails
+	// every request. The other surfaces do the same dry run.
+	if err := compactionvalidate.AgainstRootAgent(config.Compaction, config.AgentLoader.RootAgent(), runner.Config{
+		SessionService:  config.SessionService,
+		MemoryService:   config.MemoryService,
+		ArtifactService: config.ArtifactService,
+		PluginConfig:    config.PluginConfig,
+	}); err != nil {
+		return err
+	}
+
 	publicCompatURL, err := url.JoinPath(a.config.agentURL, compatAPIPath)
 	if err != nil {
 		return err
@@ -133,6 +148,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 			SessionService:  config.SessionService,
 			ArtifactService: config.ArtifactService,
 			PluginConfig:    config.PluginConfig,
+			Compaction:      config.Compaction,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)

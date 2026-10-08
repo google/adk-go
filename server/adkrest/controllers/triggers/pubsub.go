@@ -36,18 +36,48 @@ type PubSubController struct {
 }
 
 // NewPubSubController creates a new PubSubController.
+// Deprecated: use [NewPubSubControllerWithConfig], which does not have to grow a
+// parameter every time the controller gains a setting, and which surfaces a
+// configuration error instead of discarding it. This one is kept because it is
+// released API and every existing call site still compiles; it is a candidate
+// for removal at the next major version.
 func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *PubSubController {
-	return &PubSubController{
-		runner: &RetriableRunner{
-			sessionService:  sessionService,
-			agentLoader:     agentLoader,
-			memoryService:   memoryService,
-			artifactService: artifactService,
-			pluginConfig:    pluginConfig,
-			triggerConfig:   triggerConfig,
-		},
-		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+	// No compaction, so nothing that can be rejected. The error return exists
+	// for the config form, which can be handed a configuration that cannot
+	// serve the apps behind this controller.
+	c, _ := NewPubSubControllerWithConfig(ControllerConfig{
+		SessionService:  sessionService,
+		AgentLoader:     agentLoader,
+		MemoryService:   memoryService,
+		ArtifactService: artifactService,
+		PluginConfig:    pluginConfig,
+		TriggerConfig:   triggerConfig,
+	})
+	return c
+}
+
+// NewPubSubControllerWithConfig creates the controller from a config struct.
+//
+// A separate constructor rather than a variadic parameter on the one above:
+// adding a parameter would change that function's type, which breaks any caller
+// holding it as a value even though ordinary call sites still compile, and it
+// is released API.
+func NewPubSubControllerWithConfig(cfg ControllerConfig) (*PubSubController, error) {
+	retriable := newRetriableRunner(cfg)
+	if err := retriable.validateCompaction(); err != nil {
+		return nil, err
 	}
+	// A non-positive MaxConcurrentRuns means "no limit": leave semaphore nil so
+	// the guard in PubSubTriggerHandler is skipped. make(chan, 0) would be an
+	// unbuffered channel (not nil), which would make every request block forever.
+	var semaphore chan struct{}
+	if cfg.TriggerConfig.MaxConcurrentRuns > 0 {
+		semaphore = make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns)
+	}
+	return &PubSubController{
+		runner:    retriable,
+		semaphore: semaphore,
+	}, nil
 }
 
 // PubSubTriggerHandler handles the PubSub trigger endpoint.

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 )
 
 // BeforeExecuteCallback is the callback which will be called before an execution is started.
@@ -321,9 +322,16 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 			continue
 		}
 		remoteSubagent := subagents[remoteSubagentIdx]
+		// The subagent's client may carry the auth transport remoteagent.NewA2A
+		// installs for A2AConfig.Auth, which keys the credential on the scope.
+		// Without it the provider would see no identity for this cancel, and a
+		// secured remote would leave its task running. The client provider and
+		// a card fetch see it too, matching the remote agent's own run loop.
+		id := iremoteagent.CallIdentity{AppName: cfg.AppName, UserID: meta.userID, SessionID: meta.sessionID, AgentName: task.agentName}
+		scopedCtx := iremoteagent.AttachAuthScope(ctx, remoteSubagent.config, id)
 		client, ok := clientCache[task.agentName]
 		if !ok {
-			_, newClient, err := iremoteagent.CreateA2AClient(ctx, remoteSubagent.config)
+			_, newClient, err := iremoteagent.CreateA2AClient(scopedCtx, remoteSubagent.config)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("failed to create A2A client: %w", err))
 				continue
@@ -331,7 +339,7 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 			clientCache[task.agentName] = newClient
 			client = newClient
 		}
-		_, err = client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: task.taskID})
+		_, err = client.CancelTask(scopedCtx, &a2a.CancelTaskRequest{ID: task.taskID})
 		if err != nil {
 			failures = append(failures, fmt.Errorf("failed to cancel task: %w", err))
 			continue
@@ -350,6 +358,13 @@ func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProces
 	meta := processor.meta
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
+			// A compaction failure is bookkeeping, not the task. The agent has
+			// already answered and its events are persisted, so failing the
+			// task would report work as lost that the caller has in hand.
+			if errors.Is(adkErr, compaction.ErrCompaction) {
+				log.Warn(ctx, "context compaction failed", "error", adkErr)
+				continue
+			}
 			event := processor.makeTaskFailedEvent(ctx, fmt.Errorf("agent run failed: %w", adkErr), nil)
 			e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), event, adkErr)
 			return
