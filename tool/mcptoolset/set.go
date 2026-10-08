@@ -17,6 +17,7 @@ package mcptoolset
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -31,6 +32,14 @@ import (
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
+// New returns an error if neither Transport nor Endpoint is provided.
+//
+// The returned toolset implements [io.Closer]. Callers must close it when it
+// is no longer in use. Close waits for ongoing connection setup and MCP
+// operations to finish, and is safe to call concurrently or more than once.
+// Further MCP operations fail with [mcp.ErrConnectionClosed]; closing does not
+// affect other sessions created with Config.Client.
+// When using [tool.FilterToolset], retain the original toolset to close it.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
@@ -69,6 +78,9 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
 		transport = &mcp.StreamableClientTransport{Endpoint: cfg.Endpoint}
+	}
+	if transport == nil {
+		return nil, fmt.Errorf("mcptoolset: set Config.Transport or Config.Endpoint")
 	}
 	if cfg.Auth == nil {
 		return transport, nil
@@ -142,11 +154,17 @@ type Config struct {
 }
 
 type set struct {
-	mcpClient                   MCPClient
+	mcpClient                   *connectionRefresher
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
 }
+
+func (s *set) Close() error {
+	return s.mcpClient.Close()
+}
+
+var _ io.Closer = (*set)(nil)
 
 func (*set) Name() string {
 	return "mcp_tool_set"
