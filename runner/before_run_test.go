@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 )
@@ -91,6 +92,7 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 					wantReply = genai.NewContentFromText("modified answer", genai.RoleModel)
 				}
 				onEventCalls, afterRunCalls := 0, 0
+				var pluginReply *session.Event
 				p, err := plugin.New(plugin.Config{
 					Name: "cache",
 					OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
@@ -125,6 +127,8 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 							modified.Content = wantReply
 							modified.Partial = tc.partial
 							modified.Actions.StateDelta = map[string]any{"reply_processed": true}
+							modified.CustomMetadata = map[string]any{"cache": true}
+							pluginReply = &modified
 							return &modified, nil
 						}
 						return nil, nil
@@ -177,6 +181,16 @@ func TestRunner_BeforeRunShortCircuit(t *testing.T) {
 					}
 					if !cmp.Equal(wantReply, gotEvent.Content) {
 						t.Error("reply mismatch")
+					}
+					wantMetadata := map[string]any{plugininternal.BeforeRunReplyKey: true}
+					if pluginReply != nil {
+						wantMetadata["cache"] = true
+						if !cmp.Equal(pluginReply.CustomMetadata, map[string]any{"cache": true}) {
+							t.Error("plugin-owned event metadata was mutated")
+						}
+					}
+					if !cmp.Equal(gotEvent.CustomMetadata, wantMetadata) {
+						t.Error("reply metadata mismatch")
 					}
 				} else if gotEvent != nil {
 					t.Error("error path yielded a content event")

@@ -16,13 +16,11 @@ package remoteagent
 
 import (
 	"context"
-	"errors"
 	"iter"
-	"maps"
+	"slices"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -48,10 +46,6 @@ func TestBeforeRunReplyPreservesRemoteSession(t *testing.T) {
 	}{
 		{name: "stateful", contextID: "remote-context"},
 		{name: "stateless"},
-		{
-			name: "converter with context metadata", contextID: "remote-context",
-			converter: convertResponse,
-		},
 		{name: "converter without metadata", converter: convertResponse},
 		{name: "after callback without metadata", replace: true},
 		{name: "cached function call", contextID: "remote-context", functionCall: true},
@@ -79,6 +73,14 @@ func TestBeforeRunReplyPreservesRemoteSession(t *testing.T) {
 				turn := 0
 				cache, err := plugin.New(plugin.Config{
 					Name: "cache",
+					OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+						if turn != 2 {
+							return nil, nil
+						}
+						out := *ev
+						out.CustomMetadata = map[string]any{"cache": true}
+						return &out, nil
+					},
 					BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
 						turn++
 						if turn == 2 {
@@ -143,62 +145,95 @@ func TestBeforeRunReplyPreservesRemoteSession(t *testing.T) {
 	}
 }
 
-func TestRemoteReplyOrigin(t *testing.T) {
-	responseKey := adka2a.ToADKMetaKey("response")
-	for _, tc := range []struct {
-		name     string
-		metadata map[string]any
-		want     map[string]any
-		failed   bool
-	}{
-		{name: "no metadata", want: map[string]any{responseKey: true}},
-		{
-			name: "existing metadata", metadata: map[string]any{"custom": true},
-			want: map[string]any{"custom": true, responseKey: true},
-		},
-		{
-			name: "existing response", metadata: map[string]any{responseKey: map[string]any{"kind": "message"}},
-			want: map[string]any{responseKey: map[string]any{"kind": "message"}},
-		},
-		{name: "local error recovery", failed: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			client := &beforeRunClient{}
-			if tc.failed {
-				client.err = errors.New("transport failed")
-			}
-			converted := session.NewEvent(t.Context(), "invocation")
-			converted.Author = "remote"
-			converted.Content = genai.NewContentFromText("reply", genai.RoleModel)
-			converted.CustomMetadata = maps.Clone(tc.metadata)
-			remote, err := NewA2A(A2AConfig{
-				Name: "remote", AgentCard: &a2a.AgentCard{},
-				ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) { return client, nil },
-				Converter: func(agent.InvocationContext, *a2a.SendMessageRequest, a2a.Event, error) (*session.Event, error) {
-					return converted, nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx := newInvocationContextWithStreamingMode(t, []*session.Event{newEventFromParts("user", genai.NewPartFromText("question"))}, agent.StreamingModeNone)
-			count := 0
-			for ev, err := range remote.Run(ctx) {
+func TestCallbackReplyKeepsHistoryBoundary(t *testing.T) {
+	for _, kind := range []string{"before agent", "plugin before agent", "before request"} {
+		for _, mode := range []agent.StreamingMode{agent.StreamingModeNone, agent.StreamingModeSSE} {
+			t.Run(kind+"/"+string(mode), func(t *testing.T) {
+				client := &beforeRunClient{contextID: "remote-context"}
+				cfg := A2AConfig{
+					Name: "remote", AgentCard: &a2a.AgentCard{},
+					ClientProvider: func(context.Context, *a2a.AgentCard) (A2AClient, error) { return client, nil },
+				}
+				denied := 0
+				refusal := genai.NewContentFromText("Request withheld.", genai.RoleModel)
+				guard := func(ctx agent.Context) (*genai.Content, error) {
+					if slices.ContainsFunc(ctx.UserContent().Parts, func(p *genai.Part) bool { return p.Text == "blocked input" }) {
+						denied++
+						return refusal, nil
+					}
+					return nil, nil
+				}
+				var plugins []*plugin.Plugin
+				switch kind {
+				case "before agent":
+					cfg.BeforeAgentCallbacks = []agent.BeforeAgentCallback{guard}
+				case "plugin before agent":
+					p, err := plugin.New(plugin.Config{Name: "guard", BeforeAgentCallback: guard})
+					if err != nil {
+						t.Fatal(err)
+					}
+					plugins = []*plugin.Plugin{p}
+				case "before request":
+					cfg.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
+						func(ctx agent.Context, req *a2a.SendMessageRequest) (*session.Event, error) {
+							if slices.ContainsFunc(req.Message.Parts, func(p *a2a.Part) bool { return p.Text() == "blocked input" }) {
+								denied++
+								ev := session.NewEvent(ctx, "refusal")
+								ev.Author = "remote"
+								ev.Content = refusal
+								return ev, nil
+							}
+							return nil, nil
+						},
+					}
+				}
+				remote, err := NewA2A(cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
-				count++
-				if !cmp.Equal(ev.CustomMetadata, tc.want) {
-					t.Error("remote response metadata mismatch")
+				r, err := runner.New(runner.Config{
+					AppName: "test", Agent: remote, SessionService: session.InMemoryService(), AutoCreateSession: true,
+					PluginConfig: runner.PluginConfig{Plugins: plugins},
+				})
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			if count != 1 {
-				t.Errorf("events = %d, want 1", count)
-			}
-			if !cmp.Equal(converted.CustomMetadata, tc.metadata) {
-				t.Error("converter-owned event metadata was mutated")
-			}
-		})
+				wantCalls := 0
+				for i, question := range []string{"first question", "blocked input", "next question", "last question"} {
+					for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText(question, genai.RoleUser), agent.RunConfig{StreamingMode: mode}) {
+						if err != nil {
+							t.Fatal(err)
+						}
+						if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+							t.Fatal("run emitted an error event")
+						}
+					}
+					if i != 1 {
+						wantCalls++
+					}
+					if client.calls != wantCalls {
+						t.Fatalf("turn %d: remote calls = %d, want %d", i, client.calls, wantCalls)
+					}
+					if i == 1 {
+						continue
+					}
+					msg := client.lastMessage
+					if len(msg.Parts) != 1 || msg.Parts[0].Text() != question {
+						t.Errorf("turn %d: callback boundary replayed earlier content", i)
+					}
+					wantContext := ""
+					if i == 3 {
+						wantContext = client.contextID
+					}
+					if msg.ContextID != wantContext {
+						t.Errorf("turn %d: context ID did not follow the latest history boundary", i)
+					}
+				}
+				if denied != 1 {
+					t.Errorf("denied turns = %d, want 1", denied)
+				}
+			})
+		}
 	}
 }
 
@@ -207,15 +242,11 @@ type beforeRunClient struct {
 	contextID   string
 	calls       int
 	lastMessage *a2a.Message
-	err         error
 }
 
 func (c *beforeRunClient) SendMessage(_ context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
 	c.calls++
 	c.lastMessage = req.Message
-	if c.err != nil {
-		return nil, c.err
-	}
 	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("remote reply"))
 	msg.ContextID = c.contextID
 	return msg, nil

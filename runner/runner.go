@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"time"
 
 	"google.golang.org/genai"
@@ -795,7 +796,14 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	if err != nil {
 		return nil, err
 	}
+	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
+	// changing plugin-owned metadata.
 	event = fromPlugin(event, modifiedEvent, record)
+	reply := *event
+	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
+	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
+	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
+	event = &reply
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)

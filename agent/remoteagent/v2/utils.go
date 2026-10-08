@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -39,7 +40,7 @@ type userFunctionCall struct {
 // with user-provided data. The struct contains both call and response events.
 // agentName is the remote peer's name; when non-empty, only function calls authored by that peer match
 // (aligned with adk-python's event.author == self.name check). Calls produced
-// by local callbacks do not resume the named peer.
+// by BeforeRun callbacks do not resume the named peer.
 // scope is the invocation IsolationScope so a sibling-scope function call cannot
 // leak its TaskID or contextID into this invocation.
 func getUserFunctionCallAt(events session.Events, index int, agentName, scope string) *userFunctionCall {
@@ -59,7 +60,7 @@ func getUserFunctionCallAt(events session.Events, index int, agentName, scope st
 		if request.IsolationScope != scope || !isFunctionCallEvent(request, fnCallID, agentName) {
 			continue
 		}
-		if agentName != "" && !isRemoteResponse(request) {
+		if agentName != "" && request.CustomMetadata[plugininternal.BeforeRunReplyKey] == true {
 			return nil
 		}
 		result := &userFunctionCall{response: candidate}
@@ -106,7 +107,7 @@ func collectRemoteFunctionCallIDs(events session.Events, agentName, scope string
 		if agentName != "" && event.Author != agentName {
 			continue
 		}
-		remoteCall := agentName == "" || isRemoteResponse(event)
+		remoteCall := agentName == "" || event.CustomMetadata[plugininternal.BeforeRunReplyKey] != true
 		for _, part := range event.Content.Parts {
 			if part == nil {
 				continue
@@ -162,7 +163,7 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 
 // toMissingRemoteSessionParts returns content parts for all events we think are not present in the remote session
 // and a2a contextID if it was found in a remote agent event metadata.
-// We iterate session events backward until all events are processed or a response from this remote agent is found.
+// We iterate backward until an event authored by this agent, other than a BeforeRun reply, is found.
 // Parts from all events we processed are returned as a single list.
 // The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
 // any of the previous one. In this case a new contextID will be generated on the remote server.
@@ -180,7 +181,9 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		if event.IsolationScope != ctx.IsolationScope() {
 			continue
 		}
-		if event.Author == ctx.Agent().Name() && isRemoteResponse(event) {
+		// Unlike Python's broader origin check, only BeforeRun replies are skipped:
+		// other Go callbacks must retain their existing history boundaries.
+		if event.Author == ctx.Agent().Name() && event.CustomMetadata[plugininternal.BeforeRunReplyKey] != true {
 			lastRemoteResponseIndex = i
 			_, contextID = adka2a.GetA2ATaskInfo(event)
 			break
@@ -198,10 +201,10 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		if event.IsolationScope != ctx.IsolationScope() {
 			continue
 		}
-		// Local callback replies, like other agents' replies, are context the
+		// BeforeRun replies, like other agents' replies, are context the
 		// peer has not seen. Render their calls as text rather than peer calls.
 		// Keep anonymous wrappers' existing attribution behavior.
-		if ctx.Agent().Name() != "" && event.Author != "user" && (event.Author != ctx.Agent().Name() || !isRemoteResponse(event)) {
+		if ctx.Agent().Name() != "" && event.Author != "user" && (event.Author != ctx.Agent().Name() || event.CustomMetadata[plugininternal.BeforeRunReplyKey] == true) {
 			event = presentAsUserMessage(ctx, event)
 		}
 		if event.Content == nil || len(event.Content.Parts) == 0 {
@@ -215,15 +218,6 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		result = append(result, parts...)
 	}
 	return result, contextID
-}
-
-// Local callbacks can use the peer's author without reaching the peer. As in
-// adk-python's _is_relayed_peer_event, metadata identifies remote responses.
-// Go also accepts task/context IDs for converters and stored events that omit
-// the raw response.
-func isRemoteResponse(event *session.Event) bool {
-	taskID, contextID := adka2a.GetA2ATaskInfo(event)
-	return event.CustomMetadata[adka2a.ToADKMetaKey("response")] != nil || taskID != "" || contextID != ""
 }
 
 // hasIsolationScopeHistory reports whether the session already holds at
