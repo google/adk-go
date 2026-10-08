@@ -1,0 +1,69 @@
+{
+  "root_span": {
+    "name": "invoke_agent some_root_agent",
+    "attributes": {
+      "gcp.vertex.agent.invocation_id": "PRESENT",
+      "gen_ai.agent.description": "A sample root agent.",
+      "gen_ai.agent.name": "some_root_agent",
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_agent"
+    },
+    "status": "UNSET",
+    "children": [
+      {
+        "name": "generate_content mock",
+        "attributes": {
+          "gcp.vertex.agent.event_id": "PRESENT",
+          "gcp.vertex.agent.invocation_id": "PRESENT",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ]
+        },
+        "status": "UNSET",
+        "children": [],
+        "logs": [
+          {
+            "event_name": "gen_ai.system.message",
+            "body": {
+              "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_root_agent\". The description about you is \"A sample root agent.\"."
+            },
+            "attributes": {}
+          },
+          {
+            "event_name": "gen_ai.user.message",
+            "body": {
+              "content": {
+                "parts": [
+                  {
+                    "text": "hello"
+                  }
+                ],
+                "role": "user"
+              }
+            },
+            "attributes": {}
+          },
+          {
+            "event_name": "gen_ai.choice",
+            "body": {
+              "content": {
+                "parts": [
+                  {
+                    "text": "text response"
+                  }
+                ],
+                "role": "model"
+              },
+              "finish_reason": "STOP",
+              "index": 0
+            },
+            "attributes": {}
+          }
+        ]
+      }
+    ],
+    "logs": []
+  }
+}

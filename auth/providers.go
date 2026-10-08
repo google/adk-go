@@ -70,7 +70,9 @@ type ConsentRequiredError struct {
 	// Nonce is an opaque value echoed back to correlate the consent response.
 	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
-	// Key is the credential-store key to resume the flow under.
+	// Key is an opaque, caller-defined identifier for the credential this flow
+	// will produce, for a consumer that has to resume the flow later. It is not a
+	// [CredentialKey], which identifies a [CredentialStore] entry.
 	Key string
 }
 
@@ -165,8 +167,12 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
-			// Stricter than adk-python (scopes optional there): an explicit-key
-			// access token is scope-bound, so no scopes = unusable — fail fast.
+			// An explicit-key access token is scope-bound, so no scopes = unusable.
+			// This runs on the first Credential call, not in ServiceAccount, which
+			// returns no error and so cannot fail at construction. adk-python
+			// rejects the same case at the same point, when it first exchanges the
+			// key (service_account_exchanger.py), and defaults scopes only for
+			// default credentials, as adcTokenSource does below.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}
