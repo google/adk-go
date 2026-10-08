@@ -109,6 +109,30 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 		},
 		{
+			name: "splits newline independently",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-newline-only", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("prefix\nzebra", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "zebra"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("prefix\nzebra", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "splits tab independently",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-tab-only", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("prefix\twalrus", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "walrus"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("prefix\twalrus", genai.RoleModel)},
+			}},
+		},
+		{
 			name: "splits internal punctuation",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess-internal-punctuation", []*session.Event{
