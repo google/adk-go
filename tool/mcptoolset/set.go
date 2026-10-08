@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -371,7 +370,6 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		// The framework serves a call to a reserved name itself, so the tool is
 		// unreachable. Dropping it keeps the rest of the toolset usable.
 		if llminternal.IsReservedToolName(mcpTool.Name) {
-			log.Printf("adk: mcptoolset: MCP server advertises tool %q, a name reserved by the framework; dropping it", mcpTool.Name)
 			continue
 		}
 
