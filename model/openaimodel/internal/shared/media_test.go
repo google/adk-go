@@ -286,3 +286,37 @@ func TestClassifyMedia_ReadsTheFieldsItNames(t *testing.T) {
 		t.Errorf("genai.Part no longer has the media fields %v this classifier reads", want)
 	}
 }
+
+// TestDataURLTrimsTheDeclaredMIMEType is the asymmetry between reading a MIME
+// type and writing one: mediaKindOf tolerates whitespace so that " image/png"
+// is still classified as an image, and a data URL does not, because the space
+// lands inside the URL and stops it being one.
+//
+// Found in review of the endpoint that first sent these: while media was
+// refused, nothing rendered the type and the asymmetry cost nothing.
+func TestDataURLTrimsTheDeclaredMIMEType(t *testing.T) {
+	tests := []struct {
+		name string
+		mime string
+		want string
+	}{
+		{"leading space", " image/png", "data:image/png;base64,AQ=="},
+		{"trailing space", "image/png ", "data:image/png;base64,AQ=="},
+		{"surrounding whitespace", "\timage/png\n", "data:image/png;base64,AQ=="},
+		// Case and parameters are the part's to declare: media types are
+		// case-insensitive, and a parameter is meaningful on the wire.
+		{"case is left alone", "IMAGE/PNG", "data:IMAGE/PNG;base64,AQ=="},
+		{"parameters are kept", "image/png;charset=utf-8", "data:image/png;charset=utf-8;base64,AQ=="},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			media, err := ClassifyMedia(&genai.Part{InlineData: &genai.Blob{MIMEType: tt.mime, Data: []byte{1}}})
+			if err != nil {
+				t.Fatalf("ClassifyMedia() err = %v", err)
+			}
+			if got := media[0].DataURL(); got != tt.want {
+				t.Errorf("DataURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

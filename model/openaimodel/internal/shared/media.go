@@ -89,12 +89,18 @@ type Media struct {
 // of a location. It is built here rather than in each endpoint so that the
 // encoding has one definition and one test.
 //
+// The MIME type is trimmed, because surrounding whitespace is tolerated when
+// reading the kind off a type but not when writing one into a URL: " image/png"
+// classifies as an image and then renders "data: image/png;base64,…", which is
+// not a data URL at all. Case and any parameters are left as the part declared
+// them — media types are case-insensitive, and a parameter belongs on the wire.
+//
 // It returns "" for media that is not inline, there being no bytes to render.
 func (m Media) DataURL() string {
 	if m.Source != MediaSourceData {
 		return ""
 	}
-	return fmt.Sprintf("data:%s;base64,%s", m.MIMEType, base64.StdEncoding.EncodeToString(m.Data))
+	return fmt.Sprintf("data:%s;base64,%s", strings.TrimSpace(m.MIMEType), base64.StdEncoding.EncodeToString(m.Data))
 }
 
 // ClassifyMedia reduces a part's media fields to [Media] values, in the order

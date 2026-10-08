@@ -100,13 +100,13 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 	var (
 		items            oairesponses.ResponseInputParam
 		tracker          shared.CallTracker
-		textParts        []string
+		buffered         []bufferedContent
 		droppedReasoning bool
 		curRole          genai.Role = genai.RoleUser
-		// flushText is a helper function that takes any accumulated text parts
-		// and converts them into a message, then appends it to our items.
+		// flushText is a helper function that takes any accumulated content
+		// and converts it into a message, then appends it to our items.
 		flushText = func() error {
-			if len(textParts) == 0 {
+			if len(buffered) == 0 {
 				return nil
 			}
 			msgRole, err := normalizeRole(curRole)
@@ -116,15 +116,23 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// The Responses API rejects "input_text" for the assistant role, so
 			// a replayed assistant turn goes out as an output message instead.
 			if msgRole == oairesponses.EasyInputMessageRoleAssistant {
-				if msg := newOutputMessage(textParts); msg != nil {
+				msg, err := newOutputMessage(buffered)
+				if err != nil {
+					return err
+				}
+				if msg != nil {
 					items = append(items, oairesponses.ResponseInputItemUnionParam{OfOutputMessage: msg})
 				}
 			} else {
-				if msg := newMessage(msgRole, textParts); msg != nil {
+				msg, err := newMessage(msgRole, buffered)
+				if err != nil {
+					return err
+				}
+				if msg != nil {
 					items = append(items, oairesponses.ResponseInputItemUnionParam{OfMessage: msg})
 				}
 			}
-			textParts = textParts[:0]
+			buffered = buffered[:0]
 			return nil
 		}
 	)
@@ -141,8 +149,17 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// Reported before anything is emitted, so that a field this
 			// package cannot send is named even when text or a call rides on
 			// the same part and would otherwise have carried it out unnoticed.
-			if field := shared.UnsupportedPayload(part); field != "" {
+			// Media is excluded from the report because this endpoint emits it
+			// below; Chat Completions still reports it until it can.
+			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
+			}
+			// Classified before any of it is emitted, for the same reason the
+			// check above runs first: media this endpoint cannot label must
+			// fail the request rather than leave with the text beside it.
+			media, err := shared.ClassifyMedia(part)
+			if err != nil {
+				return nil, false, err
 			}
 			// Text is read independently of a call or a response because one
 			// part can carry both. A call and a response on the same part are
@@ -150,7 +167,7 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			sendText := part.Text != "" && !part.Thought
 			switch {
 			case sendText:
-				textParts = append(textParts, part.Text)
+				buffered = append(buffered, bufferedContent{text: part.Text})
 			case part.Text != "" || shared.ReplayedReasoning(part):
 				// Dropping reasoning must not hide a bad role, so the check
 				// still runs. The drop counts toward the emptied-request
@@ -162,6 +179,12 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 				if _, err := normalizeRole(curRole); err != nil {
 					return nil, false, err
 				}
+			}
+			// After the part's own text, so that "describe this:" keeps its
+			// place ahead of the image it introduces, and before the call
+			// switch below, whose flush has to carry the media out with it.
+			for _, m := range media {
+				buffered = append(buffered, bufferedContent{media: &m})
 			}
 			switch {
 			case part.FunctionCall != nil:
@@ -184,7 +207,7 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 					return nil, false, err
 				}
 				items = append(items, oairesponses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case !sendText && !shared.ReplayedReasoning(part):
+			case !sendText && len(media) == 0 && !shared.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
 				// before, so a caller matching on that still matches here.
@@ -200,18 +223,45 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 	return items, droppedReasoning, nil
 }
 
+// bufferedContent is one piece of a message, held in the order it arrived:
+// either text or a classified media value, never both. Text and media
+// interleave inside a single message, so they are buffered together rather
+// than text being collected on its own and media appended after it.
+type bufferedContent struct {
+	text  string
+	media *shared.Media
+}
+
+// imageInputDetail is the detail level every image input carries.
+//
+// ResponseInputImageParam tags Detail as api:"required" and omitzero at the
+// same time, so an unset value does not fail to compile — it vanishes from the
+// request and the server decides what was meant. "auto" is therefore sent
+// explicitly rather than left to a default. A genai.Part carries no notion of
+// detail, and giving a caller a way to choose belongs to genai.Content rather
+// than to this converter.
+const imageInputDetail = oairesponses.ResponseInputImageDetailAuto
+
 // newMessage builds an easy input message for an already-normalized role.
-func newMessage(msgRole oairesponses.EasyInputMessageRole, texts []string) *oairesponses.EasyInputMessageParam {
-	if len(texts) == 0 {
-		return nil
+func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedContent) (*oairesponses.EasyInputMessageParam, error) {
+	if len(buffered) == 0 {
+		return nil, nil
 	}
-	contentList := make(oairesponses.ResponseInputMessageContentListParam, 0, len(texts))
-	for _, txt := range texts {
-		if strings.TrimSpace(txt) == "" {
+	contentList := make(oairesponses.ResponseInputMessageContentListParam, 0, len(buffered))
+	for _, b := range buffered {
+		if b.media != nil {
+			content, err := newMediaContent(*b.media)
+			if err != nil {
+				return nil, err
+			}
+			contentList = append(contentList, content)
+			continue
+		}
+		if strings.TrimSpace(b.text) == "" {
 			continue
 		}
 		textParam := oairesponses.ResponseInputTextParam{
-			Text: txt,
+			Text: b.text,
 			Type: constant.InputText("input_text"),
 		}
 		contentList = append(contentList, oairesponses.ResponseInputContentUnionParam{
@@ -219,7 +269,7 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, texts []string) *oair
 		})
 	}
 	if len(contentList) == 0 {
-		return nil
+		return nil, nil
 	}
 	return &oairesponses.EasyInputMessageParam{
 		Role: msgRole,
@@ -227,35 +277,92 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, texts []string) *oair
 		Content: oairesponses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
+	}, nil
+}
+
+// newMediaContent puts one classified media value in the content field the
+// Responses API has for it.
+//
+// Kind decides the field — input_image or input_file — and source decides
+// which of that field's three ways of naming the bytes is used. The two vary
+// independently: an image uploaded to the provider stays a file id rather than
+// becoming a location for the server to fetch.
+func newMediaContent(m shared.Media) (oairesponses.ResponseInputContentUnionParam, error) {
+	switch m.Kind {
+	case shared.MediaKindImage:
+		image := oairesponses.ResponseInputImageParam{Detail: imageInputDetail}
+		switch m.Source {
+		case shared.MediaSourceData:
+			image.ImageURL = param.NewOpt(m.DataURL())
+		case shared.MediaSourceFileID:
+			image.FileID = param.NewOpt(m.FileID)
+		case shared.MediaSourceURL:
+			image.ImageURL = param.NewOpt(m.URL)
+		default:
+			return oairesponses.ResponseInputContentUnionParam{}, fmt.Errorf("openai: unsupported media source: %s", m.Source)
+		}
+		return oairesponses.ResponseInputContentUnionParam{OfInputImage: &image}, nil
+	case shared.MediaKindFile:
+		file := oairesponses.ResponseInputFileParam{}
+		switch m.Source {
+		case shared.MediaSourceData:
+			file.FileData = param.NewOpt(m.DataURL())
+		case shared.MediaSourceFileID:
+			file.FileID = param.NewOpt(m.FileID)
+		case shared.MediaSourceURL:
+			file.FileURL = param.NewOpt(m.URL)
+		default:
+			return oairesponses.ResponseInputContentUnionParam{}, fmt.Errorf("openai: unsupported media source: %s", m.Source)
+		}
+		// filename is optional on this endpoint, so an unnamed file is sent
+		// without one rather than under a name nobody chose. Should a derived
+		// name be ruled endpoint-neutral, it arrives in Media.Filename and is
+		// carried here unchanged.
+		if m.Filename != "" {
+			file.Filename = param.NewOpt(m.Filename)
+		}
+		return oairesponses.ResponseInputContentUnionParam{OfInputFile: &file}, nil
+	default:
+		// Audio and video are labelled by the classifier and refused here:
+		// the Responses input has no field for either, and naming the type
+		// the part declared says more than naming the field it arrived in.
+		return oairesponses.ResponseInputContentUnionParam{}, fmt.Errorf("%w: %s", shared.ErrUnsupportedMIMEType, m.MIMEType)
 	}
 }
 
 // newOutputMessage builds an assistant output message whose content uses the
 // "output_text" type, as required when replaying a prior assistant turn to the
 // OpenAI Responses API.
-func newOutputMessage(texts []string) *oairesponses.ResponseOutputMessageParam {
-	if len(texts) == 0 {
-		return nil
+func newOutputMessage(buffered []bufferedContent) (*oairesponses.ResponseOutputMessageParam, error) {
+	if len(buffered) == 0 {
+		return nil, nil
 	}
-	contentList := make([]oairesponses.ResponseOutputMessageContentUnionParam, 0, len(texts))
-	for _, txt := range texts {
-		if strings.TrimSpace(txt) == "" {
+	contentList := make([]oairesponses.ResponseOutputMessageContentUnionParam, 0, len(buffered))
+	for _, b := range buffered {
+		if b.media != nil {
+			// An output message's content is output_text or a refusal, so
+			// there is nowhere to put an image a prior assistant turn
+			// replayed. Refused rather than dropped, the caller being the
+			// only one who can decide what to send instead.
+			return nil, fmt.Errorf("%w: %s", shared.ErrMediaOnAssistantTurn, b.media.MIMEType)
+		}
+		if strings.TrimSpace(b.text) == "" {
 			continue
 		}
 		contentList = append(contentList, oairesponses.ResponseOutputMessageContentUnionParam{
 			OfOutputText: &oairesponses.ResponseOutputTextParam{
-				Text: txt,
+				Text: b.text,
 				Type: constant.OutputText("output_text"),
 			},
 		})
 	}
 	if len(contentList) == 0 {
-		return nil
+		return nil, nil
 	}
 	return &oairesponses.ResponseOutputMessageParam{
 		Content: contentList,
 		Status:  oairesponses.ResponseOutputMessageStatusCompleted,
-	}
+	}, nil
 }
 
 func normalizeRole(role genai.Role) (oairesponses.EasyInputMessageRole, error) {
