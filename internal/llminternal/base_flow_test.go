@@ -946,9 +946,8 @@ func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LL
 // None of these store a runconfig in the Go context, as when agent.Run() is
 // invoked directly and the runner is bypassed, so runconfig.FromContext would
 // return nil; the streaming mode is read from the invocation context instead.
-// The nil RunConfig case is not hypothetical: RunLive builds its invocation
-// context without one, so that branch is reachable in production and has to
-// resolve to false rather than panic.
+// An invocation context built outside the runner need not carry a RunConfig at
+// all, and that has to resolve to false rather than panic.
 func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -966,6 +965,11 @@ func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
 			want:      false,
 		},
 		{
+			name:      "unset streaming mode does not stream",
+			runConfig: &agent.RunConfig{},
+			want:      false,
+		},
+		{
 			name:      "nil run config does not stream",
 			runConfig: nil,
 			want:      false,
@@ -974,7 +978,16 @@ func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := &recordStreamModel{}
+			var calls int
+			var gotStream bool
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+					calls++
+					gotStream = stream
+					return func(func(*model.LLMResponse, error) bool) {}
+				},
+			}
 			f := &Flow{Model: m}
 
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
@@ -988,11 +1001,14 @@ func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
 				}
 			}
 
-			if m.stream != tc.want {
-				t.Errorf("GenerateContent received stream=%v, want %v", m.stream, tc.want)
+			if calls != 1 {
+				t.Fatalf("GenerateContent called %d times, want 1", calls)
+			}
+			if gotStream != tc.want {
+				t.Errorf("GenerateContent received stream=%v, want %v", gotStream, tc.want)
 			}
 		})
-  } 
+	}
 }
 
 func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
