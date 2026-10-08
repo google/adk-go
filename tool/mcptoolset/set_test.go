@@ -1472,8 +1472,6 @@ func TestCallToolMeta(t *testing.T) {
 			},
 		},
 		{
-			// Metadata does not turn a result the toolset cannot render into a
-			// success: a non-text result fails with or without _meta.
 			name: "non-text result with server meta",
 			handler: func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return &mcp.CallToolResult{
@@ -1481,7 +1479,10 @@ func TestCallToolMeta(t *testing.T) {
 					Content: []mcp.Content{&mcp.ImageContent{Data: []byte{1, 2, 3}, MIMEType: "image/png"}},
 				}, nil
 			},
-			wantErr: true,
+			want: map[string]any{
+				"output": `[MCP image: mimeType="image/png", size=3 bytes]`,
+				"_meta":  wantChallengeMeta,
+			},
 		},
 		{
 			name: "non-text result without server meta",
@@ -1490,7 +1491,7 @@ func TestCallToolMeta(t *testing.T) {
 					Content: []mcp.Content{&mcp.ImageContent{Data: []byte{1, 2, 3}, MIMEType: "image/png"}},
 				}, nil
 			},
-			wantErr: true,
+			want: map[string]any{"output": `[MCP image: mimeType="image/png", size=3 bytes]`},
 		},
 		{
 			// The server stamps io.modelcontextprotocol/serverInfo on every
