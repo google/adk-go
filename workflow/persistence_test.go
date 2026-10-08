@@ -332,7 +332,7 @@ func TestScheduler_NoOutputActivationClearsPreviousResult(t *testing.T) {
 			sawCompletion = true
 		}
 		return true
-	})
+	}, false)
 	s.wg.Wait()
 	if ns := s.state.Nodes["silent"]; !sawCompletion || ns.Status != NodeCompleted || ns.Output != nil {
 		t.Fatal("silent activation retained a previous activation's result")

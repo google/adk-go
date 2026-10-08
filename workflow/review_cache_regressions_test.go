@@ -54,6 +54,12 @@ func TestSubScheduler_RehydrateCache_AncestorOutcomes(t *testing.T) {
 	legacy.ErrorCode = workflowNodeCancelledCode
 	emptyPaths := marker("root@1/c@1", "cancelled")
 	emptyPaths.CustomMetadata[workflowFailedChildPathsKey] = []any{}
+	emptyFailure := marker(parent, "failed")
+	emptyFailure.CustomMetadata[workflowFailedChildPathsKey] = []any{}
+	nullPaths := marker(parent, "failed")
+	nullPaths.CustomMetadata[workflowFailedChildPathsKey] = []any(nil)
+	wrongType := marker(parent, "failed")
+	wrongType.CustomMetadata[workflowFailedChildPathsKey] = "invalid"
 	invalidPaths := marker("root@1/c@1", "cancelled")
 	invalidPaths.CustomMetadata[workflowFailedChildPathsKey] = []any{"", false}
 	parentOutput := output(parent)
@@ -71,7 +77,10 @@ func TestSubScheduler_RehydrateCache_AncestorOutcomes(t *testing.T) {
 		{name: "recorded_ancestor_path", events: sliceEvents{output(leaf), marker("root@1", "failed", "root@1/c@1")}, want: map[string]any{}},
 		{name: "direct_parent_failure", events: sliceEvents{output(leaf), marker(parent, "failed")}, want: map[string]any{}},
 		{name: "ancestor_unknown_cancel", events: sliceEvents{output(leaf), marker("root@1/c@1", "cancelled")}, want: map[string]any{}},
-		{name: "ancestor_empty_paths", events: sliceEvents{output(leaf), emptyPaths}, want: map[string]any{}},
+		{name: "ancestor_empty_paths", events: sliceEvents{output(leaf), emptyPaths}, want: map[string]any{leaf: "result"}},
+		{name: "direct_parent_empty_failure", events: sliceEvents{output(leaf), emptyFailure}, want: map[string]any{leaf: "result"}},
+		{name: "direct_parent_null_paths", events: sliceEvents{output(leaf), nullPaths}, want: map[string]any{}},
+		{name: "direct_parent_invalid_type", events: sliceEvents{output(leaf), wrongType}, want: map[string]any{}},
 		{name: "ancestor_invalid_paths", events: sliceEvents{output(leaf), invalidPaths}, want: map[string]any{}},
 		{name: "legacy_ancestor_cancel", events: sliceEvents{output(leaf), legacy}, want: map[string]any{}},
 		{name: "failed_descendant_subtree", events: sliceEvents{output(parent + "/branch@1/leaf@1"), output(parent + "/stable@1"), marker("root@1/c@1", "failed", parent+"/branch@1")}, want: map[string]any{parent + "/stable@1": "result"}},
@@ -101,11 +110,13 @@ func TestSubScheduler_RehydrateCache_AncestorOutcomes(t *testing.T) {
 			if err := json.Unmarshal(data, &persisted); err != nil {
 				t.Fatal("history deserialization failed")
 			}
-			ctx := newMockCtx(t)
-			ctx.sess = &eventsSession{events: persisted}
-			sub := newDynamicSubScheduler(agent.Promote(ctx), parent, noopEmit).(*dynamicSubScheduler)
-			if !reflect.DeepEqual(sub.resultByPath, tc.want) {
-				t.Fatal("cache did not respect outcome path ancestry")
+			for _, events := range []sliceEvents{tc.events, persisted} {
+				ctx := newMockCtx(t)
+				ctx.sess = &eventsSession{events: events}
+				sub := newDynamicSubScheduler(agent.Promote(ctx), parent, noopEmit).(*dynamicSubScheduler)
+				if !reflect.DeepEqual(sub.resultByPath, tc.want) {
+					t.Fatal("cache did not respect outcome path ancestry")
+				}
 			}
 		})
 	}
@@ -157,7 +168,7 @@ func TestSubScheduler_FailureInventory(t *testing.T) {
 	if !set["parent/failed@stable"] || !set["parent/inflight@1"] {
 		t.Fatal("inventory did not cover both failed and in-flight children")
 	}
-	sub.finishRun("parent/inflight@1", runResult{out: "ok"})
+	sub.finishRun("parent/inflight@1", runResult{out: "ok"}, false)
 }
 
 func TestWorkflowNode_DelegatedControlOwnership(t *testing.T) {
@@ -276,7 +287,7 @@ func TestSubScheduler_WaitForOutputHasNoFailureMarker(t *testing.T) {
 		}
 	}
 	var pathsError *failedChildPathsError
-	if errors.As(sub.withChildFailures(errors.New("scripted failure")), &pathsError) {
+	if !errors.As(sub.withChildFailures(errors.New("scripted failure")), &pathsError) || pathsError.paths == nil || len(pathsError.paths) != 0 {
 		t.Fatal("waiting for output contaminated the failure inventory")
 	}
 }

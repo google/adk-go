@@ -97,7 +97,7 @@ func (w *Workflow) Resume(
 		defer func() {
 			s.cancelAll()
 			if len(s.runsByName) > 0 {
-				s.run(func(*session.Event, error) bool { return false })
+				s.run(nil, true)
 			}
 			s.wg.Wait()
 		}()
@@ -264,7 +264,7 @@ func (w *Workflow) Resume(
 			}
 		}
 
-		s.run(yield)
+		s.run(yield, false)
 	}
 }
 

@@ -227,3 +227,105 @@ func TestRunner_WorkflowHITL_NestedCachedDelegationAcrossResume(t *testing.T) {
 		t.Fatal("join not emitted")
 	}
 }
+
+func TestRunner_WorkflowRetryPreservesCompletedChild(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nested       bool
+		childFailure bool
+	}{
+		{name: "direct"},
+		{name: "nested", nested: true},
+		{name: "nested_body_failure", nested: true, childFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var chargeCalls, parentCalls, childCalls atomic.Int32
+			failure := errors.New("scripted body failure")
+			charge := workflow.NewFunctionNode("charge", func(agent.Context, any) (string, error) {
+				chargeCalls.Add(1)
+				return "charged", nil
+			}, workflow.NodeConfig{})
+			var child workflow.Node = charge
+			if tc.nested {
+				child = workflow.NewDynamicNode("mid", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
+					out, err := workflow.RunNode[string](ctx, charge, in, workflow.WithRunID("charge"))
+					if err != nil {
+						return "", err
+					}
+					if childCalls.Add(1) == 1 && tc.childFailure {
+						return "", failure
+					}
+					return out, nil
+				}, workflow.NodeConfig{})
+			}
+			p := workflow.NewDynamicNode("p", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
+				parentCalls.Add(1)
+				out, err := workflow.RunNode[string](ctx, child, in, workflow.WithRunID("charge"))
+				if err != nil {
+					return "", err
+				}
+				if parentCalls.Load() == 1 && !tc.childFailure {
+					return "", failure
+				}
+				return out, nil
+			}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
+			r := newJoinResumeRunner(t, []workflow.Edge{{From: workflow.Start, To: p}})
+			var completed bool
+			for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatal("runner did not recover the parent failure")
+				}
+				if ev.Output == "charged" && ev.NodeInfo != nil && ev.NodeInfo.Path == "root@1/p@1" {
+					completed = true
+				}
+			}
+			if !completed || parentCalls.Load() != 2 || chargeCalls.Load() != 1 {
+				t.Fatal("parent retry repeated a completed child or lost its result")
+			}
+		})
+	}
+}
+
+func TestRunner_WorkflowRetryReplacesRecoveredChildFailures(t *testing.T) {
+	var leafCalls, midCalls, parentCalls atomic.Int32
+	leafFailure := errors.New("scripted leaf failure")
+	bodyFailure := errors.New("scripted middle body failure")
+	leaf := workflow.NewFunctionNode("leaf", func(agent.Context, any) (string, error) {
+		if leafCalls.Add(1) == 1 {
+			return "", leafFailure
+		}
+		return "charged", nil
+	}, workflow.NodeConfig{})
+	mid := workflow.NewDynamicNode("mid", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
+		call := midCalls.Add(1)
+		out, err := workflow.RunNode[string](ctx, leaf, in, workflow.WithRunID("leaf"))
+		if err != nil {
+			return "", err
+		}
+		if call == 2 {
+			return "", bodyFailure
+		}
+		return out, nil
+	}, workflow.NodeConfig{})
+	p := workflow.NewDynamicNode("p", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
+		parentCalls.Add(1)
+		out, err := workflow.RunNode[string](ctx, mid, in, workflow.WithRunID("middle"))
+		if errors.Is(err, leafFailure) {
+			out, err = workflow.RunNode[string](ctx, mid, in, workflow.WithRunID("middle"))
+		}
+		return out, err
+	}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
+	r := newJoinResumeRunner(t, []workflow.Edge{{From: workflow.Start, To: p}})
+	var completed bool
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal("runner did not recover the nested failures")
+		}
+		if ev.Output == "charged" && ev.NodeInfo != nil && ev.NodeInfo.Path == "root@1/p@1" {
+			completed = true
+		}
+	}
+	if !completed || leafCalls.Load() != 2 || midCalls.Load() != 3 || parentCalls.Load() != 2 {
+		t.Fatal("new child inventory retained a recovered leaf's stale failure")
+	}
+}

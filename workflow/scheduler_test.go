@@ -415,7 +415,7 @@ func TestScheduler_ExternalCancellationMarksNodeCancelled(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				s.run(func(*session.Event, error) bool { return true })
+				s.run(func(*session.Event, error) bool { return true }, false)
 				s.wg.Wait()
 			}()
 

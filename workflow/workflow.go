@@ -332,7 +332,7 @@ func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Even
 		startState.Input = input
 		s.scheduleNode(Start, input, "", ctx.Branch())
 
-		s.run(yield)
+		s.run(yield, false)
 
 		// All goroutines have returned; ensure no leak.
 		s.wg.Wait()

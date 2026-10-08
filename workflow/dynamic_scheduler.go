@@ -220,6 +220,9 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		// a child from emitting its own marker through makeEmit.
 		knownPaths := false
 		if paths, ok := ev.CustomMetadata[workflowFailedChildPathsKey].([]any); ok {
+			// An explicit empty array records a completed inventory with no
+			// uncertain children. Absent/null metadata still means unknown.
+			knownPaths = paths != nil && len(paths) == 0
 			for _, value := range paths {
 				if path, ok := value.(string); ok && path != "" {
 					knownPaths = true
@@ -358,6 +361,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				Cause: fmt.Errorf("%w: child did not complete", ErrNodeFailed),
 			}}
 		}
+		failureRecorded := false
 		if res.err != nil && !errors.Is(res.err, ErrNodeInterrupted) {
 			// The parent's failure record cannot invalidate this child's
 			// path-keyed cache on a later re-entry. Record the child failure
@@ -365,9 +369,10 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			ev := session.NewEvent(childCtx, childCtx.InvocationID())
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
 			ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
-			_ = s.emitUp(ev)
+			recordFailedChildPaths(ev.CustomMetadata, res.err)
+			failureRecorded = s.emitUp(ev) == nil
 		}
-		s.finishRun(childPath, res)
+		s.finishRun(childPath, res, failureRecorded)
 	}()
 
 	var (
@@ -574,15 +579,35 @@ func (s *dynamicSubScheduler) awaitOrLead(childPath string) (runResult, bool) {
 // in-flight slot. A successful outcome is also cached so a later call
 // replays it; failures and interrupts are not, matching the pre-existing
 // replay semantics.
-func (s *dynamicSubScheduler) finishRun(childPath string, res runResult) {
+func (s *dynamicSubScheduler) finishRun(childPath string, res runResult, failureRecorded bool) {
 	s.mu.Lock()
 	leader := s.inflightByPath[childPath]
 	delete(s.inflightByPath, childPath)
+	clearFailures := func() {
+		for path := range s.failedPaths {
+			if path == childPath || strings.HasPrefix(path, childPath+"/") {
+				delete(s.failedPaths, path)
+			}
+		}
+	}
 	if res.err == nil {
 		s.resultByPath[childPath] = res.out
-		delete(s.failedPaths, childPath)
+		clearFailures()
 	} else if !errors.Is(res.err, ErrNodeInterrupted) {
-		s.failedPaths[childPath] = struct{}{}
+		var inventory *failedChildPathsError
+		if failureRecorded && errors.As(res.err, &inventory) {
+			// The child's marker already invalidates its own result. Keep
+			// its latest inventory rather than widening it to the subtree
+			// or retaining failures recovered by a later run of the child.
+			clearFailures()
+			for _, path := range inventory.paths {
+				s.failedPaths[path] = struct{}{}
+			}
+		} else {
+			// Without a recorded child outcome, even its own partial result
+			// may remain in history. Preserve the conservative fallback.
+			s.failedPaths[childPath] = struct{}{}
+		}
 	}
 	s.mu.Unlock()
 	if leader != nil {
@@ -600,10 +625,41 @@ func (s *dynamicSubScheduler) withChildFailures(err error) error {
 	for path := range s.inflightByPath {
 		paths = append(paths, path)
 	}
-	if len(paths) == 0 {
-		return err
-	}
+	// Preserve a known empty inventory so a body-only failure does not
+	// invalidate completed children on retry, as in adk-python's runs cache.
 	return &failedChildPathsError{cause: err, paths: paths}
+}
+
+// A known inventory is authoritative, including an empty one. Adding a
+// containing NodeRunError path would discard completed nested children.
+func recordFailedChildPaths(metadata map[string]any, failure error) {
+	paths := []any{}
+	seen := map[string]bool{}
+	addPath := func(path string) {
+		if path != "" && !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	for failure != nil {
+		var inventory *failedChildPathsError
+		if errors.As(failure, &inventory) {
+			for _, path := range inventory.paths {
+				addPath(path)
+			}
+			metadata[workflowFailedChildPathsKey] = paths
+			return
+		}
+		var childError *NodeRunError
+		if !errors.As(failure, &childError) {
+			break
+		}
+		addPath(childError.ChildPath)
+		failure = childError.Cause
+	}
+	if len(paths) > 0 {
+		metadata[workflowFailedChildPathsKey] = paths
+	}
 }
 
 // claimDelegation reserves the at-most-one output delegation when

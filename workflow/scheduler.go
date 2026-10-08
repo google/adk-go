@@ -544,6 +544,8 @@ func (s *scheduler) cancelAll() {
 // state-side effects, yields events to the caller, and schedules
 // successor nodes when a node completes. Returns when all running
 // tasks have signalled completion.
+// Start with draining=true only after cancelling tasks for a caller that
+// has already stopped consuming. In that mode yield is never called.
 //
 // On non-nil yield-return-false (caller broke from the range loop)
 // or on a non-retryable node error, run cancels all in-flight
@@ -553,11 +555,10 @@ func (s *scheduler) cancelAll() {
 // run runs on the caller's goroutine (the goroutine that called
 // Workflow.Run); it is the only mutator of state.Nodes and the
 // node-side accumulators.
-func (s *scheduler) run(yield func(*session.Event, error) bool) {
-	var pendingErr error  // first non-nil node error; surfaced after drain
-	var cancelErr error   // cause of an external cancellation; surfaced only when no node reported an error
-	draining := false     // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
-	consumerGone := false // true once the caller broke the range loop; no further yield is allowed
+func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
+	var pendingErr error     // first non-nil node error; surfaced after drain
+	var cancelErr error      // cause of an external cancellation; surfaced only when no node reported an error
+	consumerGone := draining // no further yield is allowed after consumer exit, including initial cleanup
 
 	doneChan := s.parentCtx.Done()
 
@@ -694,31 +695,7 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *se
 		// A failed attempt can still recover through retries or a parent
 		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
 		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
-		var paths []any
-		seen := map[string]bool{}
-		addPath := func(path string) {
-			if path != "" && !seen[path] {
-				seen[path] = true
-				paths = append(paths, path)
-			}
-		}
-		for failure != nil {
-			var allChildren *failedChildPathsError
-			if errors.As(failure, &allChildren) {
-				for _, path := range allChildren.paths {
-					addPath(path)
-				}
-			}
-			var childError *NodeRunError
-			if !errors.As(failure, &childError) {
-				break
-			}
-			addPath(childError.ChildPath)
-			failure = childError.Cause
-		}
-		if len(paths) > 0 {
-			ev.CustomMetadata[workflowFailedChildPathsKey] = paths
-		}
+		recordFailedChildPaths(ev.CustomMetadata, failure)
 	} else {
 		ev.CustomMetadata[workflowNodeCompletedKey] = true
 	}
