@@ -82,8 +82,12 @@ import (
 // Agents is flat, keyed by agent name, and holds only LLM agents. So
 // RootAgentName is not one of its keys when the root agent is of another kind.
 //
-// Agents carries no omitempty. Evaluation reads the key on every response, so
-// an app with no LLM agent at all reports an empty object rather than nothing.
+// It is not guaranteed that agent names are unique across an app. 
+// For example, agents in two different subworkflows can share one. 
+// When two LLM agents share a name, Agents describes only one of them and logs the clash. 
+// Which one is described is non-deterministic, because the agents of
+// a nested workflow are visited in no fixed order. The agents below the other
+// one are still described.
 type AppInfo struct {
 	Name          string                `json:"name"`
 	RootAgentName string                `json:"rootAgentName"`
@@ -102,9 +106,6 @@ type AppInfo struct {
 // of another kind is not listed, and neither are the LLM agents below it: they
 // are described in [AppInfo.Agents], but this agent hands off to the agent in
 // between rather than to them.
-//
-// Tools and SubAgents are present on every agent, as [] when there is nothing
-// to report, so a client can read them without checking that the key exists.
 type AgentInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
@@ -214,8 +215,8 @@ func describe(ctx context.Context, appName string, a agent.Agent, state *llminte
 	}
 }
 
-// llmSubAgents names the sub-agents of a that are LLM agents, in order. It is
-// never nil, so an agent with none reports [] rather than null.
+// llmSubAgents names the sub-agents of a that are LLM agents, in the order
+// a.SubAgents returns them.
 func llmSubAgents(a agent.Agent) []string {
 	names := []string{}
 	for _, sub := range a.SubAgents() {
@@ -233,10 +234,10 @@ func llmSubAgents(a agent.Agent) []string {
 // SubAgents, so following SubAgents alone reports nothing for a graph-rooted
 // app.
 func children(a agent.Agent) []agent.Agent {
-	// The graph's agents come in no particular order, so if two different
-	// agents share a name and one is in a nested workflow, which one is
-	// described can change from request to request. Sort them here if that
-	// matters.
+	// TODO: make agent name clashes deterministic. A nested workflow's
+	// agents come in map order (workflow's graph.allEdges ranges over its
+	// successors map), so which of two agents sharing a name is described can
+	// change between requests.
 	return slices.Concat(a.SubAgents(), workflowwalk.WalkAgents(workflowEdges(a)))
 }
 
