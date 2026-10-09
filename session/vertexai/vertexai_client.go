@@ -113,9 +113,9 @@ func isNotFoundError(err error) bool {
 	// status.Code returns codes.Unknown if it's not a gRPC error, otherwise the
 	// specific gRPC code, and it unwraps, so the first arm still sees a
 	// NOT_FOUND that getSession has wrapped in session.ErrNotFound. The
-	// sentinel arm is therefore redundant for every error the backend
-	// produces; it is kept because it is the only arm that catches
-	// getSession's nil-response guard, which carries no gRPC status.
+	// sentinel arm catches the getSession errors that carry no gRPC status:
+	// the nil-response guard, and a session that belongs to another user.
+	// deleteSession relies on the second to treat that session as missing.
 	return status.Code(err) == codes.NotFound || errors.Is(err, session.ErrNotFound)
 }
 
@@ -175,8 +175,12 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	if sessRpcResp == nil {
 		return nil, fmt.Errorf("%w: %q", session.ErrNotFound, req.SessionID)
 	}
+	// Another user's session is reported as missing, as the in-memory and
+	// database services report it, so the REST layer answers 404 for every
+	// backend. This diverges from adk-python, whose VertexAiSessionService
+	// raises ValueError here and so answers 500.
 	if sessRpcResp.UserId != req.UserID {
-		return nil, fmt.Errorf("session %s does not belong to user %s", req.SessionID, req.UserID)
+		return nil, fmt.Errorf("%w: session %s does not belong to user %s", session.ErrNotFound, req.SessionID, req.UserID)
 	}
 
 	return &localSession{
@@ -269,7 +273,10 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 		SessionID: req.SessionID,
 	}); err != nil {
 		if isNotFoundError(err) {
-			return nil // A missing session is a no-op.
+			// A missing session, or another user's, is a no-op, as it is for
+			// the in-memory and database services. adk-python's
+			// VertexAiSessionService raises ValueError for another user's.
+			return nil
 		}
 		return err
 	}
