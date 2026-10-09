@@ -19,8 +19,19 @@ import (
 	"google.golang.org/adk/v2/internal/workflowwalk"
 )
 
-// init hands walkAgents to the experimental app-info endpoint through
-// [workflowwalk.WalkAgents].
+// init registers walkAgents as internal [workflowwalk.WalkAgents] for the experimental
+// app-info endpoint (exp/appinfo). The walk reads unexported node fields, so it
+// has to live in this package, and a function variable in an internal package
+// keeps it reachable only from this module.
+//
+// Exporting the walk would make it public API for a feature that is still
+// experimental. It would also give callers the agents a running graph uses.
+// Those agents are live: SubAgents returns the agent's own slice, not a copy,
+// so a caller could change which agents the app hands off to. An example of
+// hypothetical exported walk:
+//
+//	walked := workflow.WalkAgents(edges)
+//	walked[0].SubAgents()[0] = other // walked[0] now transfers to other
 func init() {
 	workflowwalk.WalkAgents = func(edges any) []agent.Agent {
 		return walkAgents(edges.([]Edge))
