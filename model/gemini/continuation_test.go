@@ -175,6 +175,68 @@ func checkRequests(t *testing.T, api *fakeContinuationAPI, wantTokens, wantOutpu
 	}
 }
 
+func TestContinuation_PreservesClientProviderOnEveryRequest(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			}}
+			srv := httptest.NewServer(http.HandlerFunc(api.serve))
+			t.Cleanup(srv.Close)
+			providerCalls := 0
+			llm, err := NewModel(t.Context(), "m", &genai.ClientConfig{
+				APIKey:  "key",
+				Backend: genai.BackendGeminiAPI,
+				HTTPOptions: genai.HTTPOptions{
+					BaseURL: srv.URL,
+					ExtrasRequestProvider: func(body map[string]any) map[string]any {
+						providerCalls++
+						body["clientMarker"] = "preserved"
+						contents := mapsFromSlice(body["contents"])
+						parts := mapsFromSlice(contents[0]["parts"])
+						contents[0]["parts"] = append(parts, map[string]any{"thoughtSignature": "provider-signature"})
+						return body
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewModel: %v", err)
+			}
+			for _, err := range llm.GenerateContent(t.Context(), continuationRequest(), stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+			}
+
+			api.mu.Lock()
+			bodies := append([]string(nil), api.bodies...)
+			api.mu.Unlock()
+			if got, want := providerCalls, 2; got != want {
+				t.Fatalf("client provider calls = %d, want %d", got, want)
+			}
+			if got, want := len(bodies), 2; got != want {
+				t.Fatalf("request count = %d, want %d", got, want)
+			}
+			for i, requestBody := range bodies {
+				var body map[string]any
+				if err := json.Unmarshal([]byte(requestBody), &body); err != nil {
+					t.Fatalf("request %d: json.Unmarshal() error = %v", i, err)
+				}
+				if got := body["clientMarker"]; got != "preserved" {
+					t.Errorf("request %d: client provider marker = %#v, want preserved", i, got)
+				}
+				contents := mapsFromSlice(body["contents"])
+				parts := mapsFromSlice(contents[0]["parts"])
+				providerPart := parts[len(parts)-1]
+				if got, ok := providerPart["text"]; !ok || got != "" {
+					t.Errorf("request %d: provider part text = %#v, present = %t; want present empty text", i, got, ok)
+				}
+			}
+		})
+	}
+}
+
 func TestContinuation_Generate(t *testing.T) {
 	tests := []struct {
 		name            string

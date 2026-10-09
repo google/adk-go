@@ -29,6 +29,9 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// BeforeRunReplyKey identifies persisted replies that bypassed agent execution.
+const BeforeRunReplyKey = "adk:before_run_reply"
+
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
