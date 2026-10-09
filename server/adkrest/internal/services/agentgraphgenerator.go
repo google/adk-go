@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	llmagentinternal "google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
@@ -232,7 +233,7 @@ func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawCluster(ctx context.Context, parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	agentInternal, ok := agent.(agentinternal.Agent)
 	if !ok {
 		return nil
@@ -242,7 +243,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	// destination cluster was actually added; a name already visited as a tool
 	// is skipped and must not be linked through a node that was never drawn.
 	for _, subAgent := range subs {
-		err := buildGraph(cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err := buildGraph(ctx, cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
@@ -273,7 +274,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	return nil
 }
 
-func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawNode(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
@@ -302,7 +303,7 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 		if err != nil {
 			return fmt.Errorf("add cluster: %w", err)
 		}
-		return drawCluster(parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
+		return drawCluster(ctx, parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
 	} else {
 		nodeAttributes := map[string]string{
 			"label":     caption,
@@ -322,6 +323,9 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 }
 
 func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]string, theme Theme) error {
+	if graph.Edges != nil && graph.Edges.SrcToDsts != nil && graph.Edges.SrcToDsts[from] != nil && len(graph.Edges.SrcToDsts[from][to]) > 0 {
+		return nil
+	}
 	edgeHighlighted := edgeHighlighted(from, to, highlightedPairs)
 	edgeAttributes := map[string]string{}
 	if edgeHighlighted != nil {
@@ -339,7 +343,7 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 	return graph.AddEdge(from, to, true, edgeAttributes)
 }
 
-func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil
@@ -348,7 +352,7 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 		return nil
 	}
 
-	err := drawNode(graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
+	err := drawNode(ctx, graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return fmt.Errorf("draw node: %w", err)
 	}
@@ -360,20 +364,55 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 	if ok {
 		tools := llmagentinternal.Reveal(llmAgent).Tools
 		for _, tool := range tools {
-			err = drawNode(graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+			err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool node: %w", err)
 			}
-			err = drawEdge(graph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
+			err = drawEdge(parentGraph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool edge: %w", err)
 			}
 		}
+		for _, toolset := range llmagentinternal.Reveal(llmAgent).Toolsets {
+			var tsTools []tool.Tool
+			var tsErr error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						tsErr = fmt.Errorf("toolset.Tools panicked: %v", r)
+					}
+				}()
+				rCtx := icontext.NewReadonlyContext(icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{}))
+				tsTools, tsErr = toolset.Tools(rCtx)
+			}()
+			if tsErr != nil {
+				// Toolset resolution requires context attributes (like auth or session)
+				// that are unavailable during static graph generation, or it threw an error.
+				// Skip it to keep the rest of the graph intact.
+				continue
+			}
+			for _, tool := range tsTools {
+				err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+				if err != nil {
+					return fmt.Errorf("draw tool node: %w", err)
+				}
+				err = drawEdge(parentGraph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
+				if err != nil {
+					return fmt.Errorf("draw tool edge: %w", err)
+				}
+			}
+		}
 	}
 	for _, subAgent := range agent.SubAgents() {
-		err = buildGraph(graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err = buildGraph(ctx, graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("build sub agent graph: %w", err)
+		}
+		if !shouldBuildAgentCluster(agent) {
+			err = drawClusterEdge(parentGraph, agent, subAgent, highlightedPairs, theme)
+			if err != nil {
+				return fmt.Errorf("draw sub agent edge: %w", err)
+			}
 		}
 	}
 	return nil
@@ -402,7 +441,7 @@ func GetAgentGraphWithTheme(ctx context.Context, agent agent.Agent, highlightedP
 		return "", fmt.Errorf("set graph background color: %w", err)
 	}
 	visitedNodes := map[string]bool{}
-	err := buildGraph(graph, graph, agent, highlightedPairs, visitedNodes, theme)
+	err := buildGraph(ctx, graph, graph, agent, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return "", fmt.Errorf("build root graph: %w", err)
 	}

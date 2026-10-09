@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type dummyLLM struct {
@@ -424,14 +425,14 @@ func TestDrawNode(t *testing.T) {
 			visitedNodes := make(map[string]bool)
 			nodeName := ""
 			if tt.agent != nil {
-				err = drawNode(graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes, DarkTheme)
+				err = drawNode(context.Background(), graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
 				nodeName = tt.agent.Name()
 			}
 			if tt.tool != nil {
-				err = drawNode(graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes, DarkTheme)
+				err = drawNode(context.Background(), graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
@@ -465,7 +466,7 @@ func TestDrawClusterNode(t *testing.T) {
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
 	agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
-	err = drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes, DarkTheme)
+	err = drawNode(context.Background(), graph, parentGraph, agent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("drawNode failed: %v", err)
 	}
@@ -608,7 +609,7 @@ func TestDrawCluster(t *testing.T) {
 			parentAgent := newTestAgent(t, "ParentAgent", "", tt.agentType, []agent.Agent{subAgent1, subAgent2}, nil)
 
 			clusterGraph := gographviz.NewGraph()
-			err = drawCluster(parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes, DarkTheme)
+			err = drawCluster(context.Background(), parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes, DarkTheme)
 			if err != nil {
 				t.Fatalf("drawCluster failed: %v", err)
 			}
@@ -666,7 +667,7 @@ func TestBuildGraph(t *testing.T) {
 	subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
 	mainAgent := newTestAgent(t, "MainAgent", "", agentinternal.TypeLLMAgent, []agent.Agent{subAgent1, subAgent2}, []tool.Tool{tool2})
 
-	err = buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes, DarkTheme)
+	err = buildGraph(context.Background(), graph, parentGraph, mainAgent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("buildGraph failed: %v", err)
 	}
@@ -869,4 +870,56 @@ func TestNestedWorkflowGraph(t *testing.T) {
 			t.Fatalf("undrawn workflow was anchored inside its cluster\n%s", dot)
 		}
 	})
+}
+
+type args struct{}
+
+func newTestTool(name string) tool.Tool {
+	t, err := functiontool.New(functiontool.Config{Name: name, Description: name},
+		func(agent.Context, args) (string, error) { return ``, nil })
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+type staticToolset struct{}
+
+func (staticToolset) Name() string { return "my_toolset" }
+func (staticToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	return []tool.Tool{newTestTool("toolset_tool")}, nil
+}
+
+func TestAgentGraphWithToolsetAndSubAgent(t *testing.T) {
+	helper, err := llmagent.New(llmagent.Config{Name: "helper", Description: "helper", Model: &dummyLLM{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     &dummyLLM{},
+		Tools:     []tool.Tool{newTestTool("direct_tool")},
+		Toolsets:  []tool.Toolset{staticToolset{}},
+		SubAgents: []agent.Agent{helper},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	graphStr, err := GetAgentGraph(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify expected sub-agent and toolset tools are in graph
+	if !strings.Contains(graphStr, "root->direct_tool") {
+		t.Errorf("Expected graph to contain edge root->direct_tool")
+	}
+	if !strings.Contains(graphStr, "root->toolset_tool") {
+		t.Errorf("Expected graph to contain edge root->toolset_tool")
+	}
+	if !strings.Contains(graphStr, "root->helper") {
+		t.Errorf("Expected graph to contain edge root->helper")
+	}
 }
