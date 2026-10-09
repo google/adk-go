@@ -175,10 +175,10 @@ func parseModelName(modelName string) (*modelInfo, error) {
 }
 
 func resolveProxyURL(proxyURL string) string {
-	if proxyURL != "" {
-		return proxyURL
+	if trimmed := strings.TrimSpace(proxyURL); trimmed != "" {
+		return trimmed
 	}
-	return os.Getenv(apigeeProxyURLEnvVar)
+	return strings.TrimSpace(os.Getenv(apigeeProxyURLEnvVar))
 }
 
 func generateHTTPOptions(proxyURL, apiVersion string, customHeaders http.Header) *genai.HTTPOptions {
@@ -216,8 +216,8 @@ func generateClientConfig(isVertexAI bool, backendType genai.Backend, httpOption
 		Backend:     backendType,
 	}
 
-	project := os.Getenv(projectEnvVar)
-	location := os.Getenv(locationEnvVar)
+	project := strings.TrimSpace(os.Getenv(projectEnvVar))
+	location := strings.TrimSpace(os.Getenv(locationEnvVar))
 	if isVertexAI {
 		if project == "" {
 			return nil, fmt.Errorf("%s environment variable must be set", projectEnvVar)

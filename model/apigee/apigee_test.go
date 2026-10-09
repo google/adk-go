@@ -230,6 +230,27 @@ func TestNewModelWithoutProxyURL(t *testing.T) {
 	}
 }
 
+func TestNewModelTreatsBlankProxyURLAsUnset(t *testing.T) {
+	ctx := t.Context()
+	t.Setenv("GOOGLE_API_KEY", "test-key")
+
+	t.Run("blank env", func(t *testing.T) {
+		t.Setenv(apigeeProxyURLEnvVar, "   ")
+		_, err := NewModel(ctx, "apigee/gemini-1.5-flash")
+		if err == nil || !strings.Contains(err.Error(), apigeeProxyURLEnvVar) {
+			t.Errorf("NewModel() with blank %s = %v, want error mentioning the env var", apigeeProxyURLEnvVar, err)
+		}
+	})
+
+	t.Run("blank option falls back to env", func(t *testing.T) {
+		t.Setenv(apigeeProxyURLEnvVar, "https://env.proxy.url")
+		_, err := NewModel(ctx, "apigee/gemini-1.5-flash", WithProxyURL("   "))
+		if err != nil {
+			t.Fatalf("NewModel() with blank WithProxyURL should fall back to env: %v", err)
+		}
+	})
+}
+
 func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
@@ -249,6 +270,20 @@ func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 	_, err = NewModel(ctx, "apigee/gemini-1.5-flash", WithProxyURL(proxyURL))
 	if err == nil || !strings.Contains(err.Error(), locationEnvVar) {
 		t.Errorf("NewModel() with vertex enabled but no location env var should fail")
+	}
+
+	t.Setenv(projectEnvVar, "   ")
+	t.Setenv(locationEnvVar, "test-location")
+	_, err = NewModel(ctx, "apigee/gemini-1.5-flash", WithProxyURL(proxyURL))
+	if err == nil || !strings.Contains(err.Error(), projectEnvVar) {
+		t.Errorf("NewModel() with blank %s should fail", projectEnvVar)
+	}
+
+	t.Setenv(projectEnvVar, "test-project")
+	t.Setenv(locationEnvVar, "   ")
+	_, err = NewModel(ctx, "apigee/gemini-1.5-flash", WithProxyURL(proxyURL))
+	if err == nil || !strings.Contains(err.Error(), locationEnvVar) {
+		t.Errorf("NewModel() with blank %s should fail", locationEnvVar)
 	}
 }
 
