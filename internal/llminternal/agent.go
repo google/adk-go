@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -70,6 +72,34 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	// LiveModeInjection guards the single live-mode tool injection an agent
+	// receives. Its lifetime follows the agent rather than a global cache.
+	// Only callers of Do are synchronized; other State readers take no lock.
+	LiveModeInjection LiveModeToolInjection
+}
+
+// LiveModeToolInjection allows one successful live-mode tool injection per
+// agent. Multiple injectors share this latch, so the first successful one wins.
+// A panicking injection is retried by a later caller.
+// LiveModeToolInjection must not be copied after first use.
+type LiveModeToolInjection struct {
+	mu   sync.Mutex
+	done bool
+}
+
+// Do runs inject at most once successfully. Concurrent callers wait for the
+// injection to finish before returning. A panic propagates without marking the
+// injection complete. inject must not block indefinitely or re-enter Do on the
+// same receiver.
+func (l *LiveModeToolInjection) Do(inject func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return
+	}
+	inject()
+	l.done = true
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)

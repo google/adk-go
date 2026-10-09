@@ -553,7 +553,7 @@ func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
 // about this process's own credentials, and every provider in the process
 // fails it identically.
 func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
-	// A wiring context that is already cancelled does not stop the build — that
+	// A wiring context that is already canceled does not stop the build — that
 	// is the documented contract — so the failure is forced by pointing
 	// Application Default Credentials at a path that does not exist. The file is
 	// never created, so discovery fails on the open rather than on the contents.
@@ -1133,7 +1133,7 @@ type recordingStore struct {
 
 	lastKey     auth.CredentialKey
 	lastExpires time.Time
-	// setCancellable records whether the last Set could have been cancelled.
+	// setCancellable records whether the last Set could have been canceled.
 	setCancellable bool
 }
 
@@ -1389,7 +1389,7 @@ func TestProviderCachedExpiry(t *testing.T) {
 		{name: "a minute of life left", left: "1m", want: time.Minute},
 		// Twice the margin, so widening the floor to any multiple of it stops
 		// caching this. The floor is what keeps a guaranteed-dead entry out; it is
-		// not a licence to refuse short-lived credentials.
+		// not a license to refuse short-lived credentials.
 		{name: "twice the store's margin", left: "20s", want: 20 * time.Second},
 		{name: "clamped to the cap", left: "8760h", want: maxCachedLifetimeForTest, clamped: true},
 		// At or inside the margin the store applies, the entry would be written and

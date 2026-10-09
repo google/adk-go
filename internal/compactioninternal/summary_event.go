@@ -144,7 +144,7 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	// visible and recoverable. A reference matching nothing does not fall back
 	// to anything: coverage is the range minus the exclusions, so a hole that
 	// fails to match stops being a hole, and the event it named is dropped in
-	// favour of a summary that never described it. Over-naming is the direction
+	// favor of a summary that never described it. Over-naming is the direction
 	// to prefer, and under-naming is the one that loses conversation.
 	//
 	// Window membership is therefore decided by identity rather than by the
