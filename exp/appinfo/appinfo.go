@@ -57,8 +57,6 @@ package appinfo
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"iter"
 	"log"
 	"slices"
@@ -308,25 +306,12 @@ func resolveTools(ctx context.Context, appName, agentName string, state *llminte
 		}
 		tsTools, err := ts.Tools(toolsetCtx)
 		if err != nil {
-			log.Printf("app-info: agent %q: skipping toolset %q, which could not list its tools (%s)", agentName, ts.Name(), errorShape(err))
+			log.Printf("app-info: agent %q: skipping toolset %q, which could not list its tools (%T)", agentName, ts.Name(), err)
 			continue
 		}
 		tools = append(tools, tsTools...)
 	}
 	return tools
-}
-
-// errorShape describes err for a log line without its text, which can carry a
-// server URL with a token in its query, a credential or a response body.
-func errorShape(err error) string {
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timed out"
-	case errors.Is(err, context.Canceled):
-		return "request canceled"
-	default:
-		return fmt.Sprintf("%T", err)
-	}
 }
 
 // appInfoContext is a minimal [agent.ReadonlyContext] for resolving toolsets
