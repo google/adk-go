@@ -258,7 +258,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	// Delete specific version
 	if version != 0 {
 		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-		if err := s.bucket.object(blobName).delete(ctx); err != nil {
+		if err := s.bucket.object(blobName).delete(ctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			return fmt.Errorf("failed to delete artifact: %w", err)
 		}
 		return nil
@@ -274,14 +274,14 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// delete versions in parallel
+	// A version may disappear after listing; Delete must still succeed.
 	for _, version := range response.Versions {
 		v := version // capture loop variable for goroutine
 
 		g.Go(func() error {
 			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
 			obj := s.bucket.object(blobName)
-			if err := obj.delete(gctx); err != nil {
+			if err := obj.delete(gctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 				return fmt.Errorf("failed to delete artifact %s: %w", blobName, err)
 			}
 			return nil // nil error indicates success for this goroutine
