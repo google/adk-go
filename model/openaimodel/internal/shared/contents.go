@@ -71,15 +71,35 @@ func ReplayedReasoning(part *genai.Part) bool {
 		UnsupportedPayload(part) == ""
 }
 
-// UnsupportedPayload names the first field on part that neither endpoint has a
-// way to send, or "" when the part holds nothing beyond what their request
-// converters account for.
+// PartField names a group of genai.Part fields an endpoint emits itself. An
+// endpoint passes the groups it can carry to [UnsupportedPayload], which then
+// reports only what is left over.
+//
+// The groups exist because the two endpoints gain the ability to send a
+// payload one at a time: while one of them can emit media and the other
+// cannot, "unsupported" is no longer a property of the part alone, and a
+// single shared answer would either reject what one endpoint can send or let
+// the other drop it in silence.
+type PartField int
+
+const (
+	// PartFieldMedia is a part's media, whichever of InlineData and FileData
+	// carries it. The two travel together because an endpoint able to send
+	// one is able to send the other: they differ in where the bytes are, not
+	// in what the wire field is.
+	PartFieldMedia PartField = iota
+)
+
+// UnsupportedPayload names the first field on part that the calling endpoint
+// has no way to send, or "" when the part holds nothing beyond what its
+// request converter accounts for. Fields the caller emits itself are named in
+// emitted and are not reported.
 //
 // The test is stated as the absence of anything unaccounted for rather than as
 // a list of the fields that disqualify a part, so that a field added to
 // genai.Part by a later release is reported here by default instead of leaving
 // the request unnoticed.
-func UnsupportedPayload(part *genai.Part) string {
+func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 	if part == nil {
 		return ""
 	}
@@ -89,9 +109,24 @@ func UnsupportedPayload(part *genai.Part) string {
 	rest.ThoughtSignature = nil // no request field on either endpoint carries one
 	rest.FunctionCall = nil     // sent as a call
 	rest.FunctionResponse = nil // sent as the call's result
-	rest.VideoMetadata = nil    // qualifies media carried in another field
-	rest.MediaResolution = nil  // likewise
+	rest.VideoMetadata = nil    // qualifies video, which neither endpoint sends
+	rest.MediaResolution = nil  // qualifies media, and see below
 	rest.PartMetadata = nil     // caller bookkeeping, never content
+
+	for _, field := range emitted {
+		if field == PartFieldMedia {
+			rest.InlineData = nil // the caller has a wire field for the bytes
+			rest.FileData = nil   // and for the id or location naming them
+			// A qualifier is only harmless while the thing it qualifies is
+			// refused: unsent media takes its resolution down with it and the
+			// caller is told about the media. Once the media does go out, a
+			// resolution nobody carries is a request quietly downgraded, so
+			// it is restored to the account and reported.
+			if part.MediaResolution != nil && (part.InlineData != nil || part.FileData != nil) {
+				rest.MediaResolution = part.MediaResolution
+			}
+		}
+	}
 
 	v := reflect.ValueOf(rest)
 	for i := range v.NumField() {

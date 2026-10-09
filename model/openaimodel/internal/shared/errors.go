@@ -43,6 +43,25 @@ var (
 	ErrSafetySettingsNotSupported = errors.New("openai: gemini safety settings are not supported")
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = errors.New("openai: unsupported mime type")
+	// ErrMediaMIMETypeRequired is returned when a part carries media without a
+	// MIME type. The type is what decides whether an endpoint has a field for
+	// the media at all, so it is required rather than defaulted: calling
+	// unlabelled bytes application/octet-stream told the server they were
+	// opaque when in truth nobody had looked.
+	ErrMediaMIMETypeRequired = errors.New("openai: media part is missing a mime type")
+	// ErrMediaDataRequired is returned when a part carries inline media whose
+	// bytes are empty, which would otherwise go out as a data URL with nothing
+	// after the comma.
+	ErrMediaDataRequired = errors.New("openai: inline media part carries no data")
+	// ErrMediaURIRequired is returned when a part carries file data without a
+	// URI, leaving nothing to name the media.
+	ErrMediaURIRequired = errors.New("openai: file data part is missing a uri")
+	// ErrMediaOnAssistantTurn is returned when a replayed assistant turn
+	// carries media. Both endpoints replay a prior assistant turn as text —
+	// "output_text" items on Responses, a string on Chat Completions — and
+	// neither shape has a field for an image or a file, so media there is
+	// refused rather than dropped on the way out.
+	ErrMediaOnAssistantTurn = errors.New("openai: media on a replayed assistant turn is not supported")
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")
 

@@ -379,20 +379,23 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// The leading turn is what makes this test bite: on its own the
 	// unsupported part leaves the request empty, so a build that skipped it
 	// silently would still fail with shared.ErrNoContents and look like a rejection.
+	//
+	// The part carries executable code rather than media: media has a wire
+	// field on this endpoint now, and the walk below covers what is left.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{InlineData: &genai.Blob{Data: []byte{0x1}}},
+					{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
 				},
 			},
 		},
 	}
 	_, err := buildParams("fallback", req)
 	if err == nil {
-		t.Fatalf("expected error for inline data part")
+		t.Fatalf("expected error for an executable code part")
 	}
 	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
@@ -416,11 +419,16 @@ func describeInput(items oairesponses.ResponseInputParam) []string {
 		case item.OfMessage != nil:
 			texts := make([]string, 0, len(item.OfMessage.Content.OfInputItemContentList))
 			for _, c := range item.OfMessage.Content.OfInputItemContentList {
-				if c.OfInputText == nil {
+				switch {
+				case c.OfInputText != nil:
+					texts = append(texts, c.OfInputText.Text)
+				case c.OfInputImage != nil:
+					texts = append(texts, describeImage(c.OfInputImage))
+				case c.OfInputFile != nil:
+					texts = append(texts, describeFile(c.OfInputFile))
+				default:
 					texts = append(texts, "<non-text>")
-					continue
 				}
-				texts = append(texts, c.OfInputText.Text)
 			}
 			got = append(got, "in/"+string(item.OfMessage.Role)+":"+strings.Join(texts, "|"))
 		case item.OfOutputMessage != nil:
@@ -442,6 +450,55 @@ func describeInput(items oairesponses.ResponseInputParam) []string {
 		}
 	}
 	return got
+}
+
+// describeImage renders an image content part as
+// "img/<detail>:<field>=<value>".
+//
+// The field is named rather than just its value, because the bug this change
+// fixes moves a value from one field to another without altering it: an
+// uploaded image sent as image_url carries the very same "file-…" string that
+// file_id would have carried, so a rendering that showed only the value read
+// identically before and after the fix and held nothing. Proven by mutation —
+// swapping the two fields left the first version of this test green.
+//
+// The detail is included in every case rather than tested once: the field is
+// api:"required" and omitzero at the same time, so a value that goes missing
+// is dropped from the request instead of failing to build, and only reading it
+// back off the param catches that.
+func describeImage(image *oairesponses.ResponseInputImageParam) string {
+	ref := "<no reference>"
+	switch {
+	case image.FileID.Valid():
+		ref = "file_id=" + image.FileID.Or("")
+	case image.ImageURL.Valid():
+		ref = "image_url=" + image.ImageURL.Or("")
+	}
+	return "img/" + string(image.Detail) + ":" + ref
+}
+
+// describeFile renders a file content part as "file:<field>=<value>", with
+// "#<name>" appended when a filename rode along, so a case can state which of
+// the three references carried the file and whether it was named.
+//
+// Presence is read off Valid rather than off the string, because an empty
+// filename that was set is sent as "filename":"" while one that was never set
+// is dropped from the request — a difference the value alone cannot show, and
+// the second mutation this renderer missed on its first pass.
+func describeFile(file *oairesponses.ResponseInputFileParam) string {
+	ref := "<no reference>"
+	switch {
+	case file.FileID.Valid():
+		ref = "file_id=" + file.FileID.Or("")
+	case file.FileData.Valid():
+		ref = "file_data=" + file.FileData.Or("")
+	case file.FileURL.Valid():
+		ref = "file_url=" + file.FileURL.Or("")
+	}
+	if file.Filename.Valid() {
+		ref += "#" + file.Filename.Or("")
+	}
+	return "file:" + ref
 }
 
 func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
@@ -585,9 +642,10 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			want: []string{"in/user:q"},
 		},
 		{
-			// Marking media as a thought must not smuggle it past the
-			// unsupported-part check and out of the request unannounced.
-			name: "thought_marked_media_is_still_rejected",
+			// Marking media as a thought must not make the media vanish with
+			// the reasoning: the drop is about text, and an image on a thought
+			// part is still an image the model is meant to see.
+			name: "thought_marked_media_is_still_sent",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -595,14 +653,13 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			// The same part with reasoning text riding on it. Suppressing the
-			// text must not also suppress the rejection, or the image leaves
-			// the request unannounced — the arm keys on what the part
-			// contributed, not on whether it had text.
-			name: "thought_text_riding_on_media_is_still_rejected",
+			// The same part with reasoning text riding on it: the text is
+			// dropped and the image is not, which is the one shape where the
+			// two halves of a part part ways.
+			name: "thought_text_riding_on_media_drops_only_the_text",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -611,7 +668,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
 			name: "thought_text_riding_on_code_is_still_rejected",
@@ -667,29 +724,31 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: `unsupported role "assistant"`,
 		},
 		{
-			// Not a thought at all: an image riding on ordinary text used to
-			// leave the request silently, because the text matched an arm and
-			// the rejection never ran. The check is independent of what the
-			// part contributed, so it is reported here too.
-			name: "media_riding_on_plain_text_is_rejected",
+			// An image riding on ordinary text keeps its place behind it: the
+			// words introduce the picture, and a content list that reordered
+			// them would change what was asked.
+			name: "media_riding_on_plain_text_keeps_its_place",
 			contents: []*genai.Content{
 				userTurn(&genai.Part{
 					Text:       "describe this",
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			want: []string{"in/user:describe this|img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			// Same hole on the call arm.
-			name: "media_riding_on_a_call_is_rejected",
+			// A model turn replays as an output message, whose content is
+			// output_text or a refusal — there is no field for an image, so
+			// this one is refused rather than dropped on the way out.
+			name: "media_on_a_replayed_assistant_turn_is_refused",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
-					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
-					InlineData:   &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+					Text:       "here it is",
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			wantErr:     shared.ErrMediaOnAssistantTurn,
+			wantErrText: "image/png",
 		},
 		{
 			// A part that carries only bookkeeping reaches nothing: it is not
@@ -786,6 +845,204 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 // bare shared.ErrNoContents and which get it wrapped, because a caller comparing with
 // == rather than errors.Is sees only the bare one. Only a drop that suppressed
 // text the model would otherwise have seen earns the wrap.
+// userContent and modelContent wrap parts in a turn of the given role.
+func userContent(parts ...*genai.Part) *genai.Content {
+	return &genai.Content{Role: string(genai.RoleUser), Parts: parts}
+}
+
+func modelContent(parts ...*genai.Part) *genai.Content {
+	return &genai.Content{Role: string(genai.RoleModel), Parts: parts}
+}
+
+// TestBuildParams_Media drives every kind-and-source pair the classifier can
+// produce through the content field this endpoint has for it.
+//
+// Kind and source are crossed rather than sampled because they vary
+// independently and the pairing is the part that was wrong before: an image
+// behind a file id used to go out as a location for the server to fetch, which
+// is a request for a string that is not a URL.
+func TestBuildParams_Media(t *testing.T) {
+	tests := []struct {
+		name        string
+		part        *genai.Part
+		want        []string
+		wantErr     error
+		wantErrText string
+	}{
+		{
+			name: "inline_image_becomes_a_data_url",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ=="},
+		},
+		{
+			// The pairing the old code got wrong: an uploaded image stays a
+			// file id instead of being handed over as a location.
+			name: "uploaded_image_stays_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "image/png", FileURI: "file-abc123"}},
+			want: []string{"in/user:img/auto:file_id=file-abc123"},
+		},
+		{
+			name: "remote_image_becomes_an_image_url",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "image/jpeg", FileURI: "https://example.test/cat.jpg"}},
+			want: []string{"in/user:img/auto:image_url=https://example.test/cat.jpg"},
+		},
+		{
+			name: "inline_file_carries_its_display_name",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}, DisplayName: "report.pdf"}},
+			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#report.pdf"},
+		},
+		{
+			// filename is optional on this endpoint, so an unnamed file goes
+			// out without one rather than under a name nobody chose. Whether
+			// the server minds is a question for the live run.
+			name: "inline_file_without_a_display_name_sends_no_filename",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}}},
+			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ=="},
+		},
+		{
+			name: "uploaded_file_stays_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz"}},
+			want: []string{"in/user:file:file_id=file-xyz"},
+		},
+		{
+			// The one asymmetry between the two fields: input_file has a URL
+			// of its own, input_image reuses image_url.
+			name: "remote_file_becomes_a_file_url",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "https://example.test/doc.pdf"}},
+			want: []string{"in/user:file:file_url=https://example.test/doc.pdf"},
+		},
+		{
+			// An unknown MIME type is a file rather than an error: the kind is
+			// read off the top-level type, and "file" is the endpoint's
+			// catch-all field, not a guess about the bytes.
+			name: "an_unrecognized_type_travels_as_a_file",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/x-tar", Data: []byte{1}}},
+			want: []string{"in/user:file:file_data=data:application/x-tar;base64,AQ=="},
+		},
+		{
+			// Classified by the shared code, refused here: the rejection names
+			// the type the part declared, which says more than naming the
+			// field it arrived in.
+			name:        "audio_is_refused_by_its_declared_type",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantErr:     shared.ErrUnsupportedMIMEType,
+			wantErrText: "audio/mpeg",
+		},
+		{
+			name:        "video_is_refused_by_its_declared_type",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "video/mp4", FileURI: "file-v1"}},
+			wantErr:     shared.ErrUnsupportedMIMEType,
+			wantErrText: "video/mp4",
+		},
+		{
+			// Unlabelled bytes are refused rather than called
+			// application/octet-stream, which would tell the server they were
+			// opaque when in truth nobody had looked.
+			name:    "inline_media_without_a_mime_type_is_refused",
+			part:    &genai.Part{InlineData: &genai.Blob{Data: []byte{1}}},
+			wantErr: shared.ErrMediaMIMETypeRequired,
+		},
+		{
+			name:    "file_data_without_a_mime_type_is_refused",
+			part:    &genai.Part{FileData: &genai.FileData{FileURI: "file-abc"}},
+			wantErr: shared.ErrMediaMIMETypeRequired,
+		},
+		{
+			name:    "inline_media_without_bytes_is_refused",
+			part:    &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantErr: shared.ErrMediaDataRequired,
+		},
+		{
+			name:    "file_data_without_a_uri_is_refused",
+			part:    &genai.Part{FileData: &genai.FileData{MIMEType: "image/png"}},
+			wantErr: shared.ErrMediaURIRequired,
+		},
+		{
+			// Both fields on one part are both sent, inline first, because
+			// that is the order genai presents them and the content list has
+			// to keep it.
+			name: "a_part_carrying_both_fields_sends_both_in_order",
+			part: &genai.Part{
+				InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				FileData:   &genai.FileData{MIMEType: "application/pdf", FileURI: "file-p1"},
+			},
+			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{
+				Contents: []*genai.Content{userContent(tt.part)},
+			})
+			if tt.wantErr != nil || tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("buildParams() err = nil, want an error")
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildParams_MediaKeepsItsPlaceAroundACall pins the order a flush has to
+// preserve: an image buffered in a turn leaves ahead of the call that follows
+// it, rather than after it or not at all.
+func TestBuildParams_MediaKeepsItsPlaceAroundACall(t *testing.T) {
+	params, err := buildParams("fallback", &model.LLMRequest{Contents: []*genai.Content{
+		userContent(
+			&genai.Part{Text: "look at this"},
+			&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+		),
+		modelContent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}}),
+	}})
+	if err != nil {
+		t.Fatalf("buildParams() err = %v", err)
+	}
+	want := []string{"in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "call:lookup/c1"}
+	if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, want) {
+		t.Errorf("input items = %q, want %q", got, want)
+	}
+}
+
+// TestBuildParams_ImageDetailReachesTheWire reads the detail off the marshalled
+// request rather than off the param.
+//
+// The param-level checks above cannot see the failure this one is for: Detail
+// is tagged api:"required" and omitzero together, so a value left unset
+// disappears during marshalling and the server, not the compiler, decides what
+// was meant.
+func TestBuildParams_ImageDetailReachesTheWire(t *testing.T) {
+	params, err := buildParams("fallback", &model.LLMRequest{Contents: []*genai.Content{
+		userContent(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}),
+	}})
+	if err != nil {
+		t.Fatalf("buildParams() err = %v", err)
+	}
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal() err = %v", err)
+	}
+	if want := `"detail":"auto"`; !strings.Contains(string(body), want) {
+		t.Errorf("request body = %s, want it to carry %s", body, want)
+	}
+	if want := `"type":"input_image"`; !strings.Contains(string(body), want) {
+		t.Errorf("request body = %s, want it to carry %s", body, want)
+	}
+}
+
 func TestBuildParams_NoContentsSentinelIdentity(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -976,8 +1233,14 @@ func TestReplayedReasoning(t *testing.T) {
 }
 
 // accountedForFields is the specification shared.UnsupportedPayload
-// implements: the genai.Part fields the request converters know what to do with,
-// and why.
+// implements for THIS endpoint: the genai.Part fields its request converter
+// knows what to do with, and why.
+//
+// It is per-endpoint rather than global because the two endpoints no longer
+// agree: Responses emits media and so passes shared.PartFieldMedia, while Chat
+// Completions still reports it. The default answer — the one with no field
+// emitted — is pinned in the shared package, so that a converter gaining a
+// wire field has to say so here before media stops being reported.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
@@ -992,6 +1255,8 @@ var accountedForFields = map[string]string{
 	"VideoMetadata":    "qualifies media carried in another field",
 	"MediaResolution":  "qualifies media carried in another field",
 	"PartMetadata":     "caller bookkeeping, never content",
+	"InlineData":       "sent as an input_image or input_file carrying the bytes",
+	"FileData":         "sent as an input_image or input_file naming an upload or a location",
 }
 
 func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
@@ -1006,7 +1271,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := shared.UnsupportedPayload(part)
+			got := shared.UnsupportedPayload(part, shared.PartFieldMedia)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
