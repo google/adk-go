@@ -289,6 +289,13 @@ func TestDescribeSearch_AppendsSortedNames(t *testing.T) {
 	}
 }
 
+func TestDescribeSearch_ListsEachNameOnce(t *testing.T) {
+	out := DescribeSearch("base.", []string{"zebra", "alpha", "zebra"})
+	if got := strings.Count(out, "zebra"); got != 1 {
+		t.Errorf("DescribeSearch() = %q, lists zebra %d times, want once", out, got)
+	}
+}
+
 // TestDescribeSearch_NoNamesIsBaseDescription verifies the description is
 // unchanged when no names are provided.
 func TestDescribeSearch_NoNamesIsBaseDescription(t *testing.T) {
@@ -465,6 +472,20 @@ func TestRank_InvalidPatternMatchesLiterally(t *testing.T) {
 	matches, _ := Rank(items, "(beta", nil, testCfg())
 	if diff := cmp.Diff([]string{"beta_tool"}, names(matches)); diff != "" {
 		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRank_InvalidUTF8PatternDoesNotPanic checks the literal fallback for a
+// query with invalid UTF-8, which regexp rejects even after QuoteMeta. Dropping
+// the invalid byte instead of replacing it would match the "$" alone.
+func TestRank_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
+	items := makeItems([2]string{"get_price", "returns a price in $"})
+	matches, note := Rank(items, "$\xdc", nil, testCfg())
+	if len(matches) != 0 {
+		t.Errorf("Rank() = %v, want no matches", names(matches))
+	}
+	if want := noMatchNote(testCfg()); note != want {
+		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }
 
