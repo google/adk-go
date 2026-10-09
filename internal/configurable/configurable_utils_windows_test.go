@@ -70,7 +70,7 @@ func TestResolveConfigReferenceRefusesJunction(t *testing.T) {
 				t.Skipf("cannot create a directory junction here: %v: %s", err, out)
 			}
 
-			got, err := resolveConfigReference(parentPath, tc.refPath)
+			got, err := resolveConfigReference(parentPath, tc.refPath, true, true)
 			if err == nil {
 				t.Fatalf("resolveConfigReference(%q) = %q, want a rejection: the junction leads outside %s",
 					tc.refPath, got, agentDir)
