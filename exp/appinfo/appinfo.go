@@ -80,9 +80,9 @@ import (
 // Agents is flat, keyed by agent name, and holds only LLM agents. So
 // RootAgentName is not one of its keys when the root agent is of another kind.
 //
-// It is not guaranteed that agent names are unique across an app. 
-// For example, agents in two different subworkflows can share one. 
-// When two LLM agents share a name, Agents describes only one of them and logs the clash. 
+// It is not guaranteed that agent names are unique across an app.
+// For example, agents in two different subworkflows can share one.
+// When two LLM agents share a name, Agents describes only one of them and logs the clash.
 // Which one is described is non-deterministic, because the agents of
 // a nested workflow are visited in no fixed order. The agents below the other
 // one are still described.
