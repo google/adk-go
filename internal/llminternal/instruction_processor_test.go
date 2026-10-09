@@ -15,8 +15,12 @@
 package llminternal
 
 import (
+	"context"
+	"errors"
+	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -273,4 +277,79 @@ And another optional artifact:
 			}
 		})
 	}
+}
+
+var errDatabaseFailure = errors.New("database connection refused")
+
+type errorMockState struct{}
+
+func (s *errorMockState) Get(key string) (any, error) {
+	if key == "systemic_error" {
+		return nil, errDatabaseFailure
+	}
+	return nil, session.ErrStateKeyNotExist
+}
+
+func (s *errorMockState) Set(key string, val any) error {
+	return nil
+}
+
+func (s *errorMockState) All() iter.Seq2[string, any] {
+	return nil
+}
+
+type errorMockSession struct{}
+
+func (s *errorMockSession) ID() string {
+	return "testSession"
+}
+
+func (s *errorMockSession) AppName() string {
+	return "testApp"
+}
+
+func (s *errorMockSession) UserID() string {
+	return "testUser"
+}
+
+func (s *errorMockSession) State() session.State {
+	return &errorMockState{}
+}
+
+func (s *errorMockSession) Events() session.Events {
+	return nil
+}
+
+func (s *errorMockSession) LastUpdateTime() time.Time {
+	return time.Now()
+}
+
+func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
+	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		Session: &errorMockSession{},
+	})
+
+	t.Run("missing optional key", func(t *testing.T) {
+		val, err := replaceMatch(ctx, "{missing_key?}")
+		if err != nil {
+			t.Fatalf("expected no error for missing optional key, got: %v", err)
+		}
+		if val != "" {
+			t.Errorf("expected empty string, got: %q", val)
+		}
+	})
+
+	t.Run("missing required key", func(t *testing.T) {
+		_, err := replaceMatch(ctx, "{missing_key}")
+		if err == nil || !errors.Is(err, session.ErrStateKeyNotExist) {
+			t.Fatalf("expected ErrStateKeyNotExist, got: %v", err)
+		}
+	})
+
+	t.Run("systemic error on optional key", func(t *testing.T) {
+		_, err := replaceMatch(ctx, "{systemic_error?}")
+		if err == nil || !errors.Is(err, errDatabaseFailure) {
+			t.Fatalf("expected systemic error to propagate even for optional key, got: %v", err)
+		}
+	})
 }
