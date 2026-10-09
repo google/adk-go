@@ -75,7 +75,7 @@ func hostOf(t *testing.T, ts *httptest.Server) string {
 
 // dialRunLive opens a /run_live WebSocket with the given Host and Origin
 // headers and returns the handshake status. A rebound page controls both, so
-// the two are set independently of the address actually dialled.
+// the two are set independently of the address actually dialed.
 func dialRunLive(t *testing.T, ts *httptest.Server, host, origin string) int {
 	t.Helper()
 

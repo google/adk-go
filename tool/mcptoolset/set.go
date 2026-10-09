@@ -27,6 +27,20 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// MetadataProvider supplies request-scoped metadata for MCP tool calls. The
+// returned map is sent in the `_meta` field of mcp.CallToolParams, letting an
+// agent forward values such as tracing IDs or tenant identifiers from the
+// incoming request to the MCP server.
+//
+// It is called before each tool call is sent; when a tool requires confirmation,
+// it runs only for the confirmed call, with the context of the request carrying
+// the confirmation. It may be called concurrently. The returned map, and
+// anything reachable from it, must not be modified after the provider returns.
+// Returning a nil map contributes no metadata, while returning an error or a
+// reserved MCP key ("progressToken" or any "io.modelcontextprotocol/*" key)
+// fails the tool call.
+type MetadataProvider func(ctx agent.Context) (map[string]any, error)
+
 // New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
@@ -67,6 +81,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		metadataProvider:            cfg.MetadataProvider,
 	}, nil
 }
 
@@ -151,6 +166,10 @@ type Config struct {
 	// func(name string, toolInput any) bool
 	// Returning true means confirmation is required.
 	RequireConfirmationProvider tool.ConfirmationProvider
+
+	// MetadataProvider, when set, is called before each tool call is sent to
+	// build the request's `_meta` entries.
+	MetadataProvider MetadataProvider
 }
 
 type set struct {
@@ -158,6 +177,7 @@ type set struct {
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
+	metadataProvider            MetadataProvider
 }
 
 func (s *set) Close() error {
@@ -187,7 +207,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

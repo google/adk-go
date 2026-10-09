@@ -33,7 +33,6 @@ import (
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/utils"
-	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -160,18 +159,8 @@ func (r *Runner) runNode(
 	if pluginManager != nil {
 		defer pluginManager.RunAfterRunCallback(ictx)
 
-		earlyExitResult, err := pluginManager.RunBeforeRunCallback(ictx)
-		if earlyExitResult != nil || err != nil {
-			earlyExitEvent := session.NewEvent(ictx, ictx.InvocationID())
-			earlyExitEvent.Author = "user"
-			earlyExitEvent.LLMResponse = model.LLMResponse{
-				Content: msg,
-			}
-			if appendErr := r.sessionService.AppendEvent(ictx, storedSession, earlyExitEvent); appendErr != nil {
-				yield(nil, fmt.Errorf("failed to add event to session: %w", appendErr))
-				return
-			}
-			yield(earlyExitEvent, err)
+		if event, err := r.runBeforeRunCallback(ictx); event != nil || err != nil {
+			yield(event, err)
 			return
 		}
 	}
