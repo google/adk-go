@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/genai"
 
@@ -39,6 +40,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -1123,4 +1125,27 @@ func TestSearch_OverlappingParallelCallsNeverReportNoMatch(t *testing.T) {
 		}
 		checkNames(t, llm.declared, []string{"zebra_tool", "apple_tool"}, nil)
 	}
+}
+
+// TestSearch_IndexesMCPArguments checks that argument metadata is indexed for
+// MCP tools, whose schema mcptoolset stores as the client decoded it.
+func TestSearch_IndexesMCPArguments(t *testing.T) {
+	type in struct {
+		Zipcode string `json:"zipcode" jsonschema:"postal code of the location"`
+	}
+	ct, st := mcp.NewInMemoryTransports()
+	server := mcp.NewServer(&mcp.Implementation{Name: "s", Version: "v1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather"},
+		func(context.Context, *mcp.CallToolRequest, in) (*mcp.CallToolResult, any, error) {
+			return nil, nil, nil
+		})
+	if _, err := server.Connect(t.Context(), st, nil); err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	base, err := mcptoolset.New(mcptoolset.Config{Transport: ct})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() error = %v", err)
+	}
+	out := mustSearch(t, newToolCtx(newFakeState(nil)), "postal code", base, mustNew(t, base, Config{}), 8)
+	checkNames(t, matchNames(out.Matches), []string{"get_weather"}, nil)
 }

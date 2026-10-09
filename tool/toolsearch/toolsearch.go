@@ -350,18 +350,28 @@ func argTokens(t tool.Tool) []string {
 	}
 	var extra []string
 	// A FunctionDeclaration carries its argument schema in one of two mutually
-	// exclusive fields. ADK functiontool populates
-	// the raw ParametersJsonSchema; the typed Parameters is handled too in case a
-	// tool sets it instead. If an ADK upgrade ever changes the ParametersJsonSchema
-	// representation, the type assertion below stops matching and arguments drop
-	// out of the index — TestSearch_IndexesArguments detects when that
-	// happens, since it asserts arg-only discovery through a real functiontool.
-	if js, ok := decl.ParametersJsonSchema.(*jsonschema.Schema); ok && js != nil {
-		for argName, argSchema := range js.Properties {
-			extra = append(extra, argName)
-			if argSchema != nil {
-				extra = append(extra, argSchema.Description)
+	// exclusive fields. ParametersJsonSchema is a *jsonschema.Schema from
+	// functiontool and the map[string]any the MCP client decoded from
+	// mcptoolset. The typed Parameters is handled too in case a tool sets it
+	// instead. If either producer changes its representation, arguments drop out
+	// of the index, which TestSearch_IndexesArguments and
+	// TestSearch_IndexesMCPArguments detect.
+	switch js := decl.ParametersJsonSchema.(type) {
+	case *jsonschema.Schema:
+		if js != nil {
+			for argName, argSchema := range js.Properties {
+				extra = append(extra, argName)
+				if argSchema != nil {
+					extra = append(extra, argSchema.Description)
+				}
 			}
+		}
+	case map[string]any:
+		props, _ := js["properties"].(map[string]any)
+		for argName, argSchema := range props {
+			s, _ := argSchema.(map[string]any)
+			desc, _ := s["description"].(string)
+			extra = append(extra, argName, desc)
 		}
 	}
 	if decl.Parameters != nil {
