@@ -363,10 +363,16 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 // gives a dropped or reset connection the same verdict on both goroutines and
 // on every platform.
 //
-// Timeouts are not covered. gorilla/websocket replaces any net.Error whose
-// Temporary() is true with its own type (hideTempErr), and ETIMEDOUT counts as
-// temporary on Linux, so a timed-out read loses the *net.OpError and stays
-// fatal, as it was before the type check.
+// Timeouts do not get one verdict. gorilla/websocket replaces any net.Error
+// whose Temporary() is true with its own type (hideTempErr), and ETIMEDOUT
+// counts as temporary, so over ws:// a timed-out read or write loses the
+// *net.OpError and is fatal. Over wss:// a timed-out read is hidden the same
+// way, but crypto/tls wraps a failed write in an error whose Temporary() is
+// always false, so the sender keeps the *net.OpError and resumes. The reader
+// and the sender can therefore disagree about one timed-out wss:// connection.
+// On Windows a TCP timeout is WSAETIMEDOUT (10060), which Go does not treat
+// as temporary, so it keeps the *net.OpError and resumes on both goroutines.
+// The text match before the type check treated it as fatal.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
