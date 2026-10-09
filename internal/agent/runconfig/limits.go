@@ -16,7 +16,6 @@ package runconfig
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 
@@ -37,8 +36,9 @@ const (
 //
 // A positive value is used as given. A negative value means no limit and is
 // passed through. Zero, which is what a caller gets from an empty struct
-// literal, resolves to the environment override if it parses, and to
-// DefaultMaxLLMCalls otherwise.
+// literal, resolves to the environment override if it parses as an integer,
+// and to DefaultMaxLLMCalls otherwise. An override that does not parse is
+// ignored silently.
 func ResolveMaxLLMCalls(v int) int {
 	if v != 0 {
 		return v
@@ -49,7 +49,6 @@ func ResolveMaxLLMCalls(v int) int {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		log.Printf("adk: invalid %s value %q, using the default %d", MaxLLMCallsEnvVar, raw, DefaultMaxLLMCalls)
 		return DefaultMaxLLMCalls
 	}
 	return n

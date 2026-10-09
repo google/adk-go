@@ -44,7 +44,12 @@ type RunConfig struct {
 	//
 	// Zero, the value a caller gets from agent.RunConfig{}, means the default:
 	// 500, or the value of the ADK_MAX_LLM_CALLS environment variable if it is
-	// set to a valid integer. A negative value, such as -1, means no limit.
+	// set to a valid integer. A value of ADK_MAX_LLM_CALLS that is not an
+	// integer is ignored silently and the default of 500 applies. A negative
+	// value, such as -1, means no limit.
+	//
+	// The limit covers the agents the invocation runs, including those nested
+	// through agenttool: each nested run gets its own budget of the same size.
 	//
 	// This differs from adk-python's RunConfig.max_llm_calls, where 0 means no
 	// limit. Here 0 is the default, because it is the zero value of the field,
@@ -55,7 +60,7 @@ type RunConfig struct {
 	// invocation are not.
 	//
 	// The limit exists because whether a run terminates otherwise depends
-	// entirely on model behaviour: a model that keeps requesting tool calls
+	// entirely on model behavior: a model that keeps requesting tool calls
 	// appends an event per turn and re-sends a growing history, so token cost
 	// grows quadratically with no exit.
 	MaxLLMCalls int

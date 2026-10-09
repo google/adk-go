@@ -33,7 +33,7 @@ func TestResolveMaxLLMCalls(t *testing.T) {
 		{name: "zero takes the default", in: 0, want: DefaultMaxLLMCalls},
 		{name: "zero takes the environment override", in: 0, env: "7", setEn: true, want: 7},
 		{name: "zero ignores an unparsable override", in: 0, env: "lots", setEn: true, want: DefaultMaxLLMCalls},
-		{name: "zero honours a negative override", in: 0, env: "-1", setEn: true, want: -1},
+		{name: "zero honors a negative override", in: 0, env: "-1", setEn: true, want: -1},
 		{name: "an explicit value wins over the environment", in: 5, env: "7", setEn: true, want: 5},
 		{name: "a negative value is passed through", in: -1, want: -1},
 	}
