@@ -260,22 +260,17 @@ func TestRemoteAgent_AuthAcceptedByEnforcingServer(t *testing.T) {
 			}
 
 			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
-
-			errEvent := firstErrorEvent(events)
 			if tc.wantErr {
-				if errEvent == nil {
-					t.Fatal("want an error event from the rejected request, got none")
+				if err == nil {
+					t.Fatal("want an error from the rejected request, got none")
 				}
-				if !strings.Contains(errEvent.ErrorMessage, "401") {
-					t.Errorf("error event = %q, want it to mention 401", errEvent.ErrorMessage)
+				if !strings.Contains(err.Error(), "401") {
+					t.Errorf("agent.Run() error = %q, want it to mention 401", err)
 				}
 				return
 			}
-			if errEvent != nil {
-				t.Fatalf("unexpected error event: %q", errEvent.ErrorMessage)
+			if err != nil {
+				t.Fatalf("agent.Run() error = %v", err)
 			}
 			if !eventsContainText(events, "ok") {
 				t.Errorf("authenticated response missing the remote agent's reply %q", "ok")
@@ -532,10 +527,7 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 
 	mu.Lock()
 	hits, key := elsewhereHits, elsewhereSawKey
@@ -544,12 +536,11 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 		t.Errorf("the redirect target received %d requests, want 0; it saw X-Card-Key = %q", hits, key)
 	}
 
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil {
-		t.Fatal("want an error event from the refused redirect, got none")
+	if err == nil {
+		t.Fatal("want an error from the refused redirect, got none")
 	}
-	if !strings.Contains(errEvent.ErrorMessage, "refusing redirect") {
-		t.Errorf("error event = %q, want it to mention the refused redirect", errEvent.ErrorMessage)
+	if !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("agent.Run() error = %q, want it to mention the refused redirect", err)
 	}
 }
 
@@ -1802,10 +1793,7 @@ func TestRemoteAgent_AuthRefusesADifferentHostname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1814,12 +1802,11 @@ func TestRemoteAgent_AuthRefusesADifferentHostname(t *testing.T) {
 			t.Errorf("the redirect was followed to %q; the credential must not leave the hostname the card named (saw %q)", host, hostsSeen)
 		}
 	}
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil {
-		t.Fatal("want an error event from the refused redirect, got none")
+	if err == nil {
+		t.Fatal("want an error from the refused redirect, got none")
 	}
-	if !strings.Contains(errEvent.ErrorMessage, "refusing redirect") {
-		t.Errorf("error event = %q, want it to mention the refused redirect", errEvent.ErrorMessage)
+	if !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("agent.Run() error = %q, want it to mention the refused redirect", err)
 	}
 }
 
@@ -2104,22 +2091,18 @@ func TestRemoteAgent_AuthFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
-			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
+			_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 			if n := hits.Load(); n != 0 {
 				t.Errorf("the server received %d requests, want 0: a credential failure must stop the request", n)
 			}
-			errEvent := firstErrorEvent(events)
-			if errEvent == nil {
-				t.Fatal("want an error event explaining the failure, got none")
+			if err == nil {
+				t.Fatal("want an error explaining the failure, got none")
 			}
-			if !strings.Contains(errEvent.ErrorMessage, tc.wantErr) {
-				t.Errorf("error event = %q, want it to contain %q", errEvent.ErrorMessage, tc.wantErr)
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("agent.Run() error = %q, want it to contain %q", err, tc.wantErr)
 			}
-			if tc.absent != "" && strings.Contains(errEvent.ErrorMessage, tc.absent) {
-				t.Errorf("error event = %q, want it not to leak %q", errEvent.ErrorMessage, tc.absent)
+			if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
+				t.Errorf("agent.Run() error = %q, want it not to leak %q", err, tc.absent)
 			}
 		})
 	}
@@ -2199,13 +2182,9 @@ func TestRemoteAgent_AuthRefusesAnInsecureCardSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil || !strings.Contains(errEvent.ErrorMessage, "must use https") {
-		t.Fatalf("error event = %v, want the insecure card source refused", errEvent)
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("agent.Run() error = %v, want the insecure card source refused", err)
 	}
 	if n := calls.Load(); n != 0 {
 		t.Errorf("provider called %d times, want 0: nothing should be resolved for a fetch that is refused", n)

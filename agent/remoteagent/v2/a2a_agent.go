@@ -515,7 +515,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		sendCtx := authSendContext(ctx, cfg, a.cardClient)
 		card, err := iremoteagent.ResolveAgentCard(sendCtx, a.serverConfig)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("agent card resolution failed: %w", err))
 			return
 		}
 		if cfg.Auth != nil {
@@ -533,14 +533,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		sender, err := cfg.ClientProvider(sendCtx, card)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("sender creation failed: %w", err))
 			return
 		}
 		defer destroy(ctx, sender)
 
 		msg, err := newMessage(ctx, cfg)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("message creation failed: %w", err))
 			return
 		}
 
@@ -746,14 +746,6 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
-}
-
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
-	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
-	event.TurnComplete = true
-	return event
 }
 
 func destroy(ctx context.Context, client A2AClient) {
