@@ -17,6 +17,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -200,10 +201,7 @@ func ContainsSymlink(base, rel string) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("cannot Lstat: %w", err)
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return true, nil
-		}
-		if fi.Mode()&os.ModeIrregular != 0 {
+		if isLinkLike(fi.Mode()) {
 			return true, nil
 		}
 	}
@@ -249,4 +247,26 @@ var windowsForbiddenFileNames = map[string]bool{
 	"LPT¹": true,
 	"LPT²": true,
 	"LPT³": true,
+}
+
+// isLinkLike reports whether a component may redirect the read somewhere other
+// than where its own name sits in the tree.
+//
+// ModeSymlink alone is not enough on Windows. A directory junction is a reparse
+// point with tag IO_REPARSE_TAG_MOUNT_POINT, and since Go 1.23 (godebug
+// winsymlink=1) os.Lstat reports it as ModeIrregular, not ModeSymlink: see
+// os/types_windows.go, where IO_REPARSE_TAG_SYMLINK sets ModeSymlink and mount
+// points fall through to ModeIrregular. Before Go 1.23 mount points did carry
+// ModeSymlink, which is why testing for it alone looks sufficient. This module
+// declares go 1.26, so it gets the newer mapping and a junction would walk
+// straight past a ModeSymlink-only test.
+//
+// ModeIrregular is a broad term: it covers reparse tags that do not redirect
+// anywhere, such as cloud-provider placeholder files, and those are refused
+// along with the rest. It is not universal either — IO_REPARSE_TAG_AF_UNIX maps
+// to ModeSocket and IO_REPARSE_TAG_DEDUP is reported as an ordinary file — but
+// neither of those redirects a read out of the directory, so neither matters
+// here.
+func isLinkLike(mode fs.FileMode) bool {
+	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
 }
