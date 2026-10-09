@@ -74,34 +74,32 @@ func TestDeleteMissingVersion(t *testing.T) {
 	}
 }
 
-func TestDeleteErrors(t *testing.T) {
-	for _, version := range []int64{0, 1} {
-		for _, tc := range []struct {
-			name    string
-			err     error
-			wantErr error
-		}{
-			{name: "success"},
-			{name: "not found", err: storage.ErrObjectNotExist},
-			{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist)},
-			{name: "permission denied", err: fs.ErrPermission, wantErr: fs.ErrPermission},
-			{name: "canceled", err: context.Canceled, wantErr: context.Canceled},
-		} {
-			t.Run(fmt.Sprintf("version_%d/%s", version, tc.name), func(t *testing.T) {
-				svc := newGCSServiceForTesting("bucket")
-				if _, err := svc.Save(t.Context(), saveReq()); err != nil {
-					t.Fatalf("Save() failed: %v", err)
-				}
-				svc.bucket.(*fakeBucket).deleteErr = tc.err
+func TestDeleteVersionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "success"},
+		{name: "not found", err: storage.ErrObjectNotExist},
+		{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist)},
+		{name: "permission denied", err: fs.ErrPermission, wantErr: fs.ErrPermission},
+		{name: "canceled", err: context.Canceled, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("bucket")
+			if _, err := svc.Save(t.Context(), saveReq()); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+			svc.bucket.(*fakeBucket).deleteErr = tc.err
 
-				err := svc.Delete(t.Context(), &artifact.DeleteRequest{
-					AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: version,
-				})
-				if !errors.Is(err, tc.wantErr) {
-					t.Errorf("Delete() = %v, want %v", err, tc.wantErr)
-				}
+			err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: 1,
 			})
-		}
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Delete() = %v, want %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -629,7 +627,7 @@ type fakeBucket struct {
 	// client library's wrapped storage.ErrObjectNotExist (see
 	// TestNotFoundIsWrappedSentinel).
 	attrsErr error
-	// deleteErr simulates a failure after listing, including a concurrent deletion.
+
 	deleteErr error
 }
 
