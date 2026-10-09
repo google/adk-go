@@ -30,7 +30,7 @@
 //		web.NewLauncher(webui.NewLauncher(), appinfo.NewLauncher(), api.NewLauncher()),
 //	)
 //
-//	go run . web api -path_prefix / appinfo
+//	go run . web api appinfo -path_prefix /api
 //
 // A server built some other way can mount [Handler] itself.
 //

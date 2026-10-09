@@ -172,6 +172,11 @@ func TestLauncherOrderWithAPI(t *testing.T) {
 			wantSetupErr: true,
 		},
 		{
+			name:        "before api on its default prefix",
+			appInfoArgs: []string{"-path_prefix", "/api"},
+			appInfoPath: "/api/apps/concierge/app-info",
+		},
+		{
 			name:         "after api on its default prefix",
 			apiFirst:     true,
 			appInfoArgs:  []string{"-path_prefix", "/api"},

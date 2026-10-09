@@ -47,7 +47,10 @@ type sublauncher struct {
 // The endpoint is served only when the sublauncher is passed to
 // [web.NewLauncher] and also named on the command line:
 //
-//	go run . web api -path_prefix / appinfo
+//	go run . web api appinfo -path_prefix /api
+//
+// That serves it at /api/apps/{app_name}/app-info, beside the REST API under
+// its default /api prefix.
 //
 // Pass it to web.NewLauncher before the api sublauncher. A router serves a
 // request with the first route that matches it, and the api sublauncher's
