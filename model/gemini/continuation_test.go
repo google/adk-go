@@ -259,6 +259,23 @@ func TestContinuation_Generate(t *testing.T) {
 			wantOutputSoFar: []string{"", "one "},
 		},
 		{
+			// maxOutputTokens bounds the whole generation, so the per-request
+			// limit below it is still resumed.
+			name:   "CONTINUATION with maxOutputTokens",
+			config: &genai.GenerateContentConfig{MaxOutputTokens: 100},
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
+				FinishReason:  genai.FinishReasonStop,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
+		{
 			name:    "maxOutputTokens spent",
 			config:  &genai.GenerateContentConfig{MaxOutputTokens: 100},
 			byToken: map[string][]map[string]any{"": {candidate("one ", "MAX_TOKENS", "t1")}},
@@ -343,12 +360,13 @@ func TestContinuation_GenerateStream(t *testing.T) {
 	checkRequests(t, api, []string{"", "t1"}, []string{"", "one two "})
 }
 
-// TestContinuation_GenerateStreamMaxTokens checks that a streamed MAX_TOKENS
-// stop is resumed, without completing the turn early, when the request sets no
-// maxOutputTokens, and left as it is when the request sets one.
-func TestContinuation_GenerateStreamMaxTokens(t *testing.T) {
+// TestContinuation_GenerateStreamMaxOutputTokens checks how maxOutputTokens
+// decides whether a streamed stop is resumed: MAX_TOKENS only without it,
+// CONTINUATION either way. A resumed stop does not complete the turn early.
+func TestContinuation_GenerateStreamMaxOutputTokens(t *testing.T) {
 	tests := []struct {
 		name         string
+		finish       string
 		config       *genai.GenerateContentConfig
 		wantPartials []string
 		wantText     string
@@ -356,25 +374,36 @@ func TestContinuation_GenerateStreamMaxTokens(t *testing.T) {
 		wantTokens   []string
 	}{
 		{
-			name:         "no maxOutputTokens",
+			name:         "MAX_TOKENS without maxOutputTokens",
+			finish:       "MAX_TOKENS",
 			wantPartials: []string{"one ", "two (turn complete)"},
 			wantText:     "one two",
 			wantFinish:   genai.FinishReasonStop,
 			wantTokens:   []string{"", "t1"},
 		},
 		{
-			name:         "maxOutputTokens spent",
+			name:         "MAX_TOKENS with maxOutputTokens spent",
+			finish:       "MAX_TOKENS",
 			config:       &genai.GenerateContentConfig{MaxOutputTokens: 100},
 			wantPartials: []string{"one  (turn complete)"},
 			wantText:     "one ",
 			wantFinish:   genai.FinishReasonMaxTokens,
 			wantTokens:   []string{""},
 		},
+		{
+			name:         "CONTINUATION with maxOutputTokens",
+			finish:       "CONTINUATION",
+			config:       &genai.GenerateContentConfig{MaxOutputTokens: 100},
+			wantPartials: []string{"one ", "two (turn complete)"},
+			wantText:     "one two",
+			wantFinish:   genai.FinishReasonStop,
+			wantTokens:   []string{"", "t1"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
-				"":   {candidate("one ", "MAX_TOKENS", "t1")},
+				"":   {candidate("one ", tc.finish, "t1")},
 				"t1": {candidate("two", "STOP", "")},
 			}}
 			req := continuationRequest()
