@@ -15,15 +15,17 @@
 // Package workflowwalk lets the experimental app-info endpoint (exp/appinfo)
 // walk workflow graphs, and exists for that feature only.
 //
-// Package workflow assigns its unexported graph walk to [WalkAgents] in an init
-// function, and app-info calls the walk through that variable. Because this
-// package is internal, only code in this module can reach it, so the walk stays
-// private instead of becoming part of workflow's public API.
+// The init function in workflow/walk.go assigns workflow's unexported graph
+// walk to [WalkAgents], and app-info calls the walk through that variable.
+// Because this package is internal, only code in this module can reach it. The
+// comment on that init function explains why the walk is not exported instead.
 package workflowwalk
 
 import "google.golang.org/adk/v2/agent"
 
 // WalkAgents returns the agents run by the nodes of edges, including those in
-// nested workflows and ParallelWorkers. edges must be a []workflow.Edge; it is
-// an any because this package cannot import workflow without an import cycle.
+// nested workflows and ParallelWorkers. It is set by the init function in
+// workflow/walk.go, so it is nil in a program that does not import workflow.
+// edges must be a []workflow.Edge; it is an any because this package cannot
+// import workflow without an import cycle.
 var WalkAgents func(edges any) []agent.Agent
