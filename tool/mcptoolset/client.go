@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/semaphore"
 
 	"google.golang.org/adk/v2/internal/version"
 )
@@ -40,7 +41,9 @@ type connectionRefresher struct {
 	client    *mcp.Client
 	transport mcp.Transport
 
-	mu      sync.Mutex
+	// Session initialization and refresh perform network I/O. Waiters must be
+	// able to leave when their own context ends without interrupting the owner.
+	mu      *semaphore.Weighted
 	session *mcp.ClientSession
 	closed  bool
 
@@ -65,17 +68,20 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 	return &connectionRefresher{
 		client:    client,
 		transport: transport,
+		mu:        semaphore.NewWeighted(1),
 	}
 }
 
 func (c *connectionRefresher) Close() error {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
+		// Close has no caller context, so it waits for any connection attempt
+		// in progress. Acquire cannot fail with a context that is never done.
+		_ = c.mu.Acquire(context.Background(), 1)
 		// Closing is final so failed in-flight calls cannot reconnect.
 		c.closed = true
 		session := c.session
 		c.session = nil
-		c.mu.Unlock()
+		c.mu.Release(1)
 
 		if session != nil {
 			c.closeErr = session.Close()
@@ -166,8 +172,10 @@ func shouldRefreshConnection(err error) bool {
 }
 
 func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSession, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.mu.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.mu.Release(1)
 
 	if c.closed {
 		return nil, mcp.ErrConnectionClosed
@@ -186,8 +194,10 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 }
 
 func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.ClientSession, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.mu.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.mu.Release(1)
 
 	if c.closed {
 		return nil, mcp.ErrConnectionClosed
@@ -200,7 +210,7 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 			return c.session, nil
 		}
 		if err := c.session.Close(); err != nil {
-			log.Printf("failed to close MCP session: %v", err)
+			log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 		c.session = nil
 	}
