@@ -381,6 +381,63 @@ func TestTransportNoRetryNonReplayableBody(t *testing.T) {
 	}
 }
 
+// A hand-written GetBody that yields no body, or fails, leaves nothing to replay.
+// The request had a body, so it is not retried, and RoundTrip must not panic
+// closing a replay it never got.
+func TestTransportNoRetryWhenGetBodyYieldsNothing(t *testing.T) {
+	tests := []struct {
+		name    string
+		getBody func() (io.ReadCloser, error)
+	}{
+		{name: "nil body", getBody: func() (io.ReadCloser, error) { return nil, nil }},
+		{name: "error", getBody: func() (io.ReadCloser, error) { return nil, errors.New("no replay") }},
+		{name: "error with a body", getBody: func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("payload")), errors.New("no replay")
+		}},
+	}
+	providers := []struct {
+		name string
+		p    func() auth.CredentialProvider
+	}{
+		{name: "refresh fails", p: func() auth.CredentialProvider {
+			return &errRefreshProvider{cred: auth.BearerCredential{Token: "stale"}}
+		}},
+		{name: "refresh returns nil", p: func() auth.CredentialProvider {
+			return &refreshProvider{cred: auth.BearerCredential{Token: "stale"}}
+		}},
+		{name: "refresh succeeds", p: func() auth.CredentialProvider {
+			return &refreshProvider{
+				cred:  auth.BearerCredential{Token: "stale"},
+				fresh: auth.BearerCredential{Token: "fresh"},
+			}
+		}},
+	}
+	for _, tc := range tests {
+		for _, pc := range providers {
+			t.Run(tc.name+"/"+pc.name, func(t *testing.T) {
+				base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+				tr := &auth.Transport{Provider: pc.p(), Base: base}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.test/", strings.NewReader("payload"))
+				if err != nil {
+					t.Fatalf("NewRequestWithContext() error = %v", err)
+				}
+				req.GetBody = tc.getBody
+
+				resp, err := tr.RoundTrip(req)
+				if err != nil {
+					t.Fatalf("RoundTrip() error = %v", err)
+				}
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Errorf("status = %d, want 401 (nothing to replay, so no retry)", resp.StatusCode)
+				}
+				if base.calls != 1 {
+					t.Errorf("base calls = %d, want 1", base.calls)
+				}
+			})
+		}
+	}
+}
+
 func TestTransportRetryStillRejected(t *testing.T) {
 	// Both the original and the refreshed credential are rejected: after one
 	// refresh+retry the second 401 is returned, with no further retries.

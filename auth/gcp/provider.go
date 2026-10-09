@@ -337,8 +337,8 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 // a different credential by now, and force-refreshing one that is working
 // destroys a good token.
 //
-// Two things bound what a downstream can make this do. A cache that already
-// holds something other than the rejected credential means another request has
+// Two things bound what a downstream can make this do. A cache entry that can be
+// shown to differ from the rejected credential means another request has
 // refreshed, so this serves that instead of minting again. And a force refresh
 // invalidates a live token at the service, so one per [refreshSlot] per
 // [refreshCooldown] is all a downstream gets, however fast it returns 401.
@@ -350,9 +350,11 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 // and simply not worth it yet.
 //
 // On every path that does not produce a replacement the rejected entry is
-// dropped, so a credential known to be refused is not served again, and the next
-// request resolves normally — unforced, at the cost every request paid before
-// there was a cache.
+// dropped, and the next request resolves normally — unforced, at the cost every
+// request paid before there was a cache. One race can still put the rejected
+// credential back: an unforced retrieval that started before the refresh and
+// lands after it caches what it was given. The next rejection of it evicts or
+// replaces it again.
 func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.Credential, error) {
 	client, key, err := p.resolve(ctx)
 	if err != nil {
@@ -367,8 +369,13 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 		p.dropEntry(ctx, key)
 		return nil, fmt.Errorf("gcp: resource %q: cannot read the rejected credential's token, so it cannot be force-refreshed", p.scheme.Name)
 	}
-	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
+	if cred, ok := p.cachedReplacement(ctx, key, rejectedToken); ok {
 		return cred, nil
+	}
+	if err := ctx.Err(); err != nil {
+		// Nothing has been sent, so the cooldown is not spent on it.
+		p.evictRejected(ctx, key, rejectedToken)
+		return nil, err
 	}
 	if !p.allowRefresh(refreshSlot(key.UserID, p.scheme)) {
 		// Nothing will replace it, so drop it: a credential the downstream refused
@@ -383,11 +390,9 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 		p.evictRejected(ctx, key, rejectedToken)
 		return nil, err
 	case credentialToken(cred) == rejectedToken:
-		// The service handed back what it already had. It does that when the hint
-		// did not reach it, or when the credential was never the reason for the
-		// rejection — a 403 for a missing ACL, say, which no new token fixes.
-		// Retrying with it would be a second guaranteed failure, so report instead
-		// and let the downstream's own answer stand.
+		// The service handed back what it already had, so the hint did not reach
+		// it or was not acted on. Retrying with it would be a second guaranteed
+		// failure, so report instead and let the downstream's own answer stand.
 		p.evictRejected(ctx, key, rejectedToken)
 		return nil, fmt.Errorf("gcp: resource %q: the credential service returned the credential that was rejected", p.scheme.Name)
 	case !cached:
@@ -407,17 +412,33 @@ func (p *provider) Refresh(ctx context.Context, rejected auth.Credential) (auth.
 // separately locked store calls and the interface has no compare-and-delete. The
 // window is two adjacent calls rather than a network round trip, and what it
 // costs is one spurious eviction — a cache miss and one extra retrieval on the
-// next request. It cannot serve a rejected credential or cross principals, which
-// is why it is left open rather than closed with an optional interface.
+// next request. It cannot cross principals, which is why it is left open rather
+// than closed with an optional interface. The race that can put a rejected
+// credential back is a different one — see [provider.Refresh].
 //
 // The read stays on the caller's context: failing it reads as "cannot show the
 // entry was replaced", which falls through to the delete, and that is the side
 // to fail on. The delete does not — see [provider.dropEntry].
 func (p *provider) evictRejected(ctx context.Context, key auth.CredentialKey, rejectedToken string) {
-	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok && cred != nil && credentialToken(cred) != rejectedToken {
+	if _, ok := p.cachedReplacement(ctx, key, rejectedToken); ok {
 		return
 	}
 	p.dropEntry(ctx, key)
+}
+
+// cachedReplacement returns key's cached credential when it can be shown to
+// differ from the rejected one. An entry whose token cannot be read is not shown
+// to differ — it may be the rejected credential read back as another type — so
+// it never counts as a replacement.
+func (p *provider) cachedReplacement(ctx context.Context, key auth.CredentialKey, rejectedToken string) (auth.Credential, bool) {
+	cred, ok, err := p.store.Get(ctx, key)
+	if err != nil || !ok || cred == nil {
+		return nil, false
+	}
+	if tok := credentialToken(cred); tok == "" || tok == rejectedToken {
+		return nil, false
+	}
+	return cred, true
 }
 
 // dropEntry deletes key's entry on a context detached from the caller's, and

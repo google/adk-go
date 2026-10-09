@@ -144,7 +144,8 @@ func isAuthRejected(code int) bool {
 }
 
 // replayBody returns a fresh copy of req's body for a retry. It reports false
-// when the body exists but cannot be replayed (no GetBody).
+// when the body exists but cannot be replayed: no GetBody, or one that fails or
+// yields no body.
 func replayBody(req *http.Request) (io.ReadCloser, bool) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return http.NoBody, true
@@ -153,7 +154,7 @@ func replayBody(req *http.Request) (io.ReadCloser, bool) {
 		return nil, false
 	}
 	body, err := req.GetBody()
-	if err != nil {
+	if err != nil || body == nil {
 		return nil, false
 	}
 	return body, true
