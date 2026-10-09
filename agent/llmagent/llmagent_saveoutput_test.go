@@ -450,12 +450,19 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if strings.Contains(err.Error(), "SECRET_PAYLOAD_99") {
 			t.Errorf("validation error leaked model output: %v", err)
 		}
+		whitespaceEv := createTestEvent("writer", " \n", true)
+		if err := a.maybeSaveOutput(ic, whitespaceEv); err != nil {
+			t.Fatalf("maybeSaveOutput on whitespace-only final chunk: %v", err)
+		}
+		if len(whitespaceEv.Actions.ArtifactDelta) != 0 {
+			t.Errorf("whitespace-only chunk recorded ArtifactDelta = %v, want empty", whitespaceEv.Actions.ArtifactDelta)
+		}
 		listed, err := svc.List(t.Context(), &artifact.ListRequest{AppName: "app", UserID: "u", SessionID: "s"})
 		if err != nil {
 			t.Fatalf("svc.List: %v", err)
 		}
 		if len(listed.FileNames) != 0 {
-			t.Fatalf("invalid output was saved to artifacts: %v", listed.FileNames)
+			t.Fatalf("invalid or whitespace output was saved to artifacts: %v", listed.FileNames)
 		}
 
 		goodEv := createTestEvent("writer", `{"title":"v1"}`, true)

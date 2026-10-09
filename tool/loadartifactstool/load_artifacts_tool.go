@@ -353,7 +353,7 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	if version > 0 {
 		resp, err := artifactsService.LoadVersion(ctx, artifactName, version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load artifact %s (version %d): %w", artifactName, version, err)
+			return nil, fmt.Errorf("failed to load artifact (version %d): %w", version, err)
 		}
 		return &genai.Content{
 			Parts: []*genai.Part{
@@ -385,7 +385,7 @@ type artifactVersionSummary struct {
 func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
 	versionsResp, err := artifactinternal.Versions(ctx, artifactsService, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list versions for artifact %s: %w", artifactName, err)
+		return nil, fmt.Errorf("failed to list artifact versions: %w", err)
 	}
 	versions := slices.Clone(versionsResp.Versions)
 	slices.Sort(versions)
@@ -394,7 +394,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 	for _, v := range versions {
 		metaResp, err := artifactinternal.GetArtifactVersion(ctx, artifactsService, artifactName, int(v))
 		if err != nil {
-			return nil, fmt.Errorf("failed to get version %d metadata for artifact %s: %w", v, artifactName, err)
+			return nil, fmt.Errorf("failed to get version %d metadata for artifact: %w", v, err)
 		}
 		summary := artifactVersionSummary{Version: v}
 		if av := metaResp.ArtifactVersion; av != nil {
@@ -409,7 +409,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 
 	encoded, err := json.Marshal(summaries)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal version metadata for artifact %s: %w", artifactName, err)
+		return nil, fmt.Errorf("failed to marshal version metadata for artifact: %w", err)
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{

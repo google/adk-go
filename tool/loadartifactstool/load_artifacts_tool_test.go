@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -792,4 +793,75 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("omits model-supplied artifact names from versioned load and list errors", func(t *testing.T) {
+		for _, tcErr := range []struct {
+			name     string
+			ctx      agent.Context
+			response map[string]any
+			secret   string
+		}{
+			{
+				name: "LoadVersion error",
+				ctx:  tc,
+				response: map[string]any{
+					"artifact_versions": []any{
+						map[string]any{"name": "patient-jane-doe-hiv-results.pdf", "version": float64(7)},
+					},
+				},
+				secret: "patient-jane-doe-hiv-results.pdf",
+			},
+			{
+				name: "Versions error",
+				ctx:  tc,
+				response: map[string]any{
+					"artifact_names": []any{"never-saved-x.pdf"},
+					"list_versions":  true,
+				},
+				secret: "never-saved-x.pdf",
+			},
+			{
+				name: "GetArtifactVersion error",
+				ctx: agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+					Artifacts: &artifactinternal.Artifacts{
+						Service:   failingGetVersionService{Service: svc},
+						AppName:   "app",
+						UserID:    "user",
+						SessionID: "session",
+					},
+				}), "call-meta", &session.EventActions{}, nil),
+				response: map[string]any{
+					"artifact_names": []any{"design.md"},
+					"list_versions":  true,
+				},
+				secret: "design.md",
+			},
+		} {
+			t.Run(tcErr.name, func(t *testing.T) {
+				llmReq := &model.LLMRequest{
+					Contents: []*genai.Content{{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							genai.NewPartFromFunctionResponse("load_artifacts", tcErr.response),
+						},
+					}},
+				}
+				err := requestProcessor.ProcessRequest(tcErr.ctx, llmReq)
+				if !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("ProcessRequest error = %v, want errors.Is(_, fs.ErrNotExist)", err)
+				}
+				if strings.Contains(err.Error(), tcErr.secret) {
+					t.Errorf("ProcessRequest error %q embeds model-supplied artifact name %q", err.Error(), tcErr.secret)
+				}
+			})
+		}
+	})
+}
+
+type failingGetVersionService struct {
+	artifact.Service
+}
+
+func (f failingGetVersionService) GetArtifactVersion(context.Context, *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
+	return nil, fs.ErrNotExist
 }

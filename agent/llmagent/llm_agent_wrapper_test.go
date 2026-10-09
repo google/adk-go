@@ -2073,11 +2073,12 @@ func runSequentialWithOptionalLive(t *testing.T, doLive bool, turn *model.LLMRes
 		t.Fatalf("sequentialagent.New: %v", err)
 	}
 	sessions := session.InMemoryService()
+	arts := artifact.InMemoryService()
 	r, err := runner.New(runner.Config{
 		AppName:           "app",
 		Agent:             seq,
 		SessionService:    sessions,
-		ArtifactService:   artifact.InMemoryService(),
+		ArtifactService:   arts,
 		AutoCreateSession: true,
 	})
 	if err != nil {
@@ -2117,6 +2118,17 @@ func runSequentialWithOptionalLive(t *testing.T, doLive bool, turn *model.LLMRes
 			persistedWithBody++
 		}
 	}
+	if runErr == nil {
+		loaded, err := arts.Load(t.Context(), &artifact.LoadRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: 1,
+		})
+		if err != nil {
+			t.Fatalf("arts.Load(design.md): %v", err)
+		}
+		if got, want := loaded.Part.Text, `{"title":"BODY_TXT"}`; got != want {
+			t.Errorf("saved design.md = %q, want %q", got, want)
+		}
+	}
 	return m, persistedWithBody, runErr
 }
 
@@ -2136,22 +2148,10 @@ func TestLlmAgent_OutputArtifact_SequentialRunLiveThenRunNoSetModelResponse(t *t
 	t.Run("after_failed_live", func(t *testing.T) {
 		t.Parallel()
 		m, n, runErr := runSequentialWithOptionalLive(t, true, &model.LLMResponse{
-			Content: &genai.Content{
-				Role: genai.RoleModel,
-				Parts: []*genai.Part{{
-					FunctionCall: &genai.FunctionCall{
-						ID:   "s1",
-						Name: "set_model_response",
-						Args: map[string]any{"title": "BODY_SMR"},
-					},
-				}},
-			},
+			Content: genai.NewContentFromText(`{"title":"BODY_TXT"}`, genai.RoleModel),
 		})
-		if m.sawSetModelResponse || n != 0 {
-			t.Errorf("set_model_response injected=%v for an agent New accepted; %d persisted events carry the body", m.sawSetModelResponse, n)
-		}
-		if runErr == nil || !strings.Contains(runErr.Error(), "OutputArtifact") {
-			t.Errorf("after_failed_live runErr = %v, want error mentioning OutputArtifact", runErr)
+		if m.sawSetModelResponse || n != 0 || runErr != nil {
+			t.Errorf("after_failed_live: sawSetModelResponse=%v persistedWithBody=%d err=%v; want false, 0, nil", m.sawSetModelResponse, n, runErr)
 		}
 	})
 }
