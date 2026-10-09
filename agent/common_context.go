@@ -35,7 +35,7 @@ import (
 // [IdentityFromContext], which reads it off the live session each time rather
 // than caching it.
 //
-// Reading it live is not licence to mutate the session from elsewhere. The
+// Reading it live is not license to mutate the session from elsewhere. The
 // lookup runs on whatever goroutine asks — inside an http.RoundTripper, that is
 // the caller's — while [session.Session] states no goroutine-safety requirement
 // on ID, AppName and UserID. A session that rewrites those three after the
@@ -145,7 +145,7 @@ func identityOf(getSession func() session.Session) (Identity, bool) {
 // context holds rather than through Session, so a promoted one reads and writes
 // the enclosing user's session state, and a promoted Actions accumulates into
 // the event actions that commit to that user's session. Override all six, or
-// accept that only the credential follows the decorator. That behaviour predates
+// accept that only the credential follows the decorator. That behavior predates
 // the identity key and is unchanged by it — Session, UserID and AppName have
 // always reported the enclosing invocation on the same shape — but a decorator
 // author reading this rule needs to know the credential is not the only thing
@@ -276,7 +276,7 @@ func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context 
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
 // Please mind that if you already have commonContext, you should use WithDelta to
-// create child contextes
+// create child contexts
 func NewContext(parent InvocationContext) Context {
 	if p, ok := parent.(*commonContext); ok {
 		return &commonContext{
@@ -631,7 +631,7 @@ func (c *commonContext) identity() any {
 //
 // Type-asserted rather than merely checked against nil, so a context answering
 // every key does not put a non-Identity under the identity key. That much is
-// defence in depth and not load-bearing on its own: [IdentityFromContext]
+// defense in depth and not load-bearing on its own: [IdentityFromContext]
 // asserts again, so dropping this one changes what Value returns and not what
 // any caller can observe. Removing it does not fail any test, deliberately —
 // the tests pin the contract, which is that the reader gets nothing.

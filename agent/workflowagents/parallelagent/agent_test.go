@@ -227,7 +227,7 @@ func must[T agent.Agent](a T, err error) T {
 func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
-			time.Sleep((time.Duration(rand.IntN(5) + 1)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.IntN(5)+1) * time.Millisecond)
 			if agentErr != nil {
 				yield(nil, agentErr)
 				return

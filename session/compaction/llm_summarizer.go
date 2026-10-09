@@ -133,7 +133,7 @@ type LLMSummarizerConfig struct {
 	MaxTranscriptChars int
 
 	// Timeout bounds the summarization call. Zero, the default, means no
-	// timeout, which is the behaviour every ADK implementation has today.
+	// timeout, which is the behavior every ADK implementation has today.
 	//
 	// Worth setting. The call is synchronous inside the run loop, so a
 	// summarizer that hangs holds up the turn behind it with nothing to show
@@ -153,7 +153,7 @@ type LLMSummarizerConfig struct {
 }
 
 // LLMSummarizer is the default [Summarizer]. It renders the events as a
-// labelled transcript and asks a model to summarize them.
+// labeled transcript and asks a model to summarize them.
 //
 // The transcript carries text, agent thoughts, function calls and function
 // responses. Thoughts and tool traffic are included because they hold the
@@ -295,7 +295,7 @@ func hasText(c *genai.Content) bool {
 	return false
 }
 
-// formatEvents renders events as one labelled line per part.
+// formatEvents renders events as one labeled line per part.
 //
 // Content that did not come from the framework -- model text and, especially,
 // tool output -- is escaped so it cannot span lines. Without that, a tool
@@ -408,7 +408,7 @@ func stringify(v map[string]any) string {
 // The obvious two are carriage return and newline. U+0085, U+2028 and U+2029
 // are line breaks in Unicode, and vertical tab and form feed are treated as
 // ones by enough consumers that a value carrying either should not be passed
-// through untouched. None of them is worth trusting a model not to honour: the
+// through untouched. None of them is worth trusting a model not to honor: the
 // summary built from this transcript replaces the real conversation in every
 // later prompt, so a forged turn is not read once, it becomes history.
 const lineBreakers = "\r\n\v\f\u0085\u2028\u2029"
@@ -455,7 +455,7 @@ func escapeLines(text string) string {
 //   - StopSequences are chosen for the agent's output format. A hit reports
 //     finish reason STOP, which is indistinguishable from finishing, so a
 //     summary cut off at the first occurrence of the token is stored and the
-//     covered turns are then dropped in favour of it.
+//     covered turns are then dropped in favor of it.
 //   - CandidateCount bills one generation per candidate and only the first is
 //     read, so an app asking for four pays four times for one summary.
 //

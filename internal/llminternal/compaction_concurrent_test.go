@@ -146,7 +146,7 @@ func TestCompactionSurvivesAConcurrentWriter(t *testing.T) {
 		stored = append(stored, ev)
 	}
 
-	// Deliberately not asserting that a summary landed. There are two defences
+	// Deliberately not asserting that a summary landed. There are two defenses
 	// and this scenario reaches the first one: the race check before the append
 	// sees the session changed inside the range and throws the summary away.
 	// The second, RepairAfterAppend, covers the narrower window where the event
@@ -209,7 +209,7 @@ func TestCompactionUnderConcurrentAppendsLosesNothing(t *testing.T) {
 //   - Making RepairAfterAppend never report a straggler is caught in about five
 //     runs out of six.
 //   - Making the pre-append race check never fire is NOT caught, and should not
-//     be: the repair then handles the same case on its own. The two defences
+//     be: the repair then handles the same case on its own. The two defenses
 //     overlap deliberately, so removing either one alone still loses nothing.
 //     Removing both would be caught by the first bullet.
 
